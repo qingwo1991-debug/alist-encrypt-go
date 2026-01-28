@@ -58,7 +58,7 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 // handleGet handles GET requests with decryption
 func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, path string) {
-	passwdInfo, found := h.passwdDAO.FindByPrefix(path)
+	passwdInfo, found := h.passwdDAO.FindByPath(path)
 	if !found {
 		h.handlePassthrough(w, r)
 		return
@@ -84,7 +84,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, path s
 
 // handlePut handles PUT requests with encryption
 func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, path string) {
-	passwdInfo, found := h.passwdDAO.FindByPrefix(path)
+	passwdInfo, found := h.passwdDAO.FindByPath(path)
 	if !found {
 		h.handlePassthrough(w, r)
 		return
