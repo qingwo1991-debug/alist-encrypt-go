@@ -1,7 +1,6 @@
 package dao
 
 import (
-	"encoding/json"
 	"net/url"
 	"strings"
 	"time"
@@ -99,95 +98,67 @@ func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{})
 	return d.Set(info)
 }
 
-// PasswdDAO handles password configuration
+// PasswdDAO handles password configuration lookup
 type PasswdDAO struct {
-	store *storage.Store
+	cfg   *config.Config
 	cache *storage.Cache
 }
 
 // NewPasswdDAO creates a new password DAO
 func NewPasswdDAO(store *storage.Store) *PasswdDAO {
 	return &PasswdDAO{
-		store: store,
-		cache: storage.NewCache(0), // No expiration
+		cfg:   config.Get(),
+		cache: storage.NewCache(5 * time.Minute),
 	}
 }
 
-// Get retrieves password info for a path
-func (d *PasswdDAO) Get(path string) (*config.PasswdInfo, bool) {
+// GetAll retrieves all password configs from the main config
+func (d *PasswdDAO) GetAll() []*config.PasswdInfo {
+	var result []*config.PasswdInfo
+	for i := range d.cfg.AlistServer.PasswdList {
+		result = append(result, &d.cfg.AlistServer.PasswdList[i])
+	}
+	return result
+}
+
+// FindByPath finds password config by matching encPath patterns
+func (d *PasswdDAO) FindByPath(urlPath string) (*config.PasswdInfo, bool) {
 	// Check cache first
-	if cached, ok := d.cache.Get(path); ok {
+	if cached, ok := d.cache.Get(urlPath); ok {
+		if cached == nil {
+			return nil, false
+		}
 		return cached.(*config.PasswdInfo), true
 	}
 
-	var info config.PasswdInfo
-	if err := d.store.GetJSON(storage.BucketPasswd, path, &info); err != nil {
-		return nil, false
+	result, found := d.findByPathInternal(urlPath)
+	if found {
+		d.cache.Set(urlPath, result)
+	} else {
+		d.cache.Set(urlPath, nil)
 	}
-	if info.Path == "" {
-		return nil, false
-	}
-
-	d.cache.Set(path, &info)
-	return &info, true
+	return result, found
 }
 
-// Set stores password info
-func (d *PasswdDAO) Set(info *config.PasswdInfo) error {
-	d.cache.Set(info.Path, info)
-	return d.store.SetJSON(storage.BucketPasswd, info.Path, info)
-}
+func (d *PasswdDAO) findByPathInternal(urlPath string) (*config.PasswdInfo, bool) {
+	for i := range d.cfg.AlistServer.PasswdList {
+		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
+		if !passwdInfo.Enable {
+			continue
+		}
 
-// Delete removes password info
-func (d *PasswdDAO) Delete(path string) error {
-	d.cache.Delete(path)
-	return d.store.Delete(storage.BucketPasswd, path)
-}
-
-// GetAll retrieves all password configs
-func (d *PasswdDAO) GetAll() ([]*config.PasswdInfo, error) {
-	data, err := d.store.GetAll(storage.BucketPasswd)
-	if err != nil {
-		return nil, err
-	}
-
-	var result []*config.PasswdInfo
-	for _, v := range data {
-		var info config.PasswdInfo
-		if err := json.Unmarshal(v, &info); err == nil {
-			result = append(result, &info)
+		// Check encPath patterns
+		if encryption.PathExec(passwdInfo.EncPath, urlPath) {
+			return passwdInfo, true
 		}
 	}
-	return result, nil
-}
-
-// FindByPrefix finds password config by path prefix match
-func (d *PasswdDAO) FindByPrefix(path string) (*config.PasswdInfo, bool) {
-	all, err := d.GetAll()
-	if err != nil {
-		return nil, false
-	}
-
-	var bestMatch *config.PasswdInfo
-	bestLen := 0
-
-	for _, info := range all {
-		if len(info.Path) > bestLen && strings.HasPrefix(path, info.Path) {
-			bestMatch = info
-			bestLen = len(info.Path)
-		}
-	}
-
-	return bestMatch, bestMatch != nil
+	return nil, false
 }
 
 // PathFindPasswd finds password config matching URL path with encPath patterns
 // Returns a potentially modified PasswdInfo (for folder password decoding)
 func (d *PasswdDAO) PathFindPasswd(urlPath string) (*config.PasswdInfo, bool) {
-	all, err := d.GetAll()
-	if err != nil {
-		return nil, false
-	}
+	all := d.GetAll()
 
 	for _, passwdInfo := range all {
 		if !passwdInfo.Enable {

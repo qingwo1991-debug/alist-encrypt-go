@@ -112,7 +112,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	path = strings.TrimPrefix(path, "/p")
 
 	// Find password config for this path
-	passwdInfo, found := h.passwdDAO.FindByPrefix(path)
+	passwdInfo, found := h.passwdDAO.FindByPath(path)
 	if !found {
 		// No encryption configured, proxy directly
 		targetURL := h.cfg.GetAlistURL() + r.URL.Path
@@ -202,7 +202,7 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			parsedLoc, err := url.Parse(location)
 			if err == nil {
 				path := parsedLoc.Path
-				if passwdInfo, found := h.passwdDAO.FindByPrefix(path); found {
+				if passwdInfo, found := h.passwdDAO.FindByPath(path); found {
 					// Get file info
 					if fileInfo, found := h.fileDAO.Get(path); found {
 						key := h.RegisterRedirect(location, fileInfo.Size, passwdInfo.Password, passwdInfo.EncType)

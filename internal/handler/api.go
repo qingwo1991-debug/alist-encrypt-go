@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/alist-encrypt-go/internal/auth"
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/encryption"
 )
 
 // APIHandler handles /enc-api/* routes
@@ -22,7 +25,7 @@ type APIHandler struct {
 func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.PasswdDAO) *APIHandler {
 	expireHours := cfg.JWTExpire
 	if expireHours <= 0 {
-		expireHours = 24
+		expireHours = 48
 	}
 	return &APIHandler{
 		cfg:       cfg,
@@ -32,223 +35,214 @@ func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.Pass
 	}
 }
 
-// LoginRequest represents login request body
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// LoginResponse represents login response
-type LoginResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Token   string `json:"token,omitempty"`
-}
-
 // Login handles user authentication
 func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
-	var req LoginRequest
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, LoginResponse{Code: 400, Message: "Invalid request"})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
 		return
 	}
 
 	if err := h.userDAO.Validate(req.Username, req.Password); err != nil {
-		writeJSON(w, http.StatusUnauthorized, LoginResponse{Code: 401, Message: "Invalid credentials"})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "password error"})
 		return
 	}
 
 	token, err := h.jwtAuth.GenerateToken(req.Username)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, LoginResponse{Code: 500, Message: "Failed to generate token"})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Failed to generate token"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, LoginResponse{Code: 200, Message: "Success", Token: token})
-}
-
-// GetConfig returns current configuration
-func (h *APIHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]interface{}{
-		"code":    200,
-		"message": "success",
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"data": map[string]interface{}{
-			"scheme": map[string]interface{}{
-				"address":      h.cfg.Scheme.Address,
-				"http_port":    h.cfg.Scheme.HTTPPort,
-				"https_port":   h.cfg.Scheme.HTTPSPort,
-				"force_https":  h.cfg.Scheme.ForceHTTPS,
-				"enable_h2c":   h.cfg.Scheme.EnableH2C,
+			"userInfo": map[string]interface{}{
+				"username":   req.Username,
+				"headImgUrl": "/public/logo.svg",
 			},
-			"alist": map[string]interface{}{
-				"host":  h.cfg.Alist.Host,
-				"port":  h.cfg.Alist.Port,
-				"https": h.cfg.Alist.HTTPS,
-			},
-			"cache": map[string]interface{}{
-				"enable":           h.cfg.Cache.Enable,
-				"expiration":       h.cfg.Cache.Expiration,
-				"cleanup_interval": h.cfg.Cache.CleanupInterval,
-			},
-			"proxy": map[string]interface{}{
-				"max_idle_conns":         h.cfg.Proxy.MaxIdleConns,
-				"max_idle_conns_per_host": h.cfg.Proxy.MaxIdleConnsPerHost,
-				"enable_http2":           h.cfg.Proxy.EnableHTTP2,
-				"insecure_skip_verify":   h.cfg.Proxy.InsecureSkipVerify,
-			},
-			"log": map[string]interface{}{
-				"level":  h.cfg.Log.Level,
-				"format": h.cfg.Log.Format,
-			},
+			"jwtToken": token,
 		},
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// SetConfig updates configuration
-func (h *APIHandler) SetConfig(w http.ResponseWriter, r *http.Request) {
-	// Config updates would require restart, so just acknowledge
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    200,
-		"message": "Config update requires restart",
 	})
 }
 
-// GetPasswdConfig returns password configurations
-func (h *APIHandler) GetPasswdConfig(w http.ResponseWriter, r *http.Request) {
-	configs, err := h.passwdDAO.GetAll()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"code":    500,
-			"message": err.Error(),
-		})
-		return
-	}
-
+// GetUserInfo returns current user info
+func (h *APIHandler) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    200,
-		"message": "success",
-		"data":    configs,
+		"data": map[string]interface{}{
+			"codes": []int{16, 9, 10, 11, 12, 13, 15},
+			"userInfo": map[string]interface{}{
+				"username":   "admin",
+				"headImgUrl": "/public/logo.svg",
+			},
+			"menuList": []interface{}{},
+			"roles":    []string{"admin"},
+			"version":  config.Version,
+		},
 	})
 }
 
-// SetPasswdConfigRequest represents password config update request
-type SetPasswdConfigRequest struct {
-	Path      string   `json:"path"`
-	Password  string   `json:"password"`
-	EncType   string   `json:"encType"`
-	EncPath   []string `json:"encPath"`
-	EncName   bool     `json:"encName"`
-	EncSuffix string   `json:"encSuffix"`
-	Enable    bool     `json:"enable"`
-}
-
-// SetPasswdConfig updates password configuration
-func (h *APIHandler) SetPasswdConfig(w http.ResponseWriter, r *http.Request) {
-	var req SetPasswdConfigRequest
+// UpdatePasswd updates user password
+func (h *APIHandler) UpdatePasswd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		NewPassword string `json:"newpassword"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"code":    400,
-			"message": "Invalid request",
-		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
 		return
 	}
 
-	info := &config.PasswdInfo{
-		Path:      req.Path,
-		Password:  req.Password,
-		EncType:   req.EncType,
-		EncPath:   req.EncPath,
-		EncName:   req.EncName,
-		EncSuffix: req.EncSuffix,
-		Enable:    req.Enable,
-	}
-
-	if info.EncType == "" {
-		info.EncType = "aesctr"
-	}
-
-	if err := h.passwdDAO.Set(info); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"code":    500,
-			"message": err.Error(),
-		})
+	if len(req.NewPassword) < 8 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "password too short, at less 8 digits"})
 		return
 	}
 
+	if err := h.userDAO.Validate(req.Username, req.Password); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "password error"})
+		return
+	}
+
+	if err := h.userDAO.UpdatePassword(req.Username, req.NewPassword); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"msg": "update success"})
+}
+
+// GetAlistConfig returns Alist server configuration
+func (h *APIHandler) GetAlistConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    200,
-		"message": "success",
+		"data": h.cfg.AlistServer,
 	})
 }
 
-// DeletePasswdConfigRequest represents password config delete request
-type DeletePasswdConfigRequest struct {
-	Path string `json:"path"`
+// SaveAlistConfig saves Alist server configuration
+func (h *APIHandler) SaveAlistConfig(w http.ResponseWriter, r *http.Request) {
+	var server config.AlistServer
+	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+		return
+	}
+
+	if err := h.cfg.UpdateAlistServer(server); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"msg": "save ok"})
 }
 
-// DeletePasswdConfig deletes password configuration
-func (h *APIHandler) DeletePasswdConfig(w http.ResponseWriter, r *http.Request) {
-	var req DeletePasswdConfigRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"code":    400,
-			"message": "Invalid request",
-		})
-		return
-	}
-
-	if err := h.passwdDAO.Delete(req.Path); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"code":    500,
-			"message": err.Error(),
-		})
-		return
-	}
-
+// GetWebdavConfig returns WebDAV server configurations
+func (h *APIHandler) GetWebdavConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    200,
-		"message": "success",
+		"data": h.cfg.WebDAVServer,
 	})
 }
 
-// ChangePasswordRequest represents password change request
-type ChangePasswordRequest struct {
-	OldPassword string `json:"old_password"`
-	NewPassword string `json:"new_password"`
+// SaveWebdavConfig adds a new WebDAV server configuration
+func (h *APIHandler) SaveWebdavConfig(w http.ResponseWriter, r *http.Request) {
+	var server config.WebDAVServer
+	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+		return
+	}
+
+	// Generate ID
+	id := make([]byte, 16)
+	rand.Read(id)
+	server.ID = hex.EncodeToString(id)
+
+	if err := h.cfg.AddWebDAVServer(server); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"data": h.cfg.WebDAVServer})
 }
 
-// ChangePassword changes user password
-func (h *APIHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
-	var req ChangePasswordRequest
+// UpdateWebdavConfig updates a WebDAV server configuration
+func (h *APIHandler) UpdateWebdavConfig(w http.ResponseWriter, r *http.Request) {
+	var server config.WebDAVServer
+	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+		return
+	}
+
+	if err := h.cfg.UpdateWebDAVServer(server); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"data": h.cfg.WebDAVServer})
+}
+
+// DelWebdavConfig deletes a WebDAV server configuration
+func (h *APIHandler) DelWebdavConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"code":    400,
-			"message": "Invalid request",
-		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
 		return
 	}
 
-	// For now, assume admin user
-	if err := h.userDAO.Validate("admin", req.OldPassword); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"code":    401,
-			"message": "Invalid old password",
-		})
+	if err := h.cfg.DeleteWebDAVServer(req.ID); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
 		return
 	}
 
-	if err := h.userDAO.UpdatePassword("admin", req.NewPassword); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"code":    500,
-			"message": err.Error(),
-		})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"data": h.cfg.WebDAVServer})
+}
+
+// EncodeFoldName encodes folder name with password
+func (h *APIHandler) EncodeFoldName(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Password      string `json:"password"`
+		EncType       string `json:"encType"`
+		FolderPasswd  string `json:"folderPasswd"`
+		FolderEncType string `json:"folderEncType"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+		return
+	}
+
+	folderNameEnc := encryption.EncodeFolderName(req.Password, req.EncType, req.FolderPasswd, req.FolderEncType)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"data": map[string]interface{}{
+			"folderNameEnc": folderNameEnc,
+		},
+	})
+}
+
+// DecodeFoldName decodes folder name
+func (h *APIHandler) DecodeFoldName(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Password      string `json:"password"`
+		EncType       string `json:"encType"`
+		FolderNameEnc string `json:"folderNameEnc"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+		return
+	}
+
+	folderEncType, folderPasswd, ok := encryption.DecodeFolderName(req.Password, req.EncType, req.FolderNameEnc)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "folderName is error"})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    200,
-		"message": "success",
+		"data": map[string]interface{}{
+			"folderEncType": folderEncType,
+			"folderPasswd":  folderPasswd,
+		},
 	})
 }
 

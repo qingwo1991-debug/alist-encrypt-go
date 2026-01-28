@@ -20,19 +20,20 @@ import (
 	"github.com/alist-encrypt-go/internal/handler"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
+	"github.com/alist-encrypt-go/web"
 )
 
 // Server represents the HTTP/2 server
 type Server struct {
-	cfg          *config.Config
-	store        *storage.Store
-	router       *chi.Mux
-	httpServer   *http.Server
-	httpsServer  *http.Server
-	streamProxy  *proxy.StreamProxy
-	userDAO      *dao.UserDAO
-	fileDAO      *dao.FileDAO
-	passwdDAO    *dao.PasswdDAO
+	cfg         *config.Config
+	store       *storage.Store
+	router      *chi.Mux
+	httpServer  *http.Server
+	httpsServer *http.Server
+	streamProxy *proxy.StreamProxy
+	userDAO     *dao.UserDAO
+	fileDAO     *dao.FileDAO
+	passwdDAO   *dao.PasswdDAO
 }
 
 // New creates a new server instance
@@ -72,9 +73,16 @@ func (s *Server) setupRoutes() {
 	r.Use(CORSMiddleware)
 
 	// Force HTTPS redirect if enabled
-	if s.cfg.Scheme.ForceHTTPS && s.cfg.IsHTTPSEnabled() {
+	if s.cfg.Scheme != nil && s.cfg.Scheme.ForceHTTPS && s.cfg.IsHTTPSEnabled() {
 		r.Use(ForceHTTPSMiddleware(s.cfg.Scheme.HTTPSPort))
 	}
+
+	// Serve static files (WebUI)
+	fileServer := http.FileServer(web.GetFileSystem())
+	r.Handle("/public/*", http.StripPrefix("/public", fileServer))
+	r.Get("/index", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/public/index.html", http.StatusFound)
+	})
 
 	// Create handlers
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO)
@@ -82,19 +90,36 @@ func (s *Server) setupRoutes() {
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 
-	// /enc-api/* routes - Authentication and config management
+	// /enc-api/* routes - Authentication and config management (compatible with original)
 	r.Route("/enc-api", func(r chi.Router) {
 		r.Post("/login", apiHandler.Login)
-		r.Get("/getConfig", apiHandler.GetConfig)
-		r.Post("/setConfig", apiHandler.SetConfig)
-		r.Get("/getPasswdConfig", apiHandler.GetPasswdConfig)
-		r.Post("/setPasswdConfig", apiHandler.SetPasswdConfig)
-		r.Post("/deletePasswdConfig", apiHandler.DeletePasswdConfig)
-		r.Post("/changePassword", apiHandler.ChangePassword)
+		r.Use(AuthMiddleware(s.cfg.JWTSecret))
+		r.MethodFunc("GET", "/getUserInfo", apiHandler.GetUserInfo)
+		r.MethodFunc("POST", "/getUserInfo", apiHandler.GetUserInfo)
+		r.MethodFunc("GET", "/updatePasswd", apiHandler.UpdatePasswd)
+		r.MethodFunc("POST", "/updatePasswd", apiHandler.UpdatePasswd)
+		r.MethodFunc("GET", "/getAlistConfig", apiHandler.GetAlistConfig)
+		r.MethodFunc("POST", "/getAlistConfig", apiHandler.GetAlistConfig)
+		r.MethodFunc("GET", "/saveAlistConfig", apiHandler.SaveAlistConfig)
+		r.MethodFunc("POST", "/saveAlistConfig", apiHandler.SaveAlistConfig)
+		r.MethodFunc("GET", "/getWebdavonfig", apiHandler.GetWebdavConfig) // Note: typo matches original
+		r.MethodFunc("POST", "/getWebdavonfig", apiHandler.GetWebdavConfig)
+		r.MethodFunc("GET", "/getWebdavConfig", apiHandler.GetWebdavConfig)
+		r.MethodFunc("POST", "/getWebdavConfig", apiHandler.GetWebdavConfig)
+		r.MethodFunc("GET", "/saveWebdavConfig", apiHandler.SaveWebdavConfig)
+		r.MethodFunc("POST", "/saveWebdavConfig", apiHandler.SaveWebdavConfig)
+		r.MethodFunc("GET", "/updateWebdavConfig", apiHandler.UpdateWebdavConfig)
+		r.MethodFunc("POST", "/updateWebdavConfig", apiHandler.UpdateWebdavConfig)
+		r.MethodFunc("GET", "/delWebdavConfig", apiHandler.DelWebdavConfig)
+		r.MethodFunc("POST", "/delWebdavConfig", apiHandler.DelWebdavConfig)
+		r.MethodFunc("GET", "/encodeFoldName", apiHandler.EncodeFoldName)
+		r.MethodFunc("POST", "/encodeFoldName", apiHandler.EncodeFoldName)
+		r.MethodFunc("GET", "/decodeFoldName", apiHandler.DecodeFoldName)
+		r.MethodFunc("POST", "/decodeFoldName", apiHandler.DecodeFoldName)
 	})
 
 	// /redirect/:key - 302 redirect decryption
-	r.Get("/redirect/{key}", proxyHandler.HandleRedirect)
+	r.HandleFunc("/redirect/{key}", proxyHandler.HandleRedirect)
 
 	// /dav/* - WebDAV proxy
 	r.HandleFunc("/dav/*", webdavHandler.Handle)
@@ -112,7 +137,7 @@ func (s *Server) setupRoutes() {
 	r.Post("/api/fs/move", alistHandler.HandleFsMove)
 	r.Post("/api/fs/copy", alistHandler.HandleFsCopy)
 
-	// Catch-all - Proxy to Alist
+	// Catch-all - Proxy to Alist with version injection
 	r.HandleFunc("/*", proxyHandler.HandleProxy)
 }
 
@@ -152,21 +177,21 @@ func (s *Server) Start() error {
 func (s *Server) startHTTP() error {
 	addr := s.cfg.GetHTTPAddr()
 
-	var handler http.Handler = s.router
+	var httpHandler http.Handler = s.router
 
 	// Enable h2c (HTTP/2 cleartext) if configured
-	if s.cfg.Scheme.EnableH2C {
+	if s.cfg.IsH2CEnabled() {
 		h2s := &http2.Server{
 			MaxConcurrentStreams: 1000,
 			IdleTimeout:          120 * time.Second,
 		}
-		handler = h2c.NewHandler(s.router, h2s)
+		httpHandler = h2c.NewHandler(s.router, h2s)
 		log.Info().Msg("HTTP/2 cleartext (h2c) enabled")
 	}
 
 	s.httpServer = &http.Server{
 		Addr:         addr,
-		Handler:      handler,
+		Handler:      httpHandler,
 		ReadTimeout:  0, // No timeout for streaming
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
@@ -268,3 +293,4 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	return lastErr
 }
+
