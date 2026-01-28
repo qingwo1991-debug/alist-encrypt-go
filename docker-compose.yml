@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  alist-encrypt:
+    image: ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
+    container_name: alist-encrypt-go
+    restart: unless-stopped
+    ports:
+      - "5344:5344"
+      # Uncomment for HTTPS
+      # - "5345:5345"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+    environment:
+      # Override config via environment variables (optional)
+      # ALIST_ENCRYPT_SCHEME_HTTP_PORT: 5344
+      # ALIST_ENCRYPT_SCHEME_ENABLE_H2C: "false"
+      # ALIST_ENCRYPT_ALIST_HOST: alist
+      # ALIST_ENCRYPT_ALIST_PORT: 5244
+      - TZ=Asia/Shanghai
+    networks:
+      - alist-network
+    depends_on:
+      - alist
+
+  # Optional: Alist service
+  alist:
+    image: xhofe/alist:latest
+    container_name: alist
+    restart: unless-stopped
+    ports:
+      - "5244:5244"
+    volumes:
+      - ./alist-data:/opt/alist/data
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Shanghai
+    networks:
+      - alist-network
+
+networks:
+  alist-network:
+    driver: bridge
