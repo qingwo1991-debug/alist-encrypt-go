@@ -21,12 +21,17 @@ import (
 
 // ProxyHandler handles proxy requests
 type ProxyHandler struct {
-	cfg         *config.Config
-	streamProxy *proxy.StreamProxy
-	fileDAO     *dao.FileDAO
-	passwdDAO   *dao.PasswdDAO
-	redirectMap sync.Map // key -> redirect info
+	cfg          *config.Config
+	streamProxy  *proxy.StreamProxy
+	fileDAO      *dao.FileDAO
+	passwdDAO    *dao.PasswdDAO
+	redirectMap  sync.Map // key -> redirect info
+	client       *proxy.Client // Reuse connection pool
+	redirectKeys []string // Track keys for LRU eviction
+	keysMu       sync.Mutex
 }
+
+const maxRedirectEntries = 10000 // Maximum redirect entries to prevent memory bloat
 
 type redirectInfo struct {
 	URL       string
@@ -43,6 +48,7 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		streamProxy: streamProxy,
 		fileDAO:     fileDAO,
 		passwdDAO:   passwdDAO,
+		client:      proxy.NewClient(cfg), // Reuse connection pool
 	}
 	// Cleanup expired redirects periodically
 	go h.cleanupRedirects()
@@ -102,6 +108,16 @@ func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, en
 		EncType:   encType,
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 	})
+
+	// LRU eviction: remove oldest entries if over limit
+	h.keysMu.Lock()
+	h.redirectKeys = append(h.redirectKeys, key)
+	for len(h.redirectKeys) > maxRedirectEntries {
+		oldKey := h.redirectKeys[0]
+		h.redirectKeys = h.redirectKeys[1:]
+		h.redirectMap.Delete(oldKey)
+	}
+	h.keysMu.Unlock()
 
 	return key
 }
@@ -170,13 +186,8 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute request
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(proxyReq)
+	// Execute request using shared client (connection pool)
+	resp, err := h.client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy request")
 		http.Error(w, "Proxy error", http.StatusBadGateway)
@@ -217,9 +228,12 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 
-	// Inject version for HTML
+	// Inject version for HTML (with size limit to prevent OOM)
 	if strings.Contains(contentType, "text/html") {
-		body, err := io.ReadAll(resp.Body)
+		// Limit HTML read to 10MB max to prevent memory issues
+		const maxHTMLSize = 10 * 1024 * 1024
+		limitedReader := io.LimitReader(resp.Body, maxHTMLSize)
+		body, err := io.ReadAll(limitedReader)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to read response body")
 			return
@@ -230,5 +244,8 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	io.Copy(w, resp.Body)
+	// Use buffer pool for non-HTML content
+	buf := proxy.GetBuffer()
+	defer proxy.PutBuffer(buf)
+	io.CopyBuffer(w, resp.Body, *buf)
 }

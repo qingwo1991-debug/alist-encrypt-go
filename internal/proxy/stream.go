@@ -6,11 +6,40 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/rs/zerolog/log"
 )
+
+// Buffer pool for streaming - 512KB buffers for high-bitrate video
+const streamBufferSize = 512 * 1024
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, streamBufferSize)
+		return &buf
+	},
+}
+
+func getBuffer() *[]byte {
+	return bufferPool.Get().(*[]byte)
+}
+
+func putBuffer(buf *[]byte) {
+	bufferPool.Put(buf)
+}
+
+// GetBuffer exports buffer pool for other packages
+func GetBuffer() *[]byte {
+	return getBuffer()
+}
+
+// PutBuffer exports buffer pool for other packages
+func PutBuffer(buf *[]byte) {
+	putBuffer(buf)
+}
 
 // StreamProxy handles streaming proxy with encryption/decryption
 type StreamProxy struct {
@@ -54,8 +83,10 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream response body
-	_, err = io.Copy(w, resp.Body)
+	// Stream response body with large buffer
+	buf := getBuffer()
+	defer putBuffer(buf)
+	_, err = io.CopyBuffer(w, resp.Body, *buf)
 	return err
 }
 
@@ -125,9 +156,11 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream decrypted content
+	// Stream decrypted content with large buffer
 	decryptedReader := flowEnc.DecryptReader(resp.Body)
-	_, err = io.Copy(w, decryptedReader)
+	buf := getBuffer()
+	defer putBuffer(buf)
+	_, err = io.CopyBuffer(w, decryptedReader, *buf)
 	if err != nil {
 		log.Error().Err(err).Msg("Error streaming decrypted content")
 	}
@@ -170,7 +203,10 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	_, err = io.Copy(w, resp.Body)
+	// Stream response with large buffer
+	buf := getBuffer()
+	defer putBuffer(buf)
+	_, err = io.CopyBuffer(w, resp.Body, *buf)
 	return err
 }
 

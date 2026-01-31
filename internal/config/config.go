@@ -103,6 +103,31 @@ var (
 	cfgOnce sync.Once
 )
 
+// getDefaultAlistHost returns the default Alist host based on environment
+func getDefaultAlistHost() string {
+	// Check environment variable first (for Docker deployment)
+	if host := os.Getenv("ALIST_HOST"); host != "" {
+		return host
+	}
+	// Check if running in Docker (common indicators)
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return "alist" // Default Docker service name
+	}
+	return "localhost"
+}
+
+// getDefaultAlistPort returns the default Alist port from environment or default
+func getDefaultAlistPort() int {
+	if port := os.Getenv("ALIST_PORT"); port != "" {
+		if p, err := fmt.Sscanf(port, "%d", new(int)); err == nil && p > 0 {
+			var portNum int
+			fmt.Sscanf(port, "%d", &portNum)
+			return portNum
+		}
+	}
+	return 5244
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -110,8 +135,8 @@ func DefaultConfig() *Config {
 			Name:       "alist",
 			Path:       "/*",
 			Describe:   "alist config",
-			ServerHost: "localhost",
-			ServerPort: 5244,
+			ServerHost: getDefaultAlistHost(),
+			ServerPort: getDefaultAlistPort(),
 			HTTPS:      false,
 			PasswdList: []PasswdInfo{
 				{

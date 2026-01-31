@@ -10,9 +10,18 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 
 	"golang.org/x/crypto/pbkdf2"
 )
+
+// Buffer pool for encryption to reduce GC pressure
+var encryptBufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 64*1024) // 64KB buffers
+		return &buf
+	},
+}
 
 // AESCTR implements AES-128-CTR encryption with position seeking support
 type AESCTR struct {
@@ -155,7 +164,15 @@ type ctrWriter struct {
 }
 
 func (w *ctrWriter) Write(p []byte) (int, error) {
-	encrypted := make([]byte, len(p))
+	// Use buffer pool for small writes, allocate for large ones
+	var encrypted []byte
+	if len(p) <= 64*1024 {
+		bufPtr := encryptBufferPool.Get().(*[]byte)
+		defer encryptBufferPool.Put(bufPtr)
+		encrypted = (*bufPtr)[:len(p)]
+	} else {
+		encrypted = make([]byte, len(p))
+	}
 	copy(encrypted, p)
 	w.cipher.Encrypt(encrypted)
 	return w.writer.Write(encrypted)
