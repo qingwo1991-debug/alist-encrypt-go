@@ -89,7 +89,10 @@ func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 			}
 
 			if token == "" {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				// Return JSON error for frontend compatibility (not HTTP 401)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"code":401,"msg":"please login"}`))
 				return
 			}
 
