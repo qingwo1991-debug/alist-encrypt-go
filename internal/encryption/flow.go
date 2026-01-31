@@ -13,8 +13,9 @@ import (
 type EncType string
 
 const (
-	EncTypeAESCTR EncType = "aesctr"
-	EncTypeRC4MD5 EncType = "rc4md5"
+	EncTypeAESCTR   EncType = "aesctr"
+	EncTypeRC4MD5   EncType = "rc4md5"
+	EncTypeChaCha20 EncType = "chacha20"
 )
 
 // Cipher interface for encryption/decryption
@@ -51,6 +52,8 @@ func NewFlowEnc(password string, encType string, fileSize int64) (*FlowEnc, erro
 		}
 	case EncTypeRC4MD5:
 		f.cipher, err = NewRC4MD5(password, fileSize)
+	case EncTypeChaCha20:
+		f.cipher, err = NewChaCha20(password, fileSize)
 	default:
 		return nil, fmt.Errorf("unsupported encryption type: %s", encType)
 	}

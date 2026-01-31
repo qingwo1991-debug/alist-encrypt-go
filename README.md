@@ -4,27 +4,48 @@ A Go rewrite of alist-encrypt, providing transparent encryption proxy for Alist 
 
 ## Features
 
-- **Transparent Encryption**: AES-128-CTR and RC4-MD5 encryption for file content
+- **Transparent Encryption**: AES-128-CTR, ChaCha20, and RC4-MD5 encryption for file content
+- **ChaCha20 Support**: Optimized for CPUs without AES-NI (e.g., Intel J4125, ARM) - 3-5x faster than software AES
 - **Filename Encryption**: Optional encrypted filenames with MixBase64 + CRC6
 - **HTTP/2 Support**: Full HTTP/2 with h2c (cleartext) and HTTPS support
 - **WebDAV Support**: Encrypted WebDAV access
 - **Range Request Support**: Video seeking works with encrypted files
-- **Connection Pooling**: Configurable HTTP client with connection reuse
+- **Connection Pooling**: Optimized HTTP client with connection reuse
+- **512KB Stream Buffer**: Large buffer pool for high-bitrate video streaming
+- **LRU Cache**: Memory-safe redirect cache with automatic eviction
 - **BoltDB Storage**: Embedded database for configuration persistence
 - **Unix Socket Support**: For reverse proxy setups
+- **Docker Ready**: Environment variable support for easy container deployment
 
 ## Quick Start
 
-### Using Docker
+### Using Docker (Recommended)
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  alist-encrypt:
+    image: ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
+    container_name: alist-encrypt
+    restart: unless-stopped
+    ports:
+      - "5344:5344"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - ALIST_HOST=alist        # Your Alist container/host name
+      - ALIST_PORT=5244
+    networks:
+      - your-network
+```
 
 ```bash
-docker build -t alist-encrypt-go .
-docker run -d \
-  -p 5344:5344 \
-  -v ./data:/app/data \
-  -v ./config.json:/app/config.json \
-  alist-encrypt-go
+docker compose up -d
 ```
+
+Access WebUI at: `http://your-ip:5344/index`
 
 ### From Source
 
@@ -114,9 +135,27 @@ Create a `config.json` file (compatible with OpenAlist format):
 | `enable_http2` | Enable HTTP/2 for client | `true` |
 | `insecure_skip_verify` | Skip TLS verification | `false` |
 
-### Environment Variables
+### Environment Variables (Docker)
 
-All options can be set via environment variables with `ALIST_ENCRYPT_` prefix:
+For Docker deployment, you can use environment variables instead of config.json:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALIST_HOST` | Alist server hostname | Auto-detect (`alist` in Docker, `localhost` otherwise) |
+| `ALIST_PORT` | Alist server port | `5244` |
+
+```bash
+docker run -d \
+  -p 5344:5344 \
+  -e ALIST_HOST=your-alist-host \
+  -e ALIST_PORT=5244 \
+  -v ./data:/app/data \
+  ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
+```
+
+### Configuration File
+
+All options can also be set via environment variables with `ALIST_ENCRYPT_` prefix:
 
 ```bash
 ALIST_ENCRYPT_SCHEME_HTTP_PORT=5344
@@ -174,17 +213,55 @@ ALIST_ENCRYPT_SCHEME_ENABLE_H2C=true
 
 ## Encryption Types
 
-### AES-128-CTR (Default)
+### ChaCha20 (Recommended for J4125/ARM)
 
+- **Best for CPUs without AES-NI** (Intel Celeron/Pentium, ARM)
+- 3-5x faster than software AES on these CPUs
+- PBKDF2 key derivation (1000 iterations, SHA256)
+- O(1) random access - instant video seeking
+- Modern, secure stream cipher
+
+```json
+{
+  "encType": "chacha20"
+}
+```
+
+### AES-128-CTR (Recommended for modern CPUs with AES-NI)
+
+- Best for CPUs with hardware AES acceleration (most desktop/server CPUs)
 - PBKDF2 key derivation (1000 iterations, SHA256)
 - File size-based IV generation
-- Supports random access (video seeking)
+- O(1) random access - instant video seeking
 
-### RC4-MD5
+```json
+{
+  "encType": "aesctr"
+}
+```
+
+### RC4-MD5 (Legacy)
 
 - MD5-based key derivation
 - Stream cipher with position support
-- Legacy compatibility
+- **Not recommended**: O(N) seeking performance for large files
+- Kept for backward compatibility
+
+```json
+{
+  "encType": "rc4md5"
+}
+```
+
+### CPU Recommendation
+
+| CPU Type | AES-NI | Recommended |
+|----------|--------|-------------|
+| Intel Core i3/i5/i7/i9 | ✅ Yes | `aesctr` |
+| AMD Ryzen | ✅ Yes | `aesctr` |
+| Intel Celeron/Pentium (J4125, N5105, etc.) | ❌ No | `chacha20` |
+| ARM (Raspberry Pi, etc.) | ❌ No | `chacha20` |
+| Qualcomm Snapdragon (with ARMv8 crypto) | ✅ Yes | `aesctr` |
 
 ### Filename Encryption
 
@@ -197,22 +274,23 @@ ALIST_ENCRYPT_SCHEME_ENABLE_H2C=true
 ```
 cmd/server/main.go          - Entry point
 internal/
-  config/config.go          - Configuration (Viper)
+  config/config.go          - Configuration with env var support
   server/
     server.go               - HTTP/HTTPS/Unix server
     middleware.go           - Logging, CORS, Auth
   handler/
     api.go                  - /enc-api/* routes
-    proxy.go                - Proxy and redirect
+    proxy.go                - Proxy with LRU cache
     alist.go                - Alist API interception
     webdav.go               - WebDAV handling
   proxy/
     client.go               - HTTP client pool
-    stream.go               - Streaming encryption
+    stream.go               - 512KB buffer streaming
   encryption/
     flow.go                 - Encryption dispatcher
     aesctr.go               - AES-128-CTR
-    rc4md5.go               - RC4-MD5
+    chacha20.go             - ChaCha20 (optimized for non-AES-NI CPUs)
+    rc4md5.go               - RC4-MD5 (legacy)
     filename.go             - Filename encryption
   storage/
     store.go                - BoltDB storage
