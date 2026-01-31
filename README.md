@@ -129,11 +129,16 @@ ALIST_ENCRYPT_SCHEME_ENABLE_H2C=true
 ### Encryption Management
 
 - `POST /enc-api/login` - User authentication
-- `GET /enc-api/getConfig` - Get current configuration
-- `POST /enc-api/setConfig` - Update configuration
-- `GET /enc-api/getPasswdConfig` - Get password configurations
-- `POST /enc-api/setPasswdConfig` - Set password for path
-- `POST /enc-api/deletePasswdConfig` - Delete password config
+- `GET/POST /enc-api/getUserInfo` - Get current user info
+- `GET/POST /enc-api/updatePasswd` - Update user password
+- `GET/POST /enc-api/getAlistConfig` - Get Alist server configuration
+- `GET/POST /enc-api/saveAlistConfig` - Save Alist server configuration
+- `GET/POST /enc-api/getWebdavConfig` - Get WebDAV configurations
+- `GET/POST /enc-api/saveWebdavConfig` - Add WebDAV configuration
+- `GET/POST /enc-api/updateWebdavConfig` - Update WebDAV configuration
+- `GET/POST /enc-api/delWebdavConfig` - Delete WebDAV configuration
+- `GET/POST /enc-api/encodeFoldName` - Encode folder name with password
+- `GET/POST /enc-api/decodeFoldName` - Decode folder name
 
 ### Proxy Endpoints
 
