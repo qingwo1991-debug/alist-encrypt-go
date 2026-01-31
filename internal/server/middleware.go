@@ -76,7 +76,14 @@ func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Check multiple header names for compatibility with original Node.js version
 			token := r.Header.Get("Authorization")
+			if token == "" {
+				token = r.Header.Get("AUTHORIZETOKEN") // Compatible with original frontend
+			}
+			if token == "" {
+				token = r.Header.Get("Authorizetoken")
+			}
 			if token == "" {
 				token = r.URL.Query().Get("token")
 			}
