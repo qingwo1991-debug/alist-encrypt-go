@@ -25,6 +25,9 @@ WORKDIR /app
 # Copy binary
 COPY --from=builder /alist-encrypt-go .
 
+# Copy web static files (frontend UI)
+COPY --from=builder /app/web/public ./web/public
+
 # Copy config example
 COPY --from=builder /app/configs/config.example.json ./configs/
 
