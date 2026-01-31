@@ -36,7 +36,7 @@ func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token, Depth, Destination, Overwrite, File-Path")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token, Depth, Destination, Overwrite, File-Path, Authorizetoken, AUTHORIZETOKEN")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
 
 		if r.Method == "OPTIONS" {
@@ -77,27 +77,25 @@ func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 			}
 
 			// Check multiple header names for compatibility with original Node.js version
-			token := r.Header.Get("Authorization")
+			// Note: Go's http package canonicalizes headers, so "authorizetoken" becomes "Authorizetoken"
+			token := r.Header.Get("Authorizetoken") // Primary: matches Node.js version
 			if token == "" {
-				token = r.Header.Get("AUTHORIZETOKEN") // Compatible with original frontend
-			}
-			if token == "" {
-				token = r.Header.Get("Authorizetoken")
+				token = r.Header.Get("Authorization")
 			}
 			if token == "" {
 				token = r.URL.Query().Get("token")
 			}
 
 			if token == "" {
-				// Return JSON error for frontend compatibility (not HTTP 401)
+				// Return JSON error for frontend compatibility - matches Node.js: { code: 401, msg: 'user unlogin' }
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"code":401,"msg":"please login"}`))
+				w.Write([]byte(`{"code":401,"msg":"user unlogin"}`))
 				return
 			}
 
-			// Token validation would go here
-			// For now, just pass through
+			// Store token in context for handlers
+			r.Header.Set("X-User-Token", token)
 			next.ServeHTTP(w, r)
 		})
 	}
