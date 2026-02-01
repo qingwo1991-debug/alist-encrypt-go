@@ -166,7 +166,9 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 // HandleProxy handles catch-all proxy to Alist
 func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
+	log.Debug().Str("path", r.URL.Path).Str("method", r.Method).Msg("Proxying request")
 	targetURL := h.cfg.GetAlistURL() + r.URL.Path
+	log.Debug().Str("target", targetURL).Msg("Target URL")
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
@@ -189,10 +191,11 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	// Execute request using shared client (connection pool)
 	resp, err := h.client.Do(proxyReq)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to proxy request")
+		log.Error().Err(err).Str("target", targetURL).Msg("Failed to proxy request")
 		http.Error(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
+	log.Debug().Str("target", targetURL).Int("status", resp.StatusCode).Msg("Proxy response")
 	defer resp.Body.Close()
 
 	// Inject version identifier for HTML responses

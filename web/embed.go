@@ -17,3 +17,8 @@ func GetFileSystem() http.FileSystem {
 	}
 	return http.FS(fsys)
 }
+
+// GetFileSystemWithPrefix returns the embedded file system without stripping "public" prefix
+func GetFileSystemWithPrefix() http.FileSystem {
+	return http.FS(staticFiles)
+}

@@ -71,6 +71,13 @@ func (s *Server) setupRoutes() {
 	r.Use(LoggerMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(CORSMiddleware)
+	// Debug middleware to log all requests
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Debug().Str("method", r.Method).Str("path", r.URL.Path).Msg("HTTP request")
+			next.ServeHTTP(w, r)
+		})
+	})
 
 	// Force HTTPS redirect if enabled
 	if s.cfg.Scheme != nil && s.cfg.Scheme.ForceHTTPS && s.cfg.IsHTTPSEnabled() {
@@ -78,10 +85,56 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Serve static files (WebUI)
+	// Use the filesystem with "public" prefix already stripped
 	fileServer := http.FileServer(web.GetFileSystem())
+	// Handle /public/* requests by stripping the prefix
 	r.Handle("/public/*", http.StripPrefix("/public", fileServer))
+	// Also handle /static/* for direct access to static resources
+	// The file system already has "static/" at root, so no StripPrefix needed
+	r.Handle("/static/*", fileServer)
+	// Special handler for /public/index.html to avoid redirect loop
+	r.Get("/public/index.html", func(w http.ResponseWriter, r *http.Request) {
+		f, err := web.GetFileSystem().Open("index.html")
+		if err != nil {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		stat, _ := f.Stat()
+		http.ServeContent(w, r, "index.html", stat.ModTime(), f)
+	})
+	// Redirect / to index page for better UX
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/public/index.html", http.StatusFound)
+	})
 	r.Get("/index", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/public/index.html", http.StatusFound)
+	})
+	// Debug route for testing static files
+	r.Get("/debug-static/*", func(w http.ResponseWriter, r *http.Request) {
+		path := chi.URLParam(r, "*")
+		log.Debug().Str("path", path).Msg("Static file debug request")
+		http.ServeFile(w, r, "web/public/"+path)
+	})
+	// Debug embedded filesystem
+	r.Get("/debug-embed/*", func(w http.ResponseWriter, r *http.Request) {
+		path := chi.URLParam(r, "*")
+		log.Debug().Str("path", path).Msg("Embedded file debug request")
+		fs := web.GetFileSystem()
+		f, err := fs.Open(path)
+		if err != nil {
+			log.Error().Err(err).Str("path", path).Msg("Failed to open embedded file")
+			http.Error(w, "File not found: "+err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			log.Error().Err(err).Str("path", path).Msg("Failed to stat embedded file")
+			http.Error(w, "Stat failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.ServeContent(w, r, path, stat.ModTime(), f)
 	})
 
 	// Create handlers
