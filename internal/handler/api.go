@@ -127,6 +127,42 @@ func (h *APIHandler) UpdatePasswd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "msg": "update success"})
 }
 
+// UpdateUsername updates user username
+func (h *APIHandler) UpdateUsername(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username    string `json:"username"`
+		Password    string `json:"password"`
+		NewUsername string `json:"newusername"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+		return
+	}
+
+	if len(req.NewUsername) < 3 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "username too short, at least 3 characters"})
+		return
+	}
+
+	if err := h.userDAO.Validate(req.Username, req.Password); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "password error"})
+		return
+	}
+
+	// Delete old user and create new one with same password
+	if err := h.userDAO.Delete(req.Username); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
+		return
+	}
+
+	if err := h.userDAO.Create(req.NewUsername, req.Password); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "msg": "update success"})
+}
+
 // GetAlistConfig returns Alist server configuration
 func (h *APIHandler) GetAlistConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
