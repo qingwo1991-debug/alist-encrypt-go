@@ -47,7 +47,7 @@ var gzipPool = sync.Pool{
 	},
 }
 
-// GzipMiddleware compresses JSON/HTML responses
+// GzipMiddleware compresses JSON API responses only
 func GzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip if client doesn't accept gzip
@@ -56,10 +56,10 @@ func GzipMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Skip for streaming endpoints (downloads, video)
+		// ONLY compress /enc-api/* routes (our own API)
+		// Skip everything else to avoid breaking proxied responses
 		path := r.URL.Path
-		if strings.HasPrefix(path, "/d/") || strings.HasPrefix(path, "/p/") ||
-			strings.HasPrefix(path, "/redirect/") || strings.HasPrefix(path, "/dav/") {
+		if !strings.HasPrefix(path, "/enc-api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
