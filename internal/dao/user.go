@@ -1,9 +1,15 @@
 package dao
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
+
+	"golang.org/x/crypto/argon2"
 
 	"github.com/alist-encrypt-go/internal/storage"
 )
@@ -12,6 +18,15 @@ var (
 	ErrUserNotFound    = errors.New("user not found")
 	ErrInvalidPassword = errors.New("invalid password")
 	ErrUserExists      = errors.New("user already exists")
+)
+
+// Argon2 parameters (OWASP recommended)
+const (
+	argon2Time    = 3
+	argon2Memory  = 64 * 1024 // 64MB
+	argon2Threads = 4
+	argon2KeyLen  = 32
+	saltLength    = 16
 )
 
 // User represents a user
@@ -30,10 +45,61 @@ func NewUserDAO(store *storage.Store) *UserDAO {
 	return &UserDAO{store: store}
 }
 
-// hashPassword hashes a password using SHA256
-func hashPassword(password string) string {
-	hash := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(hash[:])
+// hashPassword hashes a password using Argon2id (modern, secure)
+func hashPassword(password string) (string, error) {
+	salt := make([]byte, saltLength)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+
+	hash := argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+
+	// Format: base64(salt):base64(hash)
+	return fmt.Sprintf("%s:%s",
+		base64.StdEncoding.EncodeToString(salt),
+		base64.StdEncoding.EncodeToString(hash)), nil
+}
+
+// verifyPassword verifies a password against a hash using constant-time comparison
+func verifyPassword(password, encodedHash string) bool {
+	// Split by colon
+	parts := splitHash(encodedHash)
+	if len(parts) != 2 {
+		// Try old format (plain SHA256 hex) for backward compatibility
+		return verifyLegacyPassword(password, encodedHash)
+	}
+
+	salt, err := base64.StdEncoding.DecodeString(parts[0])
+	if err != nil {
+		return verifyLegacyPassword(password, encodedHash)
+	}
+
+	expectedHash, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return verifyLegacyPassword(password, encodedHash)
+	}
+
+	// Compute hash with same salt
+	computedHash := argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+
+	// Constant-time comparison to prevent timing attacks
+	return subtle.ConstantTimeCompare(computedHash, expectedHash) == 1
+}
+
+// splitHash splits the encoded hash by colon
+func splitHash(s string) []string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			return []string{s[:i], s[i+1:]}
+		}
+	}
+	return []string{s}
+}
+
+// verifyLegacyPassword verifies against old SHA256 format for migration
+func verifyLegacyPassword(password, hash string) bool {
+	computed := sha256.Sum256([]byte(password))
+	return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(computed[:])), []byte(hash)) == 1
 }
 
 // Create creates a new user
@@ -47,9 +113,14 @@ func (d *UserDAO) Create(username, password string) error {
 		return ErrUserExists
 	}
 
+	hash, err := hashPassword(password)
+	if err != nil {
+		return err
+	}
+
 	user := User{
 		Username:     username,
-		PasswordHash: hashPassword(password),
+		PasswordHash: hash,
 	}
 	return d.store.SetJSON(storage.BucketUsers, username, user)
 }
@@ -63,7 +134,7 @@ func (d *UserDAO) Validate(username, password string) error {
 	if user.Username == "" {
 		return ErrUserNotFound
 	}
-	if user.PasswordHash != hashPassword(password) {
+	if !verifyPassword(password, user.PasswordHash) {
 		return ErrInvalidPassword
 	}
 	return nil
@@ -87,7 +158,11 @@ func (d *UserDAO) UpdatePassword(username, newPassword string) error {
 	if err != nil {
 		return err
 	}
-	user.PasswordHash = hashPassword(newPassword)
+	hash, err := hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	user.PasswordHash = hash
 	return d.store.SetJSON(storage.BucketUsers, username, user)
 }
 
