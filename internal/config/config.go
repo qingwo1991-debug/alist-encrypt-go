@@ -31,6 +31,7 @@ type AlistServer struct {
 	ServerHost string       `json:"serverHost"`
 	ServerPort int          `json:"serverPort"`
 	HTTPS      bool         `json:"https"`
+	EnableH2C  bool         `json:"enableH2c"`  // Enable HTTP/2 cleartext to backend
 	PasswdList []PasswdInfo `json:"passwdList"`
 }
 

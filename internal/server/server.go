@@ -71,18 +71,16 @@ func (s *Server) setupRoutes() {
 	r.Use(LoggerMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(CORSMiddleware)
-	// Debug middleware to log all requests
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Debug().Str("method", r.Method).Str("path", r.URL.Path).Msg("HTTP request")
-			next.ServeHTTP(w, r)
-		})
-	})
+	r.Use(GzipMiddleware) // Compress JSON/HTML responses
 
 	// Force HTTPS redirect if enabled
 	if s.cfg.Scheme != nil && s.cfg.Scheme.ForceHTTPS && s.cfg.IsHTTPSEnabled() {
 		r.Use(ForceHTTPSMiddleware(s.cfg.Scheme.HTTPSPort))
 	}
+
+	// Health check endpoints (no auth required)
+	r.Get("/health", HealthHandler)
+	r.Get("/ready", ReadyHandler)
 
 	// Serve static files (WebUI)
 	// Use the filesystem with "public" prefix already stripped
