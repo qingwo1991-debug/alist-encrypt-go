@@ -143,6 +143,14 @@ func (s *Server) setupRoutes() {
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 
+	// Handle frontend error collection API (built into the Vue template, not needed)
+	// Return success to prevent 502 errors when Alist is not configured
+	r.Post("/integration-front/errorCollection/insert", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	})
+
 	// /enc-api/* routes - Authentication and config management (compatible with original)
 	r.Route("/enc-api", func(r chi.Router) {
 		// Public routes (no auth required)
