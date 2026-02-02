@@ -103,10 +103,7 @@ func (s *Server) setupRoutes() {
 		stat, _ := f.Stat()
 		http.ServeContent(w, r, "index.html", stat.ModTime(), f)
 	})
-	// Redirect / to index page for better UX
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/public/index.html", http.StatusFound)
-	})
+	// Only /index redirects to admin page, / should proxy to Alist
 	r.Get("/index", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/public/index.html", http.StatusFound)
 	})
