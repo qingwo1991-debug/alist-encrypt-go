@@ -28,13 +28,14 @@ type AlistHandler struct {
 }
 
 // NewAlistHandler creates a new Alist handler
-func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO) *AlistHandler {
+// proxyHandler must be the same instance used for /redirect routes
+func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, proxyHandler *ProxyHandler) *AlistHandler {
 	return &AlistHandler{
 		cfg:          cfg,
 		streamProxy:  streamProxy,
 		fileDAO:      fileDAO,
 		passwdDAO:    passwdDAO,
-		proxyHandler: NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO),
+		proxyHandler: proxyHandler,
 	}
 }
 
