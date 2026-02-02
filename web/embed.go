@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-//go:embed public/*
+//go:embed all:public
 var staticFiles embed.FS
 
 // GetFileSystem returns the embedded file system for static files
