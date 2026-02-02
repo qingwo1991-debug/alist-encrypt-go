@@ -230,10 +230,39 @@ func (h *APIHandler) GetWebdavConfig(w http.ResponseWriter, r *http.Request) {
 
 // SaveWebdavConfig adds a new WebDAV server configuration
 func (h *APIHandler) SaveWebdavConfig(w http.ResponseWriter, r *http.Request) {
-	var server config.WebDAVServer
-	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+	// Use raw map to handle encPath being either string or array
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request: " + err.Error()})
 		return
+	}
+
+	server := config.WebDAVServer{
+		Name:       getStringField(raw, "name"),
+		Describe:   getStringField(raw, "describe"),
+		Path:       getStringField(raw, "path"),
+		Enable:     getBoolField(raw, "enable"),
+		ServerHost: getStringField(raw, "serverHost"),
+		ServerPort: getIntField(raw, "serverPort"),
+		HTTPS:      getBoolField(raw, "https"),
+	}
+
+	// Handle passwdList
+	if passwdListRaw, ok := raw["passwdList"].([]interface{}); ok {
+		for _, item := range passwdListRaw {
+			if passwdMap, ok := item.(map[string]interface{}); ok {
+				passwd := config.PasswdInfo{
+					Password:  getStringField(passwdMap, "password"),
+					EncType:   getStringField(passwdMap, "encType"),
+					Describe:  getStringField(passwdMap, "describe"),
+					Enable:    getBoolField(passwdMap, "enable"),
+					EncName:   getBoolField(passwdMap, "encName"),
+					EncSuffix: getStringField(passwdMap, "encSuffix"),
+				}
+				passwd.EncPath = getStringArrayField(passwdMap, "encPath")
+				server.PasswdList = append(server.PasswdList, passwd)
+			}
+		}
 	}
 
 	// Generate ID
@@ -251,10 +280,40 @@ func (h *APIHandler) SaveWebdavConfig(w http.ResponseWriter, r *http.Request) {
 
 // UpdateWebdavConfig updates a WebDAV server configuration
 func (h *APIHandler) UpdateWebdavConfig(w http.ResponseWriter, r *http.Request) {
-	var server config.WebDAVServer
-	if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request"})
+	// Use raw map to handle encPath being either string or array
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "Invalid request: " + err.Error()})
 		return
+	}
+
+	server := config.WebDAVServer{
+		ID:         getStringField(raw, "id"),
+		Name:       getStringField(raw, "name"),
+		Describe:   getStringField(raw, "describe"),
+		Path:       getStringField(raw, "path"),
+		Enable:     getBoolField(raw, "enable"),
+		ServerHost: getStringField(raw, "serverHost"),
+		ServerPort: getIntField(raw, "serverPort"),
+		HTTPS:      getBoolField(raw, "https"),
+	}
+
+	// Handle passwdList
+	if passwdListRaw, ok := raw["passwdList"].([]interface{}); ok {
+		for _, item := range passwdListRaw {
+			if passwdMap, ok := item.(map[string]interface{}); ok {
+				passwd := config.PasswdInfo{
+					Password:  getStringField(passwdMap, "password"),
+					EncType:   getStringField(passwdMap, "encType"),
+					Describe:  getStringField(passwdMap, "describe"),
+					Enable:    getBoolField(passwdMap, "enable"),
+					EncName:   getBoolField(passwdMap, "encName"),
+					EncSuffix: getStringField(passwdMap, "encSuffix"),
+				}
+				passwd.EncPath = getStringArrayField(passwdMap, "encPath")
+				server.PasswdList = append(server.PasswdList, passwd)
+			}
+		}
 	}
 
 	if err := h.cfg.UpdateWebDAVServer(server); err != nil {
