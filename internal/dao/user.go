@@ -103,7 +103,7 @@ func (d *UserDAO) EnsureDefaultUser() error {
 		return err
 	}
 	if user.Username == "" {
-		return d.Create("admin", "admin")
+		return d.Create("admin", "123456")
 	}
 	return nil
 }
