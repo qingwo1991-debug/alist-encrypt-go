@@ -135,7 +135,8 @@ func (s *Server) setupRoutes() {
 	// Create handlers
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
-	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
+	// IMPORTANT: Pass the same proxyHandler to AlistHandler so they share the redirectMap
+	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 
 	// Handle frontend error collection API (built into the Vue template, not needed)
