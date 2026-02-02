@@ -188,6 +188,7 @@ func (h *APIHandler) SaveAlistConfig(w http.ResponseWriter, r *http.Request) {
 		ServerHost: getStringField(raw, "serverHost"),
 		ServerPort: getIntField(raw, "serverPort"),
 		HTTPS:      getBoolField(raw, "https"),
+		EnableH2C:  getBoolField(raw, "enableH2c"),
 	}
 
 	// Handle passwdList

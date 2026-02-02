@@ -15,6 +15,10 @@
         <el-switch v-model="alistConfigForm.https" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
         <span color="gray" style="font-size: 12px; margin-left: 12px">默认http</span>
       </el-form-item>
+      <el-form-item prop="enableH2c" label="HTTP/2">
+        <el-switch v-model="alistConfigForm.enableH2c" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">启用 h2c (需要后端 Alist 也开启 enable_h2c)</span>
+      </el-form-item>
 
       <el-form-item label="密码设置">
         <el-button type="success" @click="addPasswd">添加</el-button>
@@ -139,6 +143,7 @@ const alistConfigForm = reactive({
   serverHost: '192.168.1.100',
   serverPort: '5244',
   https: false,
+  enableH2c: false,
   passwdList: [
     {
       id: Math.random(),

@@ -289,8 +289,9 @@ func DecodeName(password, encType, encodedName string) string {
 
 // ConvertShowName converts encrypted filename to display name
 func ConvertShowName(password, encType, pathText string) string {
-	// URL decode the path
-	decoded, err := url.QueryUnescape(pathText)
+	// URL decode the path using PathUnescape (NOT QueryUnescape!)
+	// QueryUnescape converts '+' to space, but '+' is valid in MixBase64
+	decoded, err := url.PathUnescape(pathText)
 	if err != nil {
 		decoded = pathText
 	}
@@ -303,7 +304,7 @@ func ConvertShowName(password, encType, pathText string) string {
 	if showName == "" {
 		return OrigPrefix + fileName
 	}
-	return showName
+	return showName + ext
 }
 
 // ConvertRealName converts display filename to encrypted name
@@ -315,8 +316,9 @@ func ConvertRealName(password, encType, pathText string) string {
 		return strings.TrimPrefix(fileName, OrigPrefix)
 	}
 
-	// URL decode the filename
-	decoded, err := url.QueryUnescape(fileName)
+	// URL decode the filename using PathUnescape (NOT QueryUnescape!)
+	// QueryUnescape converts '+' to space, but '+' is valid in MixBase64
+	decoded, err := url.PathUnescape(fileName)
 	if err != nil {
 		decoded = fileName
 	}
@@ -339,8 +341,9 @@ func ConvertRealNameWithSuffix(password, encType, pathText, encSuffix string) st
 		return strings.TrimPrefix(fileName, OrigPrefix)
 	}
 
-	// URL decode the filename
-	decoded, err := url.QueryUnescape(fileName)
+	// URL decode the filename using PathUnescape (NOT QueryUnescape!)
+	// QueryUnescape converts '+' to space, but '+' is valid in MixBase64
+	decoded, err := url.PathUnescape(fileName)
 	if err != nil {
 		decoded = fileName
 	}

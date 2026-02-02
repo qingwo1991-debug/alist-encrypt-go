@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
@@ -14,7 +15,8 @@ import (
 // Client wraps http.Client with connection pooling and HTTP/2 support
 type Client struct {
 	*http.Client
-	cfg *config.Config
+	h2cClient *http.Client // Separate client for h2c connections
+	cfg       *config.Config
 }
 
 // NewClient creates a new HTTP client with connection pooling
@@ -43,7 +45,7 @@ func NewClient(cfg *config.Config) *Client {
 		http2.ConfigureTransport(transport)
 	}
 
-	return &Client{
+	client := &Client{
 		Client: &http.Client{
 			Transport: transport,
 			Timeout:   0, // No timeout for streaming
@@ -53,11 +55,42 @@ func NewClient(cfg *config.Config) *Client {
 		},
 		cfg: cfg,
 	}
+
+	// Create h2c client if enabled for backend connections
+	if cfg.AlistServer.EnableH2C {
+		h2cTransport := &http2.Transport{
+			AllowHTTP: true, // Allow HTTP/2 over cleartext (h2c)
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				// For h2c, we dial without TLS
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			},
+		}
+		client.h2cClient = &http.Client{
+			Transport: h2cTransport,
+			Timeout:   0,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+
+	return client
 }
 
-// Do executes an HTTP request
+// Do executes an HTTP request, using h2c if enabled and target is backend
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	// Use h2c client for backend connections if enabled
+	if c.h2cClient != nil && c.isBackendRequest(req) {
+		return c.h2cClient.Do(req)
+	}
 	return c.Client.Do(req)
+}
+
+// isBackendRequest checks if the request is to the Alist backend
+func (c *Client) isBackendRequest(req *http.Request) bool {
+	backendHost := c.cfg.AlistServer.ServerHost
+	return req.URL.Host == backendHost || req.Host == backendHost
 }
 
 // Get performs a GET request

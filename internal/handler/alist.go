@@ -38,6 +38,12 @@ func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 	}
 }
 
+// decryptResult holds the result of parallel filename decryption
+type decryptResult struct {
+	index    int
+	showName string
+}
+
 // HandleFsList intercepts /api/fs/list to handle filename decryption
 func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
@@ -98,12 +104,20 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 				coverNameMap := make(map[string]string)
 				var omitNames []string
 
+				// Collect files that need decryption
+				type decryptTask struct {
+					index      int
+					name       string
+					passwdInfo *config.PasswdInfo
+				}
+				var tasks []decryptTask
+
 				for i, item := range content {
 					if fileData, ok := item.(map[string]interface{}); ok {
 						name, _ := fileData["name"].(string)
 						isDir, _ := fileData["is_dir"].(bool)
 
-						if name == "" || isDir {
+						if name == "" {
 							continue
 						}
 
@@ -114,13 +128,19 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						// Cache file info
 						h.fileDAO.SetFromAlistResponse(filePath, fileData)
 
+						// Skip directories for filename decryption
+						if isDir {
+							continue
+						}
+
 						// Check if filename encryption is enabled for this path
 						passwdInfo, found := h.passwdDAO.PathFindPasswd(filePath)
 						if found && passwdInfo.EncName {
-							// Decrypt filename for display
-							showName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, name)
-							fileData["name"] = showName
-							content[i] = fileData
+							tasks = append(tasks, decryptTask{
+								index:      i,
+								name:       name,
+								passwdInfo: passwdInfo,
+							})
 						}
 
 						// Handle cover images (type 5 = image)
@@ -129,6 +149,34 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 							coverNameMap[baseName] = name
 						}
 					}
+				}
+
+				// Parallel filename decryption using goroutines
+				if len(tasks) > 0 {
+					results := make(chan decryptResult, len(tasks))
+
+					// Use worker pool for parallel decryption (limit concurrency)
+					const maxWorkers = 32
+					semaphore := make(chan struct{}, maxWorkers)
+
+					for _, task := range tasks {
+						semaphore <- struct{}{} // Acquire
+						go func(t decryptTask) {
+							defer func() { <-semaphore }() // Release
+							showName := encryption.ConvertShowName(t.passwdInfo.Password, t.passwdInfo.EncType, t.name)
+							results <- decryptResult{index: t.index, showName: showName}
+						}(task)
+					}
+
+					// Collect results
+					for range tasks {
+						result := <-results
+						if fileData, ok := content[result.index].(map[string]interface{}); ok {
+							fileData["name"] = result.showName
+							content[result.index] = fileData
+						}
+					}
+					close(results)
 				}
 
 				// Associate video files with cover images
