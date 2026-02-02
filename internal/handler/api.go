@@ -81,6 +81,7 @@ func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
 // GetUserInfo returns current user info
 func (h *APIHandler) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code": 0,
 		"data": map[string]interface{}{
 			"codes": []int{16, 9, 10, 11, 12, 13, 15},
 			"userInfo": map[string]interface{}{
@@ -121,12 +122,13 @@ func (h *APIHandler) UpdatePasswd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"msg": "update success"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "msg": "update success"})
 }
 
 // GetAlistConfig returns Alist server configuration
 func (h *APIHandler) GetAlistConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code": 0,
 		"data": h.cfg.AlistServer,
 	})
 }
@@ -144,12 +146,13 @@ func (h *APIHandler) SaveAlistConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"msg": "save ok"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "msg": "save ok"})
 }
 
 // GetWebdavConfig returns WebDAV server configurations
 func (h *APIHandler) GetWebdavConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code": 0,
 		"data": h.cfg.WebDAVServer,
 	})
 }
@@ -172,7 +175,7 @@ func (h *APIHandler) SaveWebdavConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"data": h.cfg.WebDAVServer})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "data": h.cfg.WebDAVServer})
 }
 
 // UpdateWebdavConfig updates a WebDAV server configuration
@@ -188,7 +191,7 @@ func (h *APIHandler) UpdateWebdavConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"data": h.cfg.WebDAVServer})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "data": h.cfg.WebDAVServer})
 }
 
 // DelWebdavConfig deletes a WebDAV server configuration
@@ -206,7 +209,7 @@ func (h *APIHandler) DelWebdavConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"data": h.cfg.WebDAVServer})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"code": 0, "data": h.cfg.WebDAVServer})
 }
 
 // EncodeFoldName encodes folder name with password
@@ -224,6 +227,7 @@ func (h *APIHandler) EncodeFoldName(w http.ResponseWriter, r *http.Request) {
 
 	folderNameEnc := encryption.EncodeFolderName(req.Password, req.EncType, req.FolderPasswd, req.FolderEncType)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code": 0,
 		"data": map[string]interface{}{
 			"folderNameEnc": folderNameEnc,
 		},
@@ -249,6 +253,7 @@ func (h *APIHandler) DecodeFoldName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code": 0,
 		"data": map[string]interface{}{
 			"folderEncType": folderEncType,
 			"folderPasswd":  folderPasswd,
