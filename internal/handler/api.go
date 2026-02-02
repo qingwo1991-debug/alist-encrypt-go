@@ -67,6 +67,7 @@ func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
 	token := generateUUID()
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code": 0,
 		"data": map[string]interface{}{
 			"userInfo": map[string]interface{}{
 				"username":   req.Username,
