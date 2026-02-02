@@ -186,7 +186,9 @@ func (s *Server) setupRoutes() {
 	r.HandleFunc("/redirect/{key}", proxyHandler.HandleRedirect)
 
 	// /dav/* - WebDAV proxy
-	r.HandleFunc("/dav/*", webdavHandler.Handle)
+	r.HandleFunc("/dav", webdavHandler.Handle)      // 处理 /dav
+	r.HandleFunc("/dav/", webdavHandler.Handle)     // 处理 /dav/
+	r.HandleFunc("/dav/*", webdavHandler.Handle)    // 处理 /dav/path
 
 	// /d/* and /p/* - File download with decryption
 	r.Get("/d/*", proxyHandler.HandleDownload)
