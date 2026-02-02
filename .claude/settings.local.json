@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./alist-encrypt-go.exe:*)",
+      "Bash(go build:*)",
+      "Bash(curl:*)",
+      "Bash(go version:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go vet:*)",
+      "Bash(go test:*)",
+      "Bash(if not exist \"D:\\\\temp\\\\alist-encrypt-go\\\\config.json\" copy \"D:\\\\temp\\\\alist-encrypt-go\\\\configs\\\\config.example.json\" \"D:\\\\temp\\\\alist-encrypt-go\\\\config.json\")",
+      "Bash(if not exist \"D:\\\\temp\\\\alist-encrypt-go\\\\data\" mkdir \"D:\\\\temp\\\\alist-encrypt-go\\\\data\")",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndocs: fix API endpoints in README and improve route structure\n\n- Update README.md API documentation to match actual implementation\n- Use r.Group\\(\\) for protected routes in server.go \\(chi best practice\\)\n- Add clear comments separating public and protected routes\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push)",
+      "Bash(dir:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add ChaCha20 encryption and performance optimizations\n\n- Add ChaCha20 encryption algorithm \\(3-5x faster on CPUs without AES-NI like J4125\\)\n- Fix connection pool reuse in proxy handler \\(was creating new client per request\\)\n- Add 512KB buffer pool for high-bitrate video streaming\n- Add LRU eviction for redirect map \\(max 10000 entries\\)\n- Optimize upload encryption with buffer pool to reduce GC pressure\n- Add HTML size limit \\(10MB\\) to prevent OOM\n- Support ALIST_HOST and ALIST_PORT environment variables for Docker\n- Auto-detect Docker environment for default Alist host\n- Update README with new features and CPU recommendations\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: support AUTHORIZETOKEN header for frontend compatibility\n\nThe original Node.js frontend sends authentication token via\nAUTHORIZETOKEN header, not Authorization. Now checking both\nheader names for compatibility.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: return JSON error instead of HTTP 401 for unauthenticated requests\n\nFrontend expects JSON response with code:401, not HTTP 401 status.\nThis allows the login page to display correctly when not logged in.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git reset:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: full compatibility with Node.js frontend\n\n- Use Authorizetoken header \\(Go canonicalizes to this from authorizetoken\\)\n- Add Authorizetoken to CORS allowed headers\n- Return JSON {code:401,msg:\"user unlogin\"} instead of HTTP 401\n- Match Node.js error message \"passwword error\" \\(with typo\\)\n- Use UUID token like Node.js crypto.randomUUID\\(\\) instead of JWT\n- Add generateUUID function matching Node.js format\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: copy web/public static files in Dockerfile\n\nThe frontend UI files were not being copied to the Docker image,\ncausing 404 errors when accessing /public/index.html\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: embed all static files recursively for admin page\n\n- Change embed directive from `public/*` to `all:public` to recursively\n  include static/js/*.js and static/css/*.css files\n- Remove GitHub Actions cache to ensure fresh builds\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(gh run list:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: handle frontend errorCollection API to prevent 502 on startup\n\nThe Vue frontend template includes an error collection feature that calls\n/integration-front/errorCollection/insert. When Alist is not configured,\nthis request gets proxied and fails with 502, causing the page to crash.\n\nAdd a mock handler to return success for this endpoint.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: correct volume mount path for config directory\n\nThe Go code expects config at /app/conf/config.json, not /app/config.json.\nMount the entire conf directory instead of a single file to avoid Docker\ncreating a directory when the file doesn''t exist.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: change default admin password to 123456 for compatibility\n\nMatch the original Node.js project''s default password.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(find /tmp/alist-encrypt-original/enc-webui/src -name \"*.js\" -exec grep -l \"axios\" {} ;)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: add code field to login response for frontend compatibility\n\nThe frontend axios interceptor checks for code: 0/200/20000 to determine\nsuccess. Without this field, login was failing silently.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: add code:0 to all API success responses for frontend compatibility\n\nThe frontend axios interceptor requires code: 0/200/20000 in all responses\nto consider them successful. Without this, pages fail to load after login.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: handle flexible encPath format in saveAlistConfig\n\nThe frontend may send encPath as either a comma-separated string or an array.\nAdded helper functions to handle both formats, matching the original Node.js\nbehavior.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(npm install)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add ChaCha20 encryption option to frontend\n\n- Add enc-webui source code from original project\n- Modify setting-alist, setting-webdav, encrypt-local views to include ChaCha20 option\n- Update GitHub Actions to build frontend before Docker image\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: handle flexible encPath format in WebDAV config APIs\n\nApply the same encPath string/array handling to SaveWebdavConfig and\nUpdateWebdavConfig that was already applied to SaveAlistConfig.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: change minimum password length to 7 to match original\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add updateUsername API endpoint\n\nNew endpoint /enc-api/updateUsername allows changing the username.\nRequest format:\n{\n  \"username\": \"current_username\",\n  \"password\": \"current_password\",\n  \"newusername\": \"new_username\"\n}\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nsecurity: upgrade password hashing to Argon2id\n\n- Replace SHA256 with Argon2id \\(OWASP recommended\\)\n- Add random salt per password \\(16 bytes\\)\n- Use constant-time comparison to prevent timing attacks\n- Maintain backward compatibility with legacy SHA256 hashes\n- Add updateUsername API endpoint\n\nSecurity improvements:\n- Argon2id with 64MB memory, 3 iterations, 4 threads\n- 32-byte key length\n- Base64 encoded salt:hash format\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}
