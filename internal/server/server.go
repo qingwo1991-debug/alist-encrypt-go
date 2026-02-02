@@ -163,6 +163,8 @@ func (s *Server) setupRoutes() {
 			r.MethodFunc("POST", "/getUserInfo", apiHandler.GetUserInfo)
 			r.MethodFunc("GET", "/updatePasswd", apiHandler.UpdatePasswd)
 			r.MethodFunc("POST", "/updatePasswd", apiHandler.UpdatePasswd)
+			r.MethodFunc("GET", "/updateUsername", apiHandler.UpdateUsername)
+			r.MethodFunc("POST", "/updateUsername", apiHandler.UpdateUsername)
 			r.MethodFunc("GET", "/getAlistConfig", apiHandler.GetAlistConfig)
 			r.MethodFunc("POST", "/getAlistConfig", apiHandler.GetAlistConfig)
 			r.MethodFunc("GET", "/saveAlistConfig", apiHandler.SaveAlistConfig)
