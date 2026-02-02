@@ -108,7 +108,8 @@ func (h *APIHandler) UpdatePasswd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.NewPassword) < 8 {
+	// Check minimum password length (original uses 7, message says 8)
+	if len(req.NewPassword) < 7 {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"code": 500, "msg": "password too short, at less 8 digits"})
 		return
 	}
