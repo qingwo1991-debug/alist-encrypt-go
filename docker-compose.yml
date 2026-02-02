@@ -10,8 +10,11 @@ services:
       # Uncomment for HTTPS
       # - "5345:5345"
     volumes:
-      - ./data:/app/data
+      # IMPORTANT: These volumes persist your configuration
+      # conf/config.json - stores Alist server settings, encryption passwords, etc.
+      # data/ - stores user database (login credentials)
       - ./conf:/app/conf
+      - ./data:/app/data
     environment:
       # Override config via environment variables (optional)
       # ALIST_ENCRYPT_SCHEME_HTTP_PORT: 5344

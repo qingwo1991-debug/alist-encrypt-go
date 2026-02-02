@@ -31,8 +31,8 @@ COPY --from=builder /app/web/public ./web/public
 # Copy config example
 COPY --from=builder /app/configs/config.example.json ./configs/
 
-# Create data directory
-RUN mkdir -p /app/data
+# Create data and conf directories for persistence
+RUN mkdir -p /app/data /app/conf
 
 # Expose port
 EXPOSE 5344
