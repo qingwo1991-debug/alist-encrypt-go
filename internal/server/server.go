@@ -185,10 +185,13 @@ func (s *Server) setupRoutes() {
 	// /redirect/:key - 302 redirect decryption
 	r.HandleFunc("/redirect/{key}", proxyHandler.HandleRedirect)
 
-	// /dav/* - WebDAV proxy
-	r.HandleFunc("/dav", webdavHandler.Handle)      // 处理 /dav
-	r.HandleFunc("/dav/", webdavHandler.Handle)     // 处理 /dav/
-	r.HandleFunc("/dav/*", webdavHandler.Handle)    // 处理 /dav/path
+	// /dav/* - WebDAV proxy (must handle all WebDAV methods including PROPFIND, MKCOL, etc.)
+	webdavMethods := []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"}
+	for _, method := range webdavMethods {
+		r.Method(method, "/dav", http.HandlerFunc(webdavHandler.Handle))
+		r.Method(method, "/dav/", http.HandlerFunc(webdavHandler.Handle))
+		r.Method(method, "/dav/*", http.HandlerFunc(webdavHandler.Handle))
+	}
 
 	// /d/* and /p/* - File download with decryption
 	r.Get("/d/*", proxyHandler.HandleDownload)
