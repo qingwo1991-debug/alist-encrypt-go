@@ -296,7 +296,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 }
 
 // handlePropfind handles PROPFIND requests and caches file info
-func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, path string) {
+func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, davPath string) {
 	targetURL := h.cfg.GetAlistURL() + r.URL.Path
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
@@ -329,14 +329,25 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, p
 	respBody, _ := io.ReadAll(resp.Body)
 
 	// Parse and cache file info from PROPFIND response
-	h.parsePropfindResponse(respBody, path)
+	h.parsePropfindResponse(respBody, davPath)
 
-	// Copy response
+	// Check if encryption is enabled for this path
+	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
+	if found && passwdInfo.EncName {
+		// Decrypt filenames in the XML response
+		respBody = h.decryptPropfindResponse(respBody, passwdInfo)
+	}
+
+	// Copy response headers (recalculate Content-Length since body may have changed)
 	for key, values := range resp.Header {
+		if strings.ToLower(key) == "content-length" {
+			continue // Will set correct length below
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
@@ -392,4 +403,120 @@ func (h *WebDAVHandler) parsePropfindResponse(body []byte, basePath string) {
 
 		h.fileDAO.Set(info)
 	}
+}
+
+// decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response
+func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.PasswdInfo) []byte {
+	result := string(body)
+
+	// Decrypt displayname elements: <D:displayname>encryptedName.ext</D:displayname>
+	// Match both <D:displayname> and <displayname> variants
+	displayNamePatterns := []string{
+		`<D:displayname>`, `</D:displayname>`,
+		`<d:displayname>`, `</d:displayname>`,
+		`<displayname>`, `</displayname>`,
+	}
+
+	for i := 0; i < len(displayNamePatterns); i += 2 {
+		startTag := displayNamePatterns[i]
+		endTag := displayNamePatterns[i+1]
+		result = h.decryptXMLElements(result, startTag, endTag, passwdInfo)
+	}
+
+	// Decrypt href elements: <D:href>/dav/path/encryptedName.ext</D:href>
+	hrefPatterns := []string{
+		`<D:href>`, `</D:href>`,
+		`<d:href>`, `</d:href>`,
+		`<href>`, `</href>`,
+	}
+
+	for i := 0; i < len(hrefPatterns); i += 2 {
+		startTag := hrefPatterns[i]
+		endTag := hrefPatterns[i+1]
+		result = h.decryptHrefElements(result, startTag, endTag, passwdInfo)
+	}
+
+	return []byte(result)
+}
+
+// decryptXMLElements decrypts content between XML tags (for displayname)
+func (h *WebDAVHandler) decryptXMLElements(xml, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
+	result := xml
+	searchPos := 0
+
+	for {
+		startIdx := strings.Index(result[searchPos:], startTag)
+		if startIdx == -1 {
+			break
+		}
+		startIdx += searchPos
+
+		endIdx := strings.Index(result[startIdx:], endTag)
+		if endIdx == -1 {
+			break
+		}
+		endIdx += startIdx
+
+		contentStart := startIdx + len(startTag)
+		encryptedName := result[contentStart:endIdx]
+
+		if encryptedName != "" && encryptedName != "/" {
+			decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, encryptedName)
+			if decryptedName != "" {
+				result = result[:contentStart] + decryptedName + result[endIdx:]
+				searchPos = contentStart + len(decryptedName) + len(endTag)
+				continue
+			}
+		}
+		searchPos = endIdx + len(endTag)
+	}
+
+	return result
+}
+
+// decryptHrefElements decrypts filenames in href paths
+func (h *WebDAVHandler) decryptHrefElements(xml, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
+	result := xml
+	searchPos := 0
+
+	for {
+		startIdx := strings.Index(result[searchPos:], startTag)
+		if startIdx == -1 {
+			break
+		}
+		startIdx += searchPos
+
+		endIdx := strings.Index(result[startIdx:], endTag)
+		if endIdx == -1 {
+			break
+		}
+		endIdx += startIdx
+
+		contentStart := startIdx + len(startTag)
+		hrefValue := result[contentStart:endIdx]
+
+		// Only process /dav/ paths
+		if strings.HasPrefix(hrefValue, "/dav/") {
+			davPath := strings.TrimPrefix(hrefValue, "/dav")
+			if davPath != "/" && davPath != "" {
+				// Get the filename from the path
+				fileName := path.Base(davPath)
+				if fileName != "" && fileName != "/" && fileName != "." {
+					decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, fileName)
+					if decryptedName != "" && !strings.HasPrefix(decryptedName, encryption.OrigPrefix) {
+						// Replace only the filename part in the href
+						newHref := "/dav" + path.Dir(davPath) + "/" + url.PathEscape(decryptedName)
+						// Normalize path (remove double slashes)
+						newHref = strings.ReplaceAll(newHref, "//", "/")
+						result = result[:contentStart] + newHref + result[endIdx:]
+						searchPos = contentStart + len(newHref) + len(endTag)
+						continue
+					}
+				}
+			}
+		}
+		searchPos = endIdx + len(endTag)
+	}
+
+	return result
 }
