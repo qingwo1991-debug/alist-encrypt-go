@@ -304,7 +304,8 @@ func ConvertShowName(password, encType, pathText string) string {
 	if showName == "" {
 		return OrigPrefix + fileName
 	}
-	return showName + ext
+	// Node.js 逻辑：加密的是完整文件名（含后缀），解密后不再附加后缀
+	return showName
 }
 
 // ConvertRealName converts display filename to encrypted name
@@ -324,10 +325,10 @@ func ConvertRealName(password, encType, pathText string) string {
 	}
 
 	ext := path.Ext(decoded)
-	baseName := strings.TrimSuffix(decoded, ext)
 
-	// Encrypt the filename
-	encName := EncodeName(password, encType, baseName)
+	// 与 OpenList-Encrypt 一致：加密完整文件名（含扩展名），然后再加扩展名
+	// Encrypt the complete filename (including extension), then add extension again
+	encName := EncodeName(password, encType, decoded)
 
 	return encName + ext
 }

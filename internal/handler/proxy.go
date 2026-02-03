@@ -217,13 +217,17 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				path := parsedLoc.Path
 				if passwdInfo, found := h.passwdDAO.FindByPath(path); found {
-					// Get file info
+					// Get file info, use 0 if not found (will be resolved from response headers)
+					var fileSize int64
 					if fileInfo, found := h.fileDAO.Get(path); found {
-						key := h.RegisterRedirect(location, fileInfo.Size, passwdInfo.Password, passwdInfo.EncType)
-						w.Header().Set("Location", "/redirect/"+key)
-						w.WriteHeader(resp.StatusCode)
-						return
+						fileSize = fileInfo.Size
 					}
+					// Register redirect even if fileSize is 0
+					// ProxyDownloadDecrypt will get size from Content-Length/Content-Range headers
+					key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType)
+					w.Header().Set("Location", "/redirect/"+key)
+					w.WriteHeader(resp.StatusCode)
+					return
 				}
 			}
 		}
