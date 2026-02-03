@@ -1,11 +1,11 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"runtime"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/alist-encrypt-go/internal/config"
 )
 
@@ -22,7 +22,7 @@ type HealthResponse struct {
 }
 
 // HealthHandler returns server health status
-func HealthHandler(w http.ResponseWriter, r *http.Request) {
+func HealthHandler(c *gin.Context) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
@@ -35,13 +35,10 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 		MemAlloc:     m.Alloc / 1024 / 1024, // MB
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	c.JSON(http.StatusOK, resp)
 }
 
 // ReadyHandler returns whether the service is ready to accept traffic
-func ReadyHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ready"}`))
+func ReadyHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }

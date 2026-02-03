@@ -5,98 +5,91 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 )
 
 // LoggerMiddleware logs HTTP requests using zerolog
-func LoggerMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func LoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		start := time.Now()
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
-		defer func() {
-			log.Info().
-				Str("method", r.Method).
-				Str("path", r.URL.Path).
-				Int("status", ww.Status()).
-				Int("bytes", ww.BytesWritten()).
-				Dur("duration", time.Since(start)).
-				Str("remote", r.RemoteAddr).
-				Str("proto", r.Proto).
-				Msg("request")
-		}()
+		// Process request
+		c.Next()
 
-		next.ServeHTTP(ww, r)
-	})
+		log.Info().
+			Str("method", c.Request.Method).
+			Str("path", c.Request.URL.Path).
+			Int("status", c.Writer.Status()).
+			Int("bytes", c.Writer.Size()).
+			Dur("duration", time.Since(start)).
+			Str("remote", c.ClientIP()).
+			Str("proto", c.Request.Proto).
+			Msg("request")
+	}
 }
 
 // CORSMiddleware handles CORS headers
-func CORSMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token, Depth, Destination, Overwrite, File-Path, Authorizetoken, AUTHORIZETOKEN")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
+func CORSMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK")
+		c.Header("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token, Depth, Destination, Overwrite, File-Path, Authorizetoken, AUTHORIZETOKEN")
+		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusOK)
 			return
 		}
 
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
 // ForceHTTPSMiddleware redirects HTTP to HTTPS
-func ForceHTTPSMiddleware(httpsPort int) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
-				host := r.Host
-				if httpsPort != 443 {
-					host = fmt.Sprintf("%s:%d", r.Host, httpsPort)
-				}
-				target := fmt.Sprintf("https://%s%s", host, r.URL.RequestURI())
-				http.Redirect(w, r, target, http.StatusMovedPermanently)
-				return
+func ForceHTTPSMiddleware(httpsPort int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.TLS == nil && c.GetHeader("X-Forwarded-Proto") != "https" {
+			host := c.Request.Host
+			if httpsPort != 443 {
+				host = fmt.Sprintf("%s:%d", c.Request.Host, httpsPort)
 			}
-			next.ServeHTTP(w, r)
-		})
+			target := fmt.Sprintf("https://%s%s", host, c.Request.URL.RequestURI())
+			c.Redirect(http.StatusMovedPermanently, target)
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
 
 // AuthMiddleware validates JWT tokens
-func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip auth for login endpoint
-			if r.URL.Path == "/enc-api/login" {
-				next.ServeHTTP(w, r)
-				return
-			}
+func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip auth for login endpoint
+		if c.Request.URL.Path == "/enc-api/login" {
+			c.Next()
+			return
+		}
 
-			// Check multiple header names for compatibility with original Node.js version
-			// Note: Go's http package canonicalizes headers, so "authorizetoken" becomes "Authorizetoken"
-			token := r.Header.Get("Authorizetoken") // Primary: matches Node.js version
-			if token == "" {
-				token = r.Header.Get("Authorization")
-			}
-			if token == "" {
-				token = r.URL.Query().Get("token")
-			}
+		// Check multiple header names for compatibility with original Node.js version
+		token := c.GetHeader("Authorizetoken") // Primary: matches Node.js version
+		if token == "" {
+			token = c.GetHeader("Authorization")
+		}
+		if token == "" {
+			token = c.Query("token")
+		}
 
-			if token == "" {
-				// Return JSON error for frontend compatibility - matches Node.js: { code: 401, msg: 'user unlogin' }
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"code":401,"msg":"user unlogin"}`))
-				return
-			}
+		if token == "" {
+			// Return JSON error for frontend compatibility - matches Node.js: { code: 401, msg: 'user unlogin' }
+			c.JSON(http.StatusOK, gin.H{"code": 401, "msg": "user unlogin"})
+			c.Abort()
+			return
+		}
 
-			// Store token in context for handlers
-			r.Header.Set("X-User-Token", token)
-			next.ServeHTTP(w, r)
-		})
+		// Store token in context for handlers
+		c.Request.Header.Set("X-User-Token", token)
+		c.Next()
 	}
 }

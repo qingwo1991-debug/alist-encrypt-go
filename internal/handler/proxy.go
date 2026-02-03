@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -71,7 +70,8 @@ func (h *ProxyHandler) cleanupRedirects() {
 
 // HandleRedirect handles /redirect/:key for 302 redirect decryption
 func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
-	key := chi.URLParam(r, "key")
+	// Extract key from URL path (format: /redirect/{key})
+	key := strings.TrimPrefix(r.URL.Path, "/redirect/")
 	if key == "" {
 		http.Error(w, "Missing key", http.StatusBadRequest)
 		return
