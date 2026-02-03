@@ -9,8 +9,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gin-contrib/gzip"
+	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -27,7 +27,7 @@ import (
 type Server struct {
 	cfg         *config.Config
 	store       *storage.Store
-	router      *chi.Mux
+	engine      *gin.Engine
 	httpServer  *http.Server
 	httpsServer *http.Server
 	streamProxy *proxy.StreamProxy
@@ -43,10 +43,13 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 
+	// Set Gin mode
+	gin.SetMode(gin.ReleaseMode)
+
 	s := &Server{
 		cfg:         cfg,
 		store:       store,
-		router:      chi.NewRouter(),
+		engine:      gin.New(),
 		streamProxy: proxy.NewStreamProxy(cfg),
 		userDAO:     dao.NewUserDAO(store),
 		fileDAO:     dao.NewFileDAO(store),
@@ -63,15 +66,13 @@ func New(cfg *config.Config) (*Server, error) {
 }
 
 func (s *Server) setupRoutes() {
-	r := s.router
+	r := s.engine
 
 	// Middleware
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(LoggerMiddleware)
-	r.Use(middleware.Recoverer)
-	r.Use(CORSMiddleware)
-	r.Use(GzipMiddleware) // Compress JSON/HTML responses
+	r.Use(gin.Recovery())
+	r.Use(LoggerMiddleware())
+	r.Use(CORSMiddleware())
+	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/dav"})))
 
 	// Force HTTPS redirect if enabled
 	if s.cfg.Scheme != nil && s.cfg.Scheme.ForceHTTPS && s.cfg.IsHTTPSEnabled() {
@@ -79,134 +80,95 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Health check endpoints (no auth required)
-	r.Get("/health", HealthHandler)
-	r.Get("/ready", ReadyHandler)
+	r.GET("/health", HealthHandler)
+	r.GET("/ready", ReadyHandler)
 
 	// Serve static files (WebUI)
-	// Use the filesystem with "public" prefix already stripped
-	fileServer := http.FileServer(web.GetFileSystem())
-	// Handle /public/* requests by stripping the prefix
-	r.Handle("/public/*", http.StripPrefix("/public", fileServer))
-	// Also handle /static/* for direct access to static resources
-	// The file system already has "static/" at root, so no StripPrefix needed
-	r.Handle("/static/*", fileServer)
-	// Special handler for /public/index.html to avoid redirect loop
-	r.Get("/public/index.html", func(w http.ResponseWriter, r *http.Request) {
-		f, err := web.GetFileSystem().Open("index.html")
-		if err != nil {
-			http.Error(w, "File not found", http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		stat, _ := f.Stat()
-		http.ServeContent(w, r, "index.html", stat.ModTime(), f)
-	})
-	// Only /index redirects to admin page, / should proxy to Alist
-	r.Get("/index", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/public/index.html", http.StatusFound)
-	})
-	// Debug route for testing static files
-	r.Get("/debug-static/*", func(w http.ResponseWriter, r *http.Request) {
-		path := chi.URLParam(r, "*")
-		log.Debug().Str("path", path).Msg("Static file debug request")
-		http.ServeFile(w, r, "web/public/"+path)
-	})
-	// Debug embedded filesystem
-	r.Get("/debug-embed/*", func(w http.ResponseWriter, r *http.Request) {
-		path := chi.URLParam(r, "*")
-		log.Debug().Str("path", path).Msg("Embedded file debug request")
-		fs := web.GetFileSystem()
-		f, err := fs.Open(path)
-		if err != nil {
-			log.Error().Err(err).Str("path", path).Msg("Failed to open embedded file")
-			http.Error(w, "File not found: "+err.Error(), http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		stat, err := f.Stat()
-		if err != nil {
-			log.Error().Err(err).Str("path", path).Msg("Failed to stat embedded file")
-			http.Error(w, "Stat failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		http.ServeContent(w, r, path, stat.ModTime(), f)
+	r.StaticFS("/public", web.GetFileSystem())
+	r.StaticFS("/static", web.GetFileSystem())
+
+	// Redirect /index to admin page
+	r.GET("/index", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/public/index.html")
 	})
 
 	// Create handlers
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
-	// IMPORTANT: Pass the same proxyHandler to AlistHandler so they share the redirectMap
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 
-	// Handle frontend error collection API (built into the Vue template, not needed)
-	// Return success to prevent 502 errors when Alist is not configured
-	r.Post("/integration-front/errorCollection/insert", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	// Handle frontend error collection API
+	r.POST("/integration-front/errorCollection/insert", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "ok"})
 	})
 
-	// /enc-api/* routes - Authentication and config management (compatible with original)
-	r.Route("/enc-api", func(r chi.Router) {
+	// /enc-api/* routes - Authentication and config management
+	encAPI := r.Group("/enc-api")
+	{
 		// Public routes (no auth required)
-		r.Post("/login", apiHandler.Login)
+		encAPI.POST("/login", ginWrap(apiHandler.Login))
 
-		// Protected routes (auth required) - use Group to apply middleware
-		r.Group(func(r chi.Router) {
-			r.Use(AuthMiddleware(s.cfg.JWTSecret))
-			r.MethodFunc("GET", "/getUserInfo", apiHandler.GetUserInfo)
-			r.MethodFunc("POST", "/getUserInfo", apiHandler.GetUserInfo)
-			r.MethodFunc("GET", "/updatePasswd", apiHandler.UpdatePasswd)
-			r.MethodFunc("POST", "/updatePasswd", apiHandler.UpdatePasswd)
-			r.MethodFunc("GET", "/updateUsername", apiHandler.UpdateUsername)
-			r.MethodFunc("POST", "/updateUsername", apiHandler.UpdateUsername)
-			r.MethodFunc("GET", "/getAlistConfig", apiHandler.GetAlistConfig)
-			r.MethodFunc("POST", "/getAlistConfig", apiHandler.GetAlistConfig)
-			r.MethodFunc("GET", "/saveAlistConfig", apiHandler.SaveAlistConfig)
-			r.MethodFunc("POST", "/saveAlistConfig", apiHandler.SaveAlistConfig)
-			r.MethodFunc("GET", "/getWebdavonfig", apiHandler.GetWebdavConfig) // Note: typo matches original
-			r.MethodFunc("POST", "/getWebdavonfig", apiHandler.GetWebdavConfig)
-			r.MethodFunc("GET", "/getWebdavConfig", apiHandler.GetWebdavConfig)
-			r.MethodFunc("POST", "/getWebdavConfig", apiHandler.GetWebdavConfig)
-			r.MethodFunc("GET", "/saveWebdavConfig", apiHandler.SaveWebdavConfig)
-			r.MethodFunc("POST", "/saveWebdavConfig", apiHandler.SaveWebdavConfig)
-			r.MethodFunc("GET", "/updateWebdavConfig", apiHandler.UpdateWebdavConfig)
-			r.MethodFunc("POST", "/updateWebdavConfig", apiHandler.UpdateWebdavConfig)
-			r.MethodFunc("GET", "/delWebdavConfig", apiHandler.DelWebdavConfig)
-			r.MethodFunc("POST", "/delWebdavConfig", apiHandler.DelWebdavConfig)
-			r.MethodFunc("GET", "/encodeFoldName", apiHandler.EncodeFoldName)
-			r.MethodFunc("POST", "/encodeFoldName", apiHandler.EncodeFoldName)
-			r.MethodFunc("GET", "/decodeFoldName", apiHandler.DecodeFoldName)
-			r.MethodFunc("POST", "/decodeFoldName", apiHandler.DecodeFoldName)
-		})
-	})
+		// Protected routes (auth required)
+		protected := encAPI.Group("")
+		protected.Use(AuthMiddleware(s.cfg.JWTSecret))
+		{
+			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
+			protected.Any("/updatePasswd", ginWrap(apiHandler.UpdatePasswd))
+			protected.Any("/updateUsername", ginWrap(apiHandler.UpdateUsername))
+			protected.Any("/getAlistConfig", ginWrap(apiHandler.GetAlistConfig))
+			protected.Any("/saveAlistConfig", ginWrap(apiHandler.SaveAlistConfig))
+			protected.Any("/getWebdavonfig", ginWrap(apiHandler.GetWebdavConfig)) // Typo matches original
+			protected.Any("/getWebdavConfig", ginWrap(apiHandler.GetWebdavConfig))
+			protected.Any("/saveWebdavConfig", ginWrap(apiHandler.SaveWebdavConfig))
+			protected.Any("/updateWebdavConfig", ginWrap(apiHandler.UpdateWebdavConfig))
+			protected.Any("/delWebdavConfig", ginWrap(apiHandler.DelWebdavConfig))
+			protected.Any("/encodeFoldName", ginWrap(apiHandler.EncodeFoldName))
+			protected.Any("/decodeFoldName", ginWrap(apiHandler.DecodeFoldName))
+		}
+	}
 
 	// /redirect/:key - 302 redirect decryption
-	r.HandleFunc("/redirect/{key}", proxyHandler.HandleRedirect)
+	r.Any("/redirect/:key", ginWrap(proxyHandler.HandleRedirect))
 
-	// /dav/* - WebDAV proxy (must handle all WebDAV methods including PROPFIND, MKCOL, etc.)
-	// Chi doesn't support non-standard HTTP methods, so we mount the WebDAV handler directly
-	// This bypasses Chi's method validation and allows PROPFIND, MKCOL, etc.
-	r.Mount("/dav", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		webdavHandler.Handle(w, req)
-	}))
+	// /dav/* - WebDAV proxy (supports all WebDAV methods: PROPFIND, MKCOL, etc.)
+	davGroup := r.Group("/dav")
+	{
+		davGroup.Any("", ginWrap(webdavHandler.Handle))
+		davGroup.Any("/*path", ginWrap(webdavHandler.Handle))
+		// Explicitly handle WebDAV methods
+		davGroup.Handle("PROPFIND", "", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("PROPFIND", "/*path", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("PROPPATCH", "/*path", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("MKCOL", "/*path", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("COPY", "/*path", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("MOVE", "/*path", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("LOCK", "/*path", ginWrap(webdavHandler.Handle))
+		davGroup.Handle("UNLOCK", "/*path", ginWrap(webdavHandler.Handle))
+	}
 
 	// /d/* and /p/* - File download with decryption
-	r.Get("/d/*", proxyHandler.HandleDownload)
-	r.Get("/p/*", proxyHandler.HandleDownload)
+	r.GET("/d/*path", ginWrap(proxyHandler.HandleDownload))
+	r.GET("/p/*path", ginWrap(proxyHandler.HandleDownload))
 
 	// /api/fs/* - Alist API interception
-	r.Post("/api/fs/get", alistHandler.HandleFsGet)
-	r.Post("/api/fs/list", alistHandler.HandleFsList)
-	r.Put("/api/fs/put", alistHandler.HandleFsPut)
-	r.Post("/api/fs/remove", alistHandler.HandleFsRemove)
-	r.Post("/api/fs/rename", alistHandler.HandleFsRename)
-	r.Post("/api/fs/move", alistHandler.HandleFsMove)
-	r.Post("/api/fs/copy", alistHandler.HandleFsCopy)
+	r.POST("/api/fs/get", ginWrap(alistHandler.HandleFsGet))
+	r.POST("/api/fs/list", ginWrap(alistHandler.HandleFsList))
+	r.PUT("/api/fs/put", ginWrap(alistHandler.HandleFsPut))
+	r.POST("/api/fs/remove", ginWrap(alistHandler.HandleFsRemove))
+	r.POST("/api/fs/rename", ginWrap(alistHandler.HandleFsRename))
+	r.POST("/api/fs/move", ginWrap(alistHandler.HandleFsMove))
+	r.POST("/api/fs/copy", ginWrap(alistHandler.HandleFsCopy))
 
 	// Catch-all - Proxy to Alist with version injection
-	r.HandleFunc("/*", proxyHandler.HandleProxy)
+	r.NoRoute(ginWrap(proxyHandler.HandleProxy))
+}
+
+// ginWrap wraps a http.HandlerFunc to gin.HandlerFunc
+func ginWrap(h http.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h(c.Writer, c.Request)
+	}
 }
 
 // Start starts the server(s)
@@ -245,7 +207,7 @@ func (s *Server) Start() error {
 func (s *Server) startHTTP() error {
 	addr := s.cfg.GetHTTPAddr()
 
-	var httpHandler http.Handler = s.router
+	var httpHandler http.Handler = s.engine
 
 	// Enable h2c (HTTP/2 cleartext) if configured
 	if s.cfg.IsH2CEnabled() {
@@ -253,7 +215,7 @@ func (s *Server) startHTTP() error {
 			MaxConcurrentStreams: 1000,
 			IdleTimeout:          120 * time.Second,
 		}
-		httpHandler = h2c.NewHandler(s.router, h2s)
+		httpHandler = h2c.NewHandler(s.engine, h2s)
 		log.Info().Msg("HTTP/2 cleartext (h2c) enabled")
 	}
 
@@ -281,7 +243,7 @@ func (s *Server) startHTTPS() error {
 
 	s.httpsServer = &http.Server{
 		Addr:         addr,
-		Handler:      s.router,
+		Handler:      s.engine,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  0,
 		WriteTimeout: 0,
@@ -321,7 +283,7 @@ func (s *Server) startUnix() error {
 	}
 
 	server := &http.Server{
-		Handler:      s.router,
+		Handler:      s.engine,
 		ReadTimeout:  0,
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
@@ -361,4 +323,3 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	return lastErr
 }
-
