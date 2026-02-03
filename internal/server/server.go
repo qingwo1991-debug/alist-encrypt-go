@@ -186,12 +186,11 @@ func (s *Server) setupRoutes() {
 	r.HandleFunc("/redirect/{key}", proxyHandler.HandleRedirect)
 
 	// /dav/* - WebDAV proxy (must handle all WebDAV methods including PROPFIND, MKCOL, etc.)
-	webdavMethods := []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"}
-	for _, method := range webdavMethods {
-		r.Method(method, "/dav", http.HandlerFunc(webdavHandler.Handle))
-		r.Method(method, "/dav/", http.HandlerFunc(webdavHandler.Handle))
-		r.Method(method, "/dav/*", http.HandlerFunc(webdavHandler.Handle))
-	}
+	// Chi doesn't support non-standard HTTP methods, so we mount the WebDAV handler directly
+	// This bypasses Chi's method validation and allows PROPFIND, MKCOL, etc.
+	r.Mount("/dav", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		webdavHandler.Handle(w, req)
+	}))
 
 	// /d/* and /p/* - File download with decryption
 	r.Get("/d/*", proxyHandler.HandleDownload)
