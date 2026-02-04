@@ -48,7 +48,8 @@ services:
     ports:
       - "5344:5344"
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data          # 数据目录（BoltDB 存储）
+      - ./conf:/app/conf          # 配置目录
     environment:
       - TZ=Asia/Shanghai
       - ALIST_HOST=alist          # Alist 容器名或主机地址
@@ -92,6 +93,7 @@ docker run -d \
   -e ALIST_HOST=your-alist-host \
   -e ALIST_PORT=5244 \
   -v ./data:/app/data \
+  -v ./conf:/app/conf \
   ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
 ```
 
