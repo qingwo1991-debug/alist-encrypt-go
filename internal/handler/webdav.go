@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
@@ -74,18 +74,13 @@ func (h *WebDAVHandler) convertToRealPath(davPath string) string {
 
 	// Convert filename to encrypted name
 	fileName := path.Base(davPath)
-	if strings.HasPrefix(fileName, encryption.OrigPrefix) {
-		// Original file, remove prefix
-		realName := strings.TrimPrefix(fileName, encryption.OrigPrefix)
+	if encryption.IsOriginalFile(fileName) {
+		realName := encryption.StripOriginalPrefix(fileName)
 		return path.Dir(davPath) + "/" + realName
 	}
 
-	realName := encryption.ConvertRealNameWithSuffix(
-		passwdInfo.Password,
-		passwdInfo.EncType,
-		fileName,
-		passwdInfo.EncSuffix,
-	)
+	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
+	realName := converter.ToRealName(fileName)
 	return path.Dir(davPath) + "/" + realName
 }
 
@@ -99,12 +94,9 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Convert display path to real encrypted path
 	realPath := h.convertToRealPath(davPath)
-	targetURL := h.cfg.GetAlistURL() + "/dav" + realPath
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
-	// Get file info
+	// Get file info for size
 	fileInfo, infoFound := h.fileDAO.Get(realPath)
 	var fileSize int64
 	if infoFound {
@@ -112,20 +104,19 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	}
 
 	// Create new request with modified path
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	proxyReq, err := httputil.NewRequest(r.Method, targetURL).
+		WithContext(r.Context()).
+		WithBodyReader(r.Body).
+		CopyHeaders(r).
+		Build()
 	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
 		return
-	}
-	for key, values := range r.Header {
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
-		}
 	}
 
 	if err := h.streamProxy.ProxyDownloadDecryptReq(w, proxyReq, targetURL, passwdInfo, fileSize); err != nil {
 		log.Error().Err(err).Str("path", davPath).Msg("WebDAV GET decryption failed")
-		http.Error(w, "Decryption error", http.StatusBadGateway)
+		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)
 	}
 }
 
@@ -142,24 +133,22 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 	// Convert display path to real encrypted path
 	realPath := davPath
 	if passwdInfo.EncName {
+		converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
 		fileName := path.Base(davPath)
 		ext := passwdInfo.EncSuffix
 		if ext == "" {
 			ext = path.Ext(fileName)
 		}
-		encName := encryption.EncodeName(passwdInfo.Password, passwdInfo.EncType, strings.TrimSuffix(fileName, path.Ext(fileName)))
+		encName := converter.EncryptFileName(strings.TrimSuffix(fileName, path.Ext(fileName)))
 		realPath = path.Dir(davPath) + "/" + encName + ext
 		log.Debug().Str("original", davPath).Str("encrypted", realPath).Msg("WebDAV PUT filename encrypted")
 	}
 
-	targetURL := h.cfg.GetAlistURL() + "/dav" + realPath
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
 	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize); err != nil {
 		log.Error().Err(err).Str("path", davPath).Msg("WebDAV PUT encryption failed")
-		http.Error(w, "Encryption error", http.StatusBadGateway)
+		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
 	}
 }
 
@@ -173,37 +162,29 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 
 	// Convert display path to real encrypted path
 	realPath := h.convertToRealPath(davPath)
-	targetURL := h.cfg.GetAlistURL() + "/dav" + realPath
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
-	proxyReq, err := http.NewRequestWithContext(r.Context(), "DELETE", targetURL, r.Body)
+	proxyReq, err := httputil.NewRequest("DELETE", targetURL).
+		WithContext(r.Context()).
+		WithBodyReader(r.Body).
+		CopyHeaders(r).
+		Build()
 	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
 		return
-	}
-	for key, values := range r.Header {
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
-		}
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV DELETE failed")
-		http.Error(w, "Proxy error", http.StatusBadGateway)
+		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
@@ -236,13 +217,13 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 			destPath := strings.TrimPrefix(destURL.Path, "/dav")
 			destPasswd, destFound := h.passwdDAO.FindByPath(destPath)
 			if destFound && destPasswd.EncName {
-				// Encrypt destination filename
+				converter := encryption.NewFileNameConverter(destPasswd.Password, destPasswd.EncType, destPasswd.EncSuffix)
 				fileName := path.Base(destPath)
 				ext := destPasswd.EncSuffix
 				if ext == "" {
 					ext = path.Ext(fileName)
 				}
-				encName := encryption.EncodeName(destPasswd.Password, destPasswd.EncType, strings.TrimSuffix(fileName, path.Ext(fileName)))
+				encName := converter.EncryptFileName(strings.TrimSuffix(fileName, path.Ext(fileName)))
 				realDestPath := path.Dir(destPath) + "/" + encName + ext
 
 				// Rebuild destination URL
@@ -252,26 +233,19 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	targetURL := h.cfg.GetAlistURL() + "/dav" + realSrcPath
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realSrcPath, r)
 
 	body, _ := io.ReadAll(r.Body)
-	proxyReq, err := http.NewRequestWithContext(r.Context(), method, targetURL, bytes.NewReader(body))
+	proxyReq, err := httputil.NewRequest(method, targetURL).
+		WithContext(r.Context()).
+		WithBody(body).
+		CopyHeadersExcept(r, "Destination").
+		Build()
 	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 
-	for key, values := range r.Header {
-		if key == "Destination" {
-			continue // Will set modified destination
-		}
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
-		}
-	}
 	if destination != "" {
 		proxyReq.Header.Set("Destination", destination)
 	}
@@ -280,48 +254,39 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msgf("WebDAV %s failed", method)
-		http.Error(w, "Proxy error", http.StatusBadGateway)
+		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
 
 // handlePropfind handles PROPFIND requests and caches file info
 func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, davPath string) {
-	targetURL := h.cfg.GetAlistURL() + r.URL.Path
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
 
 	// Read request body
 	body, _ := io.ReadAll(r.Body)
 
-	proxyReq, err := http.NewRequestWithContext(r.Context(), "PROPFIND", targetURL, bytes.NewReader(body))
+	proxyReq, err := httputil.NewRequest("PROPFIND", targetURL).
+		WithContext(r.Context()).
+		WithBody(body).
+		CopyHeaders(r).
+		Build()
 	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
+		RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
 		return
-	}
-
-	for key, values := range r.Header {
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
-		}
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV PROPFIND failed")
-		http.Error(w, "Proxy error", http.StatusBadGateway)
+		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -339,14 +304,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	}
 
 	// Copy response headers (recalculate Content-Length since body may have changed)
-	for key, values := range resp.Header {
-		if strings.ToLower(key) == "content-length" {
-			continue // Will set correct length below
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	httputil.CopyResponseHeaders(w, resp, "Content-Length")
 	w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
@@ -354,14 +312,11 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 
 // handlePassthrough passes requests directly to Alist
 func (h *WebDAVHandler) handlePassthrough(w http.ResponseWriter, r *http.Request) {
-	targetURL := h.cfg.GetAlistURL() + r.URL.Path
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
 
 	if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
 		log.Error().Err(err).Str("method", r.Method).Msg("WebDAV passthrough failed")
-		http.Error(w, "Proxy error", http.StatusBadGateway)
+		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 	}
 }
 
@@ -440,8 +395,8 @@ func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.
 }
 
 // decryptXMLElements decrypts content between XML tags (for displayname)
-func (h *WebDAVHandler) decryptXMLElements(xml, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
-	result := xml
+func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
+	result := xmlStr
 	searchPos := 0
 
 	for {
@@ -475,8 +430,8 @@ func (h *WebDAVHandler) decryptXMLElements(xml, startTag, endTag string, passwdI
 }
 
 // decryptHrefElements decrypts filenames in href paths
-func (h *WebDAVHandler) decryptHrefElements(xml, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
-	result := xml
+func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
+	result := xmlStr
 	searchPos := 0
 
 	for {
@@ -503,11 +458,11 @@ func (h *WebDAVHandler) decryptHrefElements(xml, startTag, endTag string, passwd
 				fileName := path.Base(davPath)
 				if fileName != "" && fileName != "/" && fileName != "." {
 					decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, fileName)
-					if decryptedName != "" && !strings.HasPrefix(decryptedName, encryption.OrigPrefix) {
+					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) {
 						// Replace only the filename part in the href
 						newHref := "/dav" + path.Dir(davPath) + "/" + url.PathEscape(decryptedName)
 						// Normalize path (remove double slashes)
-						newHref = strings.ReplaceAll(newHref, "//", "/")
+						newHref = httputil.CleanPath(newHref)
 						result = result[:contentStart] + newHref + result[endIdx:]
 						searchPos = contentStart + len(newHref) + len(endTag)
 						continue

@@ -3,7 +3,6 @@ package encryption
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -27,7 +26,7 @@ type Cipher interface {
 	DecryptReader(r io.Reader) io.Reader
 }
 
-// FlowEnc is the encryption dispatcher
+// FlowEnc is the encryption dispatcher that uses the cipher registry
 type FlowEnc struct {
 	cipher   Cipher
 	encType  EncType
@@ -35,7 +34,7 @@ type FlowEnc struct {
 	fileSize int64
 }
 
-// NewFlowEnc creates a new FlowEnc instance
+// NewFlowEnc creates a new FlowEnc instance using the cipher registry
 func NewFlowEnc(password string, encType string, fileSize int64) (*FlowEnc, error) {
 	f := &FlowEnc{
 		password: password,
@@ -43,24 +42,17 @@ func NewFlowEnc(password string, encType string, fileSize int64) (*FlowEnc, erro
 		encType:  EncType(encType),
 	}
 
-	var err error
-	switch f.encType {
-	case EncTypeAESCTR, "":
-		f.cipher, err = NewAESCTR(password, fileSize)
-		if f.encType == "" {
-			f.encType = EncTypeAESCTR
-		}
-	case EncTypeRC4MD5:
-		f.cipher, err = NewRC4MD5(password, fileSize)
-	case EncTypeChaCha20:
-		f.cipher, err = NewChaCha20(password, fileSize)
-	default:
-		return nil, fmt.Errorf("unsupported encryption type: %s", encType)
+	// Handle empty encType - default to AES-CTR
+	if f.encType == "" {
+		f.encType = EncTypeAESCTR
 	}
 
+	// Use the registry to create the cipher
+	cipher, err := NewCipher(f.encType, password, fileSize)
 	if err != nil {
 		return nil, err
 	}
+	f.cipher = cipher
 
 	return f, nil
 }
@@ -95,12 +87,20 @@ func (f *FlowEnc) GetEncType() EncType {
 	return f.encType
 }
 
+// GetCipher returns the underlying cipher (for advanced use)
+func (f *FlowEnc) GetCipher() Cipher {
+	return f.cipher
+}
+
 // GetPasswdOutward generates the outward password key for filename encryption
 // This matches the Node.js FlowEnc.getPassWdOutward implementation
 func GetPasswdOutward(password, encType string) string {
 	salt := "AES-CTR"
-	if encType == "rc4md5" {
+	switch encType {
+	case "rc4md5":
 		salt = "RC4-MD5"
+	case "chacha20":
+		salt = "ChaCha20"
 	}
 	key := pbkdf2.Key([]byte(password), []byte(salt), 1000, 16, sha256.New)
 	return hex.EncodeToString(key)

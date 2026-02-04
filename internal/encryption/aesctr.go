@@ -10,18 +10,9 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"sync"
 
 	"golang.org/x/crypto/pbkdf2"
 )
-
-// Buffer pool for encryption to reduce GC pressure
-var encryptBufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 64*1024) // 64KB buffers
-		return &buf
-	},
-}
 
 // AESCTR implements AES-128-CTR encryption with position seeking support
 type AESCTR struct {
@@ -97,20 +88,30 @@ func (a *AESCTR) SetPosition(position int64) error {
 
 // incrementIV increments the 128-bit IV counter by the given amount
 func (a *AESCTR) incrementIV(count int64) {
-	// Treat IV as big-endian 128-bit integer and add count
-	// Process from right to left (least significant byte first for addition)
 	carry := uint64(count)
-
-	// Add to lower 64 bits first
 	lower := binary.BigEndian.Uint64(a.iv[8:16])
 	newLower := lower + carry
 	binary.BigEndian.PutUint64(a.iv[8:16], newLower)
 
-	// Handle overflow to upper 64 bits
 	if newLower < lower {
 		upper := binary.BigEndian.Uint64(a.iv[0:8])
 		binary.BigEndian.PutUint64(a.iv[0:8], upper+1)
 	}
+}
+
+// Position returns the current stream position
+func (a *AESCTR) Position() int64 {
+	return a.position
+}
+
+// Algorithm returns the cipher algorithm name
+func (a *AESCTR) Algorithm() string {
+	return "AES-128-CTR"
+}
+
+// BlockSize returns the cipher block size
+func (a *AESCTR) BlockSize() int {
+	return 16
 }
 
 // Encrypt encrypts data in place
@@ -124,12 +125,9 @@ func (a *AESCTR) Decrypt(data []byte) {
 	a.Encrypt(data)
 }
 
-// EncryptReader wraps a reader with encryption
+// EncryptReader wraps a reader with encryption using base implementation
 func (a *AESCTR) EncryptReader(r io.Reader) io.Reader {
-	return &ctrReader{
-		reader: r,
-		cipher: a,
-	}
+	return WrapReaderFunc(r, a.Encrypt)
 }
 
 // DecryptReader wraps a reader with decryption
@@ -137,43 +135,7 @@ func (a *AESCTR) DecryptReader(r io.Reader) io.Reader {
 	return a.EncryptReader(r) // CTR mode: encrypt == decrypt
 }
 
-type ctrReader struct {
-	reader io.Reader
-	cipher *AESCTR
-}
-
-func (r *ctrReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if n > 0 {
-		r.cipher.Decrypt(p[:n])
-	}
-	return n, err
-}
-
-// EncryptWriter wraps a writer with encryption
+// EncryptWriter wraps a writer with encryption using base implementation
 func (a *AESCTR) EncryptWriter(w io.Writer) io.Writer {
-	return &ctrWriter{
-		writer: w,
-		cipher: a,
-	}
-}
-
-type ctrWriter struct {
-	writer io.Writer
-	cipher *AESCTR
-}
-
-func (w *ctrWriter) Write(p []byte) (int, error) {
-	// Use buffer pool for small writes, allocate for large ones
-	var encrypted []byte
-	if len(p) <= 64*1024 {
-		bufPtr := encryptBufferPool.Get().(*[]byte)
-		defer encryptBufferPool.Put(bufPtr)
-		encrypted = (*bufPtr)[:len(p)]
-	} else {
-		encrypted = make([]byte, len(p))
-	}
-	copy(encrypted, p)
-	w.cipher.Encrypt(encrypted)
-	return w.writer.Write(encrypted)
+	return WrapWriterFunc(w, a.Encrypt)
 }

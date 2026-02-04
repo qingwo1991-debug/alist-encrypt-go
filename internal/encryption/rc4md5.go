@@ -68,6 +68,21 @@ func (r *RC4MD5) SetPosition(position int64) error {
 	return nil
 }
 
+// Position returns the current stream position
+func (r *RC4MD5) Position() int64 {
+	return r.position
+}
+
+// Algorithm returns the cipher algorithm name
+func (r *RC4MD5) Algorithm() string {
+	return "RC4-MD5"
+}
+
+// BlockSize returns the cipher block size (RC4 is a stream cipher, returns 1)
+func (r *RC4MD5) BlockSize() int {
+	return 1
+}
+
 // Encrypt encrypts data in place
 func (r *RC4MD5) Encrypt(data []byte) {
 	r.cipher.XORKeyStream(data, data)
@@ -79,12 +94,9 @@ func (r *RC4MD5) Decrypt(data []byte) {
 	r.Encrypt(data)
 }
 
-// EncryptReader wraps a reader with encryption
+// EncryptReader wraps a reader with encryption using base implementation
 func (r *RC4MD5) EncryptReader(reader io.Reader) io.Reader {
-	return &rc4Reader{
-		reader: reader,
-		cipher: r,
-	}
+	return WrapReaderFunc(reader, r.Encrypt)
 }
 
 // DecryptReader wraps a reader with decryption
@@ -92,17 +104,9 @@ func (r *RC4MD5) DecryptReader(reader io.Reader) io.Reader {
 	return r.EncryptReader(reader)
 }
 
-type rc4Reader struct {
-	reader io.Reader
-	cipher *RC4MD5
-}
-
-func (r *rc4Reader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if n > 0 {
-		r.cipher.Decrypt(p[:n])
-	}
-	return n, err
+// EncryptWriter wraps a writer with encryption using base implementation
+func (r *RC4MD5) EncryptWriter(writer io.Writer) io.Writer {
+	return WrapWriterFunc(writer, r.Encrypt)
 }
 
 // KeyHex returns the hex-encoded key for debugging

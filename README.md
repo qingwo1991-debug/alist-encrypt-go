@@ -1,29 +1,45 @@
 # Alist-Encrypt-Go
 
-A Go rewrite of alist-encrypt, providing transparent encryption proxy for Alist with HTTP/2 support.
+基于 Go 语言重构的 Alist 透明加密代理，提供文件内容加密和文件名加密功能。
 
-## Features
+> **本项目是 [alist-encrypt](https://github.com/traceless/alist-encrypt) 的 Go 语言重构版本**
+>
+> 感谢原作者 [@traceless](https://github.com/traceless) 的开创性工作！
 
-- **Transparent Encryption**: AES-128-CTR, ChaCha20, and RC4-MD5 encryption for file content
-- **ChaCha20 Support**: Optimized for CPUs without AES-NI (e.g., Intel J4125, ARM) - 3-5x faster than software AES
-- **Filename Encryption**: Optional encrypted filenames with MixBase64 + CRC6
-- **HTTP/2 Support**: Full HTTP/2 with h2c (cleartext) and HTTPS support
-- **WebDAV Support**: Encrypted WebDAV access
-- **Range Request Support**: Video seeking works with encrypted files
-- **Connection Pooling**: Optimized HTTP client with connection reuse
-- **512KB Stream Buffer**: Large buffer pool for high-bitrate video streaming
-- **LRU Cache**: Memory-safe redirect cache with automatic eviction
-- **BoltDB Storage**: Embedded database for configuration persistence
-- **Unix Socket Support**: For reverse proxy setups
-- **Docker Ready**: Environment variable support for easy container deployment
+## 重构优化
 
-## Quick Start
+相比原 Node.js 版本，Go 重构版本带来以下优化：
 
-### Using Docker (Recommended)
+| 优化项 | 说明 |
+|--------|------|
+| **内存占用** | 从 Node.js 的 ~150MB 降低到 ~15MB |
+| **启动速度** | 单二进制文件，毫秒级启动 |
+| **并发性能** | Go 协程原生支持高并发，文件名解密并行处理 |
+| **HTTP/2 支持** | 原生 h2c 和 HTTPS HTTP/2 支持 |
+| **512KB 流缓冲** | 大缓冲池优化高码率视频流传输 |
+| **连接池复用** | HTTP 客户端连接池，减少连接开销 |
+| **LRU 缓存** | 内存安全的重定向缓存，自动淘汰 |
+| **ChaCha20 加密** | 新增 ChaCha20 算法，无 AES-NI 的 CPU 性能提升 3-5 倍 |
+| **类型安全** | 静态类型检查，编译期发现错误 |
+| **单文件部署** | 无需 Node.js 运行时，单二进制即可运行 |
+
+## 功能特性
+
+- **透明加密**: AES-128-CTR、ChaCha20、RC4-MD5 文件内容加密
+- **文件名加密**: MixBase64 + CRC6 校验的文件名加密
+- **Range 请求**: 支持视频拖拽进度（加密文件也支持）
+- **WebDAV 支持**: 加密的 WebDAV 访问
+- **Docker 就绪**: 环境变量配置，轻松容器化部署
+
+## 快速开始
+
+### Docker Compose（推荐）
+
+创建 `docker-compose.yml`:
 
 ```yaml
-# docker-compose.yml
 version: '3.8'
+
 services:
   alist-encrypt:
     image: ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
@@ -35,117 +51,43 @@ services:
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
-      - ALIST_HOST=alist        # Your Alist container/host name
-      - ALIST_PORT=5244
+      - ALIST_HOST=alist          # Alist 容器名或主机地址
+      - ALIST_PORT=5244           # Alist 端口
     networks:
-      - your-network
+      - alist-network
+
+  # 如果需要同时部署 Alist
+  alist:
+    image: xhofe/alist:latest
+    container_name: alist
+    restart: unless-stopped
+    ports:
+      - "5244:5244"
+    volumes:
+      - ./alist-data:/opt/alist/data
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - alist-network
+
+networks:
+  alist-network:
+    driver: bridge
 ```
+
+启动服务：
 
 ```bash
 docker compose up -d
 ```
 
-Access WebUI at: `http://your-ip:5344/index`
+访问管理界面: `http://your-ip:5344/index`
 
-### From Source
-
-```bash
-# Download dependencies
-go mod tidy
-
-# Build
-go build -o alist-encrypt-go ./cmd/server
-
-# Run
-./alist-encrypt-go
-```
-
-## Configuration
-
-Create a `config.json` file (compatible with OpenAlist format):
-
-```json
-{
-  "scheme": {
-    "address": "0.0.0.0",
-    "http_port": 5344,
-    "https_port": -1,
-    "force_https": false,
-    "cert_file": "",
-    "key_file": "",
-    "unix_file": "",
-    "unix_file_perm": "",
-    "enable_h2c": false
-  },
-  "alist": {
-    "host": "localhost",
-    "port": 5244,
-    "https": false
-  },
-  "cache": {
-    "enable": true,
-    "expiration": 10,
-    "cleanup_interval": 5
-  },
-  "proxy": {
-    "max_idle_conns": 100,
-    "max_idle_conns_per_host": 100,
-    "max_conns_per_host": 100,
-    "idle_conn_timeout": 90,
-    "enable_http2": true,
-    "insecure_skip_verify": false
-  },
-  "log": {
-    "level": "info",
-    "format": "console",
-    "output": "stdout"
-  },
-  "data_dir": "./data",
-  "jwt_secret": "your-secret-key",
-  "jwt_expire": 24
-}
-```
-
-### Configuration Options
-
-#### scheme - Server Settings
-| Option | Description | Default |
-|--------|-------------|---------|
-| `address` | Listen address | `0.0.0.0` |
-| `http_port` | HTTP port | `5344` |
-| `https_port` | HTTPS port (-1 to disable) | `-1` |
-| `force_https` | Redirect HTTP to HTTPS | `false` |
-| `cert_file` | TLS certificate file | `""` |
-| `key_file` | TLS key file | `""` |
-| `unix_file` | Unix socket path | `""` |
-| `enable_h2c` | Enable HTTP/2 cleartext | `false` |
-
-#### alist - Alist Backend
-| Option | Description | Default |
-|--------|-------------|---------|
-| `host` | Alist server host | `localhost` |
-| `port` | Alist server port | `5244` |
-| `https` | Use HTTPS for Alist | `false` |
-
-#### proxy - HTTP Client
-| Option | Description | Default |
-|--------|-------------|---------|
-| `max_idle_conns` | Max idle connections | `100` |
-| `max_idle_conns_per_host` | Max idle connections per host | `100` |
-| `enable_http2` | Enable HTTP/2 for client | `true` |
-| `insecure_skip_verify` | Skip TLS verification | `false` |
-
-### Environment Variables (Docker)
-
-For Docker deployment, you can use environment variables instead of config.json:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ALIST_HOST` | Alist server hostname | Auto-detect (`alist` in Docker, `localhost` otherwise) |
-| `ALIST_PORT` | Alist server port | `5244` |
+### Docker Run
 
 ```bash
 docker run -d \
+  --name alist-encrypt \
   -p 5344:5344 \
   -e ALIST_HOST=your-alist-host \
   -e ALIST_PORT=5244 \
@@ -153,162 +95,44 @@ docker run -d \
   ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
 ```
 
-### Configuration File
-
-All options can also be set via environment variables with `ALIST_ENCRYPT_` prefix:
+### 从源码构建
 
 ```bash
-ALIST_ENCRYPT_SCHEME_HTTP_PORT=5344
-ALIST_ENCRYPT_ALIST_HOST=localhost
-ALIST_ENCRYPT_SCHEME_ENABLE_H2C=true
+git clone https://github.com/qingwo1991-debug/alist-encrypt-go.git
+cd alist-encrypt-go
+go build -o alist-encrypt-go ./cmd/server
+./alist-encrypt-go
 ```
 
-## API Endpoints
+## 环境变量
 
-### Encryption Management
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `ALIST_HOST` | Alist 服务器地址 | `localhost` |
+| `ALIST_PORT` | Alist 服务器端口 | `5244` |
+| `TZ` | 时区 | `UTC` |
 
-- `POST /enc-api/login` - User authentication
-- `GET/POST /enc-api/getUserInfo` - Get current user info
-- `GET/POST /enc-api/updatePasswd` - Update user password
-- `GET/POST /enc-api/getAlistConfig` - Get Alist server configuration
-- `GET/POST /enc-api/saveAlistConfig` - Save Alist server configuration
-- `GET/POST /enc-api/getWebdavConfig` - Get WebDAV configurations
-- `GET/POST /enc-api/saveWebdavConfig` - Add WebDAV configuration
-- `GET/POST /enc-api/updateWebdavConfig` - Update WebDAV configuration
-- `GET/POST /enc-api/delWebdavConfig` - Delete WebDAV configuration
-- `GET/POST /enc-api/encodeFoldName` - Encode folder name with password
-- `GET/POST /enc-api/decodeFoldName` - Decode folder name
+## 加密类型选择
 
-### Proxy Endpoints
+| CPU 类型 | AES-NI | 推荐算法 |
+|----------|--------|----------|
+| Intel Core i3/i5/i7/i9 | ✅ 有 | `aesctr` |
+| AMD Ryzen | ✅ 有 | `aesctr` |
+| Intel Celeron/Pentium (J4125, N5105) | ❌ 无 | `chacha20` |
+| ARM (树莓派等) | ❌ 无 | `chacha20` |
 
-- `/d/*`, `/p/*` - File download with decryption
-- `/dav/*` - WebDAV with encryption/decryption
-- `/redirect/:key` - Redirect decryption handler
-- `/api/fs/*` - Alist API interception
-- `/*` - Catch-all proxy to Alist
+## 默认凭据
 
-## Password Configuration
+- 用户名: `admin`
+- 密码: `admin`
 
-```json
-{
-  "path": "/encrypted",
-  "password": "your-password",
-  "encType": "aesctr",
-  "encPath": ["/encrypted/.*"],
-  "encName": true,
-  "encSuffix": ".enc",
-  "enable": true
-}
-```
+**首次登录后请立即修改密码！**
 
-| Field | Description |
-|-------|-------------|
-| `path` | Base path identifier |
-| `password` | Encryption password |
-| `encType` | `aesctr` or `rc4md5` |
-| `encPath` | Regex patterns for matching |
-| `encName` | Enable filename encryption |
-| `encSuffix` | Custom file extension |
-| `enable` | Enable this config |
+## 鸣谢
 
-## Encryption Types
+- [alist-encrypt](https://github.com/traceless/alist-encrypt) - 原项目作者 [@traceless](https://github.com/traceless)
+- [Alist](https://github.com/alist-org/alist) - 优秀的网盘挂载工具
 
-### ChaCha20 (Recommended for J4125/ARM)
+## 许可证
 
-- **Best for CPUs without AES-NI** (Intel Celeron/Pentium, ARM)
-- 3-5x faster than software AES on these CPUs
-- PBKDF2 key derivation (1000 iterations, SHA256)
-- O(1) random access - instant video seeking
-- Modern, secure stream cipher
-
-```json
-{
-  "encType": "chacha20"
-}
-```
-
-### AES-128-CTR (Recommended for modern CPUs with AES-NI)
-
-- Best for CPUs with hardware AES acceleration (most desktop/server CPUs)
-- PBKDF2 key derivation (1000 iterations, SHA256)
-- File size-based IV generation
-- O(1) random access - instant video seeking
-
-```json
-{
-  "encType": "aesctr"
-}
-```
-
-### RC4-MD5 (Legacy)
-
-- MD5-based key derivation
-- Stream cipher with position support
-- **Not recommended**: O(N) seeking performance for large files
-- Kept for backward compatibility
-
-```json
-{
-  "encType": "rc4md5"
-}
-```
-
-### CPU Recommendation
-
-| CPU Type | AES-NI | Recommended |
-|----------|--------|-------------|
-| Intel Core i3/i5/i7/i9 | ✅ Yes | `aesctr` |
-| AMD Ryzen | ✅ Yes | `aesctr` |
-| Intel Celeron/Pentium (J4125, N5105, etc.) | ❌ No | `chacha20` |
-| ARM (Raspberry Pi, etc.) | ❌ No | `chacha20` |
-| Qualcomm Snapdragon (with ARMv8 crypto) | ✅ Yes | `aesctr` |
-
-### Filename Encryption
-
-- MixBase64 encoding with KSA-shuffled alphabet
-- CRC6 checksum for integrity
-- Folder password support
-
-## Architecture
-
-```
-cmd/server/main.go          - Entry point
-internal/
-  config/config.go          - Configuration with env var support
-  server/
-    server.go               - HTTP/HTTPS/Unix server
-    middleware.go           - Logging, CORS, Auth
-  handler/
-    api.go                  - /enc-api/* routes
-    proxy.go                - Proxy with LRU cache
-    alist.go                - Alist API interception
-    webdav.go               - WebDAV handling
-  proxy/
-    client.go               - HTTP client pool
-    stream.go               - 512KB buffer streaming
-  encryption/
-    flow.go                 - Encryption dispatcher
-    aesctr.go               - AES-128-CTR
-    chacha20.go             - ChaCha20 (optimized for non-AES-NI CPUs)
-    rc4md5.go               - RC4-MD5 (legacy)
-    filename.go             - Filename encryption
-  storage/
-    store.go                - BoltDB storage
-    cache.go                - In-memory TTL cache
-  dao/
-    user.go                 - User management
-    file.go                 - File info + password DAO
-  auth/
-    jwt.go                  - JWT authentication
-```
-
-## Default Credentials
-
-- Username: `admin`
-- Password: `admin`
-
-**Change immediately after first login!**
-
-## License
-
-MIT
+MIT License

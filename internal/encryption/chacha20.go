@@ -3,26 +3,16 @@ package encryption
 import (
 	"crypto/md5"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
-	"sync"
 
 	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/pbkdf2"
 )
 
-// Buffer pool for ChaCha20 encryption
-var chacha20BufferPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 64*1024)
-		return &buf
-	},
-}
-
-// ChaCha20 implements ChaCha20 encryption with position seeking support
+// ChaCha20Cipher implements ChaCha20 encryption with position seeking support
 // ChaCha20 is ideal for CPUs without AES-NI (like J4125) - 3-5x faster than software AES
 type ChaCha20Cipher struct {
 	password string
@@ -91,6 +81,21 @@ func (c *ChaCha20Cipher) SetPosition(position int64) error {
 	return nil
 }
 
+// Position returns the current stream position
+func (c *ChaCha20Cipher) Position() int64 {
+	return c.position
+}
+
+// Algorithm returns the cipher algorithm name
+func (c *ChaCha20Cipher) Algorithm() string {
+	return "ChaCha20"
+}
+
+// BlockSize returns the ChaCha20 block size
+func (c *ChaCha20Cipher) BlockSize() int {
+	return 64
+}
+
 // Encrypt encrypts data in place
 func (c *ChaCha20Cipher) Encrypt(data []byte) {
 	c.cipher.XORKeyStream(data, data)
@@ -102,12 +107,9 @@ func (c *ChaCha20Cipher) Decrypt(data []byte) {
 	c.Encrypt(data)
 }
 
-// EncryptReader wraps a reader with encryption
+// EncryptReader wraps a reader with encryption using base implementation
 func (c *ChaCha20Cipher) EncryptReader(r io.Reader) io.Reader {
-	return &chacha20Reader{
-		reader: r,
-		cipher: c,
-	}
+	return WrapReaderFunc(r, c.Encrypt)
 }
 
 // DecryptReader wraps a reader with decryption
@@ -115,67 +117,9 @@ func (c *ChaCha20Cipher) DecryptReader(r io.Reader) io.Reader {
 	return c.EncryptReader(r) // Stream cipher: encrypt == decrypt
 }
 
-type chacha20Reader struct {
-	reader io.Reader
-	cipher *ChaCha20Cipher
-}
-
-func (r *chacha20Reader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if n > 0 {
-		r.cipher.Decrypt(p[:n])
-	}
-	return n, err
-}
-
-// EncryptWriter wraps a writer with encryption
+// EncryptWriter wraps a writer with encryption using base implementation
 func (c *ChaCha20Cipher) EncryptWriter(w io.Writer) io.Writer {
-	return &chacha20Writer{
-		writer: w,
-		cipher: c,
-	}
-}
-
-type chacha20Writer struct {
-	writer io.Writer
-	cipher *ChaCha20Cipher
-}
-
-func (w *chacha20Writer) Write(p []byte) (int, error) {
-	// Use buffer pool for small writes
-	var encrypted []byte
-	if len(p) <= 64*1024 {
-		bufPtr := chacha20BufferPool.Get().(*[]byte)
-		defer chacha20BufferPool.Put(bufPtr)
-		encrypted = (*bufPtr)[:len(p)]
-	} else {
-		encrypted = make([]byte, len(p))
-	}
-	copy(encrypted, p)
-	w.cipher.Encrypt(encrypted)
-	return w.writer.Write(encrypted)
-}
-
-// GetPasswdOutwardChaCha20 generates the outward password key for filename encryption
-func GetPasswdOutwardChaCha20(password string) string {
-	key := pbkdf2.Key([]byte(password), []byte("ChaCha20"), 1000, 16, sha256.New)
-	return hex.EncodeToString(key)
-}
-
-// BenchmarkInfo returns info about ChaCha20 advantages
-func (c *ChaCha20Cipher) BenchmarkInfo() string {
-	return "ChaCha20: Optimal for CPUs without AES-NI (J4125, ARM). O(1) seek support. 3-5x faster than software AES."
-}
-
-// SupportsHardwareAcceleration returns false as ChaCha20 is pure software
-// but designed to be fast in software (unlike AES which needs AES-NI)
-func (c *ChaCha20Cipher) SupportsHardwareAcceleration() bool {
-	return false
-}
-
-// BlockSize returns the ChaCha20 block size
-func (c *ChaCha20Cipher) BlockSize() int {
-	return 64
+	return WrapWriterFunc(w, c.Encrypt)
 }
 
 // NonceSize returns the nonce size used
@@ -188,20 +132,8 @@ func (c *ChaCha20Cipher) Counter() uint32 {
 	return uint32(c.position / 64)
 }
 
-// GetPosition returns the current stream position
-func (c *ChaCha20Cipher) GetPosition() int64 {
-	return c.position
-}
-
-// incrementCounter is used internally for counter manipulation
-func incrementCounter(counter []byte, count int64) {
-	carry := uint64(count)
-	lower := binary.LittleEndian.Uint64(counter[0:8])
-	newLower := lower + carry
-	binary.LittleEndian.PutUint64(counter[0:8], newLower)
-
-	if newLower < lower && len(counter) >= 16 {
-		upper := binary.LittleEndian.Uint64(counter[8:16])
-		binary.LittleEndian.PutUint64(counter[8:16], upper+1)
-	}
+// GetPasswdOutwardChaCha20 generates the outward password key for filename encryption
+func GetPasswdOutwardChaCha20(password string) string {
+	key := pbkdf2.Key([]byte(password), []byte("ChaCha20"), 1000, 16, sha256.New)
+	return hex.EncodeToString(key)
 }
