@@ -270,16 +270,15 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Check if encryption is enabled for this path
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 
-	// Convert display path to real encrypted path for file requests (not directory listing)
+	// For PROPFIND, we should NOT convert directory paths
+	// Only convert if it looks like a file request (has extension and doesn't end with /)
 	realPath := davPath
-	if found && passwdInfo.EncName {
-		// Check if this is a file (not a directory) by looking at the path
-		fileName := path.Base(davPath)
-		if fileName != "" && fileName != "/" && fileName != "." {
-			// Try to convert to real name - this handles file PROPFIND
-			realPath = h.convertToRealPath(davPath)
-			log.Debug().Str("display", davPath).Str("real", realPath).Msg("WebDAV PROPFIND path conversion")
-		}
+	isDirectoryRequest := strings.HasSuffix(davPath, "/") || davPath == "" || path.Ext(davPath) == ""
+
+	if found && passwdInfo.EncName && !isDirectoryRequest {
+		// This looks like a file PROPFIND - convert the filename
+		realPath = h.convertToRealPath(davPath)
+		log.Debug().Str("display", davPath).Str("real", realPath).Msg("WebDAV PROPFIND file path conversion")
 	}
 
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
