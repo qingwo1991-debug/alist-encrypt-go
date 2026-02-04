@@ -4,13 +4,11 @@ on:
   push:
     branches:
       - main
-      - master
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
-      - master
   workflow_dispatch:
 
 env:
@@ -27,19 +25,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Build frontend
-        run: |
-          cd enc-webui
-          npm install
-          npm run build
-          rm -rf ../web/public/*
-          cp -r dist/* ../web/public/
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -75,6 +60,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   release-binary:
     runs-on: ubuntu-latest
@@ -87,23 +74,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Build frontend
-        run: |
-          cd enc-webui
-          npm install
-          npm run build
-          rm -rf ../web/public/*
-          cp -r dist/* ../web/public/
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.24'
+          cache: true
 
       - name: Build binaries
         run: |
