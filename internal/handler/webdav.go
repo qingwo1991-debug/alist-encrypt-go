@@ -267,7 +267,22 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 
 // handlePropfind handles PROPFIND requests and caches file info
 func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, davPath string) {
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
+	// Check if encryption is enabled for this path
+	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
+
+	// Convert display path to real encrypted path for file requests (not directory listing)
+	realPath := davPath
+	if found && passwdInfo.EncName {
+		// Check if this is a file (not a directory) by looking at the path
+		fileName := path.Base(davPath)
+		if fileName != "" && fileName != "/" && fileName != "." {
+			// Try to convert to real name - this handles file PROPFIND
+			realPath = h.convertToRealPath(davPath)
+			log.Debug().Str("display", davPath).Str("real", realPath).Msg("WebDAV PROPFIND path conversion")
+		}
+	}
+
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
 	// Read request body
 	body, _ := io.ReadAll(r.Body)
@@ -296,10 +311,8 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Parse and cache file info from PROPFIND response
 	h.parsePropfindResponse(respBody, davPath)
 
-	// Check if encryption is enabled for this path
-	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
+	// Decrypt filenames in the XML response if encryption is enabled
 	if found && passwdInfo.EncName {
-		// Decrypt filenames in the XML response
 		respBody = h.decryptPropfindResponse(respBody, passwdInfo)
 	}
 
