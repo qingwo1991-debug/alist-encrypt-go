@@ -245,9 +245,10 @@ func (c *CRC6) Checksum(data []byte) int {
 var crc6 = NewCRC6()
 
 // EncodeName encrypts a filename using password and encryption type
+// Uses cached PBKDF2 key and MixBase64 instance for performance
 func EncodeName(password, encType, plainName string) string {
 	passwdOutward := GetPasswdOutward(password, encType)
-	mix64 := NewMixBase64(passwdOutward)
+	mix64 := GetCachedMixBase64(passwdOutward)
 
 	encodedName := mix64.EncodeString(plainName)
 
@@ -260,6 +261,7 @@ func EncodeName(password, encType, plainName string) string {
 }
 
 // DecodeName decrypts a filename, returns empty string if decryption fails
+// Uses cached PBKDF2 key and MixBase64 instance for performance
 func DecodeName(password, encType, encodedName string) string {
 	if len(encodedName) < 2 {
 		return ""
@@ -267,7 +269,7 @@ func DecodeName(password, encType, encodedName string) string {
 
 	crc6Check := encodedName[len(encodedName)-1]
 	passwdOutward := GetPasswdOutward(password, encType)
-	mix64 := NewMixBase64(passwdOutward)
+	mix64 := GetCachedMixBase64(passwdOutward)
 
 	subEncName := encodedName[:len(encodedName)-1]
 

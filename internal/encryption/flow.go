@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -33,6 +34,20 @@ type FlowEnc struct {
 	password string
 	fileSize int64
 }
+
+// passwdOutwardCache caches PBKDF2-derived keys to avoid repeated computation
+// Key format: "password:encType"
+var (
+	passwdOutwardCache   = make(map[string]string)
+	passwdOutwardCacheMu sync.RWMutex
+)
+
+// mixBase64Cache caches MixBase64 instances to avoid repeated KSA computation
+// Key format: passwdOutward string
+var (
+	mixBase64Cache   = make(map[string]*MixBase64)
+	mixBase64CacheMu sync.RWMutex
+)
 
 // NewFlowEnc creates a new FlowEnc instance using the cipher registry
 func NewFlowEnc(password string, encType string, fileSize int64) (*FlowEnc, error) {
@@ -94,7 +109,19 @@ func (f *FlowEnc) GetCipher() Cipher {
 
 // GetPasswdOutward generates the outward password key for filename encryption
 // This matches the Node.js FlowEnc.getPassWdOutward implementation
+// Results are cached to avoid repeated PBKDF2 computation (1000 iterations)
 func GetPasswdOutward(password, encType string) string {
+	cacheKey := password + ":" + encType
+
+	// Try read from cache first
+	passwdOutwardCacheMu.RLock()
+	if cached, ok := passwdOutwardCache[cacheKey]; ok {
+		passwdOutwardCacheMu.RUnlock()
+		return cached
+	}
+	passwdOutwardCacheMu.RUnlock()
+
+	// Compute PBKDF2 key
 	salt := "AES-CTR"
 	switch encType {
 	case "rc4md5":
@@ -103,5 +130,34 @@ func GetPasswdOutward(password, encType string) string {
 		salt = "ChaCha20"
 	}
 	key := pbkdf2.Key([]byte(password), []byte(salt), 1000, 16, sha256.New)
-	return hex.EncodeToString(key)
+	result := hex.EncodeToString(key)
+
+	// Store in cache
+	passwdOutwardCacheMu.Lock()
+	passwdOutwardCache[cacheKey] = result
+	passwdOutwardCacheMu.Unlock()
+
+	return result
+}
+
+// GetCachedMixBase64 returns a cached MixBase64 instance for the given passwdOutward
+// This avoids repeated KSA computation which involves SHA256 and S-box shuffling
+func GetCachedMixBase64(passwdOutward string) *MixBase64 {
+	// Try read from cache first
+	mixBase64CacheMu.RLock()
+	if cached, ok := mixBase64Cache[passwdOutward]; ok {
+		mixBase64CacheMu.RUnlock()
+		return cached
+	}
+	mixBase64CacheMu.RUnlock()
+
+	// Create new instance
+	mix64 := NewMixBase64(passwdOutward)
+
+	// Store in cache
+	mixBase64CacheMu.Lock()
+	mixBase64Cache[passwdOutward] = mix64
+	mixBase64CacheMu.Unlock()
+
+	return mix64
 }
