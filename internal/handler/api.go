@@ -12,6 +12,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/restart"
 )
 
 // generateUUID generates a UUID v4 string like Node.js crypto.randomUUID()
@@ -77,10 +78,17 @@ func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 // GetUserInfo returns current user info
 func (h *APIHandler) GetUserInfo(w http.ResponseWriter, r *http.Request) {
+	// Get actual username from database
+	user, err := h.userDAO.GetFirstUser()
+	username := "admin"
+	if err == nil && user != nil {
+		username = user.Username
+	}
+
 	RespondSuccess(w, map[string]interface{}{
 		"codes": []int{16, 9, 10, 11, 12, 13, 15},
 		"userInfo": map[string]interface{}{
-			"username":   "admin",
+			"username":   username,
 			"headImgUrl": "/public/logo.svg",
 		},
 		"menuList": []interface{}{},
@@ -284,4 +292,38 @@ func (h *APIHandler) DecodeFoldName(w http.ResponseWriter, r *http.Request) {
 		"folderEncType": folderEncType,
 		"folderPasswd":  folderPasswd,
 	})
+}
+
+// GetSchemeConfig returns server scheme configuration
+func (h *APIHandler) GetSchemeConfig(w http.ResponseWriter, r *http.Request) {
+	RespondSuccess(w, h.cfg.Scheme)
+}
+
+// SaveSchemeConfig saves scheme configuration
+// Returns needRestart: true if server restart is required
+func (h *APIHandler) SaveSchemeConfig(w http.ResponseWriter, r *http.Request) {
+	var scheme config.SchemeConfig
+	if err := json.NewDecoder(r.Body).Decode(&scheme); err != nil {
+		RespondAPIError(w, 500, "Invalid request: "+err.Error())
+		return
+	}
+
+	needRestart, err := h.cfg.UpdateScheme(scheme)
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+
+	RespondSuccess(w, map[string]interface{}{
+		"message":     "save ok",
+		"needRestart": needRestart,
+	})
+
+	// Trigger restart asynchronously if needed
+	if needRestart {
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Let response complete
+			restart.Trigger()
+		}()
+	}
 }

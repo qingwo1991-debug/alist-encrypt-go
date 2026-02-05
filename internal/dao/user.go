@@ -173,12 +173,21 @@ func (d *UserDAO) Delete(username string) error {
 
 // EnsureDefaultUser ensures default admin user exists
 func (d *UserDAO) EnsureDefaultUser() error {
-	var user User
-	if err := d.store.GetJSON(storage.BucketUsers, "admin", &user); err != nil {
-		return err
+	// Check if any user exists
+	if _, err := d.GetFirstUser(); err == nil {
+		return nil // User exists
 	}
-	if user.Username == "" {
-		return d.Create("admin", "123456")
+	return d.Create("admin", "123456")
+}
+
+// GetFirstUser returns the first user in the database
+func (d *UserDAO) GetFirstUser() (*User, error) {
+	users, err := d.store.ListKeys(storage.BucketUsers)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if len(users) == 0 {
+		return nil, ErrUserNotFound
+	}
+	return d.Get(users[0])
 }

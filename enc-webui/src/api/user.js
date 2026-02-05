@@ -20,6 +20,15 @@ export const upatePasswordReq = (subForm) => {
     method: 'post'
   })
 }
+
+// 更新用户名
+export const updateUsernameReq = (subForm) => {
+  return axiosReq({
+    url: '/enc-api/updateUsername',
+    data: subForm,
+    method: 'post'
+  })
+}
 // 获取alist的配置信息
 export const getAlistConfigReq = (subForm) => {
   return axiosReq({
@@ -113,6 +122,23 @@ export const loginReq = (subForm) => {
 export const loginOutReq = () => {
   return axiosReq({
     url: '/mock/basis-func/user/loginValid',
+    method: 'post'
+  })
+}
+
+// 获取服务器scheme配置
+export const getSchemeConfigReq = () => {
+  return axiosReq({
+    url: '/enc-api/getSchemeConfig',
+    method: 'post'
+  })
+}
+
+// 保存服务器scheme配置
+export const saveSchemeConfigReq = (subForm) => {
+  return axiosReq({
+    url: '/enc-api/saveSchemeConfig',
+    data: subForm,
     method: 'post'
   })
 }

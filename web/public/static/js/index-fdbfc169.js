@@ -1,0 +1,1 @@
+import{_ as r,r as e,g as t,h as s,c as o,i as n,l as _,a6 as i}from"./index-30e50fb9.js";const m={};function u(f,d){const a=e("el-alert"),c=e("router-view");return t(),s("div",null,[o(c,null,{default:n(({Component:l})=>[o(a,{closable:!1,title:"menu 1"},{default:n(()=>[(t(),_(i(l)))]),_:2},1024)]),_:1})])}const v=r(m,[["render",u]]);export{v as default};

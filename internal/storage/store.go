@@ -138,3 +138,19 @@ func (s *Store) SetJSON(bucket []byte, key string, v interface{}) error {
 	}
 	return s.Set(bucket, key, data)
 }
+
+// ListKeys returns all keys in a bucket
+func (s *Store) ListKeys(bucket []byte) ([]string, error) {
+	var keys []string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return fmt.Errorf("bucket not found: %s", bucket)
+		}
+		return b.ForEach(func(k, v []byte) error {
+			keys = append(keys, string(k))
+			return nil
+		})
+	})
+	return keys, err
+}

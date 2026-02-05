@@ -17,7 +17,11 @@
       </el-form-item>
       <el-form-item prop="enableH2c" label="HTTP/2">
         <el-switch v-model="alistConfigForm.enableH2c" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
-        <span color="gray" style="font-size: 12px; margin-left: 12px">启用 h2c (需要后端 Alist 也开启 enable_h2c)</span>
+        <span color="gray" style="font-size: 12px; margin-left: 12px">代理连接后端Alist时启用h2c（需要Alist也开启enable_h2c）</span>
+      </el-form-item>
+      <el-form-item prop="proxyH2c" label="代理H2C">
+        <el-switch v-model="alistConfigForm.proxyH2c" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">客户端连接代理时启用h2c（播放器/浏览器需支持）</span>
       </el-form-item>
 
       <el-form-item label="密码设置">
@@ -110,7 +114,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useConfigStore } from '@/store/config'
 import { useBasicStore } from '@/store/basic'
-import { getAlistConfigReq, saveAlistConfigReq, encodeFoldNameReq, decodeFoldNameReq } from '@/api/user'
+import { getAlistConfigReq, saveAlistConfigReq, encodeFoldNameReq, decodeFoldNameReq, getSchemeConfigReq, saveSchemeConfigReq } from '@/api/user'
 
 import { Check, Delete, Edit, Message, Search, Star, CirclePlus, Folder } from '@element-plus/icons-vue'
 import { random } from 'lodash'
@@ -144,6 +148,7 @@ const alistConfigForm = reactive({
   serverPort: '5244',
   https: false,
   enableH2c: false,
+  proxyH2c: false,
   passwdList: [
     {
       id: Math.random(),
@@ -157,7 +162,7 @@ const alistConfigForm = reactive({
     }
   ]
 })
-const refSearchForm = $ref()
+const refSearchForm = ref()
 // 添加密码配置
 const addPasswd = () => {
   alistConfigForm.passwdList.push({
@@ -190,10 +195,20 @@ const decodeFoldName = async () => {
   folderForm.folderEncType = res.data.folderEncType
 }
 
-const saveAlistConfig = () => {
-  saveAlistConfigReq(alistConfigForm).then(res =>{
+const saveAlistConfig = async () => {
+  // Save alist config
+  saveAlistConfigReq(alistConfigForm).then(res => {
     ElMessage.success(res.msg)
   })
+  // Save proxy H2C setting separately
+  try {
+    const schemeRes = await getSchemeConfigReq()
+    const schemeData = schemeRes.data || {}
+    schemeData.enable_h2c = alistConfigForm.proxyH2c
+    await saveSchemeConfigReq(schemeData)
+  } catch (err) {
+    console.error('Failed to save proxy H2C setting:', err)
+  }
 }
 onMounted(async () => {
   const res = await getAlistConfigReq()
@@ -202,5 +217,14 @@ onMounted(async () => {
     passwdInfo.encPath = passwdInfo.encPath.reduce((a, b) => `${a},${b}`)
   }
   Object.assign(alistConfigForm, res.data)
+  // Load proxy H2C setting
+  try {
+    const schemeRes = await getSchemeConfigReq()
+    if (schemeRes.data) {
+      alistConfigForm.proxyH2c = schemeRes.data.enable_h2c || false
+    }
+  } catch (err) {
+    console.error('Failed to load proxy H2C setting:', err)
+  }
 })
 </script>
