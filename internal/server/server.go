@@ -125,6 +125,8 @@ func (s *Server) setupRoutes() {
 			protected.Any("/delWebdavConfig", ginWrap(apiHandler.DelWebdavConfig))
 			protected.Any("/encodeFoldName", ginWrap(apiHandler.EncodeFoldName))
 			protected.Any("/decodeFoldName", ginWrap(apiHandler.DecodeFoldName))
+			protected.Any("/getSchemeConfig", ginWrap(apiHandler.GetSchemeConfig))
+			protected.Any("/saveSchemeConfig", ginWrap(apiHandler.SaveSchemeConfig))
 		}
 	}
 
@@ -177,16 +179,22 @@ func (s *Server) Start() error {
 
 	// Start HTTP server
 	go func() {
-		if err := s.startHTTP(); err != nil && err != http.ErrServerClosed {
+		err := s.startHTTP()
+		if err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server error: %w", err)
+		} else {
+			errChan <- nil // Signal normal shutdown
 		}
 	}()
 
 	// Start HTTPS server if enabled
 	if s.cfg.IsHTTPSEnabled() {
 		go func() {
-			if err := s.startHTTPS(); err != nil && err != http.ErrServerClosed {
+			err := s.startHTTPS()
+			if err != nil && err != http.ErrServerClosed {
 				errChan <- fmt.Errorf("HTTPS server error: %w", err)
+			} else {
+				errChan <- nil
 			}
 		}()
 	}
@@ -194,13 +202,16 @@ func (s *Server) Start() error {
 	// Start Unix socket if enabled
 	if s.cfg.IsUnixSocketEnabled() {
 		go func() {
-			if err := s.startUnix(); err != nil && err != http.ErrServerClosed {
+			err := s.startUnix()
+			if err != nil && err != http.ErrServerClosed {
 				errChan <- fmt.Errorf("Unix socket error: %w", err)
+			} else {
+				errChan <- nil
 			}
 		}()
 	}
 
-	// Wait for error
+	// Wait for any server to stop
 	return <-errChan
 }
 

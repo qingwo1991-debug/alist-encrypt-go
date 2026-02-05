@@ -366,6 +366,23 @@ func (c *Config) DeleteWebDAVServer(id string) error {
 	return c.Save()
 }
 
+// UpdateScheme updates scheme configuration and saves
+// Returns true if server restart is required (H2C changed)
+func (c *Config) UpdateScheme(scheme SchemeConfig) (bool, error) {
+	c.mu.Lock()
+	oldH2C := c.Scheme != nil && c.Scheme.EnableH2C
+	newH2C := scheme.EnableH2C
+	needRestart := oldH2C != newH2C
+
+	if c.Scheme == nil {
+		c.Scheme = &SchemeConfig{}
+	}
+	*c.Scheme = scheme
+	c.mu.Unlock()
+
+	return needRestart, c.Save()
+}
+
 func getWorkDir() string {
 	dir, err := os.Getwd()
 	if err != nil {

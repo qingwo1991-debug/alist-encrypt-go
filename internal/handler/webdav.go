@@ -66,9 +66,8 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // convertToRealPath converts display path to encrypted path for WebDAV
-func (h *WebDAVHandler) convertToRealPath(davPath string) string {
-	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
-	if !found || !passwdInfo.EncName {
+func (h *WebDAVHandler) convertToRealPath(davPath string, passwdInfo *config.PasswdInfo) string {
+	if passwdInfo == nil || !passwdInfo.EncName {
 		return davPath
 	}
 
@@ -93,7 +92,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	}
 
 	// Convert display path to real encrypted path
-	realPath := h.convertToRealPath(davPath)
+	realPath := h.convertToRealPath(davPath, passwdInfo)
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
 	// Get file info for size
@@ -141,6 +140,14 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 		}
 		encName := converter.EncryptFileName(strings.TrimSuffix(fileName, path.Ext(fileName)))
 		realPath = path.Dir(davPath) + "/" + encName + ext
+
+		// Cache file info for subsequent PROPFIND (like alist-encrypt does)
+		h.fileDAO.Set(&dao.FileInfo{
+			Path:  davPath,
+			Name:  fileName,
+			Size:  fileSize,
+			IsDir: false,
+		})
 		log.Debug().Str("original", davPath).Str("encrypted", realPath).Msg("WebDAV PUT filename encrypted")
 	}
 
@@ -161,7 +168,7 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 	}
 
 	// Convert display path to real encrypted path
-	realPath := h.convertToRealPath(davPath)
+	realPath := h.convertToRealPath(davPath, passwdInfo)
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
 	proxyReq, err := httputil.NewRequest("DELETE", targetURL).
@@ -206,7 +213,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	// Convert source path
 	realSrcPath := davPath
 	if found && passwdInfo.EncName {
-		realSrcPath = h.convertToRealPath(davPath)
+		realSrcPath = h.convertToRealPath(davPath, passwdInfo)
 	}
 
 	// Convert destination path from header
@@ -265,26 +272,18 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	w.Write(respBody)
 }
 
-// handlePropfind handles PROPFIND requests and caches file info
+// handlePropfind handles PROPFIND requests - follows OpenList-Encrypt logic:
+// 1. First try without path conversion (for directory listing)
+// 2. If 404, retry with encrypted filename (for file metadata)
+// 3. Decrypt filenames in response
 func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, davPath string) {
-	// Check if encryption is enabled for this path
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 
-	// For PROPFIND, we should NOT convert directory paths
-	// Only convert if it looks like a file request (has extension and doesn't end with /)
-	realPath := davPath
-	isDirectoryRequest := strings.HasSuffix(davPath, "/") || davPath == "" || path.Ext(davPath) == ""
-
-	if found && passwdInfo.EncName && !isDirectoryRequest {
-		// This looks like a file PROPFIND - convert the filename
-		realPath = h.convertToRealPath(davPath)
-		log.Debug().Str("display", davPath).Str("real", realPath).Msg("WebDAV PROPFIND file path conversion")
-	}
-
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
-
-	// Read request body
+	// Read request body (need to buffer for possible retry)
 	body, _ := io.ReadAll(r.Body)
+
+	// Step 1: Try direct passthrough first (handles directory listing)
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+davPath, r)
 
 	proxyReq, err := httputil.NewRequest("PROPFIND", targetURL).
 		WithContext(r.Context()).
@@ -303,15 +302,41 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
+
+	// Step 2: If 404 and encryption enabled, retry with encrypted filename
+	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName {
+		resp.Body.Close()
+
+		fileName := path.Base(davPath)
+		if fileName != "" && fileName != "/" && fileName != "." {
+			// Convert to encrypted path and retry
+			realPath := h.convertToRealPath(davPath, passwdInfo)
+			retryURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
+
+			log.Debug().Str("original", davPath).Str("encrypted", realPath).Msg("WebDAV PROPFIND 404 retry with encrypted path")
+
+			retryReq, err := httputil.NewRequest("PROPFIND", retryURL).
+				WithContext(r.Context()).
+				WithBody(body).
+				CopyHeaders(r).
+				Build()
+			if err == nil {
+				retryResp, err := client.Do(retryReq)
+				if err == nil {
+					resp = retryResp
+				}
+			}
+		}
+	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
-	// Parse and cache file info from PROPFIND response
+	// Step 3: Parse and cache file info from PROPFIND response
 	h.parsePropfindResponse(respBody, davPath)
 
-	// Decrypt filenames in the XML response if encryption is enabled
-	if found && passwdInfo.EncName {
+	// Step 4: Decrypt filenames in the XML response if encryption is enabled
+	if found && passwdInfo.EncName && resp.StatusCode == http.StatusMultiStatus {
 		respBody = h.decryptPropfindResponse(respBody, passwdInfo)
 	}
 
@@ -332,18 +357,17 @@ func (h *WebDAVHandler) handlePassthrough(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// parsePropfindResponse parses WebDAV PROPFIND XML response
+// parsePropfindResponse parses WebDAV PROPFIND XML response and caches file info
 func (h *WebDAVHandler) parsePropfindResponse(body []byte, basePath string) {
 	type PropfindResponse struct {
 		XMLName  xml.Name `xml:"multistatus"`
 		Response []struct {
 			Href string `xml:"href"`
 			Prop struct {
-				DisplayName     string `xml:"propstat>prop>displayname"`
-				ContentLength   int64  `xml:"propstat>prop>getcontentlength"`
-				ResourceType    string `xml:"propstat>prop>resourcetype"`
-				LastModified    string `xml:"propstat>prop>getlastmodified"`
-				IsCollection    bool   `xml:"-"`
+				DisplayName   string `xml:"propstat>prop>displayname"`
+				ContentLength int64  `xml:"propstat>prop>getcontentlength"`
+				ResourceType  string `xml:"propstat>prop>resourcetype"`
+				LastModified  string `xml:"propstat>prop>getlastmodified"`
 			} `xml:"propstat>prop"`
 		} `xml:"response"`
 	}
@@ -356,19 +380,34 @@ func (h *WebDAVHandler) parsePropfindResponse(body []byte, basePath string) {
 
 	for _, resp := range propfind.Response {
 		// Extract path from href
-		path := strings.TrimPrefix(resp.Href, "/dav")
-		if path == "" {
-			path = "/"
+		filePath := strings.TrimPrefix(resp.Href, "/dav")
+		if filePath == "" {
+			filePath = "/"
+		}
+
+		// URL decode the path
+		if decoded, err := url.PathUnescape(filePath); err == nil {
+			filePath = decoded
 		}
 
 		info := &dao.FileInfo{
-			Path:  path,
+			Path:  filePath,
 			Name:  resp.Prop.DisplayName,
 			Size:  resp.Prop.ContentLength,
 			IsDir: strings.Contains(resp.Prop.ResourceType, "collection"),
 		}
 
 		h.fileDAO.Set(info)
+
+		// Also cache without /dav prefix for compatibility
+		if strings.HasPrefix(filePath, "/") {
+			h.fileDAO.Set(&dao.FileInfo{
+				Path:  filePath,
+				Name:  info.Name,
+				Size:  info.Size,
+				IsDir: info.IsDir,
+			})
+		}
 	}
 }
 
@@ -429,7 +468,7 @@ func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, pass
 
 		if encryptedName != "" && encryptedName != "/" {
 			decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, encryptedName)
-			if decryptedName != "" {
+			if decryptedName != "" && decryptedName != encryptedName {
 				result = result[:contentStart] + decryptedName + result[endIdx:]
 				searchPos = contentStart + len(decryptedName) + len(endTag)
 				continue
@@ -470,7 +509,7 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 				fileName := path.Base(davPath)
 				if fileName != "" && fileName != "/" && fileName != "." {
 					decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, fileName)
-					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) {
+					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) && decryptedName != fileName {
 						// Replace only the filename part in the href
 						newHref := "/dav" + path.Dir(davPath) + "/" + url.PathEscape(decryptedName)
 						// Normalize path (remove double slashes)

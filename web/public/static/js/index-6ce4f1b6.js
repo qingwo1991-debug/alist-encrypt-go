@@ -1,0 +1,1 @@
+import{a0 as a,e as o,g as t,h as n,j as e,d as r}from"./index-8063b7cb.js";const c={class:"scroll-y"},_=r({}),m=Object.assign(_,{__name:"index",setup(i){return a(o()),(l,s)=>(t(),n("div",c,[...s[0]||(s[0]=[e("h3",{class:"mb-20px"},"功能",-1),e("div",{class:"rowSS"},"找回密码，但是仅限于mix密码",-1)])]))}});export{m as default};
