@@ -83,6 +83,11 @@ func (d *FileDAO) GetEncPath(displayPath string) (string, bool) {
 	return "", false
 }
 
+// DeleteEncPathMapping removes the display path to encrypted path mapping
+func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
+	d.encPathMap.Delete(displayPath)
+}
+
 // SetFromAlistResponse parses and stores file info from Alist API response
 func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{}) error {
 	info := &FileInfo{
