@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/net/http2"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -82,7 +83,14 @@ func NewClient(cfg *config.Config) *Client {
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	// Use h2c client for backend connections if enabled
 	if c.h2cClient != nil && c.isBackendRequest(req) {
-		return c.h2cClient.Do(req)
+		resp, err := c.h2cClient.Do(req)
+		if err == nil && resp != nil {
+			log.Debug().
+				Str("proto", resp.Proto).
+				Str("url", req.URL.String()).
+				Msg("H2C connection used")
+		}
+		return resp, err
 	}
 	return c.Client.Do(req)
 }
@@ -90,7 +98,16 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 // isBackendRequest checks if the request is to the Alist backend
 func (c *Client) isBackendRequest(req *http.Request) bool {
 	backendHost := c.cfg.AlistServer.ServerHost
-	return req.URL.Host == backendHost || req.Host == backendHost
+	// Check both with and without port
+	reqHost := req.URL.Host
+	if reqHost == "" {
+		reqHost = req.Host
+	}
+	// Strip port for comparison
+	if host, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqHost = host
+	}
+	return reqHost == backendHost
 }
 
 // Get performs a GET request

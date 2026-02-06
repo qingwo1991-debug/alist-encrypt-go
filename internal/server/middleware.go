@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/trace"
 )
@@ -26,7 +25,7 @@ func TraceMiddleware() gin.HandlerFunc {
 	}
 }
 
-// LoggerMiddleware logs HTTP requests using zerolog
+// LoggerMiddleware logs HTTP requests using the new trace format
 func LoggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -36,18 +35,13 @@ func LoggerMiddleware() gin.HandlerFunc {
 
 		reqID := trace.GetRequestID(c.Request.Context())
 		pathTag := trace.GetPathTag(c.Request.Context())
+		duration := time.Since(start)
 
-		log.Info().
-			Str("req_id", reqID).
-			Str("path_tag", pathTag).
-			Str("method", c.Request.Method).
-			Str("path", c.Request.URL.Path).
-			Int("status", c.Writer.Status()).
-			Int("bytes", c.Writer.Size()).
-			Dur("duration", time.Since(start)).
-			Str("remote", c.ClientIP()).
-			Str("proto", c.Request.Proto).
-			Msg("request")
+		// Use new format: [timestamp] [req-xxx] [path_tag] [request] details
+		ts := time.Now().Format("2006-01-02T15:04:05")
+		fmt.Printf("%s [%s] [%s] [request] %s %s status=%d bytes=%d duration=%v\n",
+			ts, reqID, pathTag, c.Request.Method, c.Request.URL.Path,
+			c.Writer.Status(), c.Writer.Size(), duration)
 	}
 }
 

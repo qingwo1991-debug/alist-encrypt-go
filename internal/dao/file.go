@@ -3,6 +3,7 @@ package dao
 import (
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -23,8 +24,9 @@ type FileInfo struct {
 
 // FileDAO handles file information caching
 type FileDAO struct {
-	store *storage.Store
-	cache *storage.Cache
+	store      *storage.Store
+	cache      *storage.Cache
+	encPathMap sync.Map // displayPath -> encryptedPath mapping
 }
 
 // NewFileDAO creates a new file DAO
@@ -66,6 +68,19 @@ func (d *FileDAO) Set(info *FileInfo) error {
 func (d *FileDAO) Delete(path string) error {
 	d.cache.Delete(path)
 	return d.store.Delete(storage.BucketFileInfo, path)
+}
+
+// SetEncPathMapping caches the display path to encrypted path mapping
+func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
+	d.encPathMap.Store(displayPath, encryptedPath)
+}
+
+// GetEncPath retrieves the encrypted path for a display path
+func (d *FileDAO) GetEncPath(displayPath string) (string, bool) {
+	if v, ok := d.encPathMap.Load(displayPath); ok {
+		return v.(string), true
+	}
+	return "", false
 }
 
 // SetFromAlistResponse parses and stores file info from Alist API response
