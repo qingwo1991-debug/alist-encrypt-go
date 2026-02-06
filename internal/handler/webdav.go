@@ -301,8 +301,18 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Read request body (need to buffer for possible retry)
 	body, _ := io.ReadAll(r.Body)
 
-	// Step 1: Try direct passthrough first (handles directory listing)
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+davPath, r)
+	// Determine the actual path to request from Alist
+	// For files with encrypted names, use cached encrypted path
+	requestPath := davPath
+	if found && passwdInfo.EncName {
+		if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
+			requestPath = encPath
+			trace.Logf(r.Context(), "propfind", "Using cached enc path: %s -> %s", davPath, requestPath)
+		}
+	}
+
+	// Step 1: Request Alist with the determined path
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+requestPath, r)
 
 	proxyReq, err := httputil.NewRequest("PROPFIND", targetURL).
 		WithContext(r.Context()).
@@ -334,7 +344,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 			realPath := h.convertToRealPath(davPath, passwdInfo)
 			retryURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
-			log.Debug().Str("original", davPath).Str("encrypted", realPath).Msg("WebDAV PROPFIND 404 retry with encrypted path")
+			trace.Logf(r.Context(), "propfind", "404 retry: %s -> %s", davPath, realPath)
 
 			retryReq, err := httputil.NewRequest("PROPFIND", retryURL).
 				WithContext(r.Context()).
