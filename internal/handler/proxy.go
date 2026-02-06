@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -15,8 +16,10 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/trace"
 )
 
 // ProxyHandler handles proxy requests
@@ -120,31 +123,86 @@ func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, en
 	return key
 }
 
+// convertDisplayToRealPath converts a display path to encrypted path for downloads
+func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *config.PasswdInfo) string {
+	if passwdInfo == nil || !passwdInfo.EncName {
+		return displayPath
+	}
+
+	fileName := path.Base(displayPath)
+	if encryption.IsOriginalFile(fileName) {
+		realName := encryption.StripOriginalPrefix(fileName)
+		return path.Dir(displayPath) + "/" + realName
+	}
+
+	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
+	realName := converter.ToRealName(fileName)
+	return path.Dir(displayPath) + "/" + realName
+}
+
 // HandleDownload handles /d/* and /p/* download requests with decryption
 func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/d")
-	path = strings.TrimPrefix(path, "/p")
+	displayPath := strings.TrimPrefix(r.URL.Path, "/d")
+	displayPath = strings.TrimPrefix(displayPath, "/p")
 
-	passwdInfo, found := h.passwdDAO.FindByPath(path)
+	reqID := trace.GetRequestID(r.Context())
+	pathTag := trace.GetPathTag(r.Context())
+
+	passwdInfo, found := h.passwdDAO.FindByPath(displayPath)
 	if !found {
+		// No encryption - proxy original path
+		log.Debug().
+			Str("req_id", reqID).
+			Str("path_tag", pathTag).
+			Str("display", displayPath).
+			Msg("[download] No encryption, proxying directly")
+
 		targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
 		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
-			log.Error().Err(err).Str("path", path).Msg("Failed to proxy download")
+			log.Error().Err(err).Str("req_id", reqID).Str("path", displayPath).Msg("Failed to proxy download")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		}
 		return
 	}
 
-	fileInfo, found := h.fileDAO.Get(path)
-	if !found {
-		log.Warn().Str("path", path).Msg("File info not found, fetching from Alist")
-		fileInfo = &dao.FileInfo{Path: path, Size: 0}
+	// Convert display path to encrypted path if filename encryption is enabled
+	realPath := displayPath
+	if passwdInfo.EncName {
+		realPath = h.convertDisplayToRealPath(displayPath, passwdInfo)
 	}
 
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
+	log.Debug().
+		Str("req_id", reqID).
+		Str("path_tag", pathTag).
+		Str("display", displayPath).
+		Str("real", realPath).
+		Msg("[download] Path converted")
+
+	// Look up file info by DISPLAY path (how PROPFIND/fs/list cached it)
+	fileInfo, found := h.fileDAO.Get(displayPath)
+	if !found {
+		log.Warn().
+			Str("req_id", reqID).
+			Str("path", displayPath).
+			Msg("[download] File info not found, using size 0")
+		fileInfo = &dao.FileInfo{Path: displayPath, Size: 0}
+	}
+
+	// Build target URL with ENCRYPTED path
+	urlPrefix := "/d"
+	if strings.HasPrefix(r.URL.Path, "/p") {
+		urlPrefix = "/p"
+	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+
+	log.Debug().
+		Str("req_id", reqID).
+		Str("target", targetURL).
+		Int64("size", fileInfo.Size).
+		Msg("[download] Proxying with decryption")
 
 	if err := h.streamProxy.ProxyDownloadDecrypt(w, r, targetURL, passwdInfo, fileInfo.Size); err != nil {
-		log.Error().Err(err).Str("path", path).Msg("Failed to decrypt download")
+		log.Error().Err(err).Str("req_id", reqID).Str("path", displayPath).Msg("Failed to decrypt download")
 		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)
 	}
 }

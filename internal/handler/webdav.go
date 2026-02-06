@@ -16,6 +16,7 @@ import (
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/trace"
 )
 
 // WebDAVHandler handles WebDAV requests
@@ -85,8 +86,16 @@ func (h *WebDAVHandler) convertToRealPath(davPath string, passwdInfo *config.Pas
 
 // handleGet handles GET requests with decryption
 func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPath string) {
+	reqID := trace.GetRequestID(r.Context())
+	pathTag := trace.GetPathTag(r.Context())
+
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 	if !found {
+		log.Debug().
+			Str("req_id", reqID).
+			Str("path_tag", pathTag).
+			Str("path", davPath).
+			Msg("[webdav-get] No encryption, passthrough")
 		h.handlePassthrough(w, r)
 		return
 	}
@@ -95,11 +104,29 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	realPath := h.convertToRealPath(davPath, passwdInfo)
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
-	// Get file info for size
-	fileInfo, infoFound := h.fileDAO.Get(realPath)
+	log.Debug().
+		Str("req_id", reqID).
+		Str("path_tag", pathTag).
+		Str("display", davPath).
+		Str("real", realPath).
+		Msg("[webdav-get] Path converted")
+
+	// Look up file info using DISPLAY path (davPath), not realPath
+	// PROPFIND caches entries by display path after decrypting filenames
+	fileInfo, infoFound := h.fileDAO.Get(davPath)
 	var fileSize int64
 	if infoFound {
 		fileSize = fileInfo.Size
+		log.Debug().
+			Str("req_id", reqID).
+			Str("path", davPath).
+			Int64("size", fileSize).
+			Msg("[webdav-get] File info found")
+	} else {
+		log.Warn().
+			Str("req_id", reqID).
+			Str("path", davPath).
+			Msg("[webdav-get] File info not found, using size 0")
 	}
 
 	// Create new request with modified path
@@ -113,8 +140,13 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		return
 	}
 
+	log.Debug().
+		Str("req_id", reqID).
+		Str("target", targetURL).
+		Msg("[webdav-get] Proxying with decryption")
+
 	if err := h.streamProxy.ProxyDownloadDecryptReq(w, proxyReq, targetURL, passwdInfo, fileSize); err != nil {
-		log.Error().Err(err).Str("path", davPath).Msg("WebDAV GET decryption failed")
+		log.Error().Err(err).Str("req_id", reqID).Str("path", davPath).Msg("WebDAV GET decryption failed")
 		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)
 	}
 }
