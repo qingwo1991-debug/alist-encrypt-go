@@ -70,6 +70,7 @@ func (s *Server) setupRoutes() {
 
 	// Middleware
 	r.Use(gin.Recovery())
+	r.Use(TraceMiddleware())
 	r.Use(LoggerMiddleware())
 	r.Use(CORSMiddleware())
 	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/dav"})))

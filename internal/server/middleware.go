@@ -7,7 +7,24 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
+
+	"github.com/alist-encrypt-go/internal/trace"
 )
+
+// TraceMiddleware adds request tracing context to each request
+func TraceMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		reqID := trace.GenerateRequestID()
+		pathTag := trace.ExtractPathTag(c.Request.URL.Path)
+
+		ctx := trace.WithRequestID(c.Request.Context(), reqID)
+		ctx = trace.WithPathTag(ctx, pathTag)
+		c.Request = c.Request.WithContext(ctx)
+
+		c.Header("X-Request-ID", reqID)
+		c.Next()
+	}
+}
 
 // LoggerMiddleware logs HTTP requests using zerolog
 func LoggerMiddleware() gin.HandlerFunc {
@@ -17,7 +34,12 @@ func LoggerMiddleware() gin.HandlerFunc {
 		// Process request
 		c.Next()
 
+		reqID := trace.GetRequestID(c.Request.Context())
+		pathTag := trace.GetPathTag(c.Request.Context())
+
 		log.Info().
+			Str("req_id", reqID).
+			Str("path_tag", pathTag).
 			Str("method", c.Request.Method).
 			Str("path", c.Request.URL.Path).
 			Int("status", c.Writer.Status()).
