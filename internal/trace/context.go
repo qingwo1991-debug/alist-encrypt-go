@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"strings"
+	"time"
 )
 
 type contextKey string
@@ -86,4 +88,34 @@ func LogPrefix(ctx context.Context, operation string) string {
 		pathTag = "/"
 	}
 	return "[" + reqID + "] [" + pathTag + "] [" + operation + "]"
+}
+
+// Log outputs formatted log: [timestamp] [req-xxx] [path_tag] [operation] message
+func Log(ctx context.Context, operation, message string) {
+	reqID := GetRequestID(ctx)
+	pathTag := GetPathTag(ctx)
+	if reqID == "" {
+		reqID = "------"
+	}
+	if pathTag == "" {
+		pathTag = "/"
+	}
+	ts := time.Now().Format("2006-01-02T15:04:05")
+	fmt.Printf("%s [%s] [%s] [%s] %s\n", ts, reqID, pathTag, operation, message)
+}
+
+// Logf outputs formatted log with printf-style formatting
+func Logf(ctx context.Context, operation, format string, args ...interface{}) {
+	Log(ctx, operation, fmt.Sprintf(format, args...))
+}
+
+// ServerLog outputs server-level log: [timestamp] [category] message
+func ServerLog(category, message string) {
+	ts := time.Now().Format("2006-01-02T15:04:05")
+	fmt.Printf("%s [%s] %s\n", ts, category, message)
+}
+
+// sprintf wraps fmt.Sprintf
+func sprintf(format string, args ...interface{}) string {
+	return fmt.Sprintf(format, args...)
 }

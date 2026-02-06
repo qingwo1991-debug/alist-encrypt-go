@@ -16,6 +16,7 @@ import (
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/trace"
 )
 
 // AlistHandler handles Alist API interception
@@ -78,6 +79,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dirPath, _ := reqData["path"].(string)
+	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
 
 	// Forward to Alist
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/list", nil)
@@ -187,8 +189,15 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 					for range tasks {
 						result := <-results
 						if fileData, ok := content[result.index].(map[string]interface{}); ok {
+							encName := fileData["name"].(string)
 							fileData["name"] = result.showName
 							content[result.index] = fileData
+							trace.Logf(r.Context(), "decrypt", "Decrypt filename: %s -> %s", encName, result.showName)
+
+						// Save mapping: display path -> encrypted path
+						displayPath := path.Join(dirPath, result.showName)
+						encryptedPath := path.Join(dirPath, encName)
+						h.fileDAO.SetEncPathMapping(displayPath, encryptedPath)
 						}
 					}
 					close(results)
@@ -257,6 +266,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 
 	filePath, _ := reqData["path"].(string)
 	originalPath := filePath
+	trace.Logf(r.Context(), "get", "Processing path: %s", filePath)
 
 	// Check if filename encryption is needed
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(filePath)
@@ -264,12 +274,20 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 		// Check if it's a directory first
 		fileInfo, exists := h.fileDAO.Get(url.QueryEscape(filePath))
 		if !exists || !fileInfo.IsDir {
-			// Convert display name to real encrypted name
-			converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-			fileName := path.Base(filePath)
-			realName := converter.ToRealName(fileName)
-			filePath = path.Dir(filePath) + "/" + realName
-			reqData["path"] = filePath
+			// First try to get cached encrypted path
+			if encPath, ok := h.fileDAO.GetEncPath(filePath); ok {
+				filePath = encPath
+				reqData["path"] = filePath
+				trace.Logf(r.Context(), "get", "Using cached enc path: %s -> %s", originalPath, filePath)
+			} else {
+				// Fallback: re-encrypt (for backwards compatibility)
+				converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
+				fileName := path.Base(filePath)
+				realName := converter.ToRealName(fileName)
+				filePath = path.Dir(filePath) + "/" + realName
+				reqData["path"] = filePath
+				trace.Logf(r.Context(), "get", "Fallback enc: %s -> %s", originalPath, filePath)
+			}
 		}
 	}
 
@@ -277,7 +295,9 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 	modifiedBody, _ := json.Marshal(reqData)
 
 	// Forward to Alist
+	trace.Logf(r.Context(), "get", "Alist URL: %s", h.cfg.GetAlistURL())
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/get", nil)
+	trace.Logf(r.Context(), "get", "Target: %s", targetURL)
 	proxyReq, err := httputil.NewRequest("POST", targetURL).
 		WithContext(r.Context()).
 		WithBody(modifiedBody).
@@ -303,6 +323,13 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 		RespondHTTPErrorWithStatus(w, "Failed to read response", http.StatusBadGateway)
 		return
 	}
+
+	// Log Alist response (truncate to 500 chars)
+	respPreview := string(respBody)
+	if len(respPreview) > 500 {
+		respPreview = respPreview[:500]
+	}
+	trace.Logf(r.Context(), "get", "Alist response status=%d body=%s", resp.StatusCode, respPreview)
 
 	var respData map[string]interface{}
 	if err := json.Unmarshal(respBody, &respData); err != nil {

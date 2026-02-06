@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,6 +14,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/restart"
 	"github.com/alist-encrypt-go/internal/server"
+	"github.com/alist-encrypt-go/internal/trace"
 )
 
 func main() {
@@ -22,13 +24,8 @@ func main() {
 	// Setup logging based on config
 	setupLogging(cfg)
 
-	log.Info().Msg("Starting alist-encrypt-go")
-	log.Info().
-		Str("http_addr", cfg.GetHTTPAddr()).
-		Bool("h2c", cfg.Scheme.EnableH2C).
-		Bool("https", cfg.IsHTTPSEnabled()).
-		Str("alist_url", cfg.GetAlistURL()).
-		Msg("Configuration loaded")
+	trace.ServerLog("server", fmt.Sprintf("Encrypt proxy server starting on port %s", cfg.GetHTTPAddr()))
+	trace.ServerLog("config", fmt.Sprintf("Alist URL: %s, H2C: %t, HTTPS: %t", cfg.GetAlistURL(), cfg.Scheme.EnableH2C, cfg.IsHTTPSEnabled()))
 
 	// Server restart loop - allows graceful restart when H2C changes
 	for {

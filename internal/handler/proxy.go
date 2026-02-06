@@ -129,6 +129,12 @@ func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *
 		return displayPath
 	}
 
+	// First try to get cached encrypted path
+	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok {
+		return encPath
+	}
+
+	// Fallback: re-encrypt
 	fileName := path.Base(displayPath)
 	if encryption.IsOriginalFile(fileName) {
 		realName := encryption.StripOriginalPrefix(fileName)
@@ -145,21 +151,16 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	displayPath := strings.TrimPrefix(r.URL.Path, "/d")
 	displayPath = strings.TrimPrefix(displayPath, "/p")
 
-	reqID := trace.GetRequestID(r.Context())
-	pathTag := trace.GetPathTag(r.Context())
+	trace.Logf(r.Context(), "download", "Processing: display=%s", displayPath)
 
 	passwdInfo, found := h.passwdDAO.FindByPath(displayPath)
 	if !found {
 		// No encryption - proxy original path
-		log.Debug().
-			Str("req_id", reqID).
-			Str("path_tag", pathTag).
-			Str("display", displayPath).
-			Msg("[download] No encryption, proxying directly")
+		trace.Logf(r.Context(), "download", "No encryption, proxying directly")
 
 		targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
 		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
-			log.Error().Err(err).Str("req_id", reqID).Str("path", displayPath).Msg("Failed to proxy download")
+			log.Error().Err(err).Str("path", displayPath).Msg("Failed to proxy download")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		}
 		return
@@ -169,23 +170,16 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	realPath := displayPath
 	if passwdInfo.EncName {
 		realPath = h.convertDisplayToRealPath(displayPath, passwdInfo)
+		trace.Logf(r.Context(), "download", "Path converted: %s -> %s", displayPath, realPath)
 	}
-
-	log.Debug().
-		Str("req_id", reqID).
-		Str("path_tag", pathTag).
-		Str("display", displayPath).
-		Str("real", realPath).
-		Msg("[download] Path converted")
 
 	// Look up file info by DISPLAY path (how PROPFIND/fs/list cached it)
 	fileInfo, found := h.fileDAO.Get(displayPath)
 	if !found {
-		log.Warn().
-			Str("req_id", reqID).
-			Str("path", displayPath).
-			Msg("[download] File info not found, using size 0")
+		trace.Logf(r.Context(), "download", "File info not found, using size 0")
 		fileInfo = &dao.FileInfo{Path: displayPath, Size: 0}
+	} else {
+		trace.Logf(r.Context(), "filesize", "Got fileSize: %d", fileInfo.Size)
 	}
 
 	// Build target URL with ENCRYPTED path
@@ -195,14 +189,10 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
 
-	log.Debug().
-		Str("req_id", reqID).
-		Str("target", targetURL).
-		Int64("size", fileInfo.Size).
-		Msg("[download] Proxying with decryption")
+	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)
 
 	if err := h.streamProxy.ProxyDownloadDecrypt(w, r, targetURL, passwdInfo, fileInfo.Size); err != nil {
-		log.Error().Err(err).Str("req_id", reqID).Str("path", displayPath).Msg("Failed to decrypt download")
+		log.Error().Err(err).Str("path", displayPath).Msg("Failed to decrypt download")
 		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)
 	}
 }
