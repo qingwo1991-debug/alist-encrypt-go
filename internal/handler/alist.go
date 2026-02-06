@@ -396,6 +396,7 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle filename encryption
+	var encryptedPath string
 	if passwdInfo.EncName {
 		converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
 		fileName := path.Base(uploadPath)
@@ -404,9 +405,9 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 			ext = path.Ext(fileName)
 		}
 		encName := converter.EncryptFileName(fileName)
-		newPath := path.Dir(uploadPath) + "/" + encName + ext
-		r.Header.Set("File-Path", url.QueryEscape(newPath))
-		log.Debug().Str("original", uploadPath).Str("encrypted", newPath).Msg("Encrypted filename for upload")
+		encryptedPath = path.Dir(uploadPath) + "/" + encName + ext
+		r.Header.Set("File-Path", url.QueryEscape(encryptedPath))
+		log.Debug().Str("original", uploadPath).Str("encrypted", encryptedPath).Msg("Encrypted filename for upload")
 	}
 
 	// Encrypt and upload
@@ -415,6 +416,13 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize); err != nil {
 		log.Error().Err(err).Str("path", uploadPath).Msg("Failed to encrypt upload")
 		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
+		return
+	}
+
+	// Update cache mapping after successful upload
+	if passwdInfo.EncName && encryptedPath != "" {
+		h.fileDAO.SetEncPathMapping(uploadPath, encryptedPath)
+		log.Debug().Str("display", uploadPath).Str("encrypted", encryptedPath).Msg("Cached upload path mapping")
 	}
 }
 
@@ -478,6 +486,20 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// Clear cache for deleted items on success
+	var respData map[string]interface{}
+	if err := json.Unmarshal(respBody, &respData); err == nil {
+		if code, ok := respData["code"].(float64); ok && code == 200 {
+			for _, name := range reqData.Names {
+				displayPath := path.Join(reqData.Dir, name)
+				h.fileDAO.DeleteEncPathMapping(displayPath)
+				h.fileDAO.Delete(url.QueryEscape(displayPath))
+				log.Debug().Str("path", displayPath).Msg("Cleared cache for deleted file")
+			}
+		}
+	}
+
 	RespondRaw(w, resp.StatusCode, "application/json", respBody)
 }
 
@@ -554,6 +576,25 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// Update cache on successful rename
+	var respData map[string]interface{}
+	if err := json.Unmarshal(respBody, &respData); err == nil {
+		if code, ok := respData["code"].(float64); ok && code == 200 {
+			// Delete old path mapping
+			h.fileDAO.DeleteEncPathMapping(reqData.Path)
+			h.fileDAO.Delete(url.QueryEscape(reqData.Path))
+
+			// Add new path mapping if filename encryption is enabled
+			if found && passwdInfo.EncName {
+				newDisplayPath := path.Dir(reqData.Path) + "/" + reqData.Name
+				newEncPath := modifiedReq["path"].(string)[:len(path.Dir(reqData.Path))+1] + modifiedReq["name"].(string)
+				h.fileDAO.SetEncPathMapping(newDisplayPath, newEncPath)
+				log.Debug().Str("old", reqData.Path).Str("new", newDisplayPath).Msg("Updated cache for renamed file")
+			}
+		}
+	}
+
 	RespondRaw(w, resp.StatusCode, "application/json", respBody)
 }
 
@@ -633,5 +674,31 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// Update cache on successful move/copy
+	var respData map[string]interface{}
+	if err := json.Unmarshal(respBody, &respData); err == nil {
+		if code, ok := respData["code"].(float64); ok && code == 200 {
+			isMove := endpoint == "/api/fs/move"
+			for i, name := range reqData.Names {
+				srcDisplayPath := path.Join(reqData.SrcDir, name)
+				dstDisplayPath := path.Join(reqData.DstDir, name)
+
+				// For move operations, delete the source cache entry
+				if isMove {
+					h.fileDAO.DeleteEncPathMapping(srcDisplayPath)
+					h.fileDAO.Delete(url.QueryEscape(srcDisplayPath))
+				}
+
+				// Add destination path mapping if filename encryption is enabled
+				if found && passwdInfo.EncName && i < len(fileNames) {
+					dstEncPath := path.Join(reqData.DstDir, fileNames[i])
+					h.fileDAO.SetEncPathMapping(dstDisplayPath, dstEncPath)
+				}
+			}
+			log.Debug().Str("endpoint", endpoint).Int("count", len(reqData.Names)).Msg("Updated cache for moved/copied files")
+		}
+	}
+
 	RespondRaw(w, resp.StatusCode, "application/json", respBody)
 }
