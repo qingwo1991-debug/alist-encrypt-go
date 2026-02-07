@@ -30,9 +30,17 @@ func NewChaCha20(password string, fileSize int64) (*ChaCha20Cipher, error) {
 		fileSize: fileSize,
 	}
 
-	// Key derivation using PBKDF2 - 32 bytes for ChaCha20
-	passwdOutward := pbkdf2.Key([]byte(password), []byte("ChaCha20"), 1000, 32, sha256.New)
-	passwdSalt := hex.EncodeToString(passwdOutward) + strconv.FormatInt(fileSize, 10)
+	// Match Node.js logic: if password is already 32 chars (hex), skip PBKDF2
+	// Note: ChaCha20 uses 32-byte key, so we derive 32 bytes
+	var passwdOutward string
+	if len(password) != 32 {
+		key := pbkdf2.Key([]byte(password), []byte("ChaCha20"), 1000, 32, sha256.New)
+		passwdOutward = hex.EncodeToString(key)
+	} else {
+		// Skip PBKDF2 for pre-derived 32-char passwords
+		passwdOutward = password
+	}
+	passwdSalt := passwdOutward + strconv.FormatInt(fileSize, 10)
 
 	// Generate 32-byte key using SHA256
 	keyHash := sha256.Sum256([]byte(passwdSalt))
@@ -134,6 +142,7 @@ func (c *ChaCha20Cipher) Counter() uint32 {
 
 // GetPasswdOutwardChaCha20 generates the outward password key for filename encryption
 func GetPasswdOutwardChaCha20(password string) string {
-	key := pbkdf2.Key([]byte(password), []byte("ChaCha20"), 1000, 16, sha256.New)
+	// Match constructor: derive 32 bytes, not 16, for consistency with content encryption
+	key := pbkdf2.Key([]byte(password), []byte("ChaCha20"), 1000, 32, sha256.New)
 	return hex.EncodeToString(key)
 }

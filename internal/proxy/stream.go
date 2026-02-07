@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -94,13 +95,6 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		return errors.NewInternalWithCause("failed to create request", err)
 	}
 
-	// Parse Range header for position seeking
-	var startPos int64
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" {
-		startPos = parseRangeStart(rangeHeader)
-	}
-
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return errors.NewProxyErrorWithCause("failed to fetch", err)
@@ -116,22 +110,67 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		return errors.NewDecryptionErrorWithCause("failed to create cipher", err)
 	}
 
-	// Set position for Range requests
-	if startPos > 0 {
-		if err := flowEnc.SetPosition(startPos); err != nil {
+	// Parse and validate Range header
+	rangeReq, err := httputil.ParseRange(r.Header.Get("Range"), fileSize)
+	if err != nil {
+		// Invalid range - return 416 Range Not Satisfiable
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return nil
+	}
+
+	var requestedRange *httputil.Range
+	isRangeRequest := rangeReq != nil && len(rangeReq.Ranges) > 0
+
+	if isRangeRequest {
+		if len(rangeReq.Ranges) > 1 {
+			// Multi-range not supported - serve full content with 200
+			isRangeRequest = false
+		} else {
+			requestedRange = &rangeReq.Ranges[0]
+		}
+	}
+
+	// Set decryption position for range requests
+	if isRangeRequest {
+		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
 			return errors.NewDecryptionErrorWithCause("failed to set position", err)
 		}
 	}
 
-	// Copy response headers and write status
-	httputil.CopyResponseHeaders(w, resp)
-	w.WriteHeader(resp.StatusCode)
+	// Copy only safe headers (NOT Content-Length, NOT Content-Range)
+	httputil.CopySelectiveHeaders(w, resp, []string{
+		"Content-Type",
+		"Content-Disposition",
+		"Cache-Control",
+		"ETag",
+		"Last-Modified",
+	})
+
+	// Always advertise range support
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	var readerToStream io.Reader
+	if isRangeRequest {
+		// Partial content response
+		w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
+		w.Header().Set("Content-Range", requestedRange.ContentRangeHeader(fileSize))
+		w.WriteHeader(http.StatusPartialContent) // 206
+
+		// Limit stream output to exact range
+		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), requestedRange.ContentLength())
+	} else {
+		// Full content response
+		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+		w.WriteHeader(http.StatusOK) // 200
+
+		readerToStream = flowEnc.DecryptReader(resp.Body)
+	}
 
 	// Stream decrypted content with large buffer
-	decryptedReader := flowEnc.DecryptReader(resp.Body)
 	buf := getBuffer()
 	defer putBuffer(buf)
-	_, err = io.CopyBuffer(w, decryptedReader, *buf)
+	_, err = io.CopyBuffer(w, readerToStream, *buf)
 	if err != nil {
 		log.Error().Err(err).Msg("Error streaming decrypted content")
 	}
@@ -176,13 +215,6 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 
 // ProxyDownloadDecryptReq downloads and decrypts content using a pre-built request
 func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
-	// Parse Range header for position seeking
-	var startPos int64
-	rangeHeader := req.Header.Get("Range")
-	if rangeHeader != "" {
-		startPos = parseRangeStart(rangeHeader)
-	}
-
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return errors.NewProxyErrorWithCause("failed to fetch", err)
@@ -198,22 +230,67 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 		return errors.NewDecryptionErrorWithCause("failed to create cipher", err)
 	}
 
-	// Set position for Range requests
-	if startPos > 0 {
-		if err := flowEnc.SetPosition(startPos); err != nil {
+	// Parse and validate Range header
+	rangeReq, err := httputil.ParseRange(req.Header.Get("Range"), fileSize)
+	if err != nil {
+		// Invalid range - return 416 Range Not Satisfiable
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return nil
+	}
+
+	var requestedRange *httputil.Range
+	isRangeRequest := rangeReq != nil && len(rangeReq.Ranges) > 0
+
+	if isRangeRequest {
+		if len(rangeReq.Ranges) > 1 {
+			// Multi-range not supported - serve full content with 200
+			isRangeRequest = false
+		} else {
+			requestedRange = &rangeReq.Ranges[0]
+		}
+	}
+
+	// Set decryption position for range requests
+	if isRangeRequest {
+		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
 			return errors.NewDecryptionErrorWithCause("failed to set position", err)
 		}
 	}
 
-	// Copy response headers and write status
-	httputil.CopyResponseHeaders(w, resp)
-	w.WriteHeader(resp.StatusCode)
+	// Copy only safe headers (NOT Content-Length, NOT Content-Range)
+	httputil.CopySelectiveHeaders(w, resp, []string{
+		"Content-Type",
+		"Content-Disposition",
+		"Cache-Control",
+		"ETag",
+		"Last-Modified",
+	})
+
+	// Always advertise range support
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	var readerToStream io.Reader
+	if isRangeRequest {
+		// Partial content response
+		w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
+		w.Header().Set("Content-Range", requestedRange.ContentRangeHeader(fileSize))
+		w.WriteHeader(http.StatusPartialContent) // 206
+
+		// Limit stream output to exact range
+		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), requestedRange.ContentLength())
+	} else {
+		// Full content response
+		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+		w.WriteHeader(http.StatusOK) // 200
+
+		readerToStream = flowEnc.DecryptReader(resp.Body)
+	}
 
 	// Stream decrypted content with large buffer
-	decryptedReader := flowEnc.DecryptReader(resp.Body)
 	buf := getBuffer()
 	defer putBuffer(buf)
-	_, err = io.CopyBuffer(w, decryptedReader, *buf)
+	_, err = io.CopyBuffer(w, readerToStream, *buf)
 	if err != nil {
 		log.Error().Err(err).Msg("Error streaming decrypted content")
 	}
@@ -221,44 +298,30 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 }
 
 // resolveFileSize extracts file size from response headers if not provided
-func resolveFileSize(fileSize int64, resp *http.Response) int64 {
-	if fileSize > 0 {
-		return fileSize
+func resolveFileSize(cachedSize int64, resp *http.Response) int64 {
+	// Priority 1: Use cached size from directory listing
+	if cachedSize > 0 {
+		return cachedSize
 	}
 
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		fileSize, _ = strconv.ParseInt(cl, 10, 64)
-	}
-
-	// For partial content, try to get total from Content-Range
+	// Priority 2: Extract total from Content-Range (if upstream returned 206)
 	if resp.StatusCode == http.StatusPartialContent {
 		if cr := resp.Header.Get("Content-Range"); cr != "" {
 			// Format: bytes start-end/total
 			if idx := strings.LastIndex(cr, "/"); idx >= 0 {
 				if total, err := strconv.ParseInt(cr[idx+1:], 10, 64); err == nil && total > 0 {
-					fileSize = total
+					return total
 				}
 			}
 		}
 	}
 
-	return fileSize
-}
+	// Priority 3: Use Content-Length (if full response)
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
+			return size
+		}
+	}
 
-// parseRangeStart parses the start position from Range header
-func parseRangeStart(rangeHeader string) int64 {
-	// Format: bytes=start-end or bytes=start-
-	if !strings.HasPrefix(rangeHeader, "bytes=") {
-		return 0
-	}
-	rangeSpec := strings.TrimPrefix(rangeHeader, "bytes=")
-	parts := strings.Split(rangeSpec, "-")
-	if len(parts) < 1 {
-		return 0
-	}
-	start, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return start
+	return 0
 }

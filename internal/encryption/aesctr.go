@@ -32,9 +32,13 @@ func NewAESCTR(password string, fileSize int64) (*AESCTR, error) {
 		fileSize: fileSize,
 	}
 
-	// Key derivation using PBKDF2
-	passwdOutward := pbkdf2.Key([]byte(password), []byte("AES-CTR"), 1000, 16, sha256.New)
-	passwdSalt := hex.EncodeToString(passwdOutward) + strconv.FormatInt(fileSize, 10)
+	// Match Node.js logic: if password is already 32 chars (hex), skip PBKDF2
+	passwdOutward := password
+	if len(password) != 32 {
+		key := pbkdf2.Key([]byte(password), []byte("AES-CTR"), 1000, 16, sha256.New)
+		passwdOutward = hex.EncodeToString(key)
+	}
+	passwdSalt := passwdOutward + strconv.FormatInt(fileSize, 10)
 
 	// Generate key and IV using MD5
 	keyHash := md5.Sum([]byte(passwdSalt))
