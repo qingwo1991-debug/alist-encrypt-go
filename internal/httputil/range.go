@@ -79,7 +79,7 @@ func ParseRange(rangeHeader string, fileSize int64) (*RangeRequest, error) {
 
 		// Validate range is satisfiable
 		if r.Start >= fileSize {
-			return nil, &http.RequestedRangeNotSatisfiable{fileSize}
+			return nil, &RequestedRangeNotSatisfiable{fileSize}
 		}
 
 		// Clamp end to file size
