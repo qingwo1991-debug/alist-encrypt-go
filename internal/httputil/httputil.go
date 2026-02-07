@@ -142,3 +142,12 @@ func WriteResponseWithBody(w http.ResponseWriter, resp *http.Response, body []by
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 }
+
+// CopySelectiveHeaders copies only specified headers from response to writer
+func CopySelectiveHeaders(w http.ResponseWriter, resp *http.Response, allowedHeaders []string) {
+	for _, header := range allowedHeaders {
+		if val := resp.Header.Get(header); val != "" {
+			w.Header().Set(header, val)
+		}
+	}
+}

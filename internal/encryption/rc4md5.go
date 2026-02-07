@@ -2,19 +2,27 @@ package encryption
 
 import (
 	"crypto/md5"
-	"crypto/rc4"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strconv"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
-// RC4MD5 implements RC4-MD5 encryption
+const segmentPosition = 1000000 // 1MB segments for RC4-MD5
+
+// RC4MD5 implements RC4-MD5 encryption with segmentation
 type RC4MD5 struct {
-	password string
-	fileSize int64
-	key      []byte
-	cipher   *rc4.Cipher
-	position int64
+	password   string
+	fileSize   int64
+	fileHexKey string    // Store hex key for segment resets
+	key        []byte
+	position   int64
+	i, j       int       // RC4 state indices
+	sbox       [256]byte // RC4 S-box
 }
 
 // NewRC4MD5 creates a new RC4-MD5 cipher instance
@@ -24,48 +32,102 @@ func NewRC4MD5(password string, fileSize int64) (*RC4MD5, error) {
 		fileSize: fileSize,
 	}
 
-	// Generate key using MD5(password + fileSize)
-	keyStr := password + fmt.Sprintf("%d", fileSize)
-	keyHash := md5.Sum([]byte(keyStr))
-	r.key = keyHash[:]
-
-	// Create RC4 cipher
-	cipher, err := rc4.NewCipher(r.key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create RC4 cipher: %w", err)
+	// Step 1: PBKDF2 derivation (matching Node.js)
+	passwdOutward := password
+	if len(password) != 32 {
+		key := pbkdf2.Key([]byte(password), []byte("RC4"), 1000, 16, sha256.New)
+		passwdOutward = hex.EncodeToString(key)
 	}
-	r.cipher = cipher
+
+	// Step 2: Combine with file size (as string)
+	passwdSalt := passwdOutward + strconv.FormatInt(fileSize, 10)
+
+	// Step 3: MD5 hash to get hex key
+	hash := md5.Sum([]byte(passwdSalt))
+	r.fileHexKey = hex.EncodeToString(hash[:])
+
+	// Step 4: Convert hex to binary key
+	r.key, _ = hex.DecodeString(r.fileHexKey)
+
+	// Initialize KSA with original key
+	if err := r.resetKSA(); err != nil {
+		return nil, err
+	}
 
 	return r, nil
 }
 
-// SetPosition sets the stream position (re-initializes cipher and discards bytes)
+// resetKSA resets the RC4 KSA (Key Scheduling Algorithm) for current segment
+func (r *RC4MD5) resetKSA() error {
+	// Calculate segment offset (0, 1000000, 2000000, ...)
+	offset := (r.position / segmentPosition) * segmentPosition
+
+	// Convert offset to 4-byte big-endian
+	offsetBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(offsetBuf, uint32(offset))
+
+	// Decode hex key to binary
+	rc4Key, _ := hex.DecodeString(r.fileHexKey)
+
+	// XOR offset into last 4 bytes of key
+	j := len(rc4Key) - 4
+	for i := 0; i < 4; i++ {
+		rc4Key[j+i] ^= offsetBuf[i]
+	}
+
+	// Initialize KSA with modified key
+	return r.initKSA(rc4Key)
+}
+
+// initKSA initializes the RC4 S-box using KSA algorithm
+func (r *RC4MD5) initKSA(key []byte) error {
+	// Standard RC4 KSA
+	K := make([]byte, 256)
+	for i := 0; i < 256; i++ {
+		r.sbox[i] = byte(i)
+		K[i] = key[i%len(key)]
+	}
+
+	j := 0
+	for i := 0; i < 256; i++ {
+		j = (j + int(r.sbox[i]) + int(K[i])) % 256
+		r.sbox[i], r.sbox[j] = r.sbox[j], r.sbox[i]
+	}
+
+	r.i = 0
+	r.j = 0
+	return nil
+}
+
+// SetPosition sets the stream position for range requests
 func (r *RC4MD5) SetPosition(position int64) error {
 	if position < 0 {
 		return fmt.Errorf("position cannot be negative")
 	}
 
-	// RC4 is a stream cipher, so we need to regenerate and skip
-	cipher, err := rc4.NewCipher(r.key)
-	if err != nil {
-		return fmt.Errorf("failed to recreate RC4 cipher: %w", err)
-	}
-	r.cipher = cipher
-
-	// Discard bytes up to position (in chunks to save memory)
-	remaining := position
-	buf := make([]byte, 8192)
-	for remaining > 0 {
-		n := int64(len(buf))
-		if remaining < n {
-			n = remaining
-		}
-		r.cipher.XORKeyStream(buf[:n], buf[:n])
-		remaining -= n
-	}
-
 	r.position = position
+
+	// Reset to current segment's key
+	if err := r.resetKSA(); err != nil {
+		return err
+	}
+
+	// Advance within segment
+	offset := position % segmentPosition
+	if offset > 0 {
+		r.prgaAdvance(int(offset))
+	}
+
 	return nil
+}
+
+// prgaAdvance advances the PRGA without producing output
+func (r *RC4MD5) prgaAdvance(count int) {
+	for k := 0; k < count; k++ {
+		r.i = (r.i + 1) % 256
+		r.j = (r.j + int(r.sbox[r.i])) % 256
+		r.sbox[r.i], r.sbox[r.j] = r.sbox[r.j], r.sbox[r.i]
+	}
 }
 
 // Position returns the current stream position
@@ -83,10 +145,25 @@ func (r *RC4MD5) BlockSize() int {
 	return 1
 }
 
-// Encrypt encrypts data in place
+// Encrypt encrypts data in place with segmentation
 func (r *RC4MD5) Encrypt(data []byte) {
-	r.cipher.XORKeyStream(data, data)
-	r.position += int64(len(data))
+	for k := 0; k < len(data); k++ {
+		r.i = (r.i + 1) % 256
+		r.j = (r.j + int(r.sbox[r.i])) % 256
+
+		// Swap
+		r.sbox[r.i], r.sbox[r.j] = r.sbox[r.j], r.sbox[r.i]
+
+		// XOR with keystream
+		data[k] ^= r.sbox[(int(r.sbox[r.i])+int(r.sbox[r.j]))%256]
+
+		r.position++
+
+		// Reset every 1MB
+		if r.position%segmentPosition == 0 {
+			r.resetKSA()
+		}
+	}
 }
 
 // Decrypt decrypts data in place (same as encrypt for RC4)
@@ -111,5 +188,5 @@ func (r *RC4MD5) EncryptWriter(writer io.Writer) io.Writer {
 
 // KeyHex returns the hex-encoded key for debugging
 func (r *RC4MD5) KeyHex() string {
-	return hex.EncodeToString(r.key)
+	return r.fileHexKey
 }
