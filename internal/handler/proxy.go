@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -173,20 +174,49 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		trace.Logf(r.Context(), "download", "Path converted: %s -> %s", displayPath, realPath)
 	}
 
+	// Determine URL prefix first (needed for HEAD request)
+	urlPrefix := "/d"
+	if strings.HasPrefix(r.URL.Path, "/p") {
+		urlPrefix = "/p"
+	}
+
 	// Look up file info by DISPLAY path (how PROPFIND/fs/list cached it)
 	fileInfo, found := h.fileDAO.Get(displayPath)
 	if !found {
-		trace.Logf(r.Context(), "download", "File info not found, using size 0")
-		fileInfo = &dao.FileInfo{Path: displayPath, Size: 0}
+		// File info not cached - send HEAD request to get actual file size
+		trace.Logf(r.Context(), "download", "File info not found, fetching size via HEAD")
+
+		// Build HEAD request URL using the real (encrypted) path
+		headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+		headReq, err := httputil.NewRequest("HEAD", headURL).
+			WithContext(r.Context()).
+			CopyHeaders(r).
+			Build()
+
+		var fileSize int64
+		if err == nil {
+			client := &http.Client{}
+			headResp, err := client.Do(headReq)
+			if err == nil {
+				defer headResp.Body.Close()
+				if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
+					if size, err := strconv.ParseInt(contentLen, 10, 64); err == nil {
+						fileSize = size
+						trace.Logf(r.Context(), "download", "HEAD response: size=%d", fileSize)
+					}
+				}
+			}
+		}
+
+		fileInfo = &dao.FileInfo{Path: displayPath, Size: fileSize}
+		if fileSize == 0 {
+			trace.Logf(r.Context(), "download", "Could not determine file size, using 0")
+		}
 	} else {
 		trace.Logf(r.Context(), "filesize", "Got fileSize: %d", fileInfo.Size)
 	}
 
 	// Build target URL with ENCRYPTED path
-	urlPrefix := "/d"
-	if strings.HasPrefix(r.URL.Path, "/p") {
-		urlPrefix = "/p"
-	}
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
 
 	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)

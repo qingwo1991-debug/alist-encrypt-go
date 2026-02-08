@@ -114,7 +114,26 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		fileSize = fileInfo.Size
 		trace.Logf(r.Context(), "webdav-get", "File info found, size=%d", fileSize)
 	} else {
-		trace.Logf(r.Context(), "webdav-get", "File info not found, using size 0")
+		// File info not cached - send HEAD request to get actual file size
+		trace.Logf(r.Context(), "webdav-get", "File info not found, fetching size via HEAD")
+		headReq, err := httputil.NewRequest("HEAD", targetURL).
+			WithContext(r.Context()).
+			CopyHeaders(r).
+			Build()
+		if err == nil {
+			client := &http.Client{}
+			headResp, err := client.Do(headReq)
+			if err == nil {
+				defer headResp.Body.Close()
+				if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
+					fileSize, _ = strconv.ParseInt(contentLen, 10, 64)
+					trace.Logf(r.Context(), "webdav-get", "HEAD response: size=%d", fileSize)
+				}
+			}
+		}
+		if fileSize == 0 {
+			trace.Logf(r.Context(), "webdav-get", "Could not determine file size, using 0")
+		}
 	}
 
 	// Create new request with modified path
