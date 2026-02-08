@@ -2,7 +2,6 @@ package httputil
 
 import (
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 )
