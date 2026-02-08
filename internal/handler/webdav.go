@@ -8,6 +8,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -114,25 +115,34 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		fileSize = fileInfo.Size
 		trace.Logf(r.Context(), "webdav-get", "File info found, size=%d", fileSize)
 	} else {
-		// File info not cached - send HEAD request to get actual file size
-		trace.Logf(r.Context(), "webdav-get", "File info not found, fetching size via HEAD")
-		headReq, err := httputil.NewRequest("HEAD", targetURL).
-			WithContext(r.Context()).
-			CopyHeaders(r).
-			Build()
-		if err == nil {
-			client := &http.Client{}
-			headResp, err := client.Do(headReq)
+		// Try file size cache first (24-hour cache, very fast)
+		if cachedSize, ok := h.fileDAO.GetFileSize(realPath); ok {
+			fileSize = cachedSize
+			trace.Logf(r.Context(), "webdav-get", "File size from cache: %d", fileSize)
+		} else {
+			// File info not cached - send HEAD request to get actual file size
+			trace.Logf(r.Context(), "webdav-get", "File info not found, fetching size via HEAD")
+			headReq, err := httputil.NewRequest("HEAD", targetURL).
+				WithContext(r.Context()).
+				CopyHeaders(r).
+				Build()
 			if err == nil {
-				defer headResp.Body.Close()
-				if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
-					fileSize, _ = strconv.ParseInt(contentLen, 10, 64)
-					trace.Logf(r.Context(), "webdav-get", "HEAD response: size=%d", fileSize)
+				client := &http.Client{}
+				headResp, err := client.Do(headReq)
+				if err == nil {
+					defer headResp.Body.Close()
+					if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
+						fileSize, _ = strconv.ParseInt(contentLen, 10, 64)
+						trace.Logf(r.Context(), "webdav-get", "HEAD response: size=%d", fileSize)
+
+						// Cache file size for 24 hours (file sizes rarely change)
+						h.fileDAO.SetFileSize(realPath, fileSize, 24*time.Hour)
+					}
 				}
 			}
-		}
-		if fileSize == 0 {
-			trace.Logf(r.Context(), "webdav-get", "Could not determine file size, using 0")
+			if fileSize == 0 {
+				trace.Logf(r.Context(), "webdav-get", "Could not determine file size, using 0")
+			}
 		}
 	}
 

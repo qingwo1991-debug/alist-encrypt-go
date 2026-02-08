@@ -24,17 +24,24 @@ type FileInfo struct {
 
 // FileDAO handles file information caching
 type FileDAO struct {
-	store      *storage.Store
-	cache      *storage.Cache
-	encPathMap sync.Map // displayPath -> encryptedPath mapping
+	store         *storage.Store
+	cache         *storage.Cache
+	encPathMap    sync.Map         // displayPath -> encryptedPath mapping
+	fileSizeCache *FileSizeCache   // High-performance file size cache
 }
 
 // NewFileDAO creates a new file DAO
 func NewFileDAO(store *storage.Store) *FileDAO {
-	return &FileDAO{
-		store: store,
-		cache: storage.NewCache(10 * time.Minute),
+	dao := &FileDAO{
+		store:         store,
+		cache:         storage.NewCache(10 * time.Minute),
+		fileSizeCache: NewFileSizeCache(10000), // Cache up to 10k file sizes
 	}
+
+	// Start background cleanup for expired file size cache entries
+	go dao.cleanupFileSizeCache()
+
+	return dao
 }
 
 // Get retrieves file info from cache or store
@@ -86,6 +93,43 @@ func (d *FileDAO) GetEncPath(displayPath string) (string, bool) {
 // DeleteEncPathMapping removes the display path to encrypted path mapping
 func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
 	d.encPathMap.Delete(displayPath)
+}
+
+// GetFileSize retrieves cached file size (optimized for long-term caching)
+func (d *FileDAO) GetFileSize(path string) (int64, bool) {
+	return d.fileSizeCache.Get(path)
+}
+
+// SetFileSize caches file size with TTL (default 24 hours for stability)
+func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
+	if ttl == 0 {
+		ttl = 24 * time.Hour // Default: 24 hours
+	}
+	d.fileSizeCache.Set(path, size, ttl)
+}
+
+// DeleteFileSize removes cached file size
+func (d *FileDAO) DeleteFileSize(path string) {
+	d.fileSizeCache.Delete(path)
+}
+
+// FileSizeCacheStats returns file size cache statistics
+func (d *FileDAO) FileSizeCacheStats() map[string]interface{} {
+	return d.fileSizeCache.Stats()
+}
+
+// cleanupFileSizeCache runs periodic cleanup of expired entries
+func (d *FileDAO) cleanupFileSizeCache() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		removed := d.fileSizeCache.CleanExpired()
+		if removed > 0 {
+			// Log cleanup stats if needed
+			_ = removed
+		}
+	}
 }
 
 // SetFromAlistResponse parses and stores file info from Alist API response
