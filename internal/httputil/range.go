@@ -98,7 +98,15 @@ func ParseRange(rangeHeader string, fileSize int64) (*RangeRequest, error) {
 
 // ContentLength returns the length of the range in bytes
 func (r *Range) ContentLength() int64 {
-	return r.End - r.Start + 1
+	if r.End < r.Start {
+		return 0
+	}
+	length := r.End - r.Start + 1
+	// Overflow detection: if addition caused overflow, length would be negative
+	if length < 0 {
+		return 0
+	}
+	return length
 }
 
 // ContentRangeHeader generates the Content-Range header value

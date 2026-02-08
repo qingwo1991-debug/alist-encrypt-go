@@ -87,9 +87,19 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 
 // ProxyDownloadDecrypt downloads and decrypts content
 func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
+	// Handle empty files without decryption overhead
+	if fileSize == 0 {
+		w.Header().Set("Content-Length", "0")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.WriteHeader(http.StatusOK)
+		return nil
+	}
+
+	// Build request WITHOUT Range header - we always fetch full encrypted file
+	// Client Range is handled AFTER decryption
 	req, err := httputil.NewRequest("GET", targetURL).
 		WithContext(r.Context()).
-		CopyHeaders(r).
+		CopyHeadersExcept(r, "Range").
 		Build()
 	if err != nil {
 		return errors.NewInternalWithCause("failed to create request", err)
@@ -138,12 +148,12 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// Copy only safe headers (NOT Content-Length, NOT Content-Range)
+	// Copy only safe headers (NOT Content-Length, NOT Content-Range, NOT ETag)
+	// ETag is removed because encrypted and decrypted content differ
 	httputil.CopySelectiveHeaders(w, resp, []string{
 		"Content-Type",
 		"Content-Disposition",
 		"Cache-Control",
-		"ETag",
 		"Last-Modified",
 	})
 
@@ -258,12 +268,12 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 		}
 	}
 
-	// Copy only safe headers (NOT Content-Length, NOT Content-Range)
+	// Copy only safe headers (NOT Content-Length, NOT Content-Range, NOT ETag)
+	// ETag is removed because encrypted and decrypted content differ
 	httputil.CopySelectiveHeaders(w, resp, []string{
 		"Content-Type",
 		"Content-Disposition",
 		"Cache-Control",
-		"ETag",
 		"Last-Modified",
 	})
 
