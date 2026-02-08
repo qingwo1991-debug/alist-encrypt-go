@@ -8,7 +8,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -22,21 +21,23 @@ import (
 
 // WebDAVHandler handles WebDAV requests
 type WebDAVHandler struct {
-	cfg          *config.Config
-	streamProxy  *proxy.StreamProxy
-	fileDAO      *dao.FileDAO
-	passwdDAO    *dao.PasswdDAO
-	proxyHandler *ProxyHandler
+	cfg           *config.Config
+	streamProxy   *proxy.StreamProxy
+	fileDAO       *dao.FileDAO
+	passwdDAO     *dao.PasswdDAO
+	proxyHandler  *ProxyHandler
+	strategyCache *StrategyCache
 }
 
 // NewWebDAVHandler creates a new WebDAV handler
 func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO) *WebDAVHandler {
 	return &WebDAVHandler{
-		cfg:          cfg,
-		streamProxy:  streamProxy,
-		fileDAO:      fileDAO,
-		passwdDAO:    passwdDAO,
-		proxyHandler: NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO),
+		cfg:           cfg,
+		streamProxy:   streamProxy,
+		fileDAO:       fileDAO,
+		passwdDAO:     passwdDAO,
+		proxyHandler:  NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO),
+		strategyCache: NewStrategyCache(1000),
 	}
 }
 
@@ -109,42 +110,9 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Look up file info using DISPLAY path (davPath), not realPath
 	// PROPFIND caches entries by display path after decrypting filenames
-	fileInfo, infoFound := h.fileDAO.Get(davPath)
-	var fileSize int64
-	if infoFound {
-		fileSize = fileInfo.Size
-		trace.Logf(r.Context(), "webdav-get", "File info found, size=%d", fileSize)
-	} else {
-		// Try file size cache first (24-hour cache, very fast)
-		if cachedSize, ok := h.fileDAO.GetFileSize(realPath); ok {
-			fileSize = cachedSize
-			trace.Logf(r.Context(), "webdav-get", "File size from cache: %d", fileSize)
-		} else {
-			// File info not cached - send HEAD request to get actual file size
-			trace.Logf(r.Context(), "webdav-get", "File info not found, fetching size via HEAD")
-			headReq, err := httputil.NewRequest("HEAD", targetURL).
-				WithContext(r.Context()).
-				CopyHeaders(r).
-				Build()
-			if err == nil {
-				client := &http.Client{}
-				headResp, err := client.Do(headReq)
-				if err == nil {
-					defer headResp.Body.Close()
-					if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
-						fileSize, _ = strconv.ParseInt(contentLen, 10, 64)
-						trace.Logf(r.Context(), "webdav-get", "HEAD response: size=%d", fileSize)
+	fileSize, usedStrategy := h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
 
-						// Cache file size for 24 hours (file sizes rarely change)
-						h.fileDAO.SetFileSize(realPath, fileSize, 24*time.Hour)
-					}
-				}
-			}
-			if fileSize == 0 {
-				trace.Logf(r.Context(), "webdav-get", "Could not determine file size, using 0")
-			}
-		}
-	}
+	trace.Logf(r.Context(), "webdav-get", "File size: %d, strategy: %s", fileSize, usedStrategy)
 
 	// Create new request with modified path
 	proxyReq, err := httputil.NewRequest(r.Method, targetURL).
