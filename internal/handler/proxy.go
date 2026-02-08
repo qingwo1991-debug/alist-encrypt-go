@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,14 +24,15 @@ import (
 
 // ProxyHandler handles proxy requests
 type ProxyHandler struct {
-	cfg          *config.Config
-	streamProxy  *proxy.StreamProxy
-	fileDAO      *dao.FileDAO
-	passwdDAO    *dao.PasswdDAO
-	redirectMap  sync.Map // key -> redirect info
-	client       *proxy.Client
-	redirectKeys []string
-	keysMu       sync.Mutex
+	cfg           *config.Config
+	streamProxy   *proxy.StreamProxy
+	fileDAO       *dao.FileDAO
+	passwdDAO     *dao.PasswdDAO
+	redirectMap   sync.Map // key -> redirect info
+	client        *proxy.Client
+	redirectKeys  []string
+	keysMu        sync.Mutex
+	strategyCache *StrategyCache
 }
 
 const maxRedirectEntries = 10000
@@ -48,11 +48,12 @@ type redirectInfo struct {
 // NewProxyHandler creates a new proxy handler
 func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO) *ProxyHandler {
 	h := &ProxyHandler{
-		cfg:         cfg,
-		streamProxy: streamProxy,
-		fileDAO:     fileDAO,
-		passwdDAO:   passwdDAO,
-		client:      proxy.NewClient(cfg),
+		cfg:           cfg,
+		streamProxy:   streamProxy,
+		fileDAO:       fileDAO,
+		passwdDAO:     passwdDAO,
+		client:        proxy.NewClient(cfg),
+		strategyCache: NewStrategyCache(1000),
 	}
 	go h.cleanupRedirects()
 	return h
@@ -181,49 +182,9 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up file info by DISPLAY path (how PROPFIND/fs/list cached it)
-	fileInfo, found := h.fileDAO.Get(displayPath)
-	if !found {
-		// Try file size cache first (24-hour cache, very fast)
-		if cachedSize, ok := h.fileDAO.GetFileSize(realPath); ok {
-			fileInfo = &dao.FileInfo{Path: displayPath, Size: cachedSize}
-			trace.Logf(r.Context(), "download", "File size from cache: %d", cachedSize)
-		} else {
-			// File info not cached - send HEAD request to get actual file size
-			trace.Logf(r.Context(), "download", "File info not found, fetching size via HEAD")
+	fileInfo, usedStrategy := h.getFileSizeWithStrategy(displayPath, realPath, urlPrefix, r)
 
-			// Build HEAD request URL using the real (encrypted) path
-			headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
-			headReq, err := httputil.NewRequest("HEAD", headURL).
-				WithContext(r.Context()).
-				CopyHeaders(r).
-				Build()
-
-			var fileSize int64
-			if err == nil {
-				client := &http.Client{}
-				headResp, err := client.Do(headReq)
-				if err == nil {
-					defer headResp.Body.Close()
-					if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
-						if size, err := strconv.ParseInt(contentLen, 10, 64); err == nil {
-							fileSize = size
-							trace.Logf(r.Context(), "download", "HEAD response: size=%d", fileSize)
-
-							// Cache file size for 24 hours (file sizes rarely change)
-							h.fileDAO.SetFileSize(realPath, fileSize, 24*time.Hour)
-						}
-					}
-				}
-			}
-
-			fileInfo = &dao.FileInfo{Path: displayPath, Size: fileSize}
-			if fileSize == 0 {
-				trace.Logf(r.Context(), "download", "Could not determine file size, using 0")
-			}
-		}
-	} else {
-		trace.Logf(r.Context(), "filesize", "Got fileSize: %d", fileInfo.Size)
-	}
+	trace.Logf(r.Context(), "download", "File size: %d, strategy: %s", fileInfo.Size, usedStrategy)
 
 	// Build target URL with ENCRYPTED path
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)

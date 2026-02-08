@@ -42,7 +42,8 @@
       "Bash(git commit:*)",
       "Bash(set HTTP_PROXY=http://192.168.1.15:7890)",
       "Bash(set HTTPS_PROXY=http://192.168.1.15:7890)",
-      "Bash(set GOPROXY=https://goproxy.io,direct)"
+      "Bash(set GOPROXY=https://goproxy.io,direct)",
+      "Bash(git pull:*)"
     ]
   }
 }
