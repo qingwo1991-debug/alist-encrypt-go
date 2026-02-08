@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// MinFileSizeForCache is the minimum file size to cache (1KB)
+// This prevents caching error responses which are typically very small
+const MinFileSizeForCache = 1024
+
 // FileSizeCache provides high-performance file size caching
 // File sizes rarely change, so we can cache them for extended periods
 type FileSizeCache struct {
@@ -33,7 +37,7 @@ func NewFileSizeCache(maxSize int) *FileSizeCache {
 	}
 }
 
-// Get retrieves cached file size
+// Get retrieves cached file size with validation
 func (c *FileSizeCache) Get(path string) (int64, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -45,6 +49,12 @@ func (c *FileSizeCache) Get(path string) (int64, bool) {
 
 	// Check expiration
 	if time.Now().After(entry.ExpiresAt) {
+		return 0, false
+	}
+
+	// Validate cached size is reasonable (prevent using corrupted cache entries)
+	if entry.Size < MinFileSizeForCache {
+		// Cached value is suspiciously small, invalidate it
 		return 0, false
 	}
 
@@ -101,6 +111,33 @@ func (c *FileSizeCache) CleanExpired() int {
 
 	for path, entry := range c.entries {
 		if now.After(entry.ExpiresAt) {
+			delete(c.entries, path)
+			removed++
+		}
+	}
+
+	// Rebuild LRU list
+	if removed > 0 {
+		newList := make([]string, 0, len(c.entries))
+		for _, path := range c.lruList {
+			if _, exists := c.entries[path]; exists {
+				newList = append(newList, path)
+			}
+		}
+		c.lruList = newList
+	}
+
+	return removed
+}
+
+// ClearSuspiciousEntries removes cache entries with unrealistic file sizes
+func (c *FileSizeCache) ClearSuspiciousEntries(minSize int64) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	removed := 0
+	for path, entry := range c.entries {
+		if entry.Size < minSize {
 			delete(c.entries, path)
 			removed++
 		}
