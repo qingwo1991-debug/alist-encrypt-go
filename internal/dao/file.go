@@ -38,6 +38,13 @@ func NewFileDAO(store *storage.Store) *FileDAO {
 		fileSizeCache: NewFileSizeCache(10000), // Cache up to 10k file sizes
 	}
 
+	// Clean up suspicious cache entries on startup (e.g., 9-byte error responses)
+	removed := dao.fileSizeCache.ClearSuspiciousEntries(MinFileSizeForCache)
+	if removed > 0 {
+		// Log would require importing log package, keeping it simple for now
+		_ = removed
+	}
+
 	// Start background cleanup for expired file size cache entries
 	go dao.cleanupFileSizeCache()
 

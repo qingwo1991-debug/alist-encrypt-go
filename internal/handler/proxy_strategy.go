@@ -2,9 +2,11 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/dao"
@@ -126,11 +128,35 @@ func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, ctx cont
 	}
 	defer headResp.Body.Close()
 
+	// Validate HTTP status code
+	if headResp.StatusCode != http.StatusOK {
+		trace.Logf(ctx, "head-request", "HEAD request failed with status %d", headResp.StatusCode)
+		return 0, fmt.Errorf("HEAD request failed with status %d", headResp.StatusCode)
+	}
+
+	// Reject HTML error pages
+	contentType := headResp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/html") {
+		trace.Logf(ctx, "head-request", "Received HTML response (likely error page)")
+		return 0, fmt.Errorf("received HTML response (likely error page)")
+	}
+
 	if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
 		size, err := strconv.ParseInt(contentLen, 10, 64)
-		if err == nil && size > 0 {
-			return size, nil
+		if err != nil {
+			return 0, err
 		}
+
+		// Validate minimum size to prevent caching error responses
+		if size < MinFileSizeForCache {
+			trace.Logf(ctx, "head-request", "File size %d too small (min %d), likely error response",
+				size, MinFileSizeForCache)
+			return 0, fmt.Errorf("file size %d too small (min %d), likely error response",
+				size, MinFileSizeForCache)
+		}
+
+		trace.Logf(ctx, "head-request", "HEAD request succeeded, size=%d", size)
+		return size, nil
 	}
 
 	return 0, ErrStrategyFailed
