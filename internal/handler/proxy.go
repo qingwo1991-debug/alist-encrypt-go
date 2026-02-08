@@ -183,34 +183,43 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	// Look up file info by DISPLAY path (how PROPFIND/fs/list cached it)
 	fileInfo, found := h.fileDAO.Get(displayPath)
 	if !found {
-		// File info not cached - send HEAD request to get actual file size
-		trace.Logf(r.Context(), "download", "File info not found, fetching size via HEAD")
+		// Try file size cache first (24-hour cache, very fast)
+		if cachedSize, ok := h.fileDAO.GetFileSize(realPath); ok {
+			fileInfo = &dao.FileInfo{Path: displayPath, Size: cachedSize}
+			trace.Logf(r.Context(), "download", "File size from cache: %d", cachedSize)
+		} else {
+			// File info not cached - send HEAD request to get actual file size
+			trace.Logf(r.Context(), "download", "File info not found, fetching size via HEAD")
 
-		// Build HEAD request URL using the real (encrypted) path
-		headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
-		headReq, err := httputil.NewRequest("HEAD", headURL).
-			WithContext(r.Context()).
-			CopyHeaders(r).
-			Build()
+			// Build HEAD request URL using the real (encrypted) path
+			headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+			headReq, err := httputil.NewRequest("HEAD", headURL).
+				WithContext(r.Context()).
+				CopyHeaders(r).
+				Build()
 
-		var fileSize int64
-		if err == nil {
-			client := &http.Client{}
-			headResp, err := client.Do(headReq)
+			var fileSize int64
 			if err == nil {
-				defer headResp.Body.Close()
-				if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
-					if size, err := strconv.ParseInt(contentLen, 10, 64); err == nil {
-						fileSize = size
-						trace.Logf(r.Context(), "download", "HEAD response: size=%d", fileSize)
+				client := &http.Client{}
+				headResp, err := client.Do(headReq)
+				if err == nil {
+					defer headResp.Body.Close()
+					if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
+						if size, err := strconv.ParseInt(contentLen, 10, 64); err == nil {
+							fileSize = size
+							trace.Logf(r.Context(), "download", "HEAD response: size=%d", fileSize)
+
+							// Cache file size for 24 hours (file sizes rarely change)
+							h.fileDAO.SetFileSize(realPath, fileSize, 24*time.Hour)
+						}
 					}
 				}
 			}
-		}
 
-		fileInfo = &dao.FileInfo{Path: displayPath, Size: fileSize}
-		if fileSize == 0 {
-			trace.Logf(r.Context(), "download", "Could not determine file size, using 0")
+			fileInfo = &dao.FileInfo{Path: displayPath, Size: fileSize}
+			if fileSize == 0 {
+				trace.Logf(r.Context(), "download", "Could not determine file size, using 0")
+			}
 		}
 	} else {
 		trace.Logf(r.Context(), "filesize", "Got fileSize: %d", fileInfo.Size)
