@@ -40,7 +40,7 @@ func NewPrefetchManager(cfg *config.Config, fileDAO *dao.FileDAO, maxWorkers int
 }
 
 // PrefetchFileSize fetches file size in background and caches it
-func (pm *PrefetchManager) PrefetchFileSize(displayPath, encryptedPath string, passwdInfo *config.PasswdInfo) {
+func (pm *PrefetchManager) PrefetchFileSize(displayPath, encryptedPath string, passwdInfo *config.PasswdInfo, authHeader, cookieHeader string) {
 	// Check if already cached
 	if _, ok := pm.fileDAO.GetFileSize(encryptedPath); ok {
 		return // Already cached, skip
@@ -71,9 +71,29 @@ func (pm *PrefetchManager) PrefetchFileSize(displayPath, encryptedPath string, p
 
 		// Build HEAD request URL
 		targetURL := pm.cfg.GetAlistURL() + "/dav" + encryptedPath
-		headReq, err := httputil.NewRequest("HEAD", targetURL).
-			WithContext(ctx).
-			Build()
+
+		// Log authentication status
+		hasAuth := authHeader != ""
+		hasCookie := cookieHeader != ""
+		log.Debug().
+			Str("path", displayPath).
+			Bool("auth", hasAuth).
+			Bool("cookie", hasCookie).
+			Msg("Building prefetch HEAD request")
+
+		// Build request with authentication headers
+		reqBuilder := httputil.NewRequest("HEAD", targetURL).
+			WithContext(ctx)
+
+		// Add authentication headers if present
+		if authHeader != "" {
+			reqBuilder = reqBuilder.WithHeader("Authorization", authHeader)
+		}
+		if cookieHeader != "" {
+			reqBuilder = reqBuilder.WithHeader("Cookie", cookieHeader)
+		}
+
+		headReq, err := reqBuilder.Build()
 		if err != nil {
 			log.Debug().Err(err).Str("path", displayPath).Msg("Failed to create prefetch HEAD request")
 			return
@@ -88,6 +108,15 @@ func (pm *PrefetchManager) PrefetchFileSize(displayPath, encryptedPath string, p
 		}
 		defer headResp.Body.Close()
 
+		// Check status code
+		if headResp.StatusCode != http.StatusOK {
+			log.Debug().
+				Str("path", displayPath).
+				Int("status", headResp.StatusCode).
+				Msg("Prefetch HEAD request failed with non-200 status")
+			return
+		}
+
 		// Extract file size
 		if contentLen := headResp.Header.Get("Content-Length"); contentLen != "" {
 			if size, err := httputil.ParseInt64(contentLen); err == nil && size > 0 {
@@ -96,16 +125,16 @@ func (pm *PrefetchManager) PrefetchFileSize(displayPath, encryptedPath string, p
 				log.Debug().
 					Str("path", displayPath).
 					Int64("size", size).
-					Msg("Prefetched file size")
+					Msg("Prefetched file size successfully")
 			}
 		}
 	}()
 }
 
 // PrefetchBatch prefetches multiple file sizes in parallel
-func (pm *PrefetchManager) PrefetchBatch(items []PrefetchItem) {
+func (pm *PrefetchManager) PrefetchBatch(items []PrefetchItem, authHeader, cookieHeader string) {
 	for _, item := range items {
-		pm.PrefetchFileSize(item.DisplayPath, item.EncryptedPath, item.PasswdInfo)
+		pm.PrefetchFileSize(item.DisplayPath, item.EncryptedPath, item.PasswdInfo, authHeader, cookieHeader)
 	}
 }
 
@@ -114,6 +143,20 @@ type PrefetchItem struct {
 	DisplayPath   string
 	EncryptedPath string
 	PasswdInfo    *config.PasswdInfo
+}
+
+// PrefetchWithAuth is a convenience wrapper that extracts auth headers from request
+func (pm *PrefetchManager) PrefetchWithAuth(displayPath, encryptedPath string, passwdInfo *config.PasswdInfo, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	cookieHeader := r.Header.Get("Cookie")
+	pm.PrefetchFileSize(displayPath, encryptedPath, passwdInfo, authHeader, cookieHeader)
+}
+
+// PrefetchBatchWithAuth is a convenience wrapper for batch prefetch with auth from request
+func (pm *PrefetchManager) PrefetchBatchWithAuth(items []PrefetchItem, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	cookieHeader := r.Header.Get("Cookie")
+	pm.PrefetchBatch(items, authHeader, cookieHeader)
 }
 
 // Shutdown gracefully stops the prefetch manager

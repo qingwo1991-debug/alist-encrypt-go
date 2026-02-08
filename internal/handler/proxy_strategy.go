@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"path"
@@ -69,7 +68,7 @@ func (h *ProxyHandler) executeStrategyHTTP(strategy StrategyType, displayPath, r
 	case StrategyHEADRequest:
 		// Execute HEAD request
 		headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
-		size, err := h.executeHEADRequestHTTP(headURL, realPath, r.Context())
+		size, err := h.executeHEADRequestHTTP(headURL, realPath, r)
 		if err != nil {
 			return nil, err
 		}
@@ -99,7 +98,7 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 	// Level 3: HEAD request (slow, 10-50ms)
 	trace.Logf(ctx, "fallback", "Cache miss, trying HEAD request")
 	headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
-	size, err := h.executeHEADRequestHTTP(headURL, realPath, ctx)
+	size, err := h.executeHEADRequestHTTP(headURL, realPath, r)
 	if err == nil && size > 0 {
 		// Cache for 24 hours
 		h.fileDAO.SetFileSize(realPath, size, 24*time.Hour)
@@ -113,17 +112,27 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 }
 
 // executeHEADRequestHTTP sends a HEAD request to get file size (HTTP API version)
-func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, ctx context.Context) (int64, error) {
+func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, r *http.Request) (int64, error) {
+	ctx := r.Context()
+
+	// Log if we're copying auth headers
+	hasAuth := r.Header.Get("Authorization") != ""
+	hasCookie := r.Header.Get("Cookie") != ""
+	trace.Logf(ctx, "head-request", "Building HEAD request (auth=%v, cookie=%v)", hasAuth, hasCookie)
+
 	headReq, err := httputil.NewRequest("HEAD", headURL).
 		WithContext(ctx).
+		CopyHeadersExcept(r, "Host", "Content-Length", "Content-Type", "Accept-Encoding").
 		Build()
 	if err != nil {
+		trace.Logf(ctx, "head-request", "Failed to build HEAD request: %v", err)
 		return 0, err
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	headResp, err := client.Do(headReq)
 	if err != nil {
+		trace.Logf(ctx, "head-request", "HEAD request failed: %v", err)
 		return 0, err
 	}
 	defer headResp.Body.Close()
@@ -133,6 +142,9 @@ func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, ctx cont
 		trace.Logf(ctx, "head-request", "HEAD request failed with status %d", headResp.StatusCode)
 		return 0, fmt.Errorf("HEAD request failed with status %d", headResp.StatusCode)
 	}
+
+	// Log successful authentication
+	trace.Logf(ctx, "head-request", "HEAD request succeeded with status 200")
 
 	// Reject HTML error pages
 	contentType := headResp.Header.Get("Content-Type")
