@@ -70,7 +70,25 @@ func (h *ProxyHandler) cleanupRedirects() {
 			}
 			return true
 		})
+
+		// Cleanup redirectKeys slice to prevent memory leak
+		// Remove entries that no longer exist in the map
+		h.cleanupRedirectKeys()
 	}
+}
+
+// cleanupRedirectKeys removes stale entries from redirectKeys slice
+func (h *ProxyHandler) cleanupRedirectKeys() {
+	h.keysMu.Lock()
+	defer h.keysMu.Unlock()
+
+	validKeys := make([]string, 0, len(h.redirectKeys))
+	for _, key := range h.redirectKeys {
+		if _, ok := h.redirectMap.Load(key); ok {
+			validKeys = append(validKeys, key)
+		}
+	}
+	h.redirectKeys = validKeys
 }
 
 // HandleRedirect handles /redirect/:key for 302 redirect decryption
