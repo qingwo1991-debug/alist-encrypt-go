@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"path"
@@ -27,7 +26,7 @@ func (h *WebDAVHandler) getFileSizeWithStrategy(davPath, realPath, targetURL str
 			strategy.Strategy, dirPath, strategy.SuccessCount)
 
 		// Try the learned strategy directly
-		size, err := h.executeStrategy(strategy.Strategy, davPath, realPath, targetURL, r.Context())
+		size, err := h.executeStrategy(strategy.Strategy, davPath, realPath, targetURL, r)
 		if err == nil && size > 0 {
 			// Success! Record it
 			h.strategyCache.RecordSuccess(dirPath, strategy.Strategy)
@@ -53,7 +52,7 @@ func (h *WebDAVHandler) getFileSizeWithStrategy(davPath, realPath, targetURL str
 }
 
 // executeStrategy executes a specific strategy to get file size
-func (h *WebDAVHandler) executeStrategy(strategy StrategyType, davPath, realPath, targetURL string, ctx context.Context) (int64, error) {
+func (h *WebDAVHandler) executeStrategy(strategy StrategyType, davPath, realPath, targetURL string, r *http.Request) (int64, error) {
 	switch strategy {
 	case StrategyFileInfoCache:
 		// Try file info cache
@@ -71,7 +70,7 @@ func (h *WebDAVHandler) executeStrategy(strategy StrategyType, davPath, realPath
 
 	case StrategyHEADRequest:
 		// Execute HEAD request
-		return h.executeHEADRequest(targetURL, realPath, ctx)
+		return h.executeHEADRequest(targetURL, realPath, r)
 
 	default:
 		return 0, ErrStrategyFailed
@@ -96,7 +95,7 @@ func (h *WebDAVHandler) fallbackChain(davPath, realPath, targetURL string, r *ht
 
 	// Level 3: HEAD request (slow, 10-50ms)
 	trace.Logf(ctx, "fallback", "Cache miss, trying HEAD request")
-	size, err := h.executeHEADRequest(targetURL, realPath, ctx)
+	size, err := h.executeHEADRequest(targetURL, realPath, r)
 	if err == nil && size > 0 {
 		// Cache for 24 hours
 		h.fileDAO.SetFileSize(realPath, size, 24*time.Hour)
@@ -110,17 +109,27 @@ func (h *WebDAVHandler) fallbackChain(davPath, realPath, targetURL string, r *ht
 }
 
 // executeHEADRequest sends a HEAD request to get file size
-func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, ctx context.Context) (int64, error) {
+func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, r *http.Request) (int64, error) {
+	ctx := r.Context()
+
+	// Log if we're copying auth headers
+	hasAuth := r.Header.Get("Authorization") != ""
+	hasCookie := r.Header.Get("Cookie") != ""
+	trace.Logf(ctx, "head-request", "Building HEAD request (auth=%v, cookie=%v)", hasAuth, hasCookie)
+
 	headReq, err := httputil.NewRequest("HEAD", targetURL).
 		WithContext(ctx).
+		CopyHeadersExcept(r, "Host", "Content-Length", "Content-Type", "Accept-Encoding").
 		Build()
 	if err != nil {
+		trace.Logf(ctx, "head-request", "Failed to build HEAD request: %v", err)
 		return 0, err
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	headResp, err := client.Do(headReq)
 	if err != nil {
+		trace.Logf(ctx, "head-request", "HEAD request failed: %v", err)
 		return 0, err
 	}
 	defer headResp.Body.Close()
@@ -130,6 +139,9 @@ func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, ctx conte
 		trace.Logf(ctx, "head-request", "HEAD request failed with status %d", headResp.StatusCode)
 		return 0, fmt.Errorf("HEAD request failed with status %d", headResp.StatusCode)
 	}
+
+	// Log successful authentication
+	trace.Logf(ctx, "head-request", "HEAD request succeeded with status 200")
 
 	// Reject HTML error pages
 	contentType := headResp.Header.Get("Content-Type")
