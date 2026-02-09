@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ type AESCTR struct {
 	fileSize int64
 	key      []byte
 	iv       []byte
+	sourceIv []byte // Original IV for position seeking
 	block    cipher.Block
 	stream   cipher.Stream
 	position int64
@@ -48,6 +48,10 @@ func NewAESCTR(password string, fileSize int64) (*AESCTR, error) {
 	a.iv = make([]byte, 16)
 	copy(a.iv, ivHash[:])
 
+	// Save original IV for position seeking
+	a.sourceIv = make([]byte, 16)
+	copy(a.sourceIv, a.iv)
+
 	// Create AES block cipher
 	block, err := aes.NewCipher(a.key)
 	if err != nil {
@@ -65,10 +69,9 @@ func (a *AESCTR) SetPosition(position int64) error {
 		return fmt.Errorf("position cannot be negative")
 	}
 
-	// Reset IV to original
-	ivHash := md5.Sum([]byte(strconv.FormatInt(a.fileSize, 10)))
-	a.iv = make([]byte, 16)
-	copy(a.iv, ivHash[:])
+	// Restore IV from sourceIv (matches OpenList-Encrypt behavior)
+	a.iv = make([]byte, len(a.sourceIv))
+	copy(a.iv, a.sourceIv)
 
 	// Calculate how many 16-byte blocks to skip
 	blockCount := position / 16
@@ -91,15 +94,35 @@ func (a *AESCTR) SetPosition(position int64) error {
 }
 
 // incrementIV increments the 128-bit IV counter by the given amount
-func (a *AESCTR) incrementIV(count int64) {
-	carry := uint64(count)
-	lower := binary.BigEndian.Uint64(a.iv[8:16])
-	newLower := lower + carry
-	binary.BigEndian.PutUint64(a.iv[8:16], newLower)
+// Must match Node.js alist-encrypt's aesCTR.js implementation exactly
+func (a *AESCTR) incrementIV(increment int64) {
+	// Match Node.js aesCTR.js incrementIV implementation
+	const maxUint32 = uint64(0xffffffff)
+	inc := uint64(increment)
+	incrementBig := int64(inc / maxUint32)
+	incrementLittle := int64(inc%maxUint32) - incrementBig
 
-	if newLower < lower {
-		upper := binary.BigEndian.Uint64(a.iv[0:8])
-		binary.BigEndian.PutUint64(a.iv[0:8], upper+1)
+	overflow := int64(0)
+	for idx := 0; idx < 4; idx++ {
+		offset := 12 - idx*4
+		num := int64(uint32(a.iv[offset])<<24 | uint32(a.iv[offset+1])<<16 |
+			uint32(a.iv[offset+2])<<8 | uint32(a.iv[offset+3]))
+		incPart := overflow
+		if idx == 0 {
+			incPart += incrementLittle
+		}
+		if idx == 1 {
+			incPart += incrementBig
+		}
+		num += incPart
+		numBig := num / int64(maxUint32)
+		numLittle := num%int64(maxUint32) - numBig
+		overflow = numBig
+		v := uint32(numLittle)
+		a.iv[offset] = byte(v >> 24)
+		a.iv[offset+1] = byte(v >> 16)
+		a.iv[offset+2] = byte(v >> 8)
+		a.iv[offset+3] = byte(v)
 	}
 }
 
