@@ -27,6 +27,7 @@ type WebDAVHandler struct {
 	passwdDAO     *dao.PasswdDAO
 	proxyHandler  *ProxyHandler
 	strategyCache *StrategyCache
+	sizeResolver  *FileSizeResolver
 }
 
 // NewWebDAVHandler creates a new WebDAV handler
@@ -38,6 +39,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		passwdDAO:     passwdDAO,
 		proxyHandler:  NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO),
 		strategyCache: NewStrategyCache(1000),
+		sizeResolver:  NewFileSizeResolver(fileDAO, 20),
 	}
 }
 

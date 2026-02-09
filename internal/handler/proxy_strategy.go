@@ -160,11 +160,11 @@ func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, r *http.
 		}
 
 		// Validate minimum size to prevent caching error responses
-		if size < MinFileSizeForCache {
+		if !IsValidSize(size) {
 			trace.Logf(ctx, "head-request", "File size %d too small (min %d), likely error response",
-				size, MinFileSizeForCache)
+				size, MinValidFileSize)
 			return 0, fmt.Errorf("file size %d too small (min %d), likely error response",
-				size, MinFileSizeForCache)
+				size, MinValidFileSize)
 		}
 
 		trace.Logf(ctx, "head-request", "HEAD request succeeded, size=%d", size)

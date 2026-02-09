@@ -12,6 +12,7 @@ const (
 	StrategyFileInfoCache StrategyType = "file_info_cache" // File info cache (fastest)
 	StrategyFileSizeCache StrategyType = "file_size_cache" // File size cache (fast)
 	StrategyHEADRequest   StrategyType = "head_request"    // HEAD request (slow)
+	StrategyRangeRequest  StrategyType = "range_request"   // Range request (most reliable)
 	StrategyPROPFIND      StrategyType = "propfind"        // PROPFIND request (slowest)
 )
 
