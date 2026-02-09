@@ -548,6 +548,18 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 						encryptedPath := decodedPath
 						h.fileDAO.SetEncPathMapping(displayPath, encryptedPath)
 
+						// Copy file info from encrypted path to display path cache
+						// This fixes cache key mismatch: PROPFIND caches with encrypted path,
+						// but GET requests look up with display path
+						if fileInfo, ok := h.fileDAO.Get(encryptedPath); ok {
+							h.fileDAO.Set(&dao.FileInfo{
+								Path:  displayPath,
+								Name:  decryptedName,
+								Size:  fileInfo.Size,
+								IsDir: fileInfo.IsDir,
+							})
+						}
+
 						// Replace only the filename part in the href
 						newHref := "/dav" + path.Dir(decodedPath) + "/" + url.PathEscape(decryptedName)
 						// Normalize path (remove double slashes)
