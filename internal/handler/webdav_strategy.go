@@ -12,58 +12,99 @@ import (
 	"github.com/alist-encrypt-go/internal/trace"
 )
 
-// MinFileSizeForCache is the minimum file size to cache (1KB)
-// This prevents caching error responses which are typically very small
-const MinFileSizeForCache = 1024
-
-// getFileSizeWithStrategy retrieves file size using learned strategy or fallback chain
+// getFileSizeWithStrategy retrieves file size using learned strategy or multi-source resolver
 func (h *WebDAVHandler) getFileSizeWithStrategy(davPath, realPath, targetURL string, r *http.Request) (int64, StrategyType) {
+	ctx := r.Context()
 	dirPath := path.Dir(davPath)
+	fileName := path.Base(davPath)
 
 	// Check if we have a learned strategy for this directory path
 	if strategy, ok := h.strategyCache.GetStrategy(dirPath); ok {
-		trace.Logf(r.Context(), "strategy", "Using learned strategy %s for path %s (success=%d)",
+		trace.Logf(ctx, "strategy", "Using learned strategy %s for path %s (success=%d)",
 			strategy.Strategy, dirPath, strategy.SuccessCount)
 
-		// Try the learned strategy directly
+		// Try the learned strategy directly (fast path)
 		size, err := h.executeStrategy(strategy.Strategy, davPath, realPath, targetURL, r)
 		if err == nil && size > 0 {
-			// Success! Record it
 			h.strategyCache.RecordSuccess(dirPath, strategy.Strategy)
 			return size, strategy.Strategy
 		}
 
-		// Strategy failed, record failure and invalidate
-		trace.Logf(r.Context(), "strategy", "Learned strategy %s failed for path %s, invalidating",
+		// Strategy failed, record failure
+		trace.Logf(ctx, "strategy", "Learned strategy %s failed for path %s, using multi-source resolver",
 			strategy.Strategy, dirPath)
 		h.strategyCache.RecordFailure(dirPath, strategy.Strategy)
 	}
 
-	// No learned strategy or it failed - execute full fallback chain
-	size, usedStrategy := h.fallbackChain(davPath, realPath, targetURL, r)
-
-	// Record successful strategy
-	if size > 0 {
-		h.strategyCache.RecordSuccess(dirPath, usedStrategy)
-		trace.Logf(r.Context(), "strategy", "Recorded strategy %s for path %s", usedStrategy, dirPath)
+	// Use multi-source parallel resolver for robust file size retrieval
+	file := FileItem{
+		DisplayPath:   davPath,
+		EncryptedPath: realPath,
+		TargetURL:     targetURL,
+		FileName:      fileName,
 	}
 
-	return size, usedStrategy
+	// Try to get PROPFIND size from cache first
+	if fileInfo, ok := h.fileDAO.Get(davPath); ok {
+		file.PropfindSize = fileInfo.Size
+	}
+
+	// Build auth headers
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+
+	// Resolve with multi-source validation
+	result := h.sizeResolver.ResolveSingle(ctx, file, authHeaders)
+
+	if result.Error != nil {
+		trace.Logf(ctx, "size-resolver", "All sources failed: %v", result.Error)
+		return 0, ""
+	}
+
+	// Record successful source as strategy
+	var usedStrategy StrategyType
+	switch result.Source {
+	case SourceCache:
+		usedStrategy = StrategyFileInfoCache
+	case SourcePropfind:
+		usedStrategy = StrategyFileInfoCache
+	case SourceHEAD:
+		usedStrategy = StrategyHEADRequest
+	case SourceRange:
+		usedStrategy = StrategyRangeRequest
+	}
+
+	if result.Size > 0 {
+		h.strategyCache.RecordSuccess(dirPath, usedStrategy)
+		trace.Logf(ctx, "size-resolver", "Resolved size=%d from %s (confidence=%d)",
+			result.Size, result.Source, result.Confidence)
+	}
+
+	return result.Size, usedStrategy
 }
 
-// executeStrategy executes a specific strategy to get file size
+// executeStrategy executes a specific strategy to get file size (fast path for learned strategies)
 func (h *WebDAVHandler) executeStrategy(strategy StrategyType, davPath, realPath, targetURL string, r *http.Request) (int64, error) {
 	switch strategy {
 	case StrategyFileInfoCache:
 		// Try file info cache
-		if fileInfo, ok := h.fileDAO.Get(davPath); ok {
+		if fileInfo, ok := h.fileDAO.Get(davPath); ok && IsValidSize(fileInfo.Size) {
 			return fileInfo.Size, nil
 		}
 		return 0, ErrStrategyFailed
 
 	case StrategyFileSizeCache:
 		// Try file size cache
-		if size, ok := h.fileDAO.GetFileSize(realPath); ok {
+		if size, ok := h.fileDAO.GetFileSize(realPath); ok && IsValidSize(size) {
+			return size, nil
+		}
+		// Also try display path
+		if size, ok := h.fileDAO.GetFileSize(davPath); ok && IsValidSize(size) {
 			return size, nil
 		}
 		return 0, ErrStrategyFailed
@@ -72,47 +113,19 @@ func (h *WebDAVHandler) executeStrategy(strategy StrategyType, davPath, realPath
 		// Execute HEAD request
 		return h.executeHEADRequest(targetURL, realPath, r)
 
+	case StrategyRangeRequest:
+		// Execute Range request
+		return h.executeRangeRequest(targetURL, r)
+
 	default:
 		return 0, ErrStrategyFailed
 	}
-}
-
-// fallbackChain executes the complete fallback chain
-func (h *WebDAVHandler) fallbackChain(davPath, realPath, targetURL string, r *http.Request) (int64, StrategyType) {
-	ctx := r.Context()
-
-	// Level 1: File info cache (fastest, ~1μs)
-	if fileInfo, ok := h.fileDAO.Get(davPath); ok {
-		trace.Logf(ctx, "fallback", "Hit file info cache")
-		return fileInfo.Size, StrategyFileInfoCache
-	}
-
-	// Level 2: File size cache (fast, ~1μs)
-	if size, ok := h.fileDAO.GetFileSize(realPath); ok {
-		trace.Logf(ctx, "fallback", "Hit file size cache")
-		return size, StrategyFileSizeCache
-	}
-
-	// Level 3: HEAD request (slow, 10-50ms)
-	trace.Logf(ctx, "fallback", "Cache miss, trying HEAD request")
-	size, err := h.executeHEADRequest(targetURL, realPath, r)
-	if err == nil && size > 0 {
-		// Cache for 24 hours
-		h.fileDAO.SetFileSize(realPath, size, 24*time.Hour)
-		trace.Logf(ctx, "fallback", "HEAD request succeeded, size=%d", size)
-		return size, StrategyHEADRequest
-	}
-
-	// All strategies failed
-	trace.Logf(ctx, "fallback", "All strategies failed")
-	return 0, ""
 }
 
 // executeHEADRequest sends a HEAD request to get file size
 func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, r *http.Request) (int64, error) {
 	ctx := r.Context()
 
-	// Log if we're copying auth headers
 	hasAuth := r.Header.Get("Authorization") != ""
 	hasCookie := r.Header.Get("Cookie") != ""
 	trace.Logf(ctx, "head-request", "Building HEAD request (auth=%v, cookie=%v)", hasAuth, hasCookie)
@@ -134,14 +147,10 @@ func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, r *http.R
 	}
 	defer headResp.Body.Close()
 
-	// Validate HTTP status code
 	if headResp.StatusCode != http.StatusOK {
 		trace.Logf(ctx, "head-request", "HEAD request failed with status %d", headResp.StatusCode)
 		return 0, fmt.Errorf("HEAD request failed with status %d", headResp.StatusCode)
 	}
-
-	// Log successful authentication
-	trace.Logf(ctx, "head-request", "HEAD request succeeded with status 200")
 
 	// Reject HTML error pages
 	contentType := headResp.Header.Get("Content-Type")
@@ -156,16 +165,64 @@ func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, r *http.R
 			return 0, err
 		}
 
-		// Validate minimum size to prevent caching error responses
-		if size < MinFileSizeForCache {
-			trace.Logf(ctx, "head-request", "File size %d too small (min %d), likely error response",
-				size, MinFileSizeForCache)
-			return 0, fmt.Errorf("file size %d too small (min %d), likely error response",
-				size, MinFileSizeForCache)
+		// Validate minimum size
+		if !IsValidSize(size) {
+			trace.Logf(ctx, "head-request", "File size %d too small (min %d)", size, MinValidFileSize)
+			return 0, fmt.Errorf("file size %d too small", size)
 		}
 
 		trace.Logf(ctx, "head-request", "HEAD request succeeded, size=%d", size)
 		return size, nil
+	}
+
+	return 0, ErrStrategyFailed
+}
+
+// executeRangeRequest sends a Range request to get file size from Content-Range
+func (h *WebDAVHandler) executeRangeRequest(targetURL string, r *http.Request) (int64, error) {
+	ctx := r.Context()
+
+	rangeReq, err := httputil.NewRequest("GET", targetURL).
+		WithContext(ctx).
+		WithHeader("Range", "bytes=0-0").
+		CopyHeadersExcept(r, "Host", "Content-Length", "Content-Type", "Accept-Encoding", "Range").
+		Build()
+	if err != nil {
+		return 0, err
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(rangeReq)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("Range request failed with status %d", resp.StatusCode)
+	}
+
+	// Parse Content-Range: bytes 0-0/1234567
+	contentRange := resp.Header.Get("Content-Range")
+	if contentRange != "" {
+		parts := strings.Split(contentRange, "/")
+		if len(parts) == 2 && parts[1] != "*" {
+			size, err := strconv.ParseInt(parts[1], 10, 64)
+			if err == nil && IsValidSize(size) {
+				trace.Logf(ctx, "range-request", "Range request succeeded, size=%d", size)
+				return size, nil
+			}
+		}
+	}
+
+	// Fallback to Content-Length for servers that don't support Range
+	if resp.StatusCode == http.StatusOK {
+		if contentLen := resp.Header.Get("Content-Length"); contentLen != "" {
+			size, err := strconv.ParseInt(contentLen, 10, 64)
+			if err == nil && IsValidSize(size) {
+				return size, nil
+			}
+		}
 	}
 
 	return 0, ErrStrategyFailed
