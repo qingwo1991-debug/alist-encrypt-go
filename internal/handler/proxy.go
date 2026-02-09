@@ -33,6 +33,7 @@ type ProxyHandler struct {
 	redirectKeys  []string
 	keysMu        sync.Mutex
 	strategyCache *StrategyCache
+	sizeResolver  *FileSizeResolver
 }
 
 const maxRedirectEntries = 10000
@@ -54,6 +55,7 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		passwdDAO:     passwdDAO,
 		client:        proxy.NewClient(cfg),
 		strategyCache: NewStrategyCache(1000),
+		sizeResolver:  NewFileSizeResolver(fileDAO, 20),
 	}
 	go h.cleanupRedirects()
 	return h
@@ -250,12 +252,54 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		if location != "" {
 			parsedLoc, err := url.Parse(location)
 			if err == nil {
-				path := parsedLoc.Path
-				if passwdInfo, found := h.passwdDAO.FindByPath(path); found {
+				redirectPath := parsedLoc.Path
+				// Get original request path (display path) for cache lookup
+				// Strip /d or /p prefix to match how paths are cached in fs/get
+				originalPath := r.URL.Path
+				displayPath := strings.TrimPrefix(originalPath, "/d")
+				displayPath = strings.TrimPrefix(displayPath, "/p")
+
+				if passwdInfo, found := h.passwdDAO.FindByPath(redirectPath); found {
 					var fileSize int64
-					if fileInfo, found := h.fileDAO.Get(path); found {
+
+					// Strategy 1: Try display path first (without /d or /p prefix)
+					if fileInfo, found := h.fileDAO.Get(displayPath); found && fileInfo.Size > 0 {
 						fileSize = fileInfo.Size
+						trace.Logf(r.Context(), "redirect", "Found size via display path: %d", fileSize)
 					}
+
+					// Strategy 2: Try the redirect location path
+					if fileSize == 0 {
+						if fileInfo, found := h.fileDAO.Get(redirectPath); found && fileInfo.Size > 0 {
+							fileSize = fileInfo.Size
+							trace.Logf(r.Context(), "redirect", "Found size via redirect path: %d", fileSize)
+						}
+					}
+
+					// Strategy 3: Use FileSizeResolver for robust resolution
+					if fileSize == 0 {
+						trace.Logf(r.Context(), "redirect", "Cache miss, using size resolver")
+						authHeaders := make(http.Header)
+						if auth := r.Header.Get("Authorization"); auth != "" {
+							authHeaders.Set("Authorization", auth)
+						}
+						if cookie := r.Header.Get("Cookie"); cookie != "" {
+							authHeaders.Set("Cookie", cookie)
+						}
+
+						file := FileItem{
+							DisplayPath:   displayPath,
+							EncryptedPath: redirectPath,
+							TargetURL:     location,
+							FileName:      path.Base(displayPath),
+						}
+						result := h.sizeResolver.ResolveSingle(r.Context(), file, authHeaders)
+						if result.Error == nil && result.Size > 0 {
+							fileSize = result.Size
+							trace.Logf(r.Context(), "redirect", "Resolved size via %s: %d", result.Source, fileSize)
+						}
+					}
+
 					key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType)
 					w.Header().Set("Location", "/redirect/"+key)
 					w.WriteHeader(resp.StatusCode)

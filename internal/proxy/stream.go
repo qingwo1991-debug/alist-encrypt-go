@@ -109,6 +109,32 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		return errors.NewProxyErrorWithCause("failed to fetch", err)
 	}
+
+	// Handle redirects - Alist/WebDAV may return 302 to actual storage URL
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		location := resp.Header.Get("Location")
+		resp.Body.Close()
+
+		if location == "" {
+			return errors.NewProxyError("redirect without Location header")
+		}
+
+		log.Debug().Str("location", location).Msg("Following redirect for decryption")
+
+		// Build new request to the redirect target
+		redirectReq, err := httputil.NewRequest("GET", location).
+			WithContext(r.Context()).
+			CopyHeadersExcept(r, "Range", "Host").
+			Build()
+		if err != nil {
+			return errors.NewInternalWithCause("failed to create redirect request", err)
+		}
+
+		resp, err = s.client.Client.Do(redirectReq)
+		if err != nil {
+			return errors.NewProxyErrorWithCause("failed to fetch from redirect", err)
+		}
+	}
 	defer resp.Body.Close()
 
 	// Get file size from Content-Length if not provided
@@ -228,6 +254,32 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return errors.NewProxyErrorWithCause("failed to fetch", err)
+	}
+
+	// Handle redirects - Alist/WebDAV may return 302 to actual storage URL
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		location := resp.Header.Get("Location")
+		resp.Body.Close()
+
+		if location == "" {
+			return errors.NewProxyError("redirect without Location header")
+		}
+
+		log.Debug().Str("location", location).Msg("Following redirect for decryption (req)")
+
+		// Build new request to the redirect target
+		redirectReq, err := httputil.NewRequest("GET", location).
+			WithContext(req.Context()).
+			CopyHeadersExcept(req, "Range", "Host").
+			Build()
+		if err != nil {
+			return errors.NewInternalWithCause("failed to create redirect request", err)
+		}
+
+		resp, err = s.client.Client.Do(redirectReq)
+		if err != nil {
+			return errors.NewProxyErrorWithCause("failed to fetch from redirect", err)
+		}
 	}
 	defer resp.Body.Close()
 
