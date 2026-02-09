@@ -532,19 +532,24 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 		// Only process /dav/ paths
 		if strings.HasPrefix(hrefValue, "/dav/") {
 			davPath := strings.TrimPrefix(hrefValue, "/dav")
-			if davPath != "/" && davPath != "" {
-				// Get the filename from the path
-				fileName := path.Base(davPath)
+			// URL decode the path first (handles spaces, parentheses, etc.)
+			decodedPath, err := url.PathUnescape(davPath)
+			if err != nil {
+				decodedPath = davPath // fallback to original if decode fails
+			}
+			if decodedPath != "/" && decodedPath != "" {
+				// Get the filename from the decoded path
+				fileName := path.Base(decodedPath)
 				if fileName != "" && fileName != "/" && fileName != "." {
 					decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, fileName)
 					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) && decryptedName != fileName {
-						// Save mapping: display path -> encrypted path
-						displayPath := path.Dir(davPath) + "/" + decryptedName
-						encryptedPath := davPath
+						// Save mapping: display path -> encrypted path (use decoded path)
+						displayPath := path.Dir(decodedPath) + "/" + decryptedName
+						encryptedPath := decodedPath
 						h.fileDAO.SetEncPathMapping(displayPath, encryptedPath)
 
 						// Replace only the filename part in the href
-						newHref := "/dav" + path.Dir(davPath) + "/" + url.PathEscape(decryptedName)
+						newHref := "/dav" + path.Dir(decodedPath) + "/" + url.PathEscape(decryptedName)
 						// Normalize path (remove double slashes)
 						newHref = httputil.CleanPath(newHref)
 						result = result[:contentStart] + newHref + result[endIdx:]
