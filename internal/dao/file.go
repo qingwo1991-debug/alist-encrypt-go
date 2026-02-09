@@ -3,7 +3,6 @@ package dao
 import (
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -24,38 +23,33 @@ type FileInfo struct {
 
 // FileDAO handles file information caching
 type FileDAO struct {
-	store         *storage.Store
-	cache         *storage.Cache
-	encPathMap    sync.Map         // displayPath -> encryptedPath mapping
-	fileSizeCache *FileSizeCache   // High-performance file size cache
+	store     *storage.Store
+	pathCache *PathCache // Unified high-performance cache
 }
 
 // NewFileDAO creates a new file DAO
 func NewFileDAO(store *storage.Store) *FileDAO {
 	dao := &FileDAO{
-		store:         store,
-		cache:         storage.NewCache(10 * time.Minute),
-		fileSizeCache: NewFileSizeCache(10000), // Cache up to 10k file sizes
+		store:     store,
+		pathCache: NewPathCache(32, 1000), // 32 shards, 1000 entries per shard = 32k max
 	}
 
-	// Clean up suspicious cache entries on startup (e.g., 9-byte error responses)
-	removed := dao.fileSizeCache.ClearSuspiciousEntries(MinFileSizeForCache)
-	if removed > 0 {
-		// Log would require importing log package, keeping it simple for now
-		_ = removed
-	}
-
-	// Start background cleanup for expired file size cache entries
-	go dao.cleanupFileSizeCache()
+	// Start background cleanup for expired entries
+	go dao.cleanupPathCache()
 
 	return dao
 }
 
 // Get retrieves file info from cache or store
 func (d *FileDAO) Get(path string) (*FileInfo, bool) {
-	// Check cache first
-	if cached, ok := d.cache.Get(path); ok {
-		return cached.(*FileInfo), true
+	// Check unified path cache first
+	if entry, ok := d.pathCache.Get(path); ok {
+		return &FileInfo{
+			Path:  entry.DisplayPath,
+			Name:  entry.Name,
+			Size:  entry.Size,
+			IsDir: entry.IsDir,
+		}, true
 	}
 
 	// Check persistent store
@@ -67,75 +61,131 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 		return nil, false
 	}
 
-	// Update cache
-	d.cache.Set(path, &info)
 	return &info, true
 }
 
 // Set stores file info
 func (d *FileDAO) Set(info *FileInfo) error {
-	d.cache.Set(info.Path, info)
+	// Store in unified path cache
+	entry := &PathEntry{
+		EncryptedPath: info.Path,
+		DisplayPath:   info.Path,
+		Name:          info.Name,
+		Size:          info.Size,
+		IsDir:         info.IsDir,
+	}
+	d.pathCache.Set(entry, 24*time.Hour)
+
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
 }
 
 // Delete removes file info
 func (d *FileDAO) Delete(path string) error {
-	d.cache.Delete(path)
+	d.pathCache.Delete(path)
 	return d.store.Delete(storage.BucketFileInfo, path)
 }
 
-// SetEncPathMapping caches the display path to encrypted path mapping
+// SetEncPathMapping caches the display path to encrypted path mapping with file info
 func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
-	d.encPathMap.Store(displayPath, encryptedPath)
+	// Check if we already have this mapping with file info
+	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok {
+		// Update encrypted path if needed
+		if existing.EncryptedPath != encryptedPath {
+			existing.EncryptedPath = encryptedPath
+			d.pathCache.Set(existing, 24*time.Hour)
+		}
+		return
+	}
+
+	// Create new entry
+	entry := &PathEntry{
+		EncryptedPath: encryptedPath,
+		DisplayPath:   displayPath,
+		Name:          "",
+		Size:          0,
+		IsDir:         false,
+	}
+	d.pathCache.Set(entry, 24*time.Hour)
+}
+
+// SetEncPathMappingWithInfo caches mapping with full file info (recommended)
+func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name string, size int64, isDir bool) {
+	entry := &PathEntry{
+		EncryptedPath: encryptedPath,
+		DisplayPath:   displayPath,
+		Name:          name,
+		Size:          size,
+		IsDir:         isDir,
+	}
+	d.pathCache.Set(entry, 24*time.Hour)
 }
 
 // GetEncPath retrieves the encrypted path for a display path
 func (d *FileDAO) GetEncPath(displayPath string) (string, bool) {
-	if v, ok := d.encPathMap.Load(displayPath); ok {
-		return v.(string), true
-	}
-	return "", false
+	return d.pathCache.GetEncPath(displayPath)
 }
 
 // DeleteEncPathMapping removes the display path to encrypted path mapping
 func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
-	d.encPathMap.Delete(displayPath)
+	// Find and delete by display path
+	if entry, ok := d.pathCache.GetByDispPath(displayPath); ok {
+		d.pathCache.Delete(entry.EncryptedPath)
+	}
 }
 
 // GetFileSize retrieves cached file size (optimized for long-term caching)
 func (d *FileDAO) GetFileSize(path string) (int64, bool) {
-	return d.fileSizeCache.Get(path)
+	return d.pathCache.GetSize(path)
 }
 
 // SetFileSize caches file size with TTL (default 24 hours for stability)
 func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 	if ttl == 0 {
-		ttl = 24 * time.Hour // Default: 24 hours
+		ttl = 24 * time.Hour
 	}
-	d.fileSizeCache.Set(path, size, ttl)
+
+	// Try to update existing entry
+	if entry, ok := d.pathCache.Get(path); ok {
+		entry.Size = size
+		d.pathCache.Set(entry, ttl)
+		return
+	}
+
+	// Create minimal entry for size caching
+	entry := &PathEntry{
+		EncryptedPath: path,
+		DisplayPath:   path,
+		Size:          size,
+	}
+	d.pathCache.Set(entry, ttl)
 }
 
 // DeleteFileSize removes cached file size
 func (d *FileDAO) DeleteFileSize(path string) {
-	d.fileSizeCache.Delete(path)
+	// We don't delete the whole entry, just mark size as 0
+	if entry, ok := d.pathCache.Get(path); ok {
+		entry.Size = 0
+		d.pathCache.Set(entry, 24*time.Hour)
+	}
 }
 
 // FileSizeCacheStats returns file size cache statistics
 func (d *FileDAO) FileSizeCacheStats() map[string]interface{} {
-	return d.fileSizeCache.Stats()
+	return d.pathCache.Stats()
 }
 
-// cleanupFileSizeCache runs periodic cleanup of expired entries
-func (d *FileDAO) cleanupFileSizeCache() {
+// PathCacheStats returns full path cache statistics
+func (d *FileDAO) PathCacheStats() map[string]interface{} {
+	return d.pathCache.Stats()
+}
+
+// cleanupPathCache runs periodic cleanup of expired entries
+func (d *FileDAO) cleanupPathCache() {
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		removed := d.fileSizeCache.CleanExpired()
-		if removed > 0 {
-			// Log cleanup stats if needed
-			_ = removed
-		}
+		d.pathCache.CleanExpired()
 	}
 }
 
