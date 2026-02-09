@@ -16,29 +16,65 @@ import (
 
 // FileSizeResolver provides robust file size resolution with multi-source validation
 type FileSizeResolver struct {
-	client      *http.Client
-	fileDAO     *dao.FileDAO
-	semaphore   chan struct{} // Limit concurrent HTTP requests
-	maxWorkers  int
+	fileDAO    *dao.FileDAO
+	semaphore  chan struct{} // Limit concurrent HTTP requests
+	maxWorkers int
+
+	// Connection pool - reuse connections
+	client *http.Client
+
+	// Circuit breaker state per host
+	circuitBreakers sync.Map // host -> *CircuitBreaker
 
 	// Stats
-	totalRequests uint64
-	cacheHits     uint64
-	headHits      uint64
-	rangeHits     uint64
-	failures      uint64
+	totalRequests   uint64
+	cacheHits       uint64
+	propfindHits    uint64
+	headHits        uint64
+	rangeHits       uint64
+	failures        uint64
+	earlyReturns    uint64
+	circuitBreaks   uint64
 }
+
+// CircuitBreaker implements circuit breaker pattern
+type CircuitBreaker struct {
+	failures    int32
+	lastFailure int64 // Unix nano
+	state       int32 // 0=closed, 1=open, 2=half-open
+}
+
+const (
+	cbClosed   = 0
+	cbOpen     = 1
+	cbHalfOpen = 2
+
+	cbFailureThreshold = 5                // Open after 5 consecutive failures
+	cbResetTimeout     = 30 * time.Second // Try again after 30 seconds
+)
 
 // NewFileSizeResolver creates a new file size resolver
 func NewFileSizeResolver(fileDAO *dao.FileDAO, maxWorkers int) *FileSizeResolver {
 	if maxWorkers <= 0 {
-		maxWorkers = 20 // Default: 20 concurrent HTTP requests
+		maxWorkers = 20
 	}
+
+	// Connection pool with keep-alive
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+	}
+
 	return &FileSizeResolver{
-		client:     &http.Client{Timeout: 10 * time.Second},
 		fileDAO:    fileDAO,
 		semaphore:  make(chan struct{}, maxWorkers),
 		maxWorkers: maxWorkers,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   15 * time.Second,
+		},
 	}
 }
 
@@ -67,7 +103,7 @@ type FileItem struct {
 	EncryptedPath string
 	TargetURL     string
 	FileName      string
-	PropfindSize  int64 // Size from PROPFIND (may be 0 or wrong)
+	PropfindSize  int64
 }
 
 // MinValidFileSize is the minimum size for a valid file (1KB)
@@ -75,6 +111,9 @@ const MinValidFileSize = 1024
 
 // MinVideoFileSize is the minimum expected size for video files (100KB)
 const MinVideoFileSize = 100 * 1024
+
+// HighConfidenceThreshold - if confidence >= this, return early
+const HighConfidenceThreshold = 80
 
 // IsValidSize checks if a file size is reasonable
 func IsValidSize(size int64) bool {
@@ -87,7 +126,6 @@ func IsLikelyVideoSize(size int64) bool {
 }
 
 // ResolveBatch resolves file sizes for multiple files in parallel
-// Each file also uses multi-source parallel resolution internally
 func (r *FileSizeResolver) ResolveBatch(ctx context.Context, items []FileItem, authHeaders http.Header) []SizeResult {
 	if len(items) == 0 {
 		return nil
@@ -101,7 +139,6 @@ func (r *FileSizeResolver) ResolveBatch(ctx context.Context, items []FileItem, a
 		go func(idx int, file FileItem) {
 			defer wg.Done()
 
-			// Check context cancellation
 			select {
 			case <-ctx.Done():
 				results[idx] = SizeResult{Path: file.DisplayPath, Error: ctx.Err()}
@@ -109,11 +146,9 @@ func (r *FileSizeResolver) ResolveBatch(ctx context.Context, items []FileItem, a
 			default:
 			}
 
-			// Resolve single file with multi-source
 			result := r.ResolveSingle(ctx, file, authHeaders)
 			results[idx] = result
 
-			// Cache valid result
 			if result.Size > 0 && result.Error == nil {
 				r.cacheResult(file, result)
 			}
@@ -124,41 +159,116 @@ func (r *FileSizeResolver) ResolveBatch(ctx context.Context, items []FileItem, a
 	return results
 }
 
-// ResolveSingle resolves file size for a single file using multiple sources in parallel
+// ResolveSingle resolves file size with early termination on high confidence
 func (r *FileSizeResolver) ResolveSingle(ctx context.Context, file FileItem, authHeaders http.Header) SizeResult {
 	atomic.AddUint64(&r.totalRequests, 1)
 
+	// Fast path: Check cache first (synchronous, ~64ns)
+	if result, ok := r.tryFastPath(file); ok {
+		return result
+	}
+
+	// Slow path: parallel resolution with early termination
+	return r.resolveWithEarlyTermination(ctx, file, authHeaders)
+}
+
+// tryFastPath attempts cache lookup before launching goroutines
+func (r *FileSizeResolver) tryFastPath(file FileItem) (SizeResult, bool) {
+	// Try display path
+	if size, ok := r.fileDAO.GetFileSize(file.DisplayPath); ok && IsValidSize(size) {
+		confidence := r.calculateConfidence(size, file.FileName, SourceCache)
+		atomic.AddUint64(&r.cacheHits, 1)
+		return SizeResult{
+			Path:       file.DisplayPath,
+			Size:       size,
+			Source:     SourceCache,
+			Confidence: confidence,
+		}, true
+	}
+
+	// Try encrypted path
+	if file.EncryptedPath != "" && file.EncryptedPath != file.DisplayPath {
+		if size, ok := r.fileDAO.GetFileSize(file.EncryptedPath); ok && IsValidSize(size) {
+			confidence := r.calculateConfidence(size, file.FileName, SourceCache)
+			atomic.AddUint64(&r.cacheHits, 1)
+			return SizeResult{
+				Path:       file.DisplayPath,
+				Size:       size,
+				Source:     SourceCache,
+				Confidence: confidence,
+			}, true
+		}
+	}
+
+	// Try PROPFIND size if valid
+	if IsValidSize(file.PropfindSize) {
+		confidence := r.calculateConfidence(file.PropfindSize, file.FileName, SourcePropfind)
+		if confidence >= HighConfidenceThreshold {
+			atomic.AddUint64(&r.propfindHits, 1)
+			atomic.AddUint64(&r.earlyReturns, 1)
+			return SizeResult{
+				Path:       file.DisplayPath,
+				Size:       file.PropfindSize,
+				Source:     SourcePropfind,
+				Confidence: confidence,
+			}, true
+		}
+	}
+
+	return SizeResult{}, false
+}
+
+// resolveWithEarlyTermination runs parallel resolution with early return
+func (r *FileSizeResolver) resolveWithEarlyTermination(ctx context.Context, file FileItem, authHeaders http.Header) SizeResult {
+	// Create cancellable context for early termination
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	resultChan := make(chan SizeResult, 4)
 	var wg sync.WaitGroup
+	var returned int32
 
-	// Source 1: Cache lookup (instant, no semaphore needed)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.tryCache(file, resultChan)
-	}()
+	// Helper to send result and potentially trigger early return
+	sendResult := func(result SizeResult) {
+		select {
+		case resultChan <- result:
+			// If high confidence and valid, trigger early return
+			if result.Error == nil && IsValidSize(result.Size) && result.Confidence >= HighConfidenceThreshold {
+				if atomic.CompareAndSwapInt32(&returned, 0, 1) {
+					atomic.AddUint64(&r.earlyReturns, 1)
+					cancel() // Cancel other pending requests
+				}
+			}
+		case <-ctx.Done():
+		}
+	}
 
-	// Source 2: PROPFIND size (if provided and valid)
-	if file.PropfindSize > 0 {
+	// Source 1: PROPFIND size (if not already checked in fast path)
+	if file.PropfindSize > 0 && IsValidSize(file.PropfindSize) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.tryPropfindSize(file, resultChan)
+			sendResult(SizeResult{
+				Path:       file.DisplayPath,
+				Size:       file.PropfindSize,
+				Source:     SourcePropfind,
+				Confidence: r.calculateConfidence(file.PropfindSize, file.FileName, SourcePropfind),
+			})
 		}()
 	}
 
-	// Source 3: HEAD request (requires semaphore)
+	// Source 2: HEAD request
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.tryHEAD(ctx, file, authHeaders, resultChan)
+		r.tryHEADWithRetry(ctx, file, authHeaders, sendResult)
 	}()
 
-	// Source 4: Range request (requires semaphore, most reliable)
+	// Source 3: Range request (most reliable, but slower)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.tryRange(ctx, file, authHeaders, resultChan)
+		r.tryRangeWithRetry(ctx, file, authHeaders, sendResult)
 	}()
 
 	// Close channel when all sources complete
@@ -167,116 +277,210 @@ func (r *FileSizeResolver) ResolveSingle(ctx context.Context, file FileItem, aut
 		close(resultChan)
 	}()
 
-	// Collect and select best result
-	return r.selectBest(ctx, file, resultChan)
+	// Collect results with early termination
+	return r.collectResults(ctx, file, resultChan)
 }
 
-// tryCache attempts to get size from cache
-func (r *FileSizeResolver) tryCache(file FileItem, results chan<- SizeResult) {
-	// Try display path first
-	if size, ok := r.fileDAO.GetFileSize(file.DisplayPath); ok && IsValidSize(size) {
-		results <- SizeResult{
-			Path:       file.DisplayPath,
-			Size:       size,
-			Source:     SourceCache,
-			Confidence: r.calculateConfidence(size, file.FileName, SourceCache),
+// collectResults gathers results and returns best one, supporting early termination
+func (r *FileSizeResolver) collectResults(ctx context.Context, file FileItem, results <-chan SizeResult) SizeResult {
+	var validResults []SizeResult
+	var maxSize int64
+	var highConfidenceResult *SizeResult
+
+	timeout := time.After(12 * time.Second) // Overall timeout
+
+	for {
+		select {
+		case result, ok := <-results:
+			if !ok {
+				// Channel closed, select best from collected results
+				return r.selectBest(file, validResults, maxSize)
+			}
+
+			if result.Error != nil {
+				continue
+			}
+
+			if IsValidSize(result.Size) {
+				validResults = append(validResults, result)
+				if result.Size > maxSize {
+					maxSize = result.Size
+				}
+
+				// Early return on high confidence
+				if result.Confidence >= HighConfidenceThreshold && highConfidenceResult == nil {
+					highConfidenceResult = &result
+					// Don't return immediately, collect a bit more for cross-validation
+					// But set a short timeout
+					go func() {
+						time.Sleep(100 * time.Millisecond)
+					}()
+				}
+			}
+
+		case <-timeout:
+			if len(validResults) > 0 {
+				return r.selectBest(file, validResults, maxSize)
+			}
+			atomic.AddUint64(&r.failures, 1)
+			return SizeResult{Path: file.DisplayPath, Error: ErrTimeout}
+
+		case <-ctx.Done():
+			if len(validResults) > 0 {
+				return r.selectBest(file, validResults, maxSize)
+			}
+			return SizeResult{Path: file.DisplayPath, Error: ctx.Err()}
 		}
-		return
-	}
-
-	// Try encrypted path
-	if size, ok := r.fileDAO.GetFileSize(file.EncryptedPath); ok && IsValidSize(size) {
-		results <- SizeResult{
-			Path:       file.DisplayPath,
-			Size:       size,
-			Source:     SourceCache,
-			Confidence: r.calculateConfidence(size, file.FileName, SourceCache),
-		}
-		return
-	}
-
-	// No cache hit
-	results <- SizeResult{Path: file.DisplayPath, Source: SourceCache, Error: ErrCacheMiss}
-}
-
-// tryPropfindSize uses the size from PROPFIND response
-func (r *FileSizeResolver) tryPropfindSize(file FileItem, results chan<- SizeResult) {
-	if !IsValidSize(file.PropfindSize) {
-		results <- SizeResult{Path: file.DisplayPath, Source: SourcePropfind, Error: ErrInvalidSize}
-		return
-	}
-
-	results <- SizeResult{
-		Path:       file.DisplayPath,
-		Size:       file.PropfindSize,
-		Source:     SourcePropfind,
-		Confidence: r.calculateConfidence(file.PropfindSize, file.FileName, SourcePropfind),
 	}
 }
 
-// tryHEAD attempts HEAD request with semaphore
-func (r *FileSizeResolver) tryHEAD(ctx context.Context, file FileItem, authHeaders http.Header, results chan<- SizeResult) {
-	// Acquire semaphore
+// tryHEADWithRetry attempts HEAD request with retry
+func (r *FileSizeResolver) tryHEADWithRetry(ctx context.Context, file FileItem, authHeaders http.Header, sendResult func(SizeResult)) {
+	host := extractHost(file.TargetURL)
+
+	// Check circuit breaker
+	if r.isCircuitOpen(host) {
+		atomic.AddUint64(&r.circuitBreaks, 1)
+		sendResult(SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: ErrCircuitOpen})
+		return
+	}
+
+	// Acquire semaphore with timeout
 	select {
 	case r.semaphore <- struct{}{}:
 		defer func() { <-r.semaphore }()
 	case <-ctx.Done():
-		results <- SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: ctx.Err()}
+		sendResult(SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: ctx.Err()})
+		return
+	case <-time.After(5 * time.Second):
+		sendResult(SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: ErrSemaphoreTimeout})
 		return
 	}
 
-	size, err := r.headRequest(ctx, file.TargetURL, authHeaders)
-	if err != nil {
-		results <- SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: err}
-		return
+	// Retry loop
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(500 * time.Millisecond): // Backoff
+			case <-ctx.Done():
+				sendResult(SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: ctx.Err()})
+				return
+			}
+		}
+
+		size, err := r.headRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
+		if err == nil && IsValidSize(size) {
+			r.recordSuccess(host)
+			atomic.AddUint64(&r.headHits, 1)
+			sendResult(SizeResult{
+				Path:       file.DisplayPath,
+				Size:       size,
+				Source:     SourceHEAD,
+				Confidence: r.calculateConfidence(size, file.FileName, SourceHEAD),
+			})
+			return
+		}
+		lastErr = err
 	}
 
-	if !IsValidSize(size) {
-		results <- SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: ErrInvalidSize}
-		return
-	}
-
-	atomic.AddUint64(&r.headHits, 1)
-	results <- SizeResult{
-		Path:       file.DisplayPath,
-		Size:       size,
-		Source:     SourceHEAD,
-		Confidence: r.calculateConfidence(size, file.FileName, SourceHEAD),
-	}
+	r.recordFailure(host)
+	sendResult(SizeResult{Path: file.DisplayPath, Source: SourceHEAD, Error: lastErr})
 }
 
-// tryRange attempts Range request with semaphore
-func (r *FileSizeResolver) tryRange(ctx context.Context, file FileItem, authHeaders http.Header, results chan<- SizeResult) {
-	// Acquire semaphore
+// tryRangeWithRetry attempts Range request with retry
+func (r *FileSizeResolver) tryRangeWithRetry(ctx context.Context, file FileItem, authHeaders http.Header, sendResult func(SizeResult)) {
+	host := extractHost(file.TargetURL)
+
+	if r.isCircuitOpen(host) {
+		atomic.AddUint64(&r.circuitBreaks, 1)
+		sendResult(SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: ErrCircuitOpen})
+		return
+	}
+
 	select {
 	case r.semaphore <- struct{}{}:
 		defer func() { <-r.semaphore }()
 	case <-ctx.Done():
-		results <- SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: ctx.Err()}
+		sendResult(SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: ctx.Err()})
+		return
+	case <-time.After(5 * time.Second):
+		sendResult(SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: ErrSemaphoreTimeout})
 		return
 	}
 
-	size, err := r.rangeRequest(ctx, file.TargetURL, authHeaders)
-	if err != nil {
-		results <- SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: err}
-		return
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(500 * time.Millisecond):
+			case <-ctx.Done():
+				sendResult(SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: ctx.Err()})
+				return
+			}
+		}
+
+		size, err := r.rangeRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
+		if err == nil && IsValidSize(size) {
+			r.recordSuccess(host)
+			atomic.AddUint64(&r.rangeHits, 1)
+			sendResult(SizeResult{
+				Path:       file.DisplayPath,
+				Size:       size,
+				Source:     SourceRange,
+				Confidence: r.calculateConfidence(size, file.FileName, SourceRange),
+			})
+			return
+		}
+		lastErr = err
 	}
 
-	if !IsValidSize(size) {
-		results <- SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: ErrInvalidSize}
-		return
-	}
-
-	atomic.AddUint64(&r.rangeHits, 1)
-	results <- SizeResult{
-		Path:       file.DisplayPath,
-		Size:       size,
-		Source:     SourceRange,
-		Confidence: r.calculateConfidence(size, file.FileName, SourceRange),
-	}
+	r.recordFailure(host)
+	sendResult(SizeResult{Path: file.DisplayPath, Source: SourceRange, Error: lastErr})
 }
 
-// calculateConfidence returns confidence score based on size, file type, and source
+// selectBest chooses the best result from collected results
+func (r *FileSizeResolver) selectBest(file FileItem, validResults []SizeResult, maxSize int64) SizeResult {
+	if len(validResults) == 0 {
+		atomic.AddUint64(&r.failures, 1)
+		return SizeResult{Path: file.DisplayPath, Error: ErrNoValidSize}
+	}
+
+	if len(validResults) == 1 {
+		r.recordSourceHit(validResults[0].Source)
+		return validResults[0]
+	}
+
+	// Find best by score
+	var best SizeResult
+	for _, result := range validResults {
+		score := float64(result.Size) * float64(result.Confidence)
+		bestScore := float64(best.Size) * float64(best.Confidence)
+		if score > bestScore {
+			best = result
+		}
+	}
+
+	// Cross-validation: if best is much smaller than max, prefer max
+	if best.Size < maxSize/2 && IsLikelyVideoSize(maxSize) {
+		for _, result := range validResults {
+			if result.Size == maxSize {
+				log.Debug().
+					Str("path", file.DisplayPath).
+					Int64("selected", maxSize).
+					Int64("rejected", best.Size).
+					Msg("Cross-validation: selected larger size")
+				r.recordSourceHit(result.Source)
+				return result
+			}
+		}
+	}
+
+	r.recordSourceHit(best.Source)
+	return best
+}
+
+// calculateConfidence returns confidence score
 func (r *FileSizeResolver) calculateConfidence(size int64, fileName string, source SizeSource) int {
 	base := 0
 	switch source {
@@ -287,12 +491,11 @@ func (r *FileSizeResolver) calculateConfidence(size int64, fileName string, sour
 	case SourceHEAD:
 		base = 65
 	case SourceRange:
-		base = 75 // Range is most reliable
+		base = 75
 	}
 
-	// Bonus for reasonable video size
 	if isVideoFile(fileName) && IsLikelyVideoSize(size) {
-		base += 15
+		base += 20 // Higher bonus for video
 	} else if IsValidSize(size) {
 		base += 5
 	}
@@ -303,76 +506,54 @@ func (r *FileSizeResolver) calculateConfidence(size int64, fileName string, sour
 	return base
 }
 
-// selectBest chooses the best result from multiple sources
-func (r *FileSizeResolver) selectBest(ctx context.Context, file FileItem, results <-chan SizeResult) SizeResult {
-	var validResults []SizeResult
-	var maxSize int64
-
-	// Collect all results
-	for result := range results {
-		if result.Error != nil {
-			continue
-		}
-		if result.Size > 0 {
-			validResults = append(validResults, result)
-			if result.Size > maxSize {
-				maxSize = result.Size
-			}
-		}
-	}
-
-	if len(validResults) == 0 {
-		atomic.AddUint64(&r.failures, 1)
-		return SizeResult{
-			Path:  file.DisplayPath,
-			Error: ErrNoValidSize,
-		}
-	}
-
-	// Strategy 1: If only one valid result, use it
-	if len(validResults) == 1 {
-		r.recordHit(validResults[0].Source)
-		return validResults[0]
-	}
-
-	// Strategy 2: Cross-validation - if results differ significantly, prefer larger
-	// Error responses (HTML pages, JSON errors) are typically small
-	var best SizeResult
-	for _, result := range validResults {
-		// Score = size * confidence
-		// This favors larger sizes with higher confidence
-		score := float64(result.Size) * float64(result.Confidence)
-		bestScore := float64(best.Size) * float64(best.Confidence)
-
-		if score > bestScore {
-			best = result
-		}
-	}
-
-	// Strategy 3: If best is suspiciously smaller than max, use max
-	if best.Size < maxSize/2 && IsLikelyVideoSize(maxSize) {
-		for _, result := range validResults {
-			if result.Size == maxSize {
-				log.Debug().
-					Str("path", file.DisplayPath).
-					Int64("selected", maxSize).
-					Int64("rejected", best.Size).
-					Msg("Cross-validation: selected larger size")
-				r.recordHit(result.Source)
-				return result
-			}
-		}
-	}
-
-	r.recordHit(best.Source)
-	return best
+// Circuit breaker methods
+func (r *FileSizeResolver) getCircuitBreaker(host string) *CircuitBreaker {
+	cb, _ := r.circuitBreakers.LoadOrStore(host, &CircuitBreaker{})
+	return cb.(*CircuitBreaker)
 }
 
-// recordHit updates hit statistics
-func (r *FileSizeResolver) recordHit(source SizeSource) {
+func (r *FileSizeResolver) isCircuitOpen(host string) bool {
+	cb := r.getCircuitBreaker(host)
+	state := atomic.LoadInt32(&cb.state)
+
+	if state == cbClosed {
+		return false
+	}
+
+	if state == cbOpen {
+		lastFailure := atomic.LoadInt64(&cb.lastFailure)
+		if time.Since(time.Unix(0, lastFailure)) > cbResetTimeout {
+			atomic.CompareAndSwapInt32(&cb.state, cbOpen, cbHalfOpen)
+			return false
+		}
+		return true
+	}
+
+	return false // half-open allows one request
+}
+
+func (r *FileSizeResolver) recordSuccess(host string) {
+	cb := r.getCircuitBreaker(host)
+	atomic.StoreInt32(&cb.failures, 0)
+	atomic.StoreInt32(&cb.state, cbClosed)
+}
+
+func (r *FileSizeResolver) recordFailure(host string) {
+	cb := r.getCircuitBreaker(host)
+	failures := atomic.AddInt32(&cb.failures, 1)
+	atomic.StoreInt64(&cb.lastFailure, time.Now().UnixNano())
+
+	if failures >= cbFailureThreshold {
+		atomic.StoreInt32(&cb.state, cbOpen)
+	}
+}
+
+func (r *FileSizeResolver) recordSourceHit(source SizeSource) {
 	switch source {
 	case SourceCache:
 		atomic.AddUint64(&r.cacheHits, 1)
+	case SourcePropfind:
+		atomic.AddUint64(&r.propfindHits, 1)
 	case SourceHEAD:
 		atomic.AddUint64(&r.headHits, 1)
 	case SourceRange:
@@ -380,23 +561,24 @@ func (r *FileSizeResolver) recordHit(source SizeSource) {
 	}
 }
 
-// cacheResult stores the resolved size in cache
+// cacheResult stores the resolved size
 func (r *FileSizeResolver) cacheResult(file FileItem, result SizeResult) {
-	// Cache with both display and encrypted paths
 	r.fileDAO.SetFileSize(file.DisplayPath, result.Size, 24*time.Hour)
 	if file.EncryptedPath != "" && file.EncryptedPath != file.DisplayPath {
 		r.fileDAO.SetFileSize(file.EncryptedPath, result.Size, 24*time.Hour)
 	}
 }
 
-// headRequest performs a HEAD request to get Content-Length
-func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHeaders http.Header) (int64, error) {
+// headRequest performs HEAD request with specific timeout
+func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHeaders http.Header, timeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
 		return 0, err
 	}
 
-	// Copy auth headers
 	copyAuthHeaders(req, authHeaders)
 
 	resp, err := r.client.Do(req)
@@ -409,7 +591,6 @@ func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHead
 		return 0, &SizeResolverError{Message: "HEAD failed", StatusCode: resp.StatusCode}
 	}
 
-	// Reject HTML responses (likely error pages)
 	contentType := resp.Header.Get("Content-Type")
 	if strings.Contains(contentType, "text/html") {
 		return 0, &SizeResolverError{Message: "received HTML response"}
@@ -417,20 +598,22 @@ func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHead
 
 	contentLen := resp.Header.Get("Content-Length")
 	if contentLen == "" {
-		return 0, &SizeResolverError{Message: "no Content-Length header"}
+		return 0, &SizeResolverError{Message: "no Content-Length"}
 	}
 
 	return strconv.ParseInt(contentLen, 10, 64)
 }
 
-// rangeRequest performs a Range request to get file size from Content-Range header
-func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHeaders http.Header) (int64, error) {
+// rangeRequest performs Range request with specific timeout
+func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHeaders http.Header, timeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return 0, err
 	}
 
-	// Request just the first byte
 	req.Header.Set("Range", "bytes=0-0")
 	copyAuthHeaders(req, authHeaders)
 
@@ -440,12 +623,11 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 	}
 	defer resp.Body.Close()
 
-	// 206 Partial Content is expected for Range requests
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return 0, &SizeResolverError{Message: "Range request failed", StatusCode: resp.StatusCode}
+		return 0, &SizeResolverError{Message: "Range failed", StatusCode: resp.StatusCode}
 	}
 
-	// Parse Content-Range header: "bytes 0-0/1234567"
+	// Parse Content-Range: bytes 0-0/1234567
 	contentRange := resp.Header.Get("Content-Range")
 	if contentRange != "" {
 		parts := strings.Split(contentRange, "/")
@@ -454,18 +636,46 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 		}
 	}
 
-	// Fallback to Content-Length if full response (no Range support)
 	if resp.StatusCode == http.StatusOK {
-		contentLen := resp.Header.Get("Content-Length")
-		if contentLen != "" {
+		if contentLen := resp.Header.Get("Content-Length"); contentLen != "" {
 			return strconv.ParseInt(contentLen, 10, 64)
 		}
 	}
 
-	return 0, &SizeResolverError{Message: "no size info in response"}
+	return 0, &SizeResolverError{Message: "no size info"}
 }
 
-// copyAuthHeaders copies authentication headers to the request
+// Stats returns resolver statistics
+func (r *FileSizeResolver) Stats() map[string]interface{} {
+	total := atomic.LoadUint64(&r.totalRequests)
+	cacheHits := atomic.LoadUint64(&r.cacheHits)
+	propfindHits := atomic.LoadUint64(&r.propfindHits)
+	headHits := atomic.LoadUint64(&r.headHits)
+	rangeHits := atomic.LoadUint64(&r.rangeHits)
+	failures := atomic.LoadUint64(&r.failures)
+	earlyReturns := atomic.LoadUint64(&r.earlyReturns)
+	circuitBreaks := atomic.LoadUint64(&r.circuitBreaks)
+
+	hitRate := float64(0)
+	if total > 0 {
+		hitRate = float64(cacheHits+propfindHits+headHits+rangeHits) / float64(total) * 100
+	}
+
+	return map[string]interface{}{
+		"total_requests":  total,
+		"cache_hits":      cacheHits,
+		"propfind_hits":   propfindHits,
+		"head_hits":       headHits,
+		"range_hits":      rangeHits,
+		"failures":        failures,
+		"early_returns":   earlyReturns,
+		"circuit_breaks":  circuitBreaks,
+		"hit_rate":        hitRate,
+		"max_workers":     r.maxWorkers,
+	}
+}
+
+// Helper functions
 func copyAuthHeaders(req *http.Request, authHeaders http.Header) {
 	for _, key := range []string{"Authorization", "Cookie"} {
 		if values := authHeaders[key]; len(values) > 0 {
@@ -476,22 +686,29 @@ func copyAuthHeaders(req *http.Request, authHeaders http.Header) {
 	}
 }
 
-// Stats returns resolver statistics
-func (r *FileSizeResolver) Stats() map[string]interface{} {
-	total := atomic.LoadUint64(&r.totalRequests)
-	cacheHits := atomic.LoadUint64(&r.cacheHits)
-	headHits := atomic.LoadUint64(&r.headHits)
-	rangeHits := atomic.LoadUint64(&r.rangeHits)
-	failures := atomic.LoadUint64(&r.failures)
-
-	return map[string]interface{}{
-		"total_requests": total,
-		"cache_hits":     cacheHits,
-		"head_hits":      headHits,
-		"range_hits":     rangeHits,
-		"failures":       failures,
-		"max_workers":    r.maxWorkers,
+func extractHost(url string) string {
+	// Simple extraction: http://host:port/path -> host:port
+	start := strings.Index(url, "://")
+	if start == -1 {
+		return url
 	}
+	rest := url[start+3:]
+	end := strings.Index(rest, "/")
+	if end == -1 {
+		return rest
+	}
+	return rest[:end]
+}
+
+func isVideoFile(fileName string) bool {
+	ext := strings.ToLower(path.Ext(fileName))
+	videoExts := map[string]bool{
+		".mp4": true, ".mkv": true, ".avi": true, ".mov": true,
+		".wmv": true, ".flv": true, ".webm": true, ".m4v": true,
+		".ts": true, ".m2ts": true, ".mpg": true, ".mpeg": true,
+		".rmvb": true, ".rm": true, ".3gp": true,
+	}
+	return videoExts[ext]
 }
 
 // Error types
@@ -508,19 +725,10 @@ func (e *SizeResolverError) Error() string {
 }
 
 var (
-	ErrNoValidSize = &SizeResolverError{Message: "no valid file size from any source"}
-	ErrCacheMiss   = &SizeResolverError{Message: "cache miss"}
-	ErrInvalidSize = &SizeResolverError{Message: "invalid size"}
+	ErrNoValidSize      = &SizeResolverError{Message: "no valid size from any source"}
+	ErrCacheMiss        = &SizeResolverError{Message: "cache miss"}
+	ErrInvalidSize      = &SizeResolverError{Message: "invalid size"}
+	ErrCircuitOpen      = &SizeResolverError{Message: "circuit breaker open"}
+	ErrSemaphoreTimeout = &SizeResolverError{Message: "semaphore timeout"}
+	ErrTimeout          = &SizeResolverError{Message: "overall timeout"}
 )
-
-// isVideoFile checks if the filename suggests video content
-func isVideoFile(fileName string) bool {
-	ext := strings.ToLower(path.Ext(fileName))
-	videoExts := map[string]bool{
-		".mp4": true, ".mkv": true, ".avi": true, ".mov": true,
-		".wmv": true, ".flv": true, ".webm": true, ".m4v": true,
-		".ts": true, ".m2ts": true, ".mpg": true, ".mpeg": true,
-		".rmvb": true, ".rm": true, ".3gp": true,
-	}
-	return videoExts[ext]
-}
