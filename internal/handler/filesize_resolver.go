@@ -633,7 +633,7 @@ func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHead
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", "", 0, err
 	}
 
 	copyAuthHeaders(req, authHeaders)
@@ -669,7 +669,7 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", "", 0, err
 	}
 
 	req.Header.Set("Range", "bytes=0-0")
