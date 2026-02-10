@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/gin-contrib/gzip v1.2.5
 	github.com/gin-gonic/gin v1.11.0
+	github.com/go-sql-driver/mysql v1.7.1
 	github.com/golang-jwt/jwt/v5 v5.2.0
 	github.com/rs/zerolog v1.31.0
 	go.etcd.io/bbolt v1.3.8

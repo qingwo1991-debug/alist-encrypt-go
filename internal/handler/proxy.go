@@ -34,6 +34,7 @@ type ProxyHandler struct {
 	keysMu        sync.Mutex
 	strategyCache *StrategyCache
 	sizeResolver  *FileSizeResolver
+	strategySel   *StrategySelector
 }
 
 const maxRedirectEntries = 10000
@@ -66,11 +67,17 @@ func (h *ProxyHandler) Stats() map[string]interface{} {
 		},
 		"strategy_cache": h.strategyCache.Stats(),
 		"size_resolver":  h.sizeResolver.Stats(),
+		"strategy_selector": func() map[string]interface{} {
+			if h.strategySel != nil {
+				return h.strategySel.Stats()
+			}
+			return nil
+		}(),
 	}
 }
 
 // NewProxyHandler creates a new proxy handler
-func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO) *ProxyHandler {
+func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore) *ProxyHandler {
 	h := &ProxyHandler{
 		cfg:           cfg,
 		streamProxy:   streamProxy,
@@ -78,7 +85,8 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		passwdDAO:     passwdDAO,
 		client:        proxy.NewClient(cfg),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(fileDAO, 20),
+		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20),
+		strategySel:   selector,
 	}
 	go h.cleanupRedirects()
 	return h
@@ -233,9 +241,55 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
 
 	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)
+	providerKey := ProviderKey(targetURL, displayPath)
+	strategies := []proxy.StreamStrategy{proxy.StreamStrategyRange}
+	if h.strategySel != nil {
+		strategies = h.strategySel.Select(providerKey)
+	}
 
-	if err := h.streamProxy.ProxyDownloadDecrypt(w, r, targetURL, passwdInfo, fileInfo.Size); err != nil {
-		log.Error().Err(err).Str("path", displayPath).Msg("Failed to decrypt download")
+	var lastErr error
+	for _, strategy := range strategies {
+		result := h.streamProxy.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, fileInfo.Size, strategy)
+		if result.Err == nil && !result.Retryable {
+			if h.strategySel != nil {
+				h.strategySel.RecordSuccess(providerKey, strategy)
+			}
+			return
+		}
+
+		if h.strategySel != nil {
+			reason := result.FailureReason
+			if reason == "" && result.Err != nil {
+				reason = "stream_error"
+			}
+			if reason == "" {
+				reason = "unknown"
+			}
+			if result.Retryable && !result.ResponseStarted {
+				if isNonStrategyFailure(reason) {
+					trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, displayPath)
+				} else {
+					trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, displayPath)
+				}
+			}
+			h.strategySel.RecordFailure(providerKey, strategy, reason)
+		}
+
+		if result.Err != nil {
+			lastErr = result.Err
+		} else if result.Retryable {
+			lastErr = fmt.Errorf("strategy %s failed", strategy)
+		}
+		if result.ResponseStarted || !result.Retryable {
+			if lastErr != nil {
+				log.Error().Err(lastErr).Str("path", displayPath).Msg("Failed to decrypt download")
+			}
+			return
+		}
+	}
+
+	if lastErr != nil {
+		log.Error().Err(lastErr).Str("path", displayPath).Msg("Failed to decrypt download")
 		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)
 	}
 }

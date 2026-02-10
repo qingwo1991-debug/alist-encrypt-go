@@ -34,6 +34,17 @@
     "output": "stdout"
   },
   "data_dir": "./data",
+  "database": {
+    "type": "mysql",
+    "dsn": "alist:3.141592654@tcp(alist_mysql:3306)/alist?charset=utf8mb4&parseTime=True&loc=Local",
+    "max_open_conns": 10,
+    "max_idle_conns": 5,
+    "conn_max_lifetime_seconds": 300,
+    "conn_max_idle_seconds": 60,
+    "flush_interval_seconds": 5,
+    "cleanup_days": 30,
+    "cleanup_interval_hours": 24
+  },
   "jwt_secret": "change-this-to-a-secure-random-string",
   "jwt_expire": 24
 }

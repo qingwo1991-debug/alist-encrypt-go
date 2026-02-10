@@ -107,6 +107,8 @@ docker run -d \
 git clone https://github.com/qingwo1991-debug/alist-encrypt-go.git
 cd alist-encrypt-go
 
+| `DB_TYPE` | 数据库类型（仅支持 mysql） | 空 |
+| `DB_DSN` | 数据库连接串 | 空 |
 # 构建前端
 cd enc-webui
 npm install
@@ -115,10 +117,23 @@ cd ..
 
 # 复制前端到嵌入目录
 cp -r enc-webui/dist/* web/public/
+  -e DB_TYPE=mysql \
+  -e DB_DSN="alist:3.141592654@tcp(alist_mysql:3306)/alist?charset=utf8mb4&parseTime=True&loc=Local" \
 
 # 构建 Go 二进制
 go build -o alist-encrypt-go ./cmd/server
 
+
+### 数据库配置（可选）
+
+启用 MySQL 持久化（Host 策略与文件元数据）时，建议使用环境变量配置：
+
+```text
+DB_TYPE=mysql
+DB_DSN=alist:3.141592654@tcp(alist_mysql:3306)/alist?charset=utf8mb4&parseTime=True&loc=Local
+```
+
+如未设置数据库连接，将自动降级为纯内存模式。
 # 运行
 ./alist-encrypt-go
 ```

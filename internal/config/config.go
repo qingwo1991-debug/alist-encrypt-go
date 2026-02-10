@@ -40,6 +40,11 @@ type AlistServer struct {
 	EnableParallelDecrypt      bool         `json:"enableParallelDecrypt"`
 	ParallelDecryptConcurrency int          `json:"parallelDecryptConcurrency"`
 	StreamBufferKb             int          `json:"streamBufferKb"`
+	EnableStrategyStore        bool         `json:"enableStrategyStore"`
+	StrategyStoreFile          string       `json:"strategyStoreFile"`
+	StrategyFailToDowngrade    int          `json:"strategyFailToDowngrade"`
+	StrategySuccessToRecover   int          `json:"strategySuccessToRecover"`
+	StrategyCooldownMinutes    int          `json:"strategyCooldownMinutes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -86,6 +91,19 @@ type LogConfig struct {
 	Name   string `json:"name"`   // log file path
 }
 
+// DBConfig represents database configuration
+type DBConfig struct {
+	Type                   string `json:"type"` // mysql
+	DSN                    string `json:"dsn"`
+	MaxOpenConns           int    `json:"max_open_conns"`
+	MaxIdleConns           int    `json:"max_idle_conns"`
+	ConnMaxLifetimeSeconds int    `json:"conn_max_lifetime_seconds"`
+	ConnMaxIdleSeconds     int    `json:"conn_max_idle_seconds"`
+	FlushIntervalSeconds   int    `json:"flush_interval_seconds"`
+	CleanupDays            int    `json:"cleanup_days"`
+	CleanupIntervalHours   int    `json:"cleanup_interval_hours"`
+}
+
 // Config represents the main configuration (compatible with Node.js version)
 type Config struct {
 	// Core settings (compatible with original)
@@ -97,6 +115,7 @@ type Config struct {
 	Scheme    *SchemeConfig `json:"scheme,omitempty"`
 	Proxy     *ProxyConfig  `json:"proxy,omitempty"`
 	Log       *LogConfig    `json:"log,omitempty"`
+	Database  *DBConfig     `json:"database,omitempty"`
 	DataDir   string        `json:"data_dir,omitempty"`
 	JWTSecret string        `json:"jwt_secret,omitempty"`
 	JWTExpire int           `json:"jwt_expire,omitempty"`
@@ -153,6 +172,11 @@ func DefaultConfig() *Config {
 			EnableParallelDecrypt:      false,
 			ParallelDecryptConcurrency: 4,
 			StreamBufferKb:             512,
+			EnableStrategyStore:        true,
+			StrategyStoreFile:          "",
+			StrategyFailToDowngrade:    2,
+			StrategySuccessToRecover:   5,
+			StrategyCooldownMinutes:    30,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -184,6 +208,17 @@ func DefaultConfig() *Config {
 			Enable: true,
 			Level:  "info",
 			Format: "console",
+		},
+		Database: &DBConfig{
+			Type:                   "",
+			DSN:                    "",
+			MaxOpenConns:           10,
+			MaxIdleConns:           5,
+			ConnMaxLifetimeSeconds: 300,
+			ConnMaxIdleSeconds:     60,
+			FlushIntervalSeconds:   5,
+			CleanupDays:            30,
+			CleanupIntervalHours:   24,
 		},
 		DataDir:   "./data",
 		JWTSecret: "alist-encrypt-secret",
@@ -217,6 +252,8 @@ func Load() *Config {
 			log.Info().Msg("Config file not found, creating default")
 			cfg.Save()
 		}
+
+		cfg.applyEnvOverrides()
 
 		cfg.configPath = configPath
 
@@ -281,6 +318,19 @@ func (c *Config) Save() error {
 	}
 
 	return os.WriteFile(configPath, data, 0644)
+}
+
+func (c *Config) applyEnvOverrides() {
+	if c.Database == nil {
+		c.Database = &DBConfig{}
+	}
+
+	if dbType := os.Getenv("DB_TYPE"); dbType != "" {
+		c.Database.Type = dbType
+	}
+	if dsn := os.Getenv("DB_DSN"); dsn != "" {
+		c.Database.DSN = dsn
+	}
 }
 
 // Get returns the global config instance
