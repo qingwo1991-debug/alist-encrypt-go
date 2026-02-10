@@ -25,14 +25,21 @@ type PasswdInfo struct {
 
 // AlistServer represents the main Alist server configuration
 type AlistServer struct {
-	Name       string       `json:"name"`
-	Path       string       `json:"path"`
-	Describe   string       `json:"describe"`
-	ServerHost string       `json:"serverHost"`
-	ServerPort int          `json:"serverPort"`
-	HTTPS      bool         `json:"https"`
-	EnableH2C  bool         `json:"enableH2c"`  // Enable HTTP/2 cleartext to backend
-	PasswdList []PasswdInfo `json:"passwdList"`
+	Name                       string       `json:"name"`
+	Path                       string       `json:"path"`
+	Describe                   string       `json:"describe"`
+	ServerHost                 string       `json:"serverHost"`
+	ServerPort                 int          `json:"serverPort"`
+	HTTPS                      bool         `json:"https"`
+	EnableH2C                  bool         `json:"enableH2c"` // Enable HTTP/2 cleartext to backend
+	PasswdList                 []PasswdInfo `json:"passwdList"`
+	EnableSizeMap              bool         `json:"enableSizeMap"`
+	SizeMapTtlMinutes          int          `json:"sizeMapTtlMinutes"`
+	EnableRangeCompatCache     bool         `json:"enableRangeCompatCache"`
+	RangeCompatTtlMinutes      int          `json:"rangeCompatTtlMinutes"`
+	EnableParallelDecrypt      bool         `json:"enableParallelDecrypt"`
+	ParallelDecryptConcurrency int          `json:"parallelDecryptConcurrency"`
+	StreamBufferKb             int          `json:"streamBufferKb"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -133,12 +140,19 @@ func getDefaultAlistPort() int {
 func DefaultConfig() *Config {
 	return &Config{
 		AlistServer: AlistServer{
-			Name:       "alist",
-			Path:       "/*",
-			Describe:   "alist config",
-			ServerHost: getDefaultAlistHost(),
-			ServerPort: getDefaultAlistPort(),
-			HTTPS:      false,
+			Name:                       "alist",
+			Path:                       "/*",
+			Describe:                   "alist config",
+			ServerHost:                 getDefaultAlistHost(),
+			ServerPort:                 getDefaultAlistPort(),
+			HTTPS:                      false,
+			EnableSizeMap:              true,
+			SizeMapTtlMinutes:          1440,
+			EnableRangeCompatCache:     true,
+			RangeCompatTtlMinutes:      60,
+			EnableParallelDecrypt:      false,
+			ParallelDecryptConcurrency: 4,
+			StreamBufferKb:             512,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",

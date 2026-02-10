@@ -76,13 +76,20 @@ func getStringArrayField(m map[string]interface{}, key string) []string {
 // ParseAlistServerFromMap parses an AlistServer from a raw map
 func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 	server := AlistServer{
-		Name:       getStringField(raw, "name"),
-		Path:       getStringField(raw, "path"),
-		Describe:   getStringField(raw, "describe"),
-		ServerHost: getStringField(raw, "serverHost"),
-		ServerPort: getIntField(raw, "serverPort"),
-		HTTPS:      getBoolField(raw, "https"),
-		EnableH2C:  getBoolField(raw, "enableH2c"),
+		Name:                       getStringField(raw, "name"),
+		Path:                       getStringField(raw, "path"),
+		Describe:                   getStringField(raw, "describe"),
+		ServerHost:                 getStringField(raw, "serverHost"),
+		ServerPort:                 getIntField(raw, "serverPort"),
+		HTTPS:                      getBoolField(raw, "https"),
+		EnableH2C:                  getBoolField(raw, "enableH2c"),
+		EnableSizeMap:              getBoolField(raw, "enableSizeMap"),
+		SizeMapTtlMinutes:          getIntField(raw, "sizeMapTtlMinutes"),
+		EnableRangeCompatCache:     getBoolField(raw, "enableRangeCompatCache"),
+		RangeCompatTtlMinutes:      getIntField(raw, "rangeCompatTtlMinutes"),
+		EnableParallelDecrypt:      getBoolField(raw, "enableParallelDecrypt"),
+		ParallelDecryptConcurrency: getIntField(raw, "parallelDecryptConcurrency"),
+		StreamBufferKb:             getIntField(raw, "streamBufferKb"),
 	}
 
 	if passwdListRaw, ok := raw["passwdList"]; ok {

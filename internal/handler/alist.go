@@ -46,6 +46,29 @@ type decryptResult struct {
 	showName string
 }
 
+const (
+	parallelDecryptThreshold = 5
+	maxParallelDecryptLimit  = 32
+)
+
+func (h *AlistHandler) parallelDecryptEnabled() bool {
+	return h.cfg != nil && h.cfg.AlistServer.EnableParallelDecrypt
+}
+
+func (h *AlistHandler) parallelDecryptLimit() int {
+	limit := 4
+	if h.cfg != nil && h.cfg.AlistServer.ParallelDecryptConcurrency > 0 {
+		limit = h.cfg.AlistServer.ParallelDecryptConcurrency
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxParallelDecryptLimit {
+		limit = maxParallelDecryptLimit
+	}
+	return limit
+}
+
 // proxyToAlist creates and executes a proxy request to Alist backend
 func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, body []byte, srcReq *http.Request) (*http.Response, error) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), endpoint, nil)
@@ -170,37 +193,45 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 
 				// Parallel filename decryption using goroutines
 				if len(tasks) > 0 {
-					results := make(chan decryptResult, len(tasks))
-
-					// Use worker pool for parallel decryption (limit concurrency)
-					const maxWorkers = 32
-					semaphore := make(chan struct{}, maxWorkers)
-
-					for _, task := range tasks {
-						semaphore <- struct{}{} // Acquire
-						go func(t decryptTask) {
-							defer func() { <-semaphore }() // Release
-							showName := encryption.ConvertShowName(t.passwdInfo.Password, t.passwdInfo.EncType, t.name)
-							results <- decryptResult{index: t.index, showName: showName}
-						}(task)
-					}
-
-					// Collect results
-					for range tasks {
-						result := <-results
+					applyResult := func(result decryptResult) {
 						if fileData, ok := content[result.index].(map[string]interface{}); ok {
 							encName := fileData["name"].(string)
 							fileData["name"] = result.showName
 							content[result.index] = fileData
 							trace.Logf(r.Context(), "decrypt", "Decrypt filename: %s -> %s", encName, result.showName)
 
-						// Save mapping: display path -> encrypted path
-						displayPath := path.Join(dirPath, result.showName)
-						encryptedPath := path.Join(dirPath, encName)
-						h.fileDAO.SetEncPathMapping(displayPath, encryptedPath)
+							// Save mapping: display path -> encrypted path
+							displayPath := path.Join(dirPath, result.showName)
+							encryptedPath := path.Join(dirPath, encName)
+							h.fileDAO.SetEncPathMapping(displayPath, encryptedPath)
 						}
 					}
-					close(results)
+
+					useParallel := h.parallelDecryptEnabled() && len(tasks) >= parallelDecryptThreshold
+					if useParallel {
+						results := make(chan decryptResult, len(tasks))
+						semaphore := make(chan struct{}, h.parallelDecryptLimit())
+
+						for _, task := range tasks {
+							semaphore <- struct{}{} // Acquire
+							go func(t decryptTask) {
+								defer func() { <-semaphore }() // Release
+								showName := encryption.ConvertShowName(t.passwdInfo.Password, t.passwdInfo.EncType, t.name)
+								results <- decryptResult{index: t.index, showName: showName}
+							}(task)
+						}
+
+						// Collect results
+						for range tasks {
+							applyResult(<-results)
+						}
+						close(results)
+					} else {
+						for _, task := range tasks {
+							showName := encryption.ConvertShowName(task.passwdInfo.Password, task.passwdInfo.EncType, task.name)
+							applyResult(decryptResult{index: task.index, showName: showName})
+						}
+					}
 				}
 
 				// Associate video files with cover images

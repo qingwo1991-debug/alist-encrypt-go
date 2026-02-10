@@ -46,6 +46,29 @@ type redirectInfo struct {
 	ExpiresAt time.Time
 }
 
+// Stats returns proxy handler statistics
+func (h *ProxyHandler) Stats() map[string]interface{} {
+	redirectCount := 0
+	h.redirectMap.Range(func(_, _ interface{}) bool {
+		redirectCount++
+		return true
+	})
+
+	h.keysMu.Lock()
+	keysLen := len(h.redirectKeys)
+	h.keysMu.Unlock()
+
+	return map[string]interface{}{
+		"redirects": map[string]interface{}{
+			"entries": redirectCount,
+			"keys":    keysLen,
+			"max":     maxRedirectEntries,
+		},
+		"strategy_cache": h.strategyCache.Stats(),
+		"size_resolver":  h.sizeResolver.Stats(),
+	}
+}
+
 // NewProxyHandler creates a new proxy handler
 func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO) *ProxyHandler {
 	h := &ProxyHandler{

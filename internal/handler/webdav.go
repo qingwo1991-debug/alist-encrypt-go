@@ -30,6 +30,14 @@ type WebDAVHandler struct {
 	sizeResolver  *FileSizeResolver
 }
 
+// Stats returns WebDAV handler statistics
+func (h *WebDAVHandler) Stats() map[string]interface{} {
+	return map[string]interface{}{
+		"strategy_cache": h.strategyCache.Stats(),
+		"size_resolver":  h.sizeResolver.Stats(),
+	}
+}
+
 // NewWebDAVHandler creates a new WebDAV handler
 func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO) *WebDAVHandler {
 	return &WebDAVHandler{
