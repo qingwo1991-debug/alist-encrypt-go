@@ -95,11 +95,10 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		return nil
 	}
 
-	// Build request WITHOUT Range header - we always fetch full encrypted file
-	// Client Range is handled AFTER decryption
+	// Build request with client headers (including Range when present)
 	req, err := httputil.NewRequest("GET", targetURL).
 		WithContext(r.Context()).
-		CopyHeadersExcept(r, "Range").
+		CopyHeaders(r).
 		Build()
 	if err != nil {
 		return errors.NewInternalWithCause("failed to create request", err)
@@ -124,7 +123,7 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		// Build new request to the redirect target
 		redirectReq, err := httputil.NewRequest("GET", location).
 			WithContext(r.Context()).
-			CopyHeadersExcept(r, "Range", "Host").
+			CopyHeadersExcept(r, "Host").
 			Build()
 		if err != nil {
 			return errors.NewInternalWithCause("failed to create redirect request", err)
@@ -167,8 +166,8 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// Set decryption position for range requests
-	if isRangeRequest {
+	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	if isRangeRequest && upstreamIsRange {
 		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
 			return errors.NewDecryptionErrorWithCause("failed to set position", err)
 		}
@@ -187,20 +186,27 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	var readerToStream io.Reader
+	decryptReader := flowEnc.DecryptReader(resp.Body)
 	if isRangeRequest {
 		// Partial content response
 		w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
 		w.Header().Set("Content-Range", requestedRange.ContentRangeHeader(fileSize))
 		w.WriteHeader(http.StatusPartialContent) // 206
 
+		if !upstreamIsRange && requestedRange.Start > 0 {
+			if _, err := io.CopyN(io.Discard, decryptReader, requestedRange.Start); err != nil {
+				return errors.NewProxyErrorWithCause("failed to skip encrypted bytes", err)
+			}
+		}
+
 		// Limit stream output to exact range
-		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), requestedRange.ContentLength())
+		readerToStream = io.LimitReader(decryptReader, requestedRange.ContentLength())
 	} else {
 		// Full content response
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 		w.WriteHeader(http.StatusOK) // 200
 
-		readerToStream = flowEnc.DecryptReader(resp.Body)
+		readerToStream = decryptReader
 	}
 
 	// Stream decrypted content with large buffer
@@ -270,7 +276,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 		// Build new request to the redirect target
 		redirectReq, err := httputil.NewRequest("GET", location).
 			WithContext(req.Context()).
-			CopyHeadersExcept(req, "Range", "Host").
+			CopyHeadersExcept(req, "Host").
 			Build()
 		if err != nil {
 			return errors.NewInternalWithCause("failed to create redirect request", err)
@@ -313,8 +319,8 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 		}
 	}
 
-	// Set decryption position for range requests
-	if isRangeRequest {
+	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	if isRangeRequest && upstreamIsRange {
 		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
 			return errors.NewDecryptionErrorWithCause("failed to set position", err)
 		}
@@ -333,20 +339,27 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	var readerToStream io.Reader
+	decryptReader := flowEnc.DecryptReader(resp.Body)
 	if isRangeRequest {
 		// Partial content response
 		w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
 		w.Header().Set("Content-Range", requestedRange.ContentRangeHeader(fileSize))
 		w.WriteHeader(http.StatusPartialContent) // 206
 
+		if !upstreamIsRange && requestedRange.Start > 0 {
+			if _, err := io.CopyN(io.Discard, decryptReader, requestedRange.Start); err != nil {
+				return errors.NewProxyErrorWithCause("failed to skip encrypted bytes", err)
+			}
+		}
+
 		// Limit stream output to exact range
-		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), requestedRange.ContentLength())
+		readerToStream = io.LimitReader(decryptReader, requestedRange.ContentLength())
 	} else {
 		// Full content response
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 		w.WriteHeader(http.StatusOK) // 200
 
-		readerToStream = flowEnc.DecryptReader(resp.Body)
+		readerToStream = decryptReader
 	}
 
 	// Stream decrypted content with large buffer
