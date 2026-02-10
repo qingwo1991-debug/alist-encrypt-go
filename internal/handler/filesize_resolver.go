@@ -17,6 +17,7 @@ import (
 // FileSizeResolver provides robust file size resolution with multi-source validation
 type FileSizeResolver struct {
 	fileDAO    *dao.FileDAO
+	metaStore  FileMetaStore
 	semaphore  chan struct{} // Limit concurrent HTTP requests
 	maxWorkers int
 
@@ -27,14 +28,14 @@ type FileSizeResolver struct {
 	circuitBreakers sync.Map // host -> *CircuitBreaker
 
 	// Stats
-	totalRequests   uint64
-	cacheHits       uint64
-	propfindHits    uint64
-	headHits        uint64
-	rangeHits       uint64
-	failures        uint64
-	earlyReturns    uint64
-	circuitBreaks   uint64
+	totalRequests uint64
+	cacheHits     uint64
+	propfindHits  uint64
+	headHits      uint64
+	rangeHits     uint64
+	failures      uint64
+	earlyReturns  uint64
+	circuitBreaks uint64
 }
 
 // CircuitBreaker implements circuit breaker pattern
@@ -54,7 +55,7 @@ const (
 )
 
 // NewFileSizeResolver creates a new file size resolver
-func NewFileSizeResolver(fileDAO *dao.FileDAO, maxWorkers int) *FileSizeResolver {
+func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int) *FileSizeResolver {
 	if maxWorkers <= 0 {
 		maxWorkers = 20
 	}
@@ -69,6 +70,7 @@ func NewFileSizeResolver(fileDAO *dao.FileDAO, maxWorkers int) *FileSizeResolver
 
 	return &FileSizeResolver{
 		fileDAO:    fileDAO,
+		metaStore:  metaStore,
 		semaphore:  make(chan struct{}, maxWorkers),
 		maxWorkers: maxWorkers,
 		client: &http.Client{
@@ -90,11 +92,14 @@ const (
 
 // SizeResult holds the result from a size resolution attempt
 type SizeResult struct {
-	Path       string
-	Size       int64
-	Source     SizeSource
-	Confidence int // 0-100, higher is more confident
-	Error      error
+	Path        string
+	Size        int64
+	Source      SizeSource
+	Confidence  int // 0-100, higher is more confident
+	ContentType string
+	StatusCode  int
+	ETag        string
+	Error       error
 }
 
 // FileItem represents a file to resolve size for
@@ -150,7 +155,7 @@ func (r *FileSizeResolver) ResolveBatch(ctx context.Context, items []FileItem, a
 			results[idx] = result
 
 			if result.Size > 0 && result.Error == nil {
-				r.cacheResult(file, result)
+				r.cacheResult(ctx, file, result)
 			}
 		}(i, item)
 	}
@@ -164,7 +169,7 @@ func (r *FileSizeResolver) ResolveSingle(ctx context.Context, file FileItem, aut
 	atomic.AddUint64(&r.totalRequests, 1)
 
 	// Fast path: Check cache first (synchronous, ~64ns)
-	if result, ok := r.tryFastPath(file); ok {
+	if result, ok := r.tryFastPath(ctx, file); ok {
 		return result
 	}
 
@@ -173,7 +178,23 @@ func (r *FileSizeResolver) ResolveSingle(ctx context.Context, file FileItem, aut
 }
 
 // tryFastPath attempts cache lookup before launching goroutines
-func (r *FileSizeResolver) tryFastPath(file FileItem) (SizeResult, bool) {
+func (r *FileSizeResolver) tryFastPath(ctx context.Context, file FileItem) (SizeResult, bool) {
+	// Try MySQL meta store first
+	if r.metaStore != nil {
+		providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
+		if meta, ok, _ := r.metaStore.Get(ctx, providerKey, file.DisplayPath); ok && IsValidSize(meta.Size) {
+			confidence := r.calculateConfidence(meta.Size, file.FileName, SourceCache)
+			atomic.AddUint64(&r.cacheHits, 1)
+			return SizeResult{
+				Path:        file.DisplayPath,
+				Size:        meta.Size,
+				Source:      SourceCache,
+				Confidence:  confidence,
+				ContentType: meta.ContentType,
+				StatusCode:  meta.StatusCode,
+			}, true
+		}
+	}
 	// Try display path
 	if size, ok := r.fileDAO.GetFileSize(file.DisplayPath); ok && IsValidSize(size) {
 		confidence := r.calculateConfidence(size, file.FileName, SourceCache)
@@ -369,15 +390,18 @@ func (r *FileSizeResolver) tryHEADWithRetry(ctx context.Context, file FileItem, 
 			}
 		}
 
-		size, err := r.headRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
+		size, contentType, etag, status, err := r.headRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
 		if err == nil && IsValidSize(size) {
 			r.recordSuccess(host)
 			atomic.AddUint64(&r.headHits, 1)
 			sendResult(SizeResult{
-				Path:       file.DisplayPath,
-				Size:       size,
-				Source:     SourceHEAD,
-				Confidence: r.calculateConfidence(size, file.FileName, SourceHEAD),
+				Path:        file.DisplayPath,
+				Size:        size,
+				Source:      SourceHEAD,
+				Confidence:  r.calculateConfidence(size, file.FileName, SourceHEAD),
+				ContentType: contentType,
+				StatusCode:  status,
+				ETag:        etag,
 			})
 			return
 		}
@@ -420,15 +444,18 @@ func (r *FileSizeResolver) tryRangeWithRetry(ctx context.Context, file FileItem,
 			}
 		}
 
-		size, err := r.rangeRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
+		size, contentType, etag, status, err := r.rangeRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
 		if err == nil && IsValidSize(size) {
 			r.recordSuccess(host)
 			atomic.AddUint64(&r.rangeHits, 1)
 			sendResult(SizeResult{
-				Path:       file.DisplayPath,
-				Size:       size,
-				Source:     SourceRange,
-				Confidence: r.calculateConfidence(size, file.FileName, SourceRange),
+				Path:        file.DisplayPath,
+				Size:        size,
+				Source:      SourceRange,
+				Confidence:  r.calculateConfidence(size, file.FileName, SourceRange),
+				ContentType: contentType,
+				StatusCode:  status,
+				ETag:        etag,
 			})
 			return
 		}
@@ -562,15 +589,45 @@ func (r *FileSizeResolver) recordSourceHit(source SizeSource) {
 }
 
 // cacheResult stores the resolved size
-func (r *FileSizeResolver) cacheResult(file FileItem, result SizeResult) {
+
+func (r *FileSizeResolver) cacheResult(ctx context.Context, file FileItem, result SizeResult) {
 	r.fileDAO.SetFileSize(file.DisplayPath, result.Size, 24*time.Hour)
 	if file.EncryptedPath != "" && file.EncryptedPath != file.DisplayPath {
 		r.fileDAO.SetFileSize(file.EncryptedPath, result.Size, 24*time.Hour)
 	}
+
+	if r.metaStore == nil {
+		return
+	}
+
+	if result.StatusCode != http.StatusOK && result.StatusCode != http.StatusPartialContent {
+		return
+	}
+	if result.ContentType != "" {
+		contentType := strings.ToLower(result.ContentType)
+		if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
+			return
+		}
+	}
+	if !IsValidSize(result.Size) {
+		return
+	}
+
+	providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
+	_ = r.metaStore.Upsert(ctx, FileMeta{
+		ProviderKey:  providerKey,
+		OriginalPath: file.DisplayPath,
+		Size:         result.Size,
+		ETag:         result.ETag,
+		ContentType:  result.ContentType,
+		StatusCode:   result.StatusCode,
+		UpdatedAt:    time.Now(),
+		LastAccessed: time.Now(),
+	})
 }
 
 // headRequest performs HEAD request with specific timeout
-func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHeaders http.Header, timeout time.Duration) (int64, error) {
+func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHeaders http.Header, timeout time.Duration) (int64, string, string, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -583,29 +640,30 @@ func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHead
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, "", "", 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, &SizeResolverError{Message: "HEAD failed", StatusCode: resp.StatusCode}
+		return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "HEAD failed", StatusCode: resp.StatusCode}
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "text/html") {
-		return 0, &SizeResolverError{Message: "received HTML response"}
+	if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
+		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "received non-media response"}
 	}
 
 	contentLen := resp.Header.Get("Content-Length")
 	if contentLen == "" {
-		return 0, &SizeResolverError{Message: "no Content-Length"}
+		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "no Content-Length"}
 	}
 
-	return strconv.ParseInt(contentLen, 10, 64)
+	size, err := strconv.ParseInt(contentLen, 10, 64)
+	return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
 }
 
 // rangeRequest performs Range request with specific timeout
-func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHeaders http.Header, timeout time.Duration) (int64, error) {
+func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHeaders http.Header, timeout time.Duration) (int64, string, string, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -619,12 +677,17 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, "", "", 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return 0, &SizeResolverError{Message: "Range failed", StatusCode: resp.StatusCode}
+		return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "Range failed", StatusCode: resp.StatusCode}
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
+		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "received non-media response"}
 	}
 
 	// Parse Content-Range: bytes 0-0/1234567
@@ -632,17 +695,19 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 	if contentRange != "" {
 		parts := strings.Split(contentRange, "/")
 		if len(parts) == 2 && parts[1] != "*" {
-			return strconv.ParseInt(parts[1], 10, 64)
+			size, err := strconv.ParseInt(parts[1], 10, 64)
+			return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
 		}
 	}
 
 	if resp.StatusCode == http.StatusOK {
 		if contentLen := resp.Header.Get("Content-Length"); contentLen != "" {
-			return strconv.ParseInt(contentLen, 10, 64)
+			size, err := strconv.ParseInt(contentLen, 10, 64)
+			return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
 		}
 	}
 
-	return 0, &SizeResolverError{Message: "no size info"}
+	return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "no size info"}
 }
 
 // Stats returns resolver statistics
@@ -662,16 +727,16 @@ func (r *FileSizeResolver) Stats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_requests":  total,
-		"cache_hits":      cacheHits,
-		"propfind_hits":   propfindHits,
-		"head_hits":       headHits,
-		"range_hits":      rangeHits,
-		"failures":        failures,
-		"early_returns":   earlyReturns,
-		"circuit_breaks":  circuitBreaks,
-		"hit_rate":        hitRate,
-		"max_workers":     r.maxWorkers,
+		"total_requests": total,
+		"cache_hits":     cacheHits,
+		"propfind_hits":  propfindHits,
+		"head_hits":      headHits,
+		"range_hits":     rangeHits,
+		"failures":       failures,
+		"early_returns":  earlyReturns,
+		"circuit_breaks": circuitBreaks,
+		"hit_rate":       hitRate,
+		"max_workers":    r.maxWorkers,
 	}
 }
 

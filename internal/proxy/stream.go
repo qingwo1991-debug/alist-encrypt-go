@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	stderrors "errors"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/encryption"
@@ -100,6 +104,25 @@ type StreamProxy struct {
 	client *Client
 	cfg    *config.Config
 	compat *rangeCompatCache
+}
+
+// StreamStrategy controls how range and streaming are handled.
+type StreamStrategy string
+
+const (
+	StreamStrategyRange   StreamStrategy = "range"
+	StreamStrategyChunked StreamStrategy = "chunked"
+	StreamStrategyFull    StreamStrategy = "full"
+)
+
+// StreamOutcome describes the streaming result for strategy selection.
+type StreamOutcome struct {
+	Err             error
+	Retryable       bool
+	FailureReason   string
+	BytesWritten    int64
+	ExpectedBytes   int64
+	ResponseStarted bool
 }
 
 // NewStreamProxy creates a new stream proxy
@@ -204,12 +227,18 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 
 // ProxyDownloadDecrypt downloads and decrypts content
 func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
+	result := s.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, fileSize, StreamStrategyRange)
+	return result.Err
+}
+
+// ProxyDownloadDecryptWithStrategy downloads and decrypts content with strategy control.
+func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy) *StreamOutcome {
 	// Handle empty files without decryption overhead
 	if fileSize == 0 {
 		w.Header().Set("Content-Length", "0")
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
-		return nil
+		return &StreamOutcome{ResponseStarted: true}
 	}
 
 	rangeHeader := r.Header.Get("Range")
@@ -220,15 +249,17 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		CopyHeaders(r).
 		Build()
 	if err != nil {
-		return errors.NewInternalWithCause("failed to create request", err)
+		return &StreamOutcome{Err: errors.NewInternalWithCause("failed to create request", err)}
 	}
+	applyStrategyHeaders(req, strategy)
 	if rangeHeader != "" && s.shouldSkipRange(targetURL) {
 		req.Header.Del("Range")
 	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return errors.NewProxyErrorWithCause("failed to fetch", err)
+		reason, retryable := classifyStreamError(err)
+		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", err), FailureReason: reason, Retryable: retryable}
 	}
 
 	// Handle redirects - Alist/WebDAV may return 302 to actual storage URL
@@ -237,7 +268,7 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		resp.Body.Close()
 
 		if location == "" {
-			return errors.NewProxyError("redirect without Location header")
+			return &StreamOutcome{Err: errors.NewProxyError("redirect without Location header")}
 		}
 
 		log.Debug().Str("location", location).Msg("Following redirect for decryption")
@@ -248,107 +279,22 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 			CopyHeadersExcept(r, "Host").
 			Build()
 		if err != nil {
-			return errors.NewInternalWithCause("failed to create redirect request", err)
+			return &StreamOutcome{Err: errors.NewInternalWithCause("failed to create redirect request", err)}
 		}
+		applyStrategyHeaders(redirectReq, strategy)
 		if rangeHeader != "" && s.shouldSkipRange(location) {
 			redirectReq.Header.Del("Range")
 		}
 
 		resp, err = s.client.Client.Do(redirectReq)
 		if err != nil {
-			return errors.NewProxyErrorWithCause("failed to fetch from redirect", err)
+			reason, retryable := classifyStreamError(err)
+			return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch from redirect", err), FailureReason: reason, Retryable: retryable}
 		}
 	}
 	defer resp.Body.Close()
 
-	// Get file size from Content-Length if not provided
-	fileSize = resolveFileSize(fileSize, resp)
-
-	// Create decryption stream
-	flowEnc, err := encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
-	if err != nil {
-		return errors.NewDecryptionErrorWithCause("failed to create cipher", err)
-	}
-
-	// Parse and validate Range header
-	rangeReq, err := httputil.ParseRange(r.Header.Get("Range"), fileSize)
-	if err != nil {
-		// Invalid range - return 416 Range Not Satisfiable
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return nil
-	}
-
-	var requestedRange *httputil.Range
-	isRangeRequest := rangeReq != nil && len(rangeReq.Ranges) > 0
-
-	if isRangeRequest {
-		if len(rangeReq.Ranges) > 1 {
-			// Multi-range not supported - serve full content with 200
-			isRangeRequest = false
-		} else {
-			requestedRange = &rangeReq.Ranges[0]
-		}
-	}
-
-	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-	if rangeHeader != "" && !upstreamIsRange {
-		markURL := targetURL
-		if resp.Request != nil && resp.Request.URL != nil {
-			markURL = resp.Request.URL.String()
-		}
-		s.markRangeIncompatible(markURL)
-	}
-	if isRangeRequest && upstreamIsRange {
-		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
-			return errors.NewDecryptionErrorWithCause("failed to set position", err)
-		}
-	}
-
-	// Copy only safe headers (NOT Content-Length, NOT Content-Range, NOT ETag)
-	// ETag is removed because encrypted and decrypted content differ
-	httputil.CopySelectiveHeaders(w, resp, []string{
-		"Content-Type",
-		"Content-Disposition",
-		"Cache-Control",
-		"Last-Modified",
-	})
-
-	// Always advertise range support
-	w.Header().Set("Accept-Ranges", "bytes")
-
-	var readerToStream io.Reader
-	decryptReader := flowEnc.DecryptReader(resp.Body)
-	if isRangeRequest {
-		// Partial content response
-		w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
-		w.Header().Set("Content-Range", requestedRange.ContentRangeHeader(fileSize))
-		w.WriteHeader(http.StatusPartialContent) // 206
-
-		if !upstreamIsRange && requestedRange.Start > 0 {
-			if _, err := io.CopyN(io.Discard, decryptReader, requestedRange.Start); err != nil {
-				return errors.NewProxyErrorWithCause("failed to skip encrypted bytes", err)
-			}
-		}
-
-		// Limit stream output to exact range
-		readerToStream = io.LimitReader(decryptReader, requestedRange.ContentLength())
-	} else {
-		// Full content response
-		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
-		w.WriteHeader(http.StatusOK) // 200
-
-		readerToStream = decryptReader
-	}
-
-	// Stream decrypted content with large buffer
-	buf := getBuffer()
-	defer putBuffer(buf)
-	_, err = io.CopyBuffer(w, readerToStream, *buf)
-	if err != nil {
-		log.Error().Err(err).Msg("Error streaming decrypted content")
-	}
-	return err
+	return s.streamDecryptResponse(w, r, resp, targetURL, passwdInfo, fileSize, rangeHeader, strategy)
 }
 
 // ProxyUploadEncrypt uploads with encryption
@@ -389,13 +335,21 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 
 // ProxyDownloadDecryptReq downloads and decrypts content using a pre-built request
 func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
+	result := s.ProxyDownloadDecryptReqWithStrategy(w, req, targetURL, passwdInfo, fileSize, StreamStrategyRange)
+	return result.Err
+}
+
+// ProxyDownloadDecryptReqWithStrategy downloads and decrypts using a pre-built request and strategy.
+func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy) *StreamOutcome {
 	rangeHeader := req.Header.Get("Range")
+	applyStrategyHeaders(req, strategy)
 	if rangeHeader != "" && s.shouldSkipRange(targetURL) {
 		req.Header.Del("Range")
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return errors.NewProxyErrorWithCause("failed to fetch", err)
+		reason, retryable := classifyStreamError(err)
+		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", err), FailureReason: reason, Retryable: retryable}
 	}
 
 	// Handle redirects - Alist/WebDAV may return 302 to actual storage URL
@@ -404,7 +358,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 		resp.Body.Close()
 
 		if location == "" {
-			return errors.NewProxyError("redirect without Location header")
+			return &StreamOutcome{Err: errors.NewProxyError("redirect without Location header")}
 		}
 
 		log.Debug().Str("location", location).Msg("Following redirect for decryption (req)")
@@ -415,46 +369,87 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 			CopyHeadersExcept(req, "Host").
 			Build()
 		if err != nil {
-			return errors.NewInternalWithCause("failed to create redirect request", err)
+			return &StreamOutcome{Err: errors.NewInternalWithCause("failed to create redirect request", err)}
 		}
+		applyStrategyHeaders(redirectReq, strategy)
 		if rangeHeader != "" && s.shouldSkipRange(location) {
 			redirectReq.Header.Del("Range")
 		}
 
 		resp, err = s.client.Client.Do(redirectReq)
 		if err != nil {
-			return errors.NewProxyErrorWithCause("failed to fetch from redirect", err)
+			reason, retryable := classifyStreamError(err)
+			return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch from redirect", err), FailureReason: reason, Retryable: retryable}
 		}
 	}
 	defer resp.Body.Close()
 
+	return s.streamDecryptResponse(w, req, resp, targetURL, passwdInfo, fileSize, rangeHeader, strategy)
+}
+
+func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
+	if strategy == StreamStrategyFull {
+		req.Header.Del("Range")
+	}
+}
+
+func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy) *StreamOutcome {
+	result := &StreamOutcome{}
+
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
+
+	if strategy == StreamStrategyFull {
+		rangeHeader = ""
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/html") && (rangeHeader != "" || fileSize > 0) {
+		return &StreamOutcome{Retryable: true, FailureReason: "html_response"}
+	}
+
+	if rangeHeader != "" && (strategy == StreamStrategyRange || strategy == StreamStrategyChunked) {
+		if resp.StatusCode != http.StatusPartialContent && resp.Header.Get("Content-Range") == "" {
+			markURL := targetURL
+			if resp.Request != nil && resp.Request.URL != nil {
+				markURL = resp.Request.URL.String()
+			}
+			s.markRangeIncompatible(markURL)
+			return &StreamOutcome{Retryable: true, FailureReason: "range_status"}
+		}
+	}
+
+	if rangeHeader != "" && fileSize == 0 && strategy != StreamStrategyFull {
+		return &StreamOutcome{Retryable: true, FailureReason: "size_unknown"}
+	}
 
 	// Create decryption stream
 	flowEnc, err := encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
 	if err != nil {
-		return errors.NewDecryptionErrorWithCause("failed to create cipher", err)
+		result.Err = errors.NewDecryptionErrorWithCause("failed to create cipher", err)
+		return result
 	}
 
 	// Parse and validate Range header
-	rangeReq, err := httputil.ParseRange(rangeHeader, fileSize)
-	if err != nil {
-		// Invalid range - return 416 Range Not Satisfiable
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return nil
-	}
-
 	var requestedRange *httputil.Range
-	isRangeRequest := rangeReq != nil && len(rangeReq.Ranges) > 0
+	var isRangeRequest bool
 
-	if isRangeRequest {
-		if len(rangeReq.Ranges) > 1 {
-			// Multi-range not supported - serve full content with 200
-			isRangeRequest = false
-		} else {
-			requestedRange = &rangeReq.Ranges[0]
+	if rangeHeader != "" {
+		rangeReq, err := httputil.ParseRange(rangeHeader, fileSize)
+		if err != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			result.ResponseStarted = true
+			return result
+		}
+
+		isRangeRequest = rangeReq != nil && len(rangeReq.Ranges) > 0
+		if isRangeRequest {
+			if len(rangeReq.Ranges) > 1 {
+				isRangeRequest = false
+			} else {
+				requestedRange = &rangeReq.Ranges[0]
+			}
 		}
 	}
 
@@ -468,12 +463,12 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 	}
 	if isRangeRequest && upstreamIsRange {
 		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
-			return errors.NewDecryptionErrorWithCause("failed to set position", err)
+			result.Err = errors.NewDecryptionErrorWithCause("failed to set position", err)
+			return result
 		}
 	}
 
 	// Copy only safe headers (NOT Content-Length, NOT Content-Range, NOT ETag)
-	// ETag is removed because encrypted and decrypted content differ
 	httputil.CopySelectiveHeaders(w, resp, []string{
 		"Content-Type",
 		"Content-Disposition",
@@ -486,36 +481,78 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 
 	var readerToStream io.Reader
 	decryptReader := flowEnc.DecryptReader(resp.Body)
+
 	if isRangeRequest {
-		// Partial content response
-		w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
+		if strategy == StreamStrategyRange {
+			w.Header().Set("Content-Length", strconv.FormatInt(requestedRange.ContentLength(), 10))
+		}
 		w.Header().Set("Content-Range", requestedRange.ContentRangeHeader(fileSize))
-		w.WriteHeader(http.StatusPartialContent) // 206
+		w.WriteHeader(http.StatusPartialContent)
+		result.ResponseStarted = true
+		result.ExpectedBytes = requestedRange.ContentLength()
 
 		if !upstreamIsRange && requestedRange.Start > 0 {
 			if _, err := io.CopyN(io.Discard, decryptReader, requestedRange.Start); err != nil {
-				return errors.NewProxyErrorWithCause("failed to skip encrypted bytes", err)
+				result.Err = errors.NewProxyErrorWithCause("failed to skip encrypted bytes", err)
+				return result
 			}
 		}
 
-		// Limit stream output to exact range
 		readerToStream = io.LimitReader(decryptReader, requestedRange.ContentLength())
 	} else {
-		// Full content response
-		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
-		w.WriteHeader(http.StatusOK) // 200
-
+		if strategy != StreamStrategyChunked && fileSize > 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+			result.ExpectedBytes = fileSize
+		}
+		w.WriteHeader(http.StatusOK)
+		result.ResponseStarted = true
 		readerToStream = decryptReader
 	}
 
-	// Stream decrypted content with large buffer
 	buf := getBuffer()
 	defer putBuffer(buf)
-	_, err = io.CopyBuffer(w, readerToStream, *buf)
+	written, err := io.CopyBuffer(w, readerToStream, *buf)
+	result.BytesWritten = written
 	if err != nil {
 		log.Error().Err(err).Msg("Error streaming decrypted content")
+		result.Err = err
+		if result.ExpectedBytes > 0 && written < result.ExpectedBytes {
+			result.FailureReason = "short_write"
+			result.Retryable = false
+			return result
+		}
+		reason, retryable := classifyStreamError(err)
+		if result.FailureReason == "" {
+			result.FailureReason = reason
+		}
+		result.Retryable = retryable
 	}
-	return err
+
+	return result
+}
+
+func classifyStreamError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	if stderrors.Is(err, context.DeadlineExceeded) {
+		return "timeout", false
+	}
+	var netErr net.Error
+	if stderrors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "timeout", false
+		}
+		return "network_error", false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset by peer") {
+		return "client_disconnect", false
+	}
+	if strings.Contains(msg, "timeout") {
+		return "timeout", false
+	}
+	return "network_error", false
 }
 
 // resolveFileSize extracts file size from response headers if not provided

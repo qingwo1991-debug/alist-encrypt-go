@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-contrib/gzip"
@@ -20,6 +21,7 @@ import (
 	"github.com/alist-encrypt-go/internal/handler"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
+	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 	"github.com/alist-encrypt-go/web"
 )
 
@@ -27,6 +29,7 @@ import (
 type Server struct {
 	cfg         *config.Config
 	store       *storage.Store
+	mysqlStore  *mysqlstore.Store
 	engine      *gin.Engine
 	httpServer  *http.Server
 	httpsServer *http.Server
@@ -54,6 +57,13 @@ func New(cfg *config.Config) (*Server, error) {
 		userDAO:     dao.NewUserDAO(store),
 		fileDAO:     dao.NewFileDAO(store),
 		passwdDAO:   dao.NewPasswdDAO(store),
+	}
+
+	mysqlStore, err := mysqlstore.NewStore(cfg)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to initialize MySQL store, using memory-only mode")
+	} else {
+		s.mysqlStore = mysqlStore
 	}
 
 	// Ensure default admin user exists
@@ -95,9 +105,23 @@ func (s *Server) setupRoutes() {
 
 	// Create handlers
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO)
-	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
+	strategyStore := handler.StrategyStore(handler.NewMemoryStrategyStore())
+	var metaStore handler.FileMetaStore
+	if s.mysqlStore != nil {
+		strategyStore = handler.NewMySQLStrategyStore(s.mysqlStore)
+		metaStore = handler.NewMySQLFileMetaStore(s.mysqlStore)
+		if err := migrateStrategyStore(s.cfg, strategyStore); err != nil {
+			log.Warn().Err(err).Msg("Failed to migrate strategy store JSON")
+		}
+	}
+	strategySelector, err := handler.NewStrategySelector(s.cfg, strategyStore)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to initialize strategy selector")
+		strategySelector, _ = handler.NewStrategySelector(s.cfg, handler.NewMemoryStrategyStore())
+	}
+	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler)
-	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
+	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
 
 	// Handle frontend error collection API
@@ -167,6 +191,34 @@ func (s *Server) setupRoutes() {
 
 	// Catch-all - Proxy to Alist with version injection
 	r.NoRoute(ginWrap(proxyHandler.HandleProxy))
+}
+
+func migrateStrategyStore(cfg *config.Config, store handler.StrategyStore) error {
+	if cfg == nil || store == nil {
+		return nil
+	}
+	path := cfg.AlistServer.StrategyStoreFile
+	if path == "" {
+		path = filepath.Join(cfg.DataDir, "strategy_cache.json")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+
+	data, err := handler.LoadStrategyStoreFile(path)
+	if err != nil {
+		return err
+	}
+	for provider, state := range data {
+		_ = store.Set(provider, state)
+	}
+
+	backupPath := path + ".bak"
+	if err := os.Rename(path, backupPath); err != nil {
+		return err
+	}
+	log.Info().Str("path", backupPath).Msg("Strategy store migrated to MySQL")
+	return nil
 }
 
 // ginWrap wraps a http.HandlerFunc to gin.HandlerFunc
