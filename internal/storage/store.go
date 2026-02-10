@@ -15,6 +15,7 @@ var (
 	BucketPasswd   = []byte("passwd")
 	BucketConfig   = []byte("config")
 	BucketFileInfo = []byte("fileinfo")
+	BucketFileSize = []byte("filesize")
 )
 
 // Store represents the BoltDB storage
@@ -51,7 +52,7 @@ func NewStore(dataDir string) (*Store, error) {
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		buckets := [][]byte{BucketUsers, BucketPasswd, BucketConfig, BucketFileInfo}
+		buckets := [][]byte{BucketUsers, BucketPasswd, BucketConfig, BucketFileInfo, BucketFileSize}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("failed to create bucket %s: %w", bucket, err)

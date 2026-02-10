@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/encryption"
@@ -15,14 +17,64 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Buffer pool for streaming - 512KB buffers for high-bitrate video
-const streamBufferSize = 512 * 1024
+// Buffer pool for streaming - default 512KB buffers for high-bitrate video
+var streamBufferSize = 512 * 1024
 
 var bufferPool = sync.Pool{
 	New: func() interface{} {
 		buf := make([]byte, streamBufferSize)
 		return &buf
 	},
+}
+
+func clampStreamBufferKB(kb int) int {
+	if kb < 32 {
+		return 32
+	}
+	if kb > 4096 {
+		return 4096
+	}
+	return kb
+}
+
+func applyStreamBufferConfig(cfg *config.Config) {
+	if cfg == nil || cfg.AlistServer.StreamBufferKb <= 0 {
+		return
+	}
+	effectiveKB := clampStreamBufferKB(cfg.AlistServer.StreamBufferKb)
+	streamBufferSize = effectiveKB * 1024
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, streamBufferSize)
+			return &buf
+		},
+	}
+}
+
+type rangeCompatCache struct {
+	entries sync.Map // host -> time.Time (expiry)
+}
+
+func (c *rangeCompatCache) shouldSkip(host string, ttl time.Duration) bool {
+	if host == "" || ttl <= 0 {
+		return false
+	}
+	if val, ok := c.entries.Load(host); ok {
+		if exp, ok2 := val.(time.Time); ok2 {
+			if time.Now().Before(exp) {
+				return true
+			}
+			c.entries.Delete(host)
+		}
+	}
+	return false
+}
+
+func (c *rangeCompatCache) mark(host string, ttl time.Duration) {
+	if host == "" || ttl <= 0 {
+		return
+	}
+	c.entries.Store(host, time.Now().Add(ttl))
 }
 
 func getBuffer() *[]byte {
@@ -47,13 +99,78 @@ func PutBuffer(buf *[]byte) {
 type StreamProxy struct {
 	client *Client
 	cfg    *config.Config
+	compat *rangeCompatCache
 }
 
 // NewStreamProxy creates a new stream proxy
 func NewStreamProxy(cfg *config.Config) *StreamProxy {
+	applyStreamBufferConfig(cfg)
 	return &StreamProxy{
 		client: NewClient(cfg),
 		cfg:    cfg,
+		compat: &rangeCompatCache{},
+	}
+}
+
+func (s *StreamProxy) rangeCompatTTL() time.Duration {
+	if s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+		return 0
+	}
+	if s.cfg.AlistServer.RangeCompatTtlMinutes <= 0 {
+		return 0
+	}
+	return time.Duration(s.cfg.AlistServer.RangeCompatTtlMinutes) * time.Minute
+}
+
+func (s *StreamProxy) rangeCompatHost(targetURL string) string {
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
+func (s *StreamProxy) shouldSkipRange(targetURL string) bool {
+	if s.compat == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+		return false
+	}
+	ttl := s.rangeCompatTTL()
+	if ttl <= 0 {
+		return false
+	}
+	return s.compat.shouldSkip(s.rangeCompatHost(targetURL), ttl)
+}
+
+func (s *StreamProxy) markRangeIncompatible(targetURL string) {
+	if s.compat == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+		return
+	}
+	ttl := s.rangeCompatTTL()
+	if ttl <= 0 {
+		return
+	}
+	s.compat.mark(s.rangeCompatHost(targetURL), ttl)
+}
+
+// RangeCompatStats returns range compatibility cache stats
+func (s *StreamProxy) RangeCompatStats() map[string]interface{} {
+	count := 0
+	if s.compat != nil {
+		s.compat.entries.Range(func(_, _ interface{}) bool {
+			count++
+			return true
+		})
+	}
+
+	return map[string]interface{}{
+		"enabled": s.cfg != nil && s.cfg.AlistServer.EnableRangeCompatCache,
+		"ttl_minutes": func() int {
+			if s.cfg != nil {
+				return s.cfg.AlistServer.RangeCompatTtlMinutes
+			}
+			return 0
+		}(),
+		"entries": count,
 	}
 }
 
@@ -95,6 +212,8 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		return nil
 	}
 
+	rangeHeader := r.Header.Get("Range")
+
 	// Build request with client headers (including Range when present)
 	req, err := httputil.NewRequest("GET", targetURL).
 		WithContext(r.Context()).
@@ -102,6 +221,9 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 		Build()
 	if err != nil {
 		return errors.NewInternalWithCause("failed to create request", err)
+	}
+	if rangeHeader != "" && s.shouldSkipRange(targetURL) {
+		req.Header.Del("Range")
 	}
 
 	resp, err := s.client.Do(req)
@@ -127,6 +249,9 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 			Build()
 		if err != nil {
 			return errors.NewInternalWithCause("failed to create redirect request", err)
+		}
+		if rangeHeader != "" && s.shouldSkipRange(location) {
+			redirectReq.Header.Del("Range")
 		}
 
 		resp, err = s.client.Client.Do(redirectReq)
@@ -167,6 +292,13 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 	}
 
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	if rangeHeader != "" && !upstreamIsRange {
+		markURL := targetURL
+		if resp.Request != nil && resp.Request.URL != nil {
+			markURL = resp.Request.URL.String()
+		}
+		s.markRangeIncompatible(markURL)
+	}
 	if isRangeRequest && upstreamIsRange {
 		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
 			return errors.NewDecryptionErrorWithCause("failed to set position", err)
@@ -257,6 +389,10 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 
 // ProxyDownloadDecryptReq downloads and decrypts content using a pre-built request
 func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
+	rangeHeader := req.Header.Get("Range")
+	if rangeHeader != "" && s.shouldSkipRange(targetURL) {
+		req.Header.Del("Range")
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return errors.NewProxyErrorWithCause("failed to fetch", err)
@@ -281,6 +417,9 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 		if err != nil {
 			return errors.NewInternalWithCause("failed to create redirect request", err)
 		}
+		if rangeHeader != "" && s.shouldSkipRange(location) {
+			redirectReq.Header.Del("Range")
+		}
 
 		resp, err = s.client.Client.Do(redirectReq)
 		if err != nil {
@@ -299,7 +438,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 	}
 
 	// Parse and validate Range header
-	rangeReq, err := httputil.ParseRange(req.Header.Get("Range"), fileSize)
+	rangeReq, err := httputil.ParseRange(rangeHeader, fileSize)
 	if err != nil {
 		// Invalid range - return 416 Range Not Satisfiable
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
@@ -320,6 +459,13 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 	}
 
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	if rangeHeader != "" && !upstreamIsRange {
+		markURL := targetURL
+		if resp.Request != nil && resp.Request.URL != nil {
+			markURL = resp.Request.URL.String()
+		}
+		s.markRangeIncompatible(markURL)
+	}
 	if isRangeRequest && upstreamIsRange {
 		if err := flowEnc.SetPosition(requestedRange.Start); err != nil {
 			return errors.NewDecryptionErrorWithCause("failed to set position", err)

@@ -21,6 +21,13 @@ type FileInfo struct {
 	Sign     string    `json:"sign"`
 }
 
+// FileSizeEntry represents a persistent file size mapping
+type FileSizeEntry struct {
+	Path      string    `json:"path"`
+	Size      int64     `json:"size"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // FileDAO handles file information caching
 type FileDAO struct {
 	store     *storage.Store
@@ -135,7 +142,24 @@ func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
 
 // GetFileSize retrieves cached file size (optimized for long-term caching)
 func (d *FileDAO) GetFileSize(path string) (int64, bool) {
-	return d.pathCache.GetSize(path)
+	if size, ok := d.pathCache.GetSize(path); ok {
+		return size, true
+	}
+
+	cfg := config.Get()
+	if cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
+		var entry FileSizeEntry
+		if err := d.store.GetJSON(storage.BucketFileSize, path, &entry); err == nil && entry.Size > 0 {
+			ttl := time.Duration(cfg.AlistServer.SizeMapTtlMinutes) * time.Minute
+			if entry.UpdatedAt.IsZero() || time.Since(entry.UpdatedAt) <= ttl {
+				cacheEntry := &PathEntry{EncryptedPath: path, DisplayPath: path, Size: entry.Size}
+				d.pathCache.Set(cacheEntry, ttl)
+				return entry.Size, true
+			}
+		}
+	}
+
+	return 0, false
 }
 
 // SetFileSize caches file size with TTL (default 24 hours for stability)
@@ -148,16 +172,21 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 	if entry, ok := d.pathCache.Get(path); ok {
 		entry.Size = size
 		d.pathCache.Set(entry, ttl)
-		return
+	} else {
+		// Create minimal entry for size caching
+		cacheEntry := &PathEntry{
+			EncryptedPath: path,
+			DisplayPath:   path,
+			Size:          size,
+		}
+		d.pathCache.Set(cacheEntry, ttl)
 	}
 
-	// Create minimal entry for size caching
-	entry := &PathEntry{
-		EncryptedPath: path,
-		DisplayPath:   path,
-		Size:          size,
+	cfg := config.Get()
+	if cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
+		persistEntry := FileSizeEntry{Path: path, Size: size, UpdatedAt: time.Now()}
+		_ = d.store.SetJSON(storage.BucketFileSize, path, persistEntry)
 	}
-	d.pathCache.Set(entry, ttl)
 }
 
 // DeleteFileSize removes cached file size
@@ -167,6 +196,7 @@ func (d *FileDAO) DeleteFileSize(path string) {
 		entry.Size = 0
 		d.pathCache.Set(entry, 24*time.Hour)
 	}
+	_ = d.store.Delete(storage.BucketFileSize, path)
 }
 
 // FileSizeCacheStats returns file size cache statistics

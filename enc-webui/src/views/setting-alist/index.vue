@@ -23,6 +23,32 @@
         <el-switch v-model="alistConfigForm.proxyH2c" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
         <span color="gray" style="font-size: 12px; margin-left: 12px">客户端连接代理时启用h2c（播放器/浏览器需支持）</span>
       </el-form-item>
+      <el-form-item prop="enableSizeMap" label="长期映射">
+        <el-switch v-model="alistConfigForm.enableSizeMap" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">缓存文件大小映射，减少探测请求</span>
+      </el-form-item>
+      <el-form-item prop="sizeMapTtlMinutes" label="映射TTL">
+        <el-input v-model="alistConfigForm.sizeMapTtlMinutes" style="max-width: 260px" placeholder="1440" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">分钟</span>
+      </el-form-item>
+      <el-form-item prop="enableRangeCompatCache" label="Range兼容">
+        <el-switch v-model="alistConfigForm.enableRangeCompatCache" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">记录不支持Range的上游并降级</span>
+      </el-form-item>
+      <el-form-item prop="rangeCompatTtlMinutes" label="兼容TTL">
+        <el-input v-model="alistConfigForm.rangeCompatTtlMinutes" style="max-width: 260px" placeholder="60" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">分钟</span>
+      </el-form-item>
+      <el-form-item prop="enableParallelDecrypt" label="并行解密">
+        <el-switch v-model="alistConfigForm.enableParallelDecrypt" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">大文件分片并行解密</span>
+      </el-form-item>
+      <el-form-item prop="parallelDecryptConcurrency" label="并发数">
+        <el-input v-model="alistConfigForm.parallelDecryptConcurrency" style="max-width: 260px" placeholder="4" />
+      </el-form-item>
+      <el-form-item prop="streamBufferKb" label="缓冲区KB">
+        <el-input v-model="alistConfigForm.streamBufferKb" style="max-width: 260px" placeholder="512" />
+      </el-form-item>
 
       <el-form-item label="密码设置">
         <el-button type="success" @click="addPasswd">添加</el-button>
@@ -149,6 +175,13 @@ const alistConfigForm = reactive({
   https: false,
   enableH2c: false,
   proxyH2c: false,
+  enableSizeMap: true,
+  sizeMapTtlMinutes: 1440,
+  enableRangeCompatCache: true,
+  rangeCompatTtlMinutes: 60,
+  enableParallelDecrypt: false,
+  parallelDecryptConcurrency: 4,
+  streamBufferKb: 512,
   passwdList: [
     {
       id: Math.random(),

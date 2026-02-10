@@ -98,6 +98,7 @@ func (s *Server) setupRoutes() {
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO)
+	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
 
 	// Handle frontend error collection API
 	r.POST("/integration-front/errorCollection/insert", func(c *gin.Context) {
@@ -128,6 +129,7 @@ func (s *Server) setupRoutes() {
 			protected.Any("/decodeFoldName", ginWrap(apiHandler.DecodeFoldName))
 			protected.Any("/getSchemeConfig", ginWrap(apiHandler.GetSchemeConfig))
 			protected.Any("/saveSchemeConfig", ginWrap(apiHandler.SaveSchemeConfig))
+			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
 		}
 	}
 
