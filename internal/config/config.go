@@ -194,7 +194,7 @@ func DefaultConfig() *Config {
 			ProbeMaxDelayMs:            15000,
 			ProbeCooldownMinutes:       1440,
 			ProbeQueueSize:             1000,
-			ProbeMinSizeBytes:          0,
+			ProbeMinSizeBytes:          100 * 1024 * 1024,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -370,6 +370,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v, ok := getEnvInt("PROBE_QUEUE_SIZE"); ok {
 		c.AlistServer.ProbeQueueSize = v
+	}
+	if v, ok := getEnvInt("PROBE_MIN_SIZE_BYTES"); ok {
+		if v > 0 {
+			c.AlistServer.ProbeMinSizeBytes = int64(v)
+		}
 	}
 }
 

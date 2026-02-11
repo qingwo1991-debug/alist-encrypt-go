@@ -104,7 +104,7 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Create handlers
-	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO)
+	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO, s.mysqlStore)
 	strategyStore := handler.StrategyStore(handler.NewMemoryStrategyStore())
 	var metaStore handler.FileMetaStore
 	if s.mysqlStore != nil {
@@ -155,6 +155,7 @@ func (s *Server) setupRoutes() {
 			protected.Any("/decodeFoldName", ginWrap(apiHandler.DecodeFoldName))
 			protected.Any("/getSchemeConfig", ginWrap(apiHandler.GetSchemeConfig))
 			protected.Any("/saveSchemeConfig", ginWrap(apiHandler.SaveSchemeConfig))
+			protected.Any("/exportFileMeta", ginWrap(apiHandler.ExportFileMeta))
 			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
 		}
 	}

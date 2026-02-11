@@ -57,7 +57,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		passwdDAO:     passwdDAO,
 		proxyHandler:  NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20),
+		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20, getMinMetaSize(cfg)),
 		strategySel:   selector,
 		metaStore:     metaStore,
 		probe:         nil,
@@ -145,6 +145,27 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	fileSize, usedStrategy := h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
 
 	trace.Logf(r.Context(), "webdav-get", "File size: %d, strategy: %s", fileSize, usedStrategy)
+	fileItem := FileItem{
+		DisplayPath:   davPath,
+		EncryptedPath: realPath,
+		TargetURL:     targetURL,
+		FileName:      path.Base(davPath),
+	}
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	if fileSize == 0 {
+		if h.sizeResolver != nil {
+			fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
+			if fresh.Error == nil && fresh.Size > 0 {
+				fileSize = fresh.Size
+			}
+		}
+	}
 	if fileSize == 0 {
 		trace.Logf(r.Context(), "webdav-get", "Size unknown, passthrough")
 		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
@@ -161,27 +182,37 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		strategies = h.strategySel.Select(providerKey)
 	}
 
-	var lastErr error
-	for _, strategy := range strategies {
-		attemptReq, err := httputil.NewRequest(r.Method, targetURL).
-			WithContext(r.Context()).
-			WithBodyReader(r.Body).
-			CopyHeaders(r).
-			Build()
-		if err != nil {
-			RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
+	tryStream := func(size int64) (bool, bool, string, error) {
+		var lastErr error
+		var lastFailure string
+		var responseStarted bool
 
-		result := h.streamProxy.ProxyDownloadDecryptReqWithStrategy(w, attemptReq, targetURL, passwdInfo, fileSize, strategy)
-		if result.Err == nil && !result.Retryable {
-			if h.strategySel != nil {
-				h.strategySel.RecordSuccess(providerKey, strategy)
+		for _, strategy := range strategies {
+			attemptReq, err := httputil.NewRequest(r.Method, targetURL).
+				WithContext(r.Context()).
+				WithBodyReader(r.Body).
+				CopyHeaders(r).
+				Build()
+			if err != nil {
+				RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
+				return false, true, "internal_error", err
 			}
-			return
-		}
 
-		if h.strategySel != nil {
+			result := h.streamProxy.ProxyDownloadDecryptReqWithStrategy(w, attemptReq, targetURL, passwdInfo, size, strategy)
+			if result.Err == nil && !result.Retryable {
+				if h.strategySel != nil {
+					h.strategySel.RecordSuccess(providerKey, strategy)
+				}
+				if h.sizeResolver != nil && r.Method == http.MethodGet {
+					metaSize := size
+					if result.ExpectedBytes > 0 {
+						metaSize = result.ExpectedBytes
+					}
+					h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, result.StatusCode, result.ContentType, result.ETag)
+				}
+				return true, result.ResponseStarted, "", nil
+			}
+
 			reason := result.FailureReason
 			if reason == "" && result.Err != nil {
 				reason = "stream_error"
@@ -189,29 +220,60 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 			if reason == "" {
 				reason = "unknown"
 			}
-			if result.Retryable && !result.ResponseStarted {
-				if isNonStrategyFailure(reason) {
-					trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, davPath)
-				} else {
-					trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, davPath)
-				}
+			if lastFailure == "" {
+				lastFailure = reason
 			}
-			h.strategySel.RecordFailure(providerKey, strategy, reason)
-		}
 
-		if result.Err != nil {
-			lastErr = result.Err
-		} else if result.Retryable {
-			lastErr = fmt.Errorf("strategy %s failed", strategy)
-		}
-		if result.ResponseStarted || !result.Retryable {
-			if lastErr != nil {
-				log.Error().Err(lastErr).Str("path", davPath).Msg("WebDAV GET decryption failed")
+			if h.strategySel != nil {
+				if result.Retryable && !result.ResponseStarted {
+					if isNonStrategyFailure(reason) {
+						trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, davPath)
+					} else {
+						trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, davPath)
+					}
+				}
+				h.strategySel.RecordFailure(providerKey, strategy, reason)
 			}
-			return
+
+			if result.Err != nil {
+				lastErr = result.Err
+			} else if result.Retryable {
+				lastErr = fmt.Errorf("strategy %s failed", strategy)
+			}
+			responseStarted = responseStarted || result.ResponseStarted
+			if result.ResponseStarted || !result.Retryable {
+				if lastErr != nil {
+					log.Error().Err(lastErr).Str("path", davPath).Msg("WebDAV GET decryption failed")
+				}
+				return false, responseStarted, lastFailure, lastErr
+			}
+		}
+		return false, responseStarted, lastFailure, lastErr
+	}
+
+	success, responseStarted, lastFailure, lastErr := tryStream(fileSize)
+	if success {
+		return
+	}
+
+	if !responseStarted && h.sizeResolver != nil {
+		fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
+		if fresh.Error == nil && fresh.Size > 0 {
+			if fileSize > 0 && fresh.Size != fileSize {
+				h.sizeResolver.RecordMetaConflict(providerKey)
+			}
+			fileSize = fresh.Size
+			success, responseStarted, lastFailure, lastErr = tryStream(fileSize)
+			if success {
+				return
+			}
 		}
 	}
 
+	if lastFailure == "range_unsatisfiable" {
+		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
 	if lastErr != nil {
 		log.Error().Err(lastErr).Str("path", davPath).Msg("WebDAV GET decryption failed")
 		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)

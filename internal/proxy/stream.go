@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -129,6 +130,9 @@ type StreamOutcome struct {
 	BytesWritten    int64
 	ExpectedBytes   int64
 	ResponseStarted bool
+	StatusCode      int
+	ContentType     string
+	ETag            string
 }
 
 // NewStreamProxy creates a new stream proxy
@@ -246,8 +250,16 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy) *StreamOutcome {
 	rangeHeader := r.Header.Get("Range")
 
+	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL) {
+		return &StreamOutcome{
+			Err:           errors.NewProxyError("range unsupported"),
+			Retryable:     true,
+			FailureReason: "range_unsupported",
+		}
+	}
+
 	// Build request with client headers (including Range when present)
-	req, err := httputil.NewRequest("GET", targetURL).
+	req, err := httputil.NewRequest(r.Method, targetURL).
 		WithContext(r.Context()).
 		CopyHeaders(r).
 		Build()
@@ -270,7 +282,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 	}
 	defer resp.Body.Close()
 
-	return s.streamDecryptResponse(w, r, resp, passwdInfo, fileSize, rangeHeader)
+	return s.streamDecryptResponse(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
 }
 
 // ProxyUploadEncrypt uploads with encryption
@@ -318,10 +330,14 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 // ProxyDownloadDecryptReqWithStrategy downloads and decrypts using a pre-built request and strategy.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy) *StreamOutcome {
 	rangeHeader := req.Header.Get("Range")
-	applyStrategyHeaders(req, strategy)
-	if rangeHeader != "" && s.shouldSkipRange(targetURL) {
-		req.Header.Del("Range")
+	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL) {
+		return &StreamOutcome{
+			Err:           errors.NewProxyError("range unsupported"),
+			Retryable:     true,
+			FailureReason: "range_unsupported",
+		}
 	}
+	applyStrategyHeaders(req, strategy)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		reason, retryable := classifyStreamError(err)
@@ -337,17 +353,19 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 }
 
 func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
-	if strategy == StreamStrategyFull {
+	if strategy == StreamStrategyFull || strategy == StreamStrategyChunked {
 		req.Header.Del("Range")
 	}
 }
 
-func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string) *StreamOutcome {
+func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL string) *StreamOutcome {
 	result := &StreamOutcome{}
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
-
+	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != fileSize {
+		fileSize = total
+	}
 	if fileSize == 0 {
 		result.Err = errors.NewDecryptionError("file size required for decrypt stream")
 		return result
@@ -360,20 +378,79 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		return result
 	}
 
-	if rangeStart, ok := parseRangeStart(rangeHeader); ok && rangeStart > 0 {
-		if err := flowEnc.SetPosition(rangeStart); err != nil {
+	var activeRange *httputil.Range
+	if rangeHeader != "" && req.Method == http.MethodGet {
+		parsed, err := httputil.ParseRange(rangeHeader, fileSize)
+		if err != nil {
+			writeRangeNotSatisfiable(w, fileSize)
+			result.Err = err
+			result.FailureReason = "range_invalid"
+			result.ResponseStarted = true
+			result.StatusCode = http.StatusRequestedRangeNotSatisfiable
+			return result
+		}
+		if parsed != nil {
+			if len(parsed.Ranges) != 1 {
+				writeRangeNotSatisfiable(w, fileSize)
+				result.Err = errors.NewProxyError("multiple ranges not supported")
+				result.FailureReason = "range_invalid"
+				result.ResponseStarted = true
+				result.StatusCode = http.StatusRequestedRangeNotSatisfiable
+				return result
+			}
+			activeRange = &parsed.Ranges[0]
+		}
+	}
+
+	if strategy == StreamStrategyFull {
+		activeRange = nil
+	}
+
+	if activeRange != nil && strategy == StreamStrategyRange {
+		if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") == "" {
+			s.markRangeIncompatible(targetURL)
+			return &StreamOutcome{Err: errors.NewProxyError("range unsupported"), Retryable: true, FailureReason: "range_unsupported"}
+		}
+		if resp.StatusCode == http.StatusPartialContent && resp.Header.Get("Content-Range") == "" {
+			s.markRangeIncompatible(targetURL)
+			return &StreamOutcome{Err: errors.NewProxyError("range unsupported"), Retryable: true, FailureReason: "range_unsupported"}
+		}
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
+				fileSize = total
+			}
+			return &StreamOutcome{Err: errors.NewProxyError("range unsatisfiable"), Retryable: true, FailureReason: "range_unsatisfiable"}
+		}
+	}
+
+	if activeRange != nil {
+		if err := flowEnc.SetPosition(activeRange.Start); err != nil {
 			result.Err = errors.NewDecryptionErrorWithCause("failed to set position", err)
 			return result
 		}
 	}
 
-	statusCode := resp.StatusCode
-	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
+	statusCode := http.StatusOK
+	if activeRange != nil {
 		statusCode = http.StatusPartialContent
 	}
 
-	// Copy upstream headers as-is for pass-through behavior.
-	httputil.CopyResponseHeaders(w, resp)
+	// Copy upstream headers but override range-related headers
+	httputil.CopyResponseHeaders(w, resp, "Content-Length", "Content-Range", "Accept-Ranges")
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	if activeRange != nil {
+		w.Header().Set("Content-Range", activeRange.ContentRangeHeader(fileSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(activeRange.ContentLength(), 10))
+		result.ExpectedBytes = activeRange.ContentLength()
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+		result.ExpectedBytes = fileSize
+	}
+
+	result.StatusCode = statusCode
+	result.ContentType = resp.Header.Get("Content-Type")
+	result.ETag = resp.Header.Get("ETag")
 
 	if req.Method == http.MethodGet && statusCode == http.StatusOK && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
 		if showName := decodeNameFromRequest(passwdInfo, req.URL.Path); showName != "" {
@@ -381,9 +458,25 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
+	if req.Method == http.MethodHead {
+		w.WriteHeader(statusCode)
+		result.ResponseStarted = true
+		return result
+	}
+
+	readerToStream := flowEnc.DecryptReader(resp.Body)
+	if activeRange != nil {
+		if strategy == StreamStrategyChunked {
+			if err := discardBytes(resp.Body, activeRange.Start); err != nil {
+				result.Err = errors.NewProxyErrorWithCause("failed to discard range bytes", err)
+				return result
+			}
+		}
+		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), activeRange.ContentLength())
+	}
+
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true
-	readerToStream := flowEnc.DecryptReader(resp.Body)
 
 	buf := getBuffer()
 	defer putBuffer(buf)
@@ -441,6 +534,33 @@ func parseRangeStart(rangeHeader string) (int64, bool) {
 		return 0, false
 	}
 	return start, true
+}
+
+func writeRangeNotSatisfiable(w http.ResponseWriter, fileSize int64) {
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+}
+
+func parseContentRangeTotal(contentRange string) int64 {
+	if contentRange == "" {
+		return 0
+	}
+	if idx := strings.LastIndex(contentRange, "/"); idx >= 0 && idx+1 < len(contentRange) {
+		totalStr := contentRange[idx+1:]
+		if total, err := strconv.ParseInt(totalStr, 10, 64); err == nil {
+			return total
+		}
+	}
+	return 0
+}
+
+func discardBytes(r io.Reader, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	_, err := io.CopyN(io.Discard, r, n)
+	return err
 }
 
 func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string) string {
