@@ -16,10 +16,13 @@ import (
 
 // FileSizeResolver provides robust file size resolution with multi-source validation
 type FileSizeResolver struct {
-	fileDAO    *dao.FileDAO
-	metaStore  FileMetaStore
-	semaphore  chan struct{} // Limit concurrent HTTP requests
-	maxWorkers int
+	fileDAO          *dao.FileDAO
+	metaStore        FileMetaStore
+	semaphore        chan struct{} // Limit concurrent HTTP requests
+	maxWorkers       int
+	minMetaSizeBytes int64
+
+	providerMeta sync.Map // provider host -> *providerMetaState
 
 	// Connection pool - reuse connections
 	client *http.Client
@@ -36,6 +39,12 @@ type FileSizeResolver struct {
 	failures      uint64
 	earlyReturns  uint64
 	circuitBreaks uint64
+}
+
+type providerMetaState struct {
+	mu        sync.Mutex
+	conflicts int
+	disabled  bool
 }
 
 // CircuitBreaker implements circuit breaker pattern
@@ -55,7 +64,7 @@ const (
 )
 
 // NewFileSizeResolver creates a new file size resolver
-func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int) *FileSizeResolver {
+func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64) *FileSizeResolver {
 	if maxWorkers <= 0 {
 		maxWorkers = 20
 	}
@@ -69,10 +78,11 @@ func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorke
 	}
 
 	return &FileSizeResolver{
-		fileDAO:    fileDAO,
-		metaStore:  metaStore,
-		semaphore:  make(chan struct{}, maxWorkers),
-		maxWorkers: maxWorkers,
+		fileDAO:          fileDAO,
+		metaStore:        metaStore,
+		semaphore:        make(chan struct{}, maxWorkers),
+		maxWorkers:       maxWorkers,
+		minMetaSizeBytes: minMetaSizeBytes,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   15 * time.Second,
@@ -177,22 +187,35 @@ func (r *FileSizeResolver) ResolveSingle(ctx context.Context, file FileItem, aut
 	return r.resolveWithEarlyTermination(ctx, file, authHeaders)
 }
 
+// ResolveSingleFresh resolves file size without using cached/meta sources
+func (r *FileSizeResolver) ResolveSingleFresh(ctx context.Context, file FileItem, authHeaders http.Header) SizeResult {
+	atomic.AddUint64(&r.totalRequests, 1)
+	file.PropfindSize = 0
+	result := r.resolveWithEarlyTermination(ctx, file, authHeaders)
+	if result.Size > 0 && result.Error == nil {
+		r.cacheResult(ctx, file, result)
+	}
+	return result
+}
+
 // tryFastPath attempts cache lookup before launching goroutines
 func (r *FileSizeResolver) tryFastPath(ctx context.Context, file FileItem) (SizeResult, bool) {
 	// Try MySQL meta store first
 	if r.metaStore != nil {
 		providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
-		if meta, ok, _ := r.metaStore.Get(ctx, providerKey, file.DisplayPath); ok && IsValidSize(meta.Size) {
-			confidence := r.calculateConfidence(meta.Size, file.FileName, SourceCache)
-			atomic.AddUint64(&r.cacheHits, 1)
-			return SizeResult{
-				Path:        file.DisplayPath,
-				Size:        meta.Size,
-				Source:      SourceCache,
-				Confidence:  confidence,
-				ContentType: meta.ContentType,
-				StatusCode:  meta.StatusCode,
-			}, true
+		if r.shouldUseMeta(providerKey) {
+			if meta, ok, _ := r.metaStore.Get(ctx, providerKey, file.DisplayPath); ok && IsValidSize(meta.Size) && r.isMetaSizeValid(meta.Size) {
+				confidence := r.calculateConfidence(meta.Size, file.FileName, SourceCache)
+				atomic.AddUint64(&r.cacheHits, 1)
+				return SizeResult{
+					Path:        file.DisplayPath,
+					Size:        meta.Size,
+					Source:      SourceCache,
+					Confidence:  confidence,
+					ContentType: meta.ContentType,
+					StatusCode:  meta.StatusCode,
+				}, true
+			}
 		}
 	}
 	// Try display path
@@ -609,7 +632,7 @@ func (r *FileSizeResolver) cacheResult(ctx context.Context, file FileItem, resul
 			return
 		}
 	}
-	if !IsValidSize(result.Size) {
+	if !IsValidSize(result.Size) || !r.isMetaSizeValid(result.Size) {
 		return
 	}
 
@@ -624,6 +647,87 @@ func (r *FileSizeResolver) cacheResult(ctx context.Context, file FileItem, resul
 		UpdatedAt:    time.Now(),
 		LastAccessed: time.Now(),
 	})
+}
+
+func (r *FileSizeResolver) RecordPlaybackSuccess(ctx context.Context, file FileItem, size int64, statusCode int, contentType, etag string) {
+	providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
+	r.resetProviderMeta(providerKey)
+
+	if r.metaStore == nil {
+		return
+	}
+	if statusCode != http.StatusOK && statusCode != http.StatusPartialContent && statusCode != 0 {
+		return
+	}
+	if !IsValidSize(size) || !r.isMetaSizeValid(size) {
+		return
+	}
+	if contentType != "" {
+		ct := strings.ToLower(contentType)
+		if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/json") {
+			return
+		}
+	}
+
+	_ = r.metaStore.Upsert(ctx, FileMeta{
+		ProviderKey:  providerKey,
+		OriginalPath: file.DisplayPath,
+		Size:         size,
+		ETag:         etag,
+		ContentType:  contentType,
+		StatusCode:   statusCode,
+		UpdatedAt:    time.Now(),
+		LastAccessed: time.Now(),
+	})
+}
+
+func (r *FileSizeResolver) RecordMetaConflict(providerKey string) {
+	provider := providerHostFromKey(providerKey)
+	state := r.getProviderMetaState(provider)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.conflicts++
+	if state.conflicts >= 3 {
+		state.conflicts = 0
+		state.disabled = true
+		log.Warn().Str("provider", provider).Msg("Meta conflicts reached threshold, disabling meta cache for provider")
+	}
+}
+
+func (r *FileSizeResolver) shouldUseMeta(providerKey string) bool {
+	provider := providerHostFromKey(providerKey)
+	state, ok := r.providerMeta.Load(provider)
+	if !ok {
+		return true
+	}
+	metaState := state.(*providerMetaState)
+	metaState.mu.Lock()
+	defer metaState.mu.Unlock()
+	return !metaState.disabled
+}
+
+func (r *FileSizeResolver) resetProviderMeta(providerKey string) {
+	provider := providerHostFromKey(providerKey)
+	state := r.getProviderMetaState(provider)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.conflicts = 0
+	state.disabled = false
+}
+
+func (r *FileSizeResolver) getProviderMetaState(provider string) *providerMetaState {
+	if provider == "" {
+		provider = "default"
+	}
+	state, _ := r.providerMeta.LoadOrStore(provider, &providerMetaState{})
+	return state.(*providerMetaState)
+}
+
+func (r *FileSizeResolver) isMetaSizeValid(size int64) bool {
+	if r.minMetaSizeBytes <= 0 {
+		return true
+	}
+	return size >= r.minMetaSizeBytes
 }
 
 // headRequest performs HEAD request with specific timeout
@@ -763,6 +867,16 @@ func extractHost(url string) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+func providerHostFromKey(providerKey string) string {
+	if providerKey == "" {
+		return ""
+	}
+	if idx := strings.Index(providerKey, "::"); idx >= 0 {
+		return providerKey[:idx]
+	}
+	return providerKey
 }
 
 func isVideoFile(fileName string) bool {

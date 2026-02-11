@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/auth"
@@ -13,6 +14,7 @@ import (
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/restart"
+	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 )
 
 // generateUUID generates a UUID v4 string like Node.js crypto.randomUUID()
@@ -27,23 +29,25 @@ func generateUUID() string {
 
 // APIHandler handles /enc-api/* routes
 type APIHandler struct {
-	cfg       *config.Config
-	jwtAuth   *auth.JWTAuth
-	userDAO   *dao.UserDAO
-	passwdDAO *dao.PasswdDAO
+	cfg        *config.Config
+	jwtAuth    *auth.JWTAuth
+	userDAO    *dao.UserDAO
+	passwdDAO  *dao.PasswdDAO
+	mysqlStore *mysqlstore.Store
 }
 
 // NewAPIHandler creates a new API handler
-func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.PasswdDAO) *APIHandler {
+func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.PasswdDAO, mysqlStore *mysqlstore.Store) *APIHandler {
 	expireHours := cfg.JWTExpire
 	if expireHours <= 0 {
 		expireHours = 48
 	}
 	return &APIHandler{
-		cfg:       cfg,
-		jwtAuth:   auth.NewJWTAuth(cfg.JWTSecret, time.Duration(expireHours)*time.Hour),
-		userDAO:   userDAO,
-		passwdDAO: passwdDAO,
+		cfg:        cfg,
+		jwtAuth:    auth.NewJWTAuth(cfg.JWTSecret, time.Duration(expireHours)*time.Hour),
+		userDAO:    userDAO,
+		passwdDAO:  passwdDAO,
+		mysqlStore: mysqlStore,
 	}
 }
 
@@ -326,4 +330,83 @@ func (h *APIHandler) SaveSchemeConfig(w http.ResponseWriter, r *http.Request) {
 			restart.Trigger()
 		}()
 	}
+}
+
+// ExportFileMeta exports file metadata from MySQL for external sync
+func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
+	if h.mysqlStore == nil {
+		RespondAPIError(w, 500, "mysql not enabled")
+		return
+	}
+
+	limit := 1000
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			if parsed > 5000 {
+				parsed = 5000
+			}
+			limit = parsed
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	var updatedAfter time.Time
+	if v := r.URL.Query().Get("since"); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
+			updatedAfter = time.Unix(parsed, 0)
+		}
+	}
+	if updatedAfter.IsZero() {
+		if v := r.URL.Query().Get("updated_after"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				updatedAfter = t
+			}
+		}
+	}
+
+	filter := mysqlstore.FileMetaFilter{
+		ProviderHost: r.URL.Query().Get("provider"),
+		OriginalPath: r.URL.Query().Get("path"),
+		PathPrefix:   r.URL.Query().Get("path_prefix"),
+		UpdatedAfter: updatedAfter,
+		CursorKey:    r.URL.Query().Get("cursor"),
+		Limit:        limit,
+		Offset:       offset,
+	}
+
+	records, err := h.mysqlStore.ListFileMeta(r.Context(), filter)
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+
+	var maxUpdated time.Time
+	nextCursor := ""
+	for _, record := range records {
+		if record.UpdatedAt.After(maxUpdated) {
+			maxUpdated = record.UpdatedAt
+		}
+		nextCursor = record.KeyHash
+	}
+	nextSince := int64(0)
+	nextSinceRFC3339 := ""
+	if !maxUpdated.IsZero() {
+		nextSince = maxUpdated.Unix()
+		nextSinceRFC3339 = maxUpdated.UTC().Format(time.RFC3339)
+	}
+
+	RespondSuccess(w, map[string]interface{}{
+		"items":              records,
+		"limit":              limit,
+		"offset":             offset,
+		"has_more":           len(records) == limit,
+		"next_since":         nextSince,
+		"next_since_rfc3339": nextSinceRFC3339,
+		"next_cursor":        nextCursor,
+	})
 }

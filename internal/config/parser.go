@@ -48,6 +48,13 @@ func getIntField(m map[string]interface{}, key string) int {
 	return 0
 }
 
+func getInt64Field(m map[string]interface{}, key string) int64 {
+	if v, ok := m[key].(float64); ok {
+		return int64(v)
+	}
+	return 0
+}
+
 func getBoolField(m map[string]interface{}, key string) bool {
 	if v, ok := m[key].(bool); ok {
 		return v
@@ -90,6 +97,19 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		EnableParallelDecrypt:      getBoolField(raw, "enableParallelDecrypt"),
 		ParallelDecryptConcurrency: getIntField(raw, "parallelDecryptConcurrency"),
 		StreamBufferKb:             getIntField(raw, "streamBufferKb"),
+		EnableStrategyStore:        getBoolField(raw, "enableStrategyStore"),
+		StrategyStoreFile:          getStringField(raw, "strategyStoreFile"),
+		StrategyFailToDowngrade:    getIntField(raw, "strategyFailToDowngrade"),
+		StrategySuccessToRecover:   getIntField(raw, "strategySuccessToRecover"),
+		StrategyCooldownMinutes:    getIntField(raw, "strategyCooldownMinutes"),
+		EnableBackgroundProbe:      getBoolField(raw, "enableBackgroundProbe"),
+		ProbeConcurrency:           getIntField(raw, "probeConcurrency"),
+		ProbeProviderConcurrency:   getIntField(raw, "probeProviderConcurrency"),
+		ProbeMinDelayMs:            getIntField(raw, "probeMinDelayMs"),
+		ProbeMaxDelayMs:            getIntField(raw, "probeMaxDelayMs"),
+		ProbeCooldownMinutes:       getIntField(raw, "probeCooldownMinutes"),
+		ProbeQueueSize:             getIntField(raw, "probeQueueSize"),
+		ProbeMinSizeBytes:          getInt64Field(raw, "probeMinSizeBytes"),
 	}
 
 	if passwdListRaw, ok := raw["passwdList"]; ok {

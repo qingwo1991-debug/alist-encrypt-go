@@ -86,7 +86,7 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		passwdDAO:     passwdDAO,
 		client:        proxy.NewClient(cfg),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20),
+		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20, getMinMetaSize(cfg)),
 		strategySel:   selector,
 	}
 	if h.streamProxy != nil {
@@ -296,6 +296,27 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
 
 	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)
+	fileItem := FileItem{
+		DisplayPath:   displayPath,
+		EncryptedPath: realPath,
+		TargetURL:     targetURL,
+		FileName:      path.Base(displayPath),
+	}
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	if fileInfo.Size == 0 {
+		if h.sizeResolver != nil {
+			fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
+			if fresh.Error == nil && fresh.Size > 0 {
+				fileInfo.Size = fresh.Size
+			}
+		}
+	}
 	if fileInfo.Size == 0 {
 		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
 			log.Error().Err(err).Str("path", displayPath).Msg("Failed to proxy download (size unknown)")
@@ -309,17 +330,27 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		strategies = h.strategySel.Select(providerKey)
 	}
 
-	var lastErr error
-	for _, strategy := range strategies {
-		result := h.streamProxy.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, fileInfo.Size, strategy)
-		if result.Err == nil && !result.Retryable {
-			if h.strategySel != nil {
-				h.strategySel.RecordSuccess(providerKey, strategy)
-			}
-			return
-		}
+	tryStream := func(size int64) (bool, bool, string, error) {
+		var lastErr error
+		var lastFailure string
+		var responseStarted bool
 
-		if h.strategySel != nil {
+		for _, strategy := range strategies {
+			result := h.streamProxy.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, size, strategy)
+			if result.Err == nil && !result.Retryable {
+				if h.strategySel != nil {
+					h.strategySel.RecordSuccess(providerKey, strategy)
+				}
+				if h.sizeResolver != nil && r.Method == http.MethodGet {
+					metaSize := size
+					if result.ExpectedBytes > 0 {
+						metaSize = result.ExpectedBytes
+					}
+					h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, result.StatusCode, result.ContentType, result.ETag)
+				}
+				return true, result.ResponseStarted, "", nil
+			}
+
 			reason := result.FailureReason
 			if reason == "" && result.Err != nil {
 				reason = "stream_error"
@@ -327,29 +358,60 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 			if reason == "" {
 				reason = "unknown"
 			}
-			if result.Retryable && !result.ResponseStarted {
-				if isNonStrategyFailure(reason) {
-					trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, displayPath)
-				} else {
-					trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, displayPath)
-				}
+			if lastFailure == "" {
+				lastFailure = reason
 			}
-			h.strategySel.RecordFailure(providerKey, strategy, reason)
-		}
 
-		if result.Err != nil {
-			lastErr = result.Err
-		} else if result.Retryable {
-			lastErr = fmt.Errorf("strategy %s failed", strategy)
-		}
-		if result.ResponseStarted || !result.Retryable {
-			if lastErr != nil {
-				log.Error().Err(lastErr).Str("path", displayPath).Msg("Failed to decrypt download")
+			if h.strategySel != nil {
+				if result.Retryable && !result.ResponseStarted {
+					if isNonStrategyFailure(reason) {
+						trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, displayPath)
+					} else {
+						trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, displayPath)
+					}
+				}
+				h.strategySel.RecordFailure(providerKey, strategy, reason)
 			}
-			return
+
+			if result.Err != nil {
+				lastErr = result.Err
+			} else if result.Retryable {
+				lastErr = fmt.Errorf("strategy %s failed", strategy)
+			}
+			responseStarted = responseStarted || result.ResponseStarted
+			if result.ResponseStarted || !result.Retryable {
+				if lastErr != nil {
+					log.Error().Err(lastErr).Str("path", displayPath).Msg("Failed to decrypt download")
+				}
+				return false, responseStarted, lastFailure, lastErr
+			}
+		}
+		return false, responseStarted, lastFailure, lastErr
+	}
+
+	success, responseStarted, lastFailure, lastErr := tryStream(fileInfo.Size)
+	if success {
+		return
+	}
+
+	if !responseStarted && h.sizeResolver != nil {
+		fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
+		if fresh.Error == nil && fresh.Size > 0 {
+			if fileInfo.Size > 0 && fresh.Size != fileInfo.Size {
+				h.sizeResolver.RecordMetaConflict(providerKey)
+			}
+			fileInfo.Size = fresh.Size
+			success, responseStarted, lastFailure, lastErr = tryStream(fileInfo.Size)
+			if success {
+				return
+			}
 		}
 	}
 
+	if lastFailure == "range_unsatisfiable" {
+		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
 	if lastErr != nil {
 		log.Error().Err(lastErr).Str("path", displayPath).Msg("Failed to decrypt download")
 		RespondHTTPErrorWithStatus(w, "Decryption error", http.StatusBadGateway)

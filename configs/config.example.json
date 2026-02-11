@@ -15,6 +15,16 @@
     "port": 5244,
     "https": false
   },
+  "alistServer": {
+    "enableBackgroundProbe": true,
+    "probeConcurrency": 4,
+    "probeProviderConcurrency": 1,
+    "probeMinDelayMs": 3000,
+    "probeMaxDelayMs": 15000,
+    "probeCooldownMinutes": 1440,
+    "probeQueueSize": 1000,
+    "probeMinSizeBytes": 104857600
+  },
   "cache": {
     "enable": true,
     "expiration": 10,

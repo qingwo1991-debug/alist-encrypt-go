@@ -169,7 +169,7 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 
 func isNonStrategyFailure(reason string) bool {
 	switch reason {
-	case "timeout", "network_error", "client_disconnect", "upstream_4xx", "upstream_5xx":
+	case "timeout", "network_error", "client_disconnect", "upstream_4xx", "upstream_5xx", "range_invalid":
 		return true
 	default:
 		return false
