@@ -15,6 +15,10 @@ alist-encrypt-go
 # Dependency directories
 vendor/
 
+# Web UI build artifacts
+enc-webui/dist/
+enc-webui/node_modules/
+
 # IDE
 .idea/
 .vscode/

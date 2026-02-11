@@ -95,6 +95,32 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 		return &dao.FileInfo{Path: displayPath, Size: size}, StrategyFileSizeCache
 	}
 
+	// Level 2.5: MySQL/meta resolver (if enabled)
+	if h.sizeResolver != nil {
+		trace.Logf(ctx, "fallback", "Cache miss, trying size resolver")
+		headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+		file := FileItem{
+			DisplayPath:   displayPath,
+			EncryptedPath: realPath,
+			TargetURL:     headURL,
+			FileName:      path.Base(displayPath),
+		}
+		authHeaders := make(http.Header)
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			authHeaders.Set("Authorization", auth)
+		}
+		if cookie := r.Header.Get("Cookie"); cookie != "" {
+			authHeaders.Set("Cookie", cookie)
+		}
+
+		result := h.sizeResolver.ResolveSingle(ctx, file, authHeaders)
+		if result.Error == nil && result.Size > 0 {
+			h.fileDAO.SetFileSize(realPath, result.Size, 24*time.Hour)
+			trace.Logf(ctx, "fallback", "Size resolver succeeded, size=%d", result.Size)
+			return &dao.FileInfo{Path: displayPath, Size: result.Size}, strategyFromSizeSource(result.Source)
+		}
+	}
+
 	// Level 3: HEAD request (slow, 10-50ms)
 	trace.Logf(ctx, "fallback", "Cache miss, trying HEAD request")
 	headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
@@ -172,4 +198,17 @@ func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, r *http.
 	}
 
 	return 0, ErrStrategyFailed
+}
+
+func strategyFromSizeSource(source SizeSource) StrategyType {
+	switch source {
+	case SourceCache, SourcePropfind:
+		return StrategyFileInfoCache
+	case SourceHEAD:
+		return StrategyHEADRequest
+	case SourceRange:
+		return StrategyRangeRequest
+	default:
+		return ""
+	}
 }

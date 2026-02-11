@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -30,6 +31,8 @@ type WebDAVHandler struct {
 	strategyCache *StrategyCache
 	sizeResolver  *FileSizeResolver
 	strategySel   *StrategySelector
+	metaStore     FileMetaStore
+	probe         *ProbeScheduler
 }
 
 // Stats returns WebDAV handler statistics
@@ -56,6 +59,8 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		strategyCache: NewStrategyCache(1000),
 		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20),
 		strategySel:   selector,
+		metaStore:     metaStore,
+		probe:         nil,
 	}
 }
 
@@ -64,6 +69,11 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	davPath := strings.TrimPrefix(r.URL.Path, "/dav")
 	if davPath == "" {
 		davPath = "/"
+	}
+
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		ctx := context.WithValue(r.Context(), "webdav-auth", auth)
+		r = r.WithContext(ctx)
 	}
 
 	switch r.Method {
@@ -84,6 +94,10 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.handlePassthrough(w, r)
 	}
+}
+
+func (h *WebDAVHandler) SetProbeScheduler(probe *ProbeScheduler) {
+	h.probe = probe
 }
 
 // convertToRealPath converts display path to encrypted path for WebDAV
@@ -131,6 +145,14 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	fileSize, usedStrategy := h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
 
 	trace.Logf(r.Context(), "webdav-get", "File size: %d, strategy: %s", fileSize, usedStrategy)
+	if fileSize == 0 {
+		trace.Logf(r.Context(), "webdav-get", "Size unknown, passthrough")
+		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
+			log.Error().Err(err).Str("path", davPath).Msg("WebDAV passthrough failed")
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+		}
+		return
+	}
 
 	trace.Logf(r.Context(), "webdav-get", "Proxying with decryption, target=%s", targetURL)
 	providerKey := ProviderKey(targetURL, davPath)
@@ -424,7 +446,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	respBody, _ := io.ReadAll(resp.Body)
 
 	// Step 3: Parse and cache file info from PROPFIND response
-	h.parsePropfindResponse(respBody, davPath)
+	h.parsePropfindResponse(r.Context(), respBody, davPath)
 
 	// Step 4: Decrypt filenames in the XML response if encryption is enabled
 	if found && passwdInfo.EncName && resp.StatusCode == http.StatusMultiStatus {
@@ -449,7 +471,7 @@ func (h *WebDAVHandler) handlePassthrough(w http.ResponseWriter, r *http.Request
 }
 
 // parsePropfindResponse parses WebDAV PROPFIND XML response and caches file info
-func (h *WebDAVHandler) parsePropfindResponse(body []byte, basePath string) {
+func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, basePath string) {
 	type PropfindResponse struct {
 		XMLName  xml.Name `xml:"multistatus"`
 		Response []struct {
@@ -489,6 +511,12 @@ func (h *WebDAVHandler) parsePropfindResponse(body []byte, basePath string) {
 		}
 
 		h.fileDAO.Set(info)
+		if !info.IsDir {
+			if info.Size > 0 {
+				h.upsertMetaFromListing(ctx, filePath, info.Size)
+			}
+			h.enqueueProbeFromPropfind(ctx, filePath, info.Size)
+		}
 
 		// Also cache without /dav prefix for compatibility
 		if strings.HasPrefix(filePath, "/") {
@@ -500,6 +528,47 @@ func (h *WebDAVHandler) parsePropfindResponse(body []byte, basePath string) {
 			})
 		}
 	}
+}
+
+func (h *WebDAVHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {
+	if h.metaStore == nil || size <= 0 {
+		return
+	}
+	providerKey := ProviderKey(h.cfg.GetAlistURL(), displayPath)
+	_ = h.metaStore.Upsert(ctx, FileMeta{
+		ProviderKey:  providerKey,
+		OriginalPath: displayPath,
+		Size:         size,
+		StatusCode:   0,
+	})
+}
+
+func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPath string, reportedSize int64) {
+	if h.probe == nil {
+		return
+	}
+	passwdInfo, found := h.passwdDAO.FindByPath(displayPath)
+	if !found || passwdInfo == nil {
+		return
+	}
+	realPath := displayPath
+	if passwdInfo.EncName {
+		realPath = h.convertToRealPath(displayPath, passwdInfo)
+	}
+	targetURL := h.cfg.GetAlistURL() + "/dav" + realPath
+	file := FileItem{
+		DisplayPath:   displayPath,
+		EncryptedPath: realPath,
+		TargetURL:     targetURL,
+		FileName:      path.Base(displayPath),
+	}
+	authHeaders := make(http.Header)
+	if auth := ctx.Value("webdav-auth"); auth != nil {
+		if value, ok := auth.(string); ok && value != "" {
+			authHeaders.Set("Authorization", value)
+		}
+	}
+	h.probe.EnqueueWithSize(file, authHeaders, reportedSize)
 }
 
 // decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response
