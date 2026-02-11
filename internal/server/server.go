@@ -119,9 +119,11 @@ func (s *Server) setupRoutes() {
 		log.Warn().Err(err).Msg("Failed to initialize strategy selector")
 		strategySelector, _ = handler.NewStrategySelector(s.cfg, handler.NewMemoryStrategyStore())
 	}
+	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
-	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler)
+	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
+	webdavHandler.SetProbeScheduler(probeScheduler)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
 
 	// Handle frontend error collection API

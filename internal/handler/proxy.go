@@ -44,6 +44,7 @@ type redirectInfo struct {
 	FileSize  int64
 	Password  string
 	EncType   string
+	EncName   bool
 	ExpiresAt time.Time
 }
 
@@ -87,6 +88,9 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		strategyCache: NewStrategyCache(1000),
 		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20),
 		strategySel:   selector,
+	}
+	if h.streamProxy != nil {
+		h.streamProxy.SetRedirectRewriter(h.rewriteRedirectLocation)
 	}
 	go h.cleanupRedirects()
 	return h
@@ -139,9 +143,41 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := value.(*redirectInfo)
+
+	lastURL := r.URL.Query().Get("lastUrl")
+	if lastURL != "" {
+		if decoded, err := url.QueryUnescape(lastURL); err == nil {
+			if parsed, err := url.Parse(decoded); err == nil {
+				if parsed.Path != "" {
+					r.URL.Path = parsed.Path
+				}
+			}
+		}
+	}
+
+	decodeParam := r.URL.Query().Get("decode")
+	decryptEnabled := decodeParam != "0"
+
+	if strings.Contains(info.URL, "baidupcs.com") {
+		r.Header.Set("User-Agent", "pan.baidu.com")
+	}
+	r.Header.Del("Referer")
+	r.Header.Del("Authorization")
+	r.Header.Del("Host")
+	r.Host = ""
+	if !decryptEnabled || info.FileSize == 0 {
+		if err := h.streamProxy.ProxyRequest(w, r, info.URL); err != nil {
+			log.Error().Err(err).Str("key", key).Msg("Failed to proxy redirect (passthrough)")
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+		}
+		return
+	}
+
 	passwdInfo := &config.PasswdInfo{
 		Password: info.Password,
 		EncType:  info.EncType,
+		EncName:  info.EncName,
+		Enable:   true,
 	}
 
 	if err := h.streamProxy.ProxyDownloadDecrypt(w, r, info.URL, passwdInfo, info.FileSize); err != nil {
@@ -151,7 +187,7 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 // RegisterRedirect registers a URL for redirect decryption and returns the key
-func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, encType string) string {
+func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, encType string, encName bool) string {
 	hash := md5.Sum([]byte(fmt.Sprintf("%s:%d:%d", url, fileSize, time.Now().UnixNano())))
 	key := hex.EncodeToString(hash[:])
 
@@ -160,7 +196,8 @@ func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, en
 		FileSize:  fileSize,
 		Password:  password,
 		EncType:   encType,
-		ExpiresAt: time.Now().Add(1 * time.Hour),
+		EncName:   encName,
+		ExpiresAt: time.Now().Add(72 * time.Hour),
 	})
 
 	// LRU eviction
@@ -174,6 +211,24 @@ func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, en
 	h.keysMu.Unlock()
 
 	return key
+}
+
+func (h *ProxyHandler) rewriteRedirectLocation(req *http.Request, location string, fileSize int64, passwdInfo *config.PasswdInfo) (string, bool) {
+	if passwdInfo == nil || !passwdInfo.Enable {
+		return "", false
+	}
+
+	key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncName)
+	lastURL := ""
+	if req != nil && req.URL != nil {
+		if req.URL.RequestURI() != "" {
+			lastURL = req.URL.RequestURI()
+		} else {
+			lastURL = req.URL.Path
+		}
+	}
+
+	return buildRedirectPath(key, lastURL, true), true
 }
 
 // convertDisplayToRealPath converts a display path to encrypted path for downloads
@@ -241,6 +296,13 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
 
 	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)
+	if fileInfo.Size == 0 {
+		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
+			log.Error().Err(err).Str("path", displayPath).Msg("Failed to proxy download (size unknown)")
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+		}
+		return
+	}
 	providerKey := ProviderKey(targetURL, displayPath)
 	strategies := []proxy.StreamStrategy{proxy.StreamStrategyRange}
 	if h.strategySel != nil {
@@ -377,8 +439,12 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 
-					key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType)
-					w.Header().Set("Location", "/redirect/"+key)
+					key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncName)
+					lastURL := ""
+					if r.URL != nil {
+						lastURL = r.URL.RequestURI()
+					}
+					w.Header().Set("Location", buildRedirectPath(key, lastURL, true))
 					w.WriteHeader(resp.StatusCode)
 					return
 				}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
@@ -45,6 +47,14 @@ type AlistServer struct {
 	StrategyFailToDowngrade    int          `json:"strategyFailToDowngrade"`
 	StrategySuccessToRecover   int          `json:"strategySuccessToRecover"`
 	StrategyCooldownMinutes    int          `json:"strategyCooldownMinutes"`
+	EnableBackgroundProbe      bool         `json:"enableBackgroundProbe"`
+	ProbeConcurrency           int          `json:"probeConcurrency"`
+	ProbeProviderConcurrency   int          `json:"probeProviderConcurrency"`
+	ProbeMinDelayMs            int          `json:"probeMinDelayMs"`
+	ProbeMaxDelayMs            int          `json:"probeMaxDelayMs"`
+	ProbeCooldownMinutes       int          `json:"probeCooldownMinutes"`
+	ProbeQueueSize             int          `json:"probeQueueSize"`
+	ProbeMinSizeBytes          int64        `json:"probeMinSizeBytes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -177,6 +187,14 @@ func DefaultConfig() *Config {
 			StrategyFailToDowngrade:    2,
 			StrategySuccessToRecover:   5,
 			StrategyCooldownMinutes:    30,
+			EnableBackgroundProbe:      false,
+			ProbeConcurrency:           4,
+			ProbeProviderConcurrency:   1,
+			ProbeMinDelayMs:            3000,
+			ProbeMaxDelayMs:            15000,
+			ProbeCooldownMinutes:       1440,
+			ProbeQueueSize:             1000,
+			ProbeMinSizeBytes:          0,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -331,6 +349,55 @@ func (c *Config) applyEnvOverrides() {
 	if dsn := os.Getenv("DB_DSN"); dsn != "" {
 		c.Database.DSN = dsn
 	}
+
+	if v, ok := getEnvBool("PROBE_ENABLE"); ok {
+		c.AlistServer.EnableBackgroundProbe = v
+	}
+	if v, ok := getEnvInt("PROBE_CONCURRENCY"); ok {
+		c.AlistServer.ProbeConcurrency = v
+	}
+	if v, ok := getEnvInt("PROBE_PROVIDER_CONCURRENCY"); ok {
+		c.AlistServer.ProbeProviderConcurrency = v
+	}
+	if v, ok := getEnvInt("PROBE_MIN_DELAY_MS"); ok {
+		c.AlistServer.ProbeMinDelayMs = v
+	}
+	if v, ok := getEnvInt("PROBE_MAX_DELAY_MS"); ok {
+		c.AlistServer.ProbeMaxDelayMs = v
+	}
+	if v, ok := getEnvInt("PROBE_COOLDOWN_MINUTES"); ok {
+		c.AlistServer.ProbeCooldownMinutes = v
+	}
+	if v, ok := getEnvInt("PROBE_QUEUE_SIZE"); ok {
+		c.AlistServer.ProbeQueueSize = v
+	}
+}
+
+func getEnvBool(key string) (bool, bool) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false, false
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func getEnvInt(key string) (int, bool) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 // Get returns the global config instance

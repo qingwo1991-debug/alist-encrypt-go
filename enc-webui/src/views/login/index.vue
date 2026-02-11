@@ -44,7 +44,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref, watch } from 'vue'
+import { nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useBasicStore } from '@/store/basic'
 import { elMessage, useElement } from '@/hooks/use-element'
@@ -92,8 +92,8 @@ let tipMessage = ref('')
 //sub form
 const refLoginForm = ref(null)
 const handleLogin = () => {
-  refLoginForm.validate((valid) => {
-    subLoading = true
+  refLoginForm.value?.validate((valid) => {
+    subLoading.value = true
     if (valid) loginFunc()
   })
 }
@@ -108,10 +108,10 @@ const loginFunc = () => {
       router.push('/')
     })
     .catch((err) => {
-      tipMessage = err?.msg
+      tipMessage.value = err?.msg
     })
     .finally(() => {
-      subLoading = false
+      subLoading.value = false
     })
 }
 /*

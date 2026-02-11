@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -26,17 +27,21 @@ type AlistHandler struct {
 	fileDAO      *dao.FileDAO
 	passwdDAO    *dao.PasswdDAO
 	proxyHandler *ProxyHandler
+	metaStore    FileMetaStore
+	probe        *ProbeScheduler
 }
 
 // NewAlistHandler creates a new Alist handler
 // proxyHandler must be the same instance used for /redirect routes
-func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, proxyHandler *ProxyHandler) *AlistHandler {
+func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
 	return &AlistHandler{
 		cfg:          cfg,
 		streamProxy:  streamProxy,
 		fileDAO:      fileDAO,
 		passwdDAO:    passwdDAO,
 		proxyHandler: proxyHandler,
+		metaStore:    metaStore,
+		probe:        probe,
 	}
 }
 
@@ -167,6 +172,16 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 
 						// Cache file info
 						h.fileDAO.SetFromAlistResponse(filePath, fileData)
+
+						if !isDir {
+							if sizeVal, ok := fileData["size"].(float64); ok {
+								size := int64(sizeVal)
+								if size > 0 {
+									h.upsertMetaFromListing(r.Context(), filePath, size)
+								}
+								h.enqueueProbeFromList(r, filePath, size)
+							}
+						}
 
 						// Skip directories for filename decryption
 						if isDir {
@@ -388,10 +403,19 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 				if size, ok := data["size"].(float64); ok {
 					fileSize = int64(size)
 				}
+				if fileSize > 0 {
+					h.upsertMetaFromListing(r.Context(), originalPath, fileSize)
+				}
+				h.enqueueProbeFromList(r, originalPath, fileSize)
 
 				// Register redirect and update URL
-				key := h.proxyHandler.RegisterRedirect(rawURL, fileSize, passwdInfo.Password, passwdInfo.EncType)
-				data["raw_url"] = "/redirect/" + key
+				key := h.proxyHandler.RegisterRedirect(rawURL, fileSize, passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncName)
+				redirectPath := buildRedirectPath(key, originalPath, true)
+				data["raw_url"] = buildRedirectURL(r, redirectPath)
+			}
+
+			if provider, ok := data["provider"].(string); ok && provider == "AliyundriveOpen" {
+				data["provider"] = "Local"
 			}
 		}
 	} else {
@@ -402,6 +426,48 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondJSON(w, resp.StatusCode, respData)
+}
+
+func (h *AlistHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {
+	if h.metaStore == nil || size <= 0 {
+		return
+	}
+	providerKey := ProviderKey(h.cfg.GetAlistURL(), displayPath)
+	_ = h.metaStore.Upsert(ctx, FileMeta{
+		ProviderKey:  providerKey,
+		OriginalPath: displayPath,
+		Size:         size,
+		StatusCode:   0,
+	})
+}
+
+func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string, reportedSize int64) {
+	if h.probe == nil {
+		return
+	}
+	passwdInfo, found := h.passwdDAO.PathFindPasswd(displayPath)
+	if !found || passwdInfo == nil {
+		return
+	}
+	realPath := displayPath
+	if passwdInfo.EncName {
+		realPath = h.proxyHandler.convertDisplayToRealPath(displayPath, passwdInfo)
+	}
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/d"+realPath, r)
+	file := FileItem{
+		DisplayPath:   displayPath,
+		EncryptedPath: realPath,
+		TargetURL:     targetURL,
+		FileName:      path.Base(displayPath),
+	}
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	h.probe.EnqueueWithSize(file, authHeaders, reportedSize)
 }
 
 // HandleFsPut handles /api/fs/put for encrypted uploads with filename encryption
