@@ -3,14 +3,12 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vueJsx from '@vitejs/plugin-vue-jsx'
 import { createSvgIconsPlugin } from 'vite-plugin-svg-icons'
-import { viteMockServe } from 'vite-plugin-mock'
 import Components from 'unplugin-vue-components/vite'
 import UnoCSS from 'unocss/vite'
 import { presetAttributify, presetIcons, presetUno } from 'unocss'
 import mkcert from 'vite-plugin-mkcert'
 import AutoImport from 'unplugin-auto-import/vite'
 import setting from './src/settings'
-const prodMock = setting.openProdMock
 // import { visualizer } from 'rollup-plugin-visualizer'
 const pathSrc = path.resolve(__dirname, 'src')
 
@@ -63,18 +61,6 @@ export default defineConfig(({ command, mode }) => {
       createSvgIconsPlugin({
         iconDirs: [path.resolve(process.cwd(), 'src/icons/common'), path.resolve(process.cwd(), 'src/icons/nav-bar')],
         symbolId: 'icon-[dir]-[name]'
-      }),
-      //https://github.com/anncwb/vite-plugin-mock/blob/HEAD/README.zh_CN.md
-      viteMockServe({
-        supportTs: true,
-        mockPath: 'mock',
-        localEnabled: command === 'serve',
-        prodEnabled: prodMock,
-        injectCode: `
-          import { setupProdMockServer } from './mock-prod-server';
-          setupProdMockServer();
-        `,
-        logger: true
       }),
       // VueSetupExtend(),using  DefineOptions instant of it
       //https://github.com/antfu/unplugin-auto-import/blob/HEAD/src/types.ts
