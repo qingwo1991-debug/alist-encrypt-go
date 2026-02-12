@@ -197,7 +197,9 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	trace.Logf(r.Context(), "webdav-get", "Proxying with decryption, target=%s", targetURL)
 	providerKey := ProviderKey(targetURL, davPath)
 	strategies := []proxy.StreamStrategy{proxy.StreamStrategyRange}
-	if h.strategySel != nil {
+	if override, ok := selectStrategyOverride(h.cfg, davPath); ok {
+		strategies = []proxy.StreamStrategy{override}
+	} else if h.strategySel != nil {
 		strategies = h.strategySel.Select(providerKey)
 	}
 

@@ -123,8 +123,35 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 	if passwdListRaw, ok := raw["passwdList"]; ok {
 		server.PasswdList = ParsePasswdList(passwdListRaw)
 	}
+	if overridesRaw, ok := raw["streamStrategyOverrides"]; ok {
+		server.StreamStrategyOverrides = ParseStreamStrategyOverrides(overridesRaw)
+	}
 
 	return server
+}
+
+// ParseStreamStrategyOverrides parses overrides from JSON into StreamStrategyOverride slice
+func ParseStreamStrategyOverrides(raw interface{}) []StreamStrategyOverride {
+	var result []StreamStrategyOverride
+	items, ok := raw.([]interface{})
+	if !ok {
+		return result
+	}
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		override := StreamStrategyOverride{
+			PathPrefix: getStringField(m, "pathPrefix"),
+			Strategy:   getStringField(m, "strategy"),
+		}
+		if override.PathPrefix == "" || override.Strategy == "" {
+			continue
+		}
+		result = append(result, override)
+	}
+	return result
 }
 
 // ParseWebDAVServerFromMap parses a WebDAVServer from a raw map
