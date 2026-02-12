@@ -388,6 +388,26 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 				return false, responseStarted, lastFailure, lastErr
 			}
 		}
+
+		if lastFailure == "range_unsatisfiable" && !responseStarted {
+			fallback := h.streamProxy.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, size, proxy.StreamStrategyFull)
+			if fallback.Err == nil && !fallback.Retryable {
+				if h.strategySel != nil {
+					h.strategySel.RecordSuccess(providerKey, proxy.StreamStrategyFull)
+				}
+				if h.sizeResolver != nil && r.Method == http.MethodGet {
+					metaSize := size
+					if fallback.ExpectedBytes > 0 {
+						metaSize = fallback.ExpectedBytes
+					}
+					h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag)
+				}
+				return true, fallback.ResponseStarted, "", nil
+			}
+			lastErr = fallback.Err
+			lastFailure = "range_unsatisfiable"
+			responseStarted = responseStarted || fallback.ResponseStarted
+		}
 		return false, responseStarted, lastFailure, lastErr
 	}
 
