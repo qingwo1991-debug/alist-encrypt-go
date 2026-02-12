@@ -129,6 +129,12 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 	if !found {
+		if dirPasswd, ok := h.passwdDAO.FindByDir(davPath); ok {
+			passwdInfo = dirPasswd
+			found = true
+		}
+	}
+	if !found {
 		trace.Logf(r.Context(), "webdav-get", "No encryption, passthrough")
 		h.handlePassthrough(w, r)
 		return
@@ -283,6 +289,12 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 // handlePut handles PUT requests with encryption and filename encryption
 func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPath string) {
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
+	if !found {
+		if dirPasswd, ok := h.passwdDAO.FindByDir(davPath); ok {
+			passwdInfo = dirPasswd
+			found = true
+		}
+	}
 	if !found {
 		h.handlePassthrough(w, r)
 		return

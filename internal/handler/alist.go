@@ -113,6 +113,16 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 
 	dirPath, _ := reqData["path"].(string)
 	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
+	allowDecrypt := h.passwdDAO.MatchDir(dirPath)
+	var dirPasswd *config.PasswdInfo
+	if allowDecrypt {
+		if passwdInfo, ok := h.passwdDAO.FindByDir(dirPath); ok {
+			dirPasswd = passwdInfo
+		}
+	}
+	if dirPasswd == nil {
+		allowDecrypt = false
+	}
 
 	// Forward to Alist
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/list", nil)
@@ -178,7 +188,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						// Cache file info
 						h.fileDAO.SetFromAlistResponse(filePath, fileData)
 
-						if !isDir {
+						if !isDir && allowDecrypt {
 							if sizeVal, ok := fileData["size"].(float64); ok {
 								size := int64(sizeVal)
 								if size > 0 {
@@ -189,17 +199,16 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						}
 
 						// Skip directories for filename decryption
-						if isDir {
+						if isDir || !allowDecrypt {
 							continue
 						}
 
-						// Check if filename encryption is enabled for this path
-						passwdInfo, found := h.passwdDAO.PathFindPasswd(filePath)
-						if found && passwdInfo.EncName {
+						// Use directory password info for fast path
+						if dirPasswd != nil && dirPasswd.EncName {
 							tasks = append(tasks, decryptTask{
 								index:      i,
 								name:       name,
-								passwdInfo: passwdInfo,
+								passwdInfo: dirPasswd,
 							})
 						}
 

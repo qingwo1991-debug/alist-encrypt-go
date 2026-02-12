@@ -291,6 +291,37 @@ func (d *PasswdDAO) FindByPath(urlPath string) (*config.PasswdInfo, bool) {
 	return result, found
 }
 
+// FindByDir finds password config for a directory by probing a child path
+func (d *PasswdDAO) FindByDir(dirPath string) (*config.PasswdInfo, bool) {
+	probePath := buildProbePath(dirPath)
+	return d.PathFindPasswd(probePath)
+}
+
+// MatchDir checks if any encryption path matches this directory's contents
+func (d *PasswdDAO) MatchDir(dirPath string) bool {
+	cacheKey := "dir:" + dirPath
+	if cached, ok := d.cache.Get(cacheKey); ok {
+		if value, ok := cached.(bool); ok {
+			return value
+		}
+	}
+
+	probePath := buildProbePath(dirPath)
+	for i := range d.cfg.AlistServer.PasswdList {
+		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
+		if !passwdInfo.Enable {
+			continue
+		}
+		if encryption.PathExec(passwdInfo.EncPath, probePath) {
+			d.cache.Set(cacheKey, true)
+			return true
+		}
+	}
+
+	d.cache.Set(cacheKey, false)
+	return false
+}
+
 func (d *PasswdDAO) findByPathInternal(urlPath string) (*config.PasswdInfo, bool) {
 	for i := range d.cfg.AlistServer.PasswdList {
 		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
@@ -344,4 +375,14 @@ func (d *PasswdDAO) PathFindPasswd(urlPath string) (*config.PasswdInfo, bool) {
 	}
 
 	return nil, false
+}
+
+func buildProbePath(dirPath string) string {
+	if dirPath == "" {
+		return "/__probe__"
+	}
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+	return dirPath + "__probe__"
 }
