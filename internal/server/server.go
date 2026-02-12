@@ -126,6 +126,34 @@ func (s *Server) setupRoutes() {
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
 
+	if s.cfg != nil && s.cfg.AlistServer.EnableStartupProbe {
+		prefixes := s.passwdDAO.GetEncPathPrefixes()
+		go func(paths []string) {
+			if len(paths) == 0 {
+				return
+			}
+			delay := time.Duration(s.cfg.AlistServer.StartupProbeDelaySeconds) * time.Second
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			interval := time.Duration(s.cfg.AlistServer.StartupProbeIntervalMinutes) * time.Minute
+			if interval <= 0 {
+				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
+				webdavHandler.StartupProbe(context.Background(), paths)
+				log.Info().Msg("Startup probe completed")
+				return
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
+				webdavHandler.StartupProbe(context.Background(), paths)
+				log.Info().Msg("Startup probe completed")
+				<-ticker.C
+			}
+		}(prefixes)
+	}
+
 	// Handle frontend error collection API
 	r.POST("/integration-front/errorCollection/insert", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "ok"})
