@@ -326,7 +326,9 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	providerKey := ProviderKey(targetURL, displayPath)
 	strategies := []proxy.StreamStrategy{proxy.StreamStrategyRange}
-	if h.strategySel != nil {
+	if override, ok := selectStrategyOverride(h.cfg, displayPath); ok {
+		strategies = []proxy.StreamStrategy{override}
+	} else if h.strategySel != nil {
 		strategies = h.strategySel.Select(providerKey)
 	}
 

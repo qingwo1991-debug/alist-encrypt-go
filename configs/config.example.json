@@ -24,6 +24,12 @@
     "startupProbeDelaySeconds": 5,
     "startupProbeIntervalMinutes": 0,
     "negativeCacheMinutes": 120,
+    "streamStrategyOverrides": [
+      {
+        "pathPrefix": "/移动云盘156/encrypt",
+        "strategy": "full"
+      }
+    ],
     "enableBackgroundProbe": true,
     "probeConcurrency": 4,
     "probeProviderConcurrency": 1,

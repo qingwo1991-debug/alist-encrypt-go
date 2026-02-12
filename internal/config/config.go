@@ -25,44 +25,51 @@ type PasswdInfo struct {
 	EncPath   []string `json:"encPath"`   // Regex patterns for path matching
 }
 
+// StreamStrategyOverride forces stream strategy for matching paths.
+type StreamStrategyOverride struct {
+	PathPrefix string `json:"pathPrefix"`
+	Strategy   string `json:"strategy"` // range, chunked, full
+}
+
 // AlistServer represents the main Alist server configuration
 type AlistServer struct {
-	Name                        string       `json:"name"`
-	Path                        string       `json:"path"`
-	Describe                    string       `json:"describe"`
-	ServerHost                  string       `json:"serverHost"`
-	ServerPort                  int          `json:"serverPort"`
-	HTTPS                       bool         `json:"https"`
-	EnableH2C                   bool         `json:"enableH2c"` // Enable HTTP/2 cleartext to backend
-	PasswdList                  []PasswdInfo `json:"passwdList"`
-	EnableSizeMap               bool         `json:"enableSizeMap"`
-	SizeMapTtlMinutes           int          `json:"sizeMapTtlMinutes"`
-	EnableRangeCompatCache      bool         `json:"enableRangeCompatCache"`
-	RangeCompatTtlMinutes       int          `json:"rangeCompatTtlMinutes"`
-	EnableParallelDecrypt       bool         `json:"enableParallelDecrypt"`
-	ParallelDecryptConcurrency  int          `json:"parallelDecryptConcurrency"`
-	StreamBufferKb              int          `json:"streamBufferKb"`
-	FollowRedirectForDecrypt    bool         `json:"followRedirectForDecrypt"`
-	RedirectMaxHops             int          `json:"redirectMaxHops"`
-	AllowLooseDecode            bool         `json:"allowLooseDecode"`
-	RequestTimeoutSeconds       int          `json:"requestTimeoutSeconds"`
-	EnableStartupProbe          bool         `json:"enableStartupProbe"`
-	StartupProbeDelaySeconds    int          `json:"startupProbeDelaySeconds"`
-	StartupProbeIntervalMinutes int          `json:"startupProbeIntervalMinutes"`
-	NegativeCacheMinutes        int          `json:"negativeCacheMinutes"`
-	EnableStrategyStore         bool         `json:"enableStrategyStore"`
-	StrategyStoreFile           string       `json:"strategyStoreFile"`
-	StrategyFailToDowngrade     int          `json:"strategyFailToDowngrade"`
-	StrategySuccessToRecover    int          `json:"strategySuccessToRecover"`
-	StrategyCooldownMinutes     int          `json:"strategyCooldownMinutes"`
-	EnableBackgroundProbe       bool         `json:"enableBackgroundProbe"`
-	ProbeConcurrency            int          `json:"probeConcurrency"`
-	ProbeProviderConcurrency    int          `json:"probeProviderConcurrency"`
-	ProbeMinDelayMs             int          `json:"probeMinDelayMs"`
-	ProbeMaxDelayMs             int          `json:"probeMaxDelayMs"`
-	ProbeCooldownMinutes        int          `json:"probeCooldownMinutes"`
-	ProbeQueueSize              int          `json:"probeQueueSize"`
-	ProbeMinSizeBytes           int64        `json:"probeMinSizeBytes"`
+	Name                        string                   `json:"name"`
+	Path                        string                   `json:"path"`
+	Describe                    string                   `json:"describe"`
+	ServerHost                  string                   `json:"serverHost"`
+	ServerPort                  int                      `json:"serverPort"`
+	HTTPS                       bool                     `json:"https"`
+	EnableH2C                   bool                     `json:"enableH2c"` // Enable HTTP/2 cleartext to backend
+	PasswdList                  []PasswdInfo             `json:"passwdList"`
+	StreamStrategyOverrides     []StreamStrategyOverride `json:"streamStrategyOverrides"`
+	EnableSizeMap               bool                     `json:"enableSizeMap"`
+	SizeMapTtlMinutes           int                      `json:"sizeMapTtlMinutes"`
+	EnableRangeCompatCache      bool                     `json:"enableRangeCompatCache"`
+	RangeCompatTtlMinutes       int                      `json:"rangeCompatTtlMinutes"`
+	EnableParallelDecrypt       bool                     `json:"enableParallelDecrypt"`
+	ParallelDecryptConcurrency  int                      `json:"parallelDecryptConcurrency"`
+	StreamBufferKb              int                      `json:"streamBufferKb"`
+	FollowRedirectForDecrypt    bool                     `json:"followRedirectForDecrypt"`
+	RedirectMaxHops             int                      `json:"redirectMaxHops"`
+	AllowLooseDecode            bool                     `json:"allowLooseDecode"`
+	RequestTimeoutSeconds       int                      `json:"requestTimeoutSeconds"`
+	EnableStartupProbe          bool                     `json:"enableStartupProbe"`
+	StartupProbeDelaySeconds    int                      `json:"startupProbeDelaySeconds"`
+	StartupProbeIntervalMinutes int                      `json:"startupProbeIntervalMinutes"`
+	NegativeCacheMinutes        int                      `json:"negativeCacheMinutes"`
+	EnableStrategyStore         bool                     `json:"enableStrategyStore"`
+	StrategyStoreFile           string                   `json:"strategyStoreFile"`
+	StrategyFailToDowngrade     int                      `json:"strategyFailToDowngrade"`
+	StrategySuccessToRecover    int                      `json:"strategySuccessToRecover"`
+	StrategyCooldownMinutes     int                      `json:"strategyCooldownMinutes"`
+	EnableBackgroundProbe       bool                     `json:"enableBackgroundProbe"`
+	ProbeConcurrency            int                      `json:"probeConcurrency"`
+	ProbeProviderConcurrency    int                      `json:"probeProviderConcurrency"`
+	ProbeMinDelayMs             int                      `json:"probeMinDelayMs"`
+	ProbeMaxDelayMs             int                      `json:"probeMaxDelayMs"`
+	ProbeCooldownMinutes        int                      `json:"probeCooldownMinutes"`
+	ProbeQueueSize              int                      `json:"probeQueueSize"`
+	ProbeMinSizeBytes           int64                    `json:"probeMinSizeBytes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
