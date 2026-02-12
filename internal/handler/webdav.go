@@ -57,7 +57,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		passwdDAO:     passwdDAO,
 		proxyHandler:  NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20, getMinMetaSize(cfg)),
+		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		strategySel:   selector,
 		metaStore:     metaStore,
 		probe:         nil,
@@ -342,7 +342,7 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		return
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV DELETE failed")
@@ -689,7 +689,8 @@ func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, pass
 		encryptedName := result[contentStart:endIdx]
 
 		if encryptedName != "" && encryptedName != "/" {
-			decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, encryptedName)
+			allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+			decryptedName := encryption.ConvertShowNameWithOptions(passwdInfo.Password, passwdInfo.EncType, encryptedName, allowLoose)
 			if decryptedName != "" && decryptedName != encryptedName {
 				result = result[:contentStart] + decryptedName + result[endIdx:]
 				searchPos = contentStart + len(decryptedName) + len(endTag)
@@ -735,7 +736,8 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 				// Get the filename from the decoded path
 				fileName := path.Base(decodedPath)
 				if fileName != "" && fileName != "/" && fileName != "." {
-					decryptedName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, fileName)
+					allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+					decryptedName := encryption.ConvertShowNameWithOptions(passwdInfo.Password, passwdInfo.EncType, fileName, allowLoose)
 					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) && decryptedName != fileName {
 						// Save mapping: display path -> encrypted path (use decoded path)
 						displayPath := path.Dir(decodedPath) + "/" + decryptedName

@@ -8,6 +8,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -20,7 +22,7 @@ const (
 // MixBase64 implements password-based Base64 encoding with KSA-shuffled alphabet
 // This is a 1:1 port of the Node.js implementation
 type MixBase64 struct {
-	chars     [65]byte          // 64 chars + padding char at index 64
+	chars     [65]byte // 64 chars + padding char at index 64
 	decodeMap map[byte]int
 }
 
@@ -289,8 +291,34 @@ func DecodeName(password, encType, encodedName string) string {
 	return decoded
 }
 
+// DecodeNameLoose attempts decode without CRC verification and applies heuristics.
+// Returns empty string if the result looks invalid.
+func DecodeNameLoose(password, encType, encodedName string) string {
+	if len(encodedName) < 2 {
+		return ""
+	}
+
+	passwdOutward := GetPasswdOutward(password, encType)
+	mix64 := GetCachedMixBase64(passwdOutward)
+
+	subEncName := encodedName[:len(encodedName)-1]
+	decoded, err := mix64.DecodeString(subEncName)
+	if err != nil {
+		return ""
+	}
+	if !isMostlyPrintable(decoded) {
+		return ""
+	}
+	return decoded
+}
+
 // ConvertShowName converts encrypted filename to display name
 func ConvertShowName(password, encType, pathText string) string {
+	return ConvertShowNameWithOptions(password, encType, pathText, false)
+}
+
+// ConvertShowNameWithOptions converts encrypted filename to display name with optional loose decode.
+func ConvertShowNameWithOptions(password, encType, pathText string, allowLoose bool) string {
 	// URL decode the path using PathUnescape (NOT QueryUnescape!)
 	// QueryUnescape converts '+' to space, but '+' is valid in MixBase64
 	decoded, err := url.PathUnescape(pathText)
@@ -303,10 +331,13 @@ func ConvertShowName(password, encType, pathText string) string {
 	encName := strings.TrimSuffix(fileName, ext)
 
 	showName := DecodeName(password, encType, encName)
+	if showName == "" && allowLoose {
+		showName = DecodeNameLoose(password, encType, encName)
+	}
 	if showName == "" {
 		return OrigPrefix + fileName
 	}
-	// Node.js 逻辑：加密的是完整文件名（含后缀），解密后不再附加后缀
+	// Node.js logic: encrypted name includes extension; decrypted name does not append extension
 	return showName
 }
 
@@ -389,6 +420,27 @@ func DecodeFolderName(password, encType, encodedName string) (folderEncType, fol
 	}
 
 	return decoded[:idx], decoded[idx+1:], true
+}
+
+func isMostlyPrintable(s string) bool {
+	if s == "" || !utf8.ValidString(s) {
+		return false
+	}
+	total := 0
+	printable := 0
+	for _, r := range s {
+		total++
+		if r == 0 {
+			return false
+		}
+		if unicode.IsPrint(r) {
+			printable++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return printable*100/total >= 85
 }
 
 // PathMatcher checks if a path matches encryption patterns

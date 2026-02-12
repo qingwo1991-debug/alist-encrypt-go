@@ -42,7 +42,7 @@ type probeItem struct {
 func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore) *ProbeScheduler {
 	ps := &ProbeScheduler{
 		cfg:         cfg,
-		resolver:    NewFileSizeResolver(fileDAO, metaStore, 4, getMinMetaSize(cfg)),
+		resolver:    NewFileSizeResolver(fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		fileDAO:     fileDAO,
 		metaStore:   metaStore,
 		enabled:     cfg != nil && cfg.AlistServer.EnableBackgroundProbe,

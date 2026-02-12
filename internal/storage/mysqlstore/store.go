@@ -56,6 +56,13 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		db.SetConnMaxIdleTime(time.Duration(cfg.Database.ConnMaxIdleSeconds) * time.Second)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return nil, err
+	}
+	log.Info().Msg("MySQL connected")
+
 	flushInterval := time.Duration(cfg.Database.FlushIntervalSeconds) * time.Second
 	if flushInterval <= 0 {
 		flushInterval = 5 * time.Second
