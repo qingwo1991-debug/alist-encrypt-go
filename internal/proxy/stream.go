@@ -349,7 +349,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 	}
 	defer resp.Body.Close()
 
-	return s.streamDecryptResponse(w, req, resp, passwdInfo, fileSize, rangeHeader)
+	return s.streamDecryptResponse(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
 }
 
 func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
