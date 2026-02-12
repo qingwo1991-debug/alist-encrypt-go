@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ type FileSizeResolver struct {
 	semaphore        chan struct{} // Limit concurrent HTTP requests
 	maxWorkers       int
 	minMetaSizeBytes int64
+	maxRedirects     int
 
 	providerMeta sync.Map // provider host -> *providerMetaState
 
@@ -64,9 +66,12 @@ const (
 )
 
 // NewFileSizeResolver creates a new file size resolver
-func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64) *FileSizeResolver {
+func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64, maxRedirects int) *FileSizeResolver {
 	if maxWorkers <= 0 {
 		maxWorkers = 20
+	}
+	if maxRedirects <= 0 {
+		maxRedirects = 2
 	}
 
 	// Connection pool with keep-alive
@@ -86,7 +91,11 @@ func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorke
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   15 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
+		maxRedirects: maxRedirects,
 	}
 }
 
@@ -735,35 +744,55 @@ func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHead
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
-	if err != nil {
-		return 0, "", "", 0, err
+	currentURL := url
+	origHost := hostOfURL(currentURL)
+
+	for redirect := 0; redirect <= r.maxRedirects; redirect++ {
+		req, err := http.NewRequestWithContext(ctx, "HEAD", currentURL, nil)
+		if err != nil {
+			return 0, "", "", 0, err
+		}
+
+		copyAuthHeadersConditional(req, authHeaders, origHost, hostOfURL(currentURL))
+
+		resp, err := r.client.Do(req)
+		if err != nil {
+			return 0, "", "", 0, err
+		}
+		if isRedirectStatusCode(resp.StatusCode) {
+			location := resp.Header.Get("Location")
+			resp.Body.Close()
+			if location == "" {
+				return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "redirect without Location", StatusCode: resp.StatusCode}
+			}
+			nextURL := resolveRedirectURL(currentURL, location)
+			if nextURL == "" {
+				return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "invalid redirect Location", StatusCode: resp.StatusCode}
+			}
+			currentURL = nextURL
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "HEAD failed", StatusCode: resp.StatusCode}
+		}
+
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
+			return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "received non-media response"}
+		}
+
+		contentLen := resp.Header.Get("Content-Length")
+		if contentLen == "" {
+			return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "no Content-Length"}
+		}
+
+		size, err := strconv.ParseInt(contentLen, 10, 64)
+		return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
 	}
 
-	copyAuthHeaders(req, authHeaders)
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return 0, "", "", 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "HEAD failed", StatusCode: resp.StatusCode}
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
-		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "received non-media response"}
-	}
-
-	contentLen := resp.Header.Get("Content-Length")
-	if contentLen == "" {
-		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "no Content-Length"}
-	}
-
-	size, err := strconv.ParseInt(contentLen, 10, 64)
-	return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
+	return 0, "", "", 0, &SizeResolverError{Message: "redirect hop limit exceeded"}
 }
 
 // rangeRequest performs Range request with specific timeout
@@ -771,47 +800,68 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return 0, "", "", 0, err
-	}
+	currentURL := url
+	origHost := hostOfURL(currentURL)
 
-	req.Header.Set("Range", "bytes=0-0")
-	copyAuthHeaders(req, authHeaders)
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return 0, "", "", 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "Range failed", StatusCode: resp.StatusCode}
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
-		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "received non-media response"}
-	}
-
-	// Parse Content-Range: bytes 0-0/1234567
-	contentRange := resp.Header.Get("Content-Range")
-	if contentRange != "" {
-		parts := strings.Split(contentRange, "/")
-		if len(parts) == 2 && parts[1] != "*" {
-			size, err := strconv.ParseInt(parts[1], 10, 64)
-			return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
+	for redirect := 0; redirect <= r.maxRedirects; redirect++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", currentURL, nil)
+		if err != nil {
+			return 0, "", "", 0, err
 		}
-	}
 
-	if resp.StatusCode == http.StatusOK {
-		if contentLen := resp.Header.Get("Content-Length"); contentLen != "" {
-			size, err := strconv.ParseInt(contentLen, 10, 64)
-			return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
+		req.Header.Set("Range", "bytes=0-0")
+		copyAuthHeadersConditional(req, authHeaders, origHost, hostOfURL(currentURL))
+
+		resp, err := r.client.Do(req)
+		if err != nil {
+			return 0, "", "", 0, err
 		}
+
+		if isRedirectStatusCode(resp.StatusCode) {
+			location := resp.Header.Get("Location")
+			resp.Body.Close()
+			if location == "" {
+				return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "redirect without Location", StatusCode: resp.StatusCode}
+			}
+			nextURL := resolveRedirectURL(currentURL, location)
+			if nextURL == "" {
+				return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "invalid redirect Location", StatusCode: resp.StatusCode}
+			}
+			currentURL = nextURL
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+			return 0, "", "", resp.StatusCode, &SizeResolverError{Message: "Range failed", StatusCode: resp.StatusCode}
+		}
+
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "application/json") {
+			return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "received non-media response"}
+		}
+
+		// Parse Content-Range: bytes 0-0/1234567
+		contentRange := resp.Header.Get("Content-Range")
+		if contentRange != "" {
+			parts := strings.Split(contentRange, "/")
+			if len(parts) == 2 && parts[1] != "*" {
+				size, err := strconv.ParseInt(parts[1], 10, 64)
+				return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
+			}
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			if contentLen := resp.Header.Get("Content-Length"); contentLen != "" {
+				size, err := strconv.ParseInt(contentLen, 10, 64)
+				return size, contentType, resp.Header.Get("ETag"), resp.StatusCode, err
+			}
+		}
+
+		return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "no size info"}
 	}
 
-	return 0, contentType, resp.Header.Get("ETag"), resp.StatusCode, &SizeResolverError{Message: "no size info"}
+	return 0, "", "", 0, &SizeResolverError{Message: "redirect hop limit exceeded"}
 }
 
 // Stats returns resolver statistics
@@ -855,6 +905,13 @@ func copyAuthHeaders(req *http.Request, authHeaders http.Header) {
 	}
 }
 
+func copyAuthHeadersConditional(req *http.Request, authHeaders http.Header, originalHost, currentHost string) {
+	if originalHost != "" && currentHost != "" && !strings.EqualFold(originalHost, currentHost) {
+		return
+	}
+	copyAuthHeaders(req, authHeaders)
+}
+
 func extractHost(url string) string {
 	// Simple extraction: http://host:port/path -> host:port
 	start := strings.Index(url, "://")
@@ -877,6 +934,44 @@ func providerHostFromKey(providerKey string) string {
 		return providerKey[:idx]
 	}
 	return providerKey
+}
+
+func isRedirectStatusCode(status int) bool {
+	switch status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveRedirectURL(baseURL, location string) string {
+	if location == "" {
+		return ""
+	}
+	loc, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	if loc.IsAbs() {
+		return loc.String()
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return base.ResolveReference(loc).String()
+}
+
+func hostOfURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 func isVideoFile(fileName string) bool {

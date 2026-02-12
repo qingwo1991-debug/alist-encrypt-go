@@ -74,6 +74,11 @@ func (h *AlistHandler) parallelDecryptLimit() int {
 	return limit
 }
 
+func (h *AlistHandler) convertShowName(passwdInfo *config.PasswdInfo, name string) string {
+	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	return encryption.ConvertShowNameWithOptions(passwdInfo.Password, passwdInfo.EncType, name, allowLoose)
+}
+
 // proxyToAlist creates and executes a proxy request to Alist backend
 func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, body []byte, srcReq *http.Request) (*http.Response, error) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), endpoint, nil)
@@ -121,7 +126,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/list")
@@ -231,7 +236,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 							semaphore <- struct{}{} // Acquire
 							go func(t decryptTask) {
 								defer func() { <-semaphore }() // Release
-								showName := encryption.ConvertShowName(t.passwdInfo.Password, t.passwdInfo.EncType, t.name)
+								showName := h.convertShowName(t.passwdInfo, t.name)
 								results <- decryptResult{index: t.index, showName: showName}
 							}(task)
 						}
@@ -243,7 +248,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						close(results)
 					} else {
 						for _, task := range tasks {
-							showName := encryption.ConvertShowName(task.passwdInfo.Password, task.passwdInfo.EncType, task.name)
+							showName := h.convertShowName(task.passwdInfo, task.name)
 							applyResult(decryptResult{index: task.index, showName: showName})
 						}
 					}
@@ -355,7 +360,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/get")
@@ -392,7 +397,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 			// Decrypt filename for display
 			if passwdInfo.EncName {
 				if name, ok := data["name"].(string); ok {
-					showName := encryption.ConvertShowName(passwdInfo.Password, passwdInfo.EncType, name)
+					showName := h.convertShowName(passwdInfo, name)
 					data["name"] = showName
 				}
 			}
@@ -573,7 +578,7 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/remove")
@@ -663,7 +668,7 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/rename")
@@ -761,7 +766,7 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy " + endpoint)

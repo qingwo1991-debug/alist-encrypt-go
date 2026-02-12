@@ -42,6 +42,10 @@ type AlistServer struct {
 	EnableParallelDecrypt      bool         `json:"enableParallelDecrypt"`
 	ParallelDecryptConcurrency int          `json:"parallelDecryptConcurrency"`
 	StreamBufferKb             int          `json:"streamBufferKb"`
+	FollowRedirectForDecrypt   bool         `json:"followRedirectForDecrypt"`
+	RedirectMaxHops            int          `json:"redirectMaxHops"`
+	AllowLooseDecode           bool         `json:"allowLooseDecode"`
+	RequestTimeoutSeconds      int          `json:"requestTimeoutSeconds"`
 	EnableStrategyStore        bool         `json:"enableStrategyStore"`
 	StrategyStoreFile          string       `json:"strategyStoreFile"`
 	StrategyFailToDowngrade    int          `json:"strategyFailToDowngrade"`
@@ -182,6 +186,10 @@ func DefaultConfig() *Config {
 			EnableParallelDecrypt:      false,
 			ParallelDecryptConcurrency: 4,
 			StreamBufferKb:             512,
+			FollowRedirectForDecrypt:   true,
+			RedirectMaxHops:            2,
+			AllowLooseDecode:           false,
+			RequestTimeoutSeconds:      20,
 			EnableStrategyStore:        true,
 			StrategyStoreFile:          "",
 			StrategyFailToDowngrade:    2,

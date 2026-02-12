@@ -16,6 +16,10 @@
     "https": false
   },
   "alistServer": {
+    "followRedirectForDecrypt": true,
+    "redirectMaxHops": 2,
+    "allowLooseDecode": false,
+    "requestTimeoutSeconds": 20,
     "enableBackgroundProbe": true,
     "probeConcurrency": 4,
     "probeProviderConcurrency": 1,

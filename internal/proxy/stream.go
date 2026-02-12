@@ -278,7 +278,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 	}
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		defer resp.Body.Close()
-		return s.handleRedirect(w, r, resp, passwdInfo, fileSize)
+		return s.handleRedirect(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
 	}
 	defer resp.Body.Close()
 
@@ -345,7 +345,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 	}
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		defer resp.Body.Close()
-		return s.handleRedirect(w, req, resp, passwdInfo, fileSize)
+		return s.handleRedirect(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
 	}
 	defer resp.Body.Close()
 
@@ -453,7 +453,8 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	result.ETag = resp.Header.Get("ETag")
 
 	if req.Method == http.MethodGet && statusCode == http.StatusOK && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
-		if showName := decodeNameFromRequest(passwdInfo, req.URL.Path); showName != "" {
+		allowLoose := s.cfg != nil && s.cfg.AlistServer.AllowLooseDecode
+		if showName := decodeNameFromRequest(passwdInfo, req.URL.Path, allowLoose); showName != "" {
 			rewriteContentDisposition(w, showName)
 		}
 	}
@@ -495,10 +496,14 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	return result
 }
 
-func (s *StreamProxy) handleRedirect(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64) *StreamOutcome {
+func (s *StreamProxy) handleRedirect(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL string) *StreamOutcome {
 	location := resp.Header.Get("Location")
 	if location == "" {
 		return &StreamOutcome{Err: errors.NewProxyError("redirect without Location header")}
+	}
+
+	if s.shouldFollowRedirect(passwdInfo) {
+		return s.followRedirectDecrypt(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
 	}
 
 	newLocation := location
@@ -512,6 +517,116 @@ func (s *StreamProxy) handleRedirect(w http.ResponseWriter, req *http.Request, r
 	w.Header().Set("Location", newLocation)
 	w.WriteHeader(resp.StatusCode)
 	return &StreamOutcome{ResponseStarted: true}
+}
+
+func (s *StreamProxy) shouldFollowRedirect(passwdInfo *config.PasswdInfo) bool {
+	if s == nil || s.cfg == nil {
+		return false
+	}
+	if !s.cfg.AlistServer.FollowRedirectForDecrypt {
+		return false
+	}
+	return passwdInfo != nil && passwdInfo.Enable
+}
+
+func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL string) *StreamOutcome {
+	baseURL := resp.Request.URL
+	currentURL := resolveRedirectURL(baseURL, resp.Header.Get("Location"))
+	if currentURL == "" {
+		return &StreamOutcome{Err: errors.NewProxyError("invalid redirect location")}
+	}
+
+	maxHops := 2
+	if s.cfg != nil && s.cfg.AlistServer.RedirectMaxHops > 0 {
+		maxHops = s.cfg.AlistServer.RedirectMaxHops
+	}
+
+	for hop := 0; hop < maxHops; hop++ {
+		newReq, err := httputil.NewRequest(req.Method, currentURL).
+			WithContext(req.Context()).
+			CopyHeaders(req).
+			Build()
+		if err != nil {
+			return &StreamOutcome{Err: errors.NewInternalWithCause("failed to create redirect request", err)}
+		}
+
+		sanitizeRedirectHeaders(newReq, req.URL, currentURL)
+		applyStrategyHeaders(newReq, strategy)
+		if rangeHeader != "" && s.shouldSkipRange(currentURL) {
+			newReq.Header.Del("Range")
+		}
+
+		nextResp, err := s.client.Do(newReq)
+		if err != nil {
+			reason, retryable := classifyStreamError(err)
+			return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to follow redirect", err), FailureReason: reason, Retryable: retryable}
+		}
+
+		if isRedirectStatus(nextResp.StatusCode) {
+			location := nextResp.Header.Get("Location")
+			nextResp.Body.Close()
+			if location == "" {
+				return &StreamOutcome{Err: errors.NewProxyError("redirect without Location header")}
+			}
+			baseURL, _ = url.Parse(currentURL)
+			currentURL = resolveRedirectURL(baseURL, location)
+			if currentURL == "" {
+				return &StreamOutcome{Err: errors.NewProxyError("invalid redirect location")}
+			}
+			continue
+		}
+
+		return s.streamDecryptResponse(w, newReq, nextResp, passwdInfo, fileSize, rangeHeader, strategy, currentURL)
+	}
+
+	return &StreamOutcome{Err: errors.NewProxyError("redirect hop limit exceeded")}
+}
+
+func isRedirectStatus(status int) bool {
+	switch status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveRedirectURL(base *url.URL, location string) string {
+	if location == "" {
+		return ""
+	}
+	loc, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	if loc.IsAbs() {
+		return loc.String()
+	}
+	if base == nil {
+		return ""
+	}
+	return base.ResolveReference(loc).String()
+}
+
+func sanitizeRedirectHeaders(req *http.Request, originalURL *url.URL, targetURL string) {
+	if req == nil {
+		return
+	}
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		return
+	}
+	originalHost := ""
+	if originalURL != nil {
+		originalHost = originalURL.Host
+	}
+	if target.Host != "" && originalHost != "" && !strings.EqualFold(target.Host, originalHost) {
+		req.Header.Del("Authorization")
+		req.Header.Del("Cookie")
+	}
+	req.Header.Del("Host")
+	req.Header.Del("Referer")
+	req.Host = ""
 }
 
 func parseRangeStart(rangeHeader string) (int64, bool) {
@@ -563,7 +678,7 @@ func discardBytes(r io.Reader, n int64) error {
 	return err
 }
 
-func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string) string {
+func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string, allowLoose bool) string {
 	if passwdInfo == nil {
 		return ""
 	}
@@ -574,7 +689,11 @@ func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string) string
 	}
 	ext := path.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	return encryption.DecodeName(passwdInfo.Password, passwdInfo.EncType, base)
+	decoded := encryption.DecodeName(passwdInfo.Password, passwdInfo.EncType, base)
+	if decoded == "" && allowLoose {
+		return encryption.DecodeNameLoose(passwdInfo.Password, passwdInfo.EncType, base)
+	}
+	return decoded
 }
 
 func rewriteContentDisposition(w http.ResponseWriter, showName string) {
