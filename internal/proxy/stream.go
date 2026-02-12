@@ -689,11 +689,11 @@ func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string, allowL
 	}
 	ext := path.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	decoded := encryption.DecodeName(passwdInfo.Password, passwdInfo.EncType, base)
-	if decoded == "" && allowLoose {
+	decodedName := encryption.DecodeName(passwdInfo.Password, passwdInfo.EncType, base)
+	if decodedName == "" && allowLoose {
 		return encryption.DecodeNameLoose(passwdInfo.Password, passwdInfo.EncType, base)
 	}
-	return decoded
+	return decodedName
 }
 
 func rewriteContentDisposition(w http.ResponseWriter, showName string) {
