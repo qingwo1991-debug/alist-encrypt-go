@@ -272,6 +272,35 @@ func (d *PasswdDAO) GetAll() []*config.PasswdInfo {
 	return result
 }
 
+// GetEncPathPrefixes returns directory prefixes extracted from encPath patterns.
+func (d *PasswdDAO) GetEncPathPrefixes() []string {
+	seen := make(map[string]struct{})
+	var prefixes []string
+
+	for i := range d.cfg.AlistServer.PasswdList {
+		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
+		if !passwdInfo.Enable {
+			continue
+		}
+		for _, pattern := range passwdInfo.EncPath {
+			if strings.HasPrefix(pattern, "/d/") || strings.HasPrefix(pattern, "/p/") || strings.HasPrefix(pattern, "/dav/") {
+				continue
+			}
+			prefix := extractLiteralPrefix(pattern)
+			if prefix == "" {
+				continue
+			}
+			if _, ok := seen[prefix]; ok {
+				continue
+			}
+			seen[prefix] = struct{}{}
+			prefixes = append(prefixes, prefix)
+		}
+	}
+
+	return prefixes
+}
+
 // FindByPath finds password config by matching encPath patterns
 func (d *PasswdDAO) FindByPath(urlPath string) (*config.PasswdInfo, bool) {
 	// Check cache first
@@ -385,4 +414,20 @@ func buildProbePath(dirPath string) string {
 		dirPath += "/"
 	}
 	return dirPath + "__probe__"
+}
+
+func extractLiteralPrefix(pattern string) string {
+	if pattern == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range pattern {
+		switch r {
+		case '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '^', '$', '.', '\\':
+			return strings.TrimRight(b.String(), "/")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimRight(b.String(), "/")
 }

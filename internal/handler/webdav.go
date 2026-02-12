@@ -10,6 +10,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -33,6 +35,7 @@ type WebDAVHandler struct {
 	strategySel   *StrategySelector
 	metaStore     FileMetaStore
 	probe         *ProbeScheduler
+	negCache      *negativePathCache
 }
 
 // Stats returns WebDAV handler statistics
@@ -61,6 +64,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		strategySel:   selector,
 		metaStore:     metaStore,
 		probe:         nil,
+		negCache:      newNegativePathCache(getNegativeCacheTTL(cfg)),
 	}
 }
 
@@ -98,6 +102,15 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 func (h *WebDAVHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
+}
+
+func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	for _, dirPath := range paths {
+		h.probePath(ctx, dirPath)
+	}
 }
 
 // convertToRealPath converts display path to encrypted path for WebDAV
@@ -470,6 +483,12 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Step 1: Request Alist with the determined path
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+requestPath, r)
 
+	if h.negCache != nil && h.negCache.IsBlocked(requestPath) {
+		trace.Logf(r.Context(), "propfind", "Negative cache hit: %s", requestPath)
+		RespondHTTPErrorWithStatus(w, "Not found", http.StatusNotFound)
+		return
+	}
+
 	proxyReq, err := httputil.NewRequest("PROPFIND", targetURL).
 		WithContext(r.Context()).
 		WithBody(body).
@@ -489,6 +508,9 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	}
 
 	trace.Logf(r.Context(), "propfind", "Alist response: status=%d", resp.StatusCode)
+	if resp.StatusCode == http.StatusNotFound && h.negCache != nil {
+		h.negCache.Block(requestPath)
+	}
 
 	// Step 2: If 404 and encryption enabled, retry with encrypted filename
 	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName {
@@ -532,6 +554,89 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	w.Header().Set("Content-Length", strconv.Itoa(len(respBody)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
+}
+
+func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) {
+	if dirPath == "" {
+		return
+	}
+	if !strings.HasPrefix(dirPath, "/") {
+		dirPath = "/" + dirPath
+	}
+	requestPath := strings.TrimRight(dirPath, "/") + "/"
+
+	if h.negCache != nil && h.negCache.IsBlocked(requestPath) {
+		return
+	}
+
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+requestPath, nil)
+	req, err := httputil.NewRequest("PROPFIND", targetURL).
+		WithContext(ctx).
+		WithHeader("Depth", "1").
+		Build()
+	if err != nil {
+		return
+	}
+
+	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound && h.negCache != nil {
+		h.negCache.Block(requestPath)
+		return
+	}
+	if resp.StatusCode != http.StatusMultiStatus {
+		return
+	}
+
+	h.parsePropfindResponse(ctx, body, requestPath)
+}
+
+type negativePathCache struct {
+	mu   sync.Mutex
+	ttl  time.Duration
+	data map[string]time.Time
+}
+
+func newNegativePathCache(ttl time.Duration) *negativePathCache {
+	if ttl <= 0 {
+		return nil
+	}
+	return &negativePathCache{
+		ttl:  ttl,
+		data: make(map[string]time.Time),
+	}
+}
+
+func (c *negativePathCache) IsBlocked(path string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exp, ok := c.data[path]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(c.data, path)
+		return false
+	}
+	return true
+}
+
+func (c *negativePathCache) Block(path string) {
+	if c == nil || path == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[path] = time.Now().Add(c.ttl)
 }
 
 // handlePassthrough passes requests directly to Alist
