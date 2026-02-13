@@ -60,7 +60,7 @@
   "data_dir": "./data",
   "database": {
     "type": "mysql",
-    "dsn": "alist:3.141592654@tcp(alist_mysql:3306)/alist?charset=utf8mb4&parseTime=True&loc=Local",
+    "dsn": "<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&parseTime=True&loc=Local",
     "max_open_conns": 10,
     "max_idle_conns": 5,
     "conn_max_lifetime_seconds": 300,
