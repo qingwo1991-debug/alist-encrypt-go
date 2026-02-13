@@ -1,6 +1,7 @@
 package encryption
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -187,20 +188,32 @@ func TestFolderNameEncryption(t *testing.T) {
 		t.Fatal("EncodeFolderName returned empty")
 	}
 
-	// Note: DecodeFolderName expects a specific format with underscore prefix
-	// The encoded result needs to be prefixed for the decode function
-	testEncoded := "prefix_" + encoded
-	gotEncType, gotPasswd, ok := DecodeFolderName(password, encType, testEncoded)
+	t.Run("direct encoded round-trip", func(t *testing.T) {
+		gotEncType, gotPasswd, ok := DecodeFolderName(password, encType, encoded)
+		if !ok {
+			t.Fatal("DecodeFolderName failed for direct encoded value")
+		}
+		if gotEncType != folderEncType {
+			t.Errorf("EncType: got %q, want %q", gotEncType, folderEncType)
+		}
+		if gotPasswd != folderPasswd {
+			t.Errorf("Passwd: got %q, want %q", gotPasswd, folderPasswd)
+		}
+	})
 
-	if !ok {
-		t.Fatal("DecodeFolderName failed")
-	}
-	if gotEncType != folderEncType {
-		t.Errorf("EncType: got %q, want %q", gotEncType, folderEncType)
-	}
-	if gotPasswd != folderPasswd {
-		t.Errorf("Passwd: got %q, want %q", gotPasswd, folderPasswd)
-	}
+	t.Run("legacy prefixed format still works", func(t *testing.T) {
+		testEncoded := "prefix_" + encoded
+		gotEncType, gotPasswd, ok := DecodeFolderName(password, encType, testEncoded)
+		if !ok {
+			t.Fatal("DecodeFolderName failed for legacy prefixed value")
+		}
+		if gotEncType != folderEncType {
+			t.Errorf("EncType: got %q, want %q", gotEncType, folderEncType)
+		}
+		if gotPasswd != folderPasswd {
+			t.Errorf("Passwd: got %q, want %q", gotPasswd, folderPasswd)
+		}
+	})
 }
 
 func TestMixBase64DecodeInvalidLength(t *testing.T) {
@@ -235,4 +248,34 @@ func TestDecodeNameMalformedInputNoPanic(t *testing.T) {
 	if got := DecodeNameLoose(password, encType, malformed); got != "" {
 		t.Fatalf("DecodeNameLoose should fail gracefully for malformed input, got %q", got)
 	}
+}
+
+func TestConvertRealNameWithSuffixRoundTrip(t *testing.T) {
+	password := "testpass"
+	encType := "aesctr"
+	original := "movie.mp4"
+
+	t.Run("empty suffix keeps round-trip", func(t *testing.T) {
+		encrypted := ConvertRealNameWithSuffix(password, encType, original, "")
+		if encrypted == "" {
+			t.Fatal("ConvertRealNameWithSuffix returned empty")
+		}
+
+		show := ConvertShowName(password, encType, encrypted)
+		if show != original {
+			t.Fatalf("round-trip failed: got %q, want %q", show, original)
+		}
+	})
+
+	t.Run("custom suffix keeps round-trip", func(t *testing.T) {
+		encrypted := ConvertRealNameWithSuffix(password, encType, original, ".enc")
+		if !strings.HasSuffix(encrypted, ".enc") {
+			t.Fatalf("encrypted name %q should end with .enc", encrypted)
+		}
+
+		show := ConvertShowName(password, encType, encrypted)
+		if show != original {
+			t.Fatalf("round-trip with custom suffix failed: got %q, want %q", show, original)
+		}
+	})
 }

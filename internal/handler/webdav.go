@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -43,6 +44,7 @@ type WebDAVHandler struct {
 }
 
 const propfindPersistentWriteThreshold = 128
+const webdavAuthContextKey = "webdav-auth"
 
 // Stats returns WebDAV handler statistics
 func (h *WebDAVHandler) Stats() map[string]interface{} {
@@ -87,7 +89,7 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if auth := r.Header.Get("Authorization"); auth != "" {
-		ctx := context.WithValue(r.Context(), "webdav-auth", auth)
+		ctx := context.WithValue(r.Context(), webdavAuthContextKey, auth)
 		r = r.WithContext(ctx)
 	}
 
@@ -119,6 +121,7 @@ func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
 	if len(paths) == 0 {
 		return
 	}
+	ctx = h.withProbeAuthContext(ctx)
 	if h.cfg != nil && h.cfg.AlistServer.StartupProbeDeepScan {
 		h.deepScan(ctx, paths)
 		return
@@ -129,8 +132,57 @@ func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
 }
 
 func (h *WebDAVHandler) deepScan(ctx context.Context, paths []string) {
+	type scanNode struct {
+		path  string
+		depth int
+	}
+
+	maxDepth := 0
+	if h.cfg != nil && h.cfg.AlistServer.ScanMaxDepth > 0 {
+		maxDepth = h.cfg.AlistServer.ScanMaxDepth
+	}
+
+	visited := make(map[string]struct{}, len(paths))
+	queue := make([]scanNode, 0, len(paths))
+
 	for _, dirPath := range paths {
-		h.probePath(ctx, dirPath)
+		normalized := normalizeProbeDirPath(dirPath)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := visited[normalized]; ok {
+			continue
+		}
+		visited[normalized] = struct{}{}
+		queue = append(queue, scanNode{path: normalized, depth: 0})
+	}
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+
+		entries := h.probePath(ctx, node.path)
+		if len(entries) == 0 {
+			continue
+		}
+		if maxDepth > 0 && node.depth >= maxDepth {
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir {
+				continue
+			}
+			nextPath := normalizeProbeDirPath(entry.Path)
+			if nextPath == "" || nextPath == node.path {
+				continue
+			}
+			if _, ok := visited[nextPath]; ok {
+				continue
+			}
+			visited[nextPath] = struct{}{}
+			queue = append(queue, scanNode{path: nextPath, depth: node.depth + 1})
+		}
 	}
 }
 
@@ -626,17 +678,14 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	w.Write(respBody)
 }
 
-func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) {
-	if dirPath == "" {
-		return
+func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) []propfindEntry {
+	requestPath := normalizeProbeDirPath(dirPath)
+	if requestPath == "" {
+		return nil
 	}
-	if !strings.HasPrefix(dirPath, "/") {
-		dirPath = "/" + dirPath
-	}
-	requestPath := strings.TrimRight(dirPath, "/") + "/"
 
 	if h.negCache != nil && h.negCache.IsBlocked(requestPath) {
-		return
+		return nil
 	}
 
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+requestPath, nil)
@@ -645,26 +694,29 @@ func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) {
 		WithHeader("Depth", "1").
 		Build()
 	if err != nil {
-		return
+		return nil
+	}
+	if auth := h.probeAuthHeader(ctx); auth != "" {
+		req.Header.Set("Authorization", auth)
 	}
 
 	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
 	resp, err := client.Do(req)
 	if err != nil {
-		return
+		return nil
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound && h.negCache != nil {
 		h.negCache.Block(requestPath)
-		return
+		return nil
 	}
 	if resp.StatusCode != http.StatusMultiStatus {
-		return
+		return nil
 	}
 
-	h.parsePropfindResponse(ctx, body, requestPath)
+	return h.parsePropfindResponse(ctx, body, requestPath)
 }
 
 type negativePathCache struct {
@@ -730,13 +782,17 @@ func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 	type PropfindResponse struct {
 		XMLName  xml.Name `xml:"multistatus"`
 		Response []struct {
-			Href string `xml:"href"`
-			Prop struct {
-				DisplayName   string `xml:"propstat>prop>displayname"`
-				ContentLength int64  `xml:"propstat>prop>getcontentlength"`
-				ResourceType  string `xml:"propstat>prop>resourcetype"`
-				LastModified  string `xml:"propstat>prop>getlastmodified"`
-			} `xml:"propstat>prop"`
+			Href     string `xml:"href"`
+			PropStat []struct {
+				Prop struct {
+					DisplayName   string `xml:"displayname"`
+					ContentLength int64  `xml:"getcontentlength"`
+					ResourceType  struct {
+						Collection *struct{} `xml:"collection"`
+						Value      string    `xml:",chardata"`
+					} `xml:"resourcetype"`
+				} `xml:"prop"`
+			} `xml:"propstat"`
 		} `xml:"response"`
 	}
 
@@ -757,11 +813,34 @@ func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 			filePath = decoded
 		}
 
+		displayName := ""
+		contentLength := int64(0)
+		hasCollection := false
+		resourceTypeText := ""
+		for _, propStat := range resp.PropStat {
+			if propStat.Prop.DisplayName != "" {
+				displayName = propStat.Prop.DisplayName
+			}
+			if propStat.Prop.ContentLength > 0 {
+				contentLength = propStat.Prop.ContentLength
+			}
+			if propStat.Prop.ResourceType.Collection != nil {
+				hasCollection = true
+			}
+			if propStat.Prop.ResourceType.Value != "" {
+				resourceTypeText = propStat.Prop.ResourceType.Value
+			}
+		}
+		isDir := hasCollection || strings.Contains(strings.ToLower(resourceTypeText), "collection")
+		if !isDir && strings.HasSuffix(filePath, "/") {
+			isDir = true
+		}
+
 		entries = append(entries, propfindEntry{
 			Path:  filePath,
-			Name:  resp.Prop.DisplayName,
-			Size:  resp.Prop.ContentLength,
-			IsDir: strings.Contains(resp.Prop.ResourceType, "collection"),
+			Name:  displayName,
+			Size:  contentLength,
+			IsDir: isDir,
 		})
 	}
 	return entries
@@ -834,12 +913,78 @@ func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPat
 		FileName:      path.Base(displayPath),
 	}
 	authHeaders := make(http.Header)
-	if auth := ctx.Value("webdav-auth"); auth != nil {
+	if auth := ctx.Value(webdavAuthContextKey); auth != nil {
 		if value, ok := auth.(string); ok && value != "" {
 			authHeaders.Set("Authorization", value)
 		}
 	}
 	h.probe.EnqueueWithSize(file, authHeaders, reportedSize)
+}
+
+func (h *WebDAVHandler) withProbeAuthContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth := h.probeAuthHeader(ctx); auth != "" {
+		return context.WithValue(ctx, webdavAuthContextKey, auth)
+	}
+	return ctx
+}
+
+func (h *WebDAVHandler) probeAuthHeader(ctx context.Context) string {
+	if ctx != nil {
+		if auth := ctx.Value(webdavAuthContextKey); auth != nil {
+			if value, ok := auth.(string); ok {
+				value = strings.TrimSpace(value)
+				if value != "" {
+					return value
+				}
+			}
+		}
+	}
+	if h == nil || h.cfg == nil {
+		return ""
+	}
+	if raw := strings.TrimSpace(h.cfg.AlistServer.ScanAuthHeader); raw != "" {
+		return extractAuthorizationValue(raw)
+	}
+	username := h.cfg.AlistServer.ScanUsername
+	password := h.cfg.AlistServer.ScanPassword
+	if username == "" && password == "" {
+		return ""
+	}
+	token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	return "Basic " + token
+}
+
+func extractAuthorizationValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "authorization:") {
+		value = strings.TrimSpace(value[len("authorization:"):])
+	}
+	return value
+}
+
+func normalizeProbeDirPath(dirPath string) string {
+	trimmed := strings.TrimSpace(dirPath)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	clean := path.Clean(trimmed)
+	if clean == "." {
+		clean = "/"
+	}
+	if clean != "/" {
+		clean = strings.TrimRight(clean, "/") + "/"
+	}
+	return clean
 }
 
 // decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response

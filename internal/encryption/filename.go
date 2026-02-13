@@ -390,10 +390,9 @@ func ConvertRealNameWithSuffix(password, encType, pathText, encSuffix string) st
 		ext = encSuffix
 	}
 
-	baseName := strings.TrimSuffix(decoded, path.Ext(decoded))
-
-	// Encrypt the filename
-	encName := EncodeName(password, encType, baseName)
+	// Keep behavior consistent with upload/display flow:
+	// encrypt full filename (including original extension), then append output suffix.
+	encName := EncodeName(password, encType, decoded)
 
 	return encName + ext
 }
@@ -406,23 +405,29 @@ func EncodeFolderName(password, encType, folderPasswd, folderEncType string) str
 
 // DecodeFolderName decodes folder password info
 func DecodeFolderName(password, encType, encodedName string) (folderEncType, folderPasswd string, ok bool) {
-	arr := strings.Split(encodedName, "_")
-	if len(arr) < 2 {
+	encodedName = strings.TrimSpace(encodedName)
+	if encodedName == "" {
 		return "", "", false
 	}
 
-	folderEncName := arr[len(arr)-1]
-	decoded := DecodeName(password, encType, folderEncName)
+	// Primary path: encodedName is the direct output of EncodeFolderName.
+	decoded := DecodeName(password, encType, encodedName)
+	if decoded == "" {
+		// Backward-compatibility: allow legacy "prefix_<encoded>" format.
+		if idx := strings.LastIndex(encodedName, "_"); idx >= 0 && idx+1 < len(encodedName) {
+			decoded = DecodeName(password, encType, encodedName[idx+1:])
+		}
+	}
 	if decoded == "" {
 		return "", "", false
 	}
 
-	idx := strings.Index(decoded, "_")
-	if idx < 0 {
+	sep := strings.Index(decoded, "_")
+	if sep < 0 {
 		return "", "", false
 	}
 
-	return decoded[:idx], decoded[idx+1:], true
+	return decoded[:sep], decoded[sep+1:], true
 }
 
 func isMostlyPrintable(s string) bool {
