@@ -118,7 +118,7 @@ cd ..
 # 复制前端到嵌入目录
 cp -r enc-webui/dist/* web/public/
   -e DB_TYPE=mysql \
-  -e DB_DSN="alist:3.141592654@tcp(alist_mysql:3306)/alist?charset=utf8mb4&parseTime=True&loc=Local" \
+  -e DB_DSN="<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&parseTime=True&loc=Local" \
 
 # 构建 Go 二进制
 go build -o alist-encrypt-go ./cmd/server
@@ -130,7 +130,7 @@ go build -o alist-encrypt-go ./cmd/server
 
 ```text
 DB_TYPE=mysql
-DB_DSN=alist:3.141592654@tcp(alist_mysql:3306)/alist?charset=utf8mb4&parseTime=True&loc=Local
+DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&parseTime=True&loc=Local
 ```
 
 如未设置数据库连接，将自动降级为纯内存模式。
