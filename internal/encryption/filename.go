@@ -140,6 +140,9 @@ func (m *MixBase64) Decode(base64Str string) ([]byte, error) {
 	if len(base64Str) == 0 {
 		return nil, nil
 	}
+	if len(base64Str)%4 != 0 {
+		return nil, errors.New("invalid base64 string length")
+	}
 
 	// Calculate output size
 	size := (len(base64Str) / 4) * 3

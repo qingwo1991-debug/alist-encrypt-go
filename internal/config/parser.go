@@ -62,6 +62,13 @@ func getBoolField(m map[string]interface{}, key string) bool {
 	return false
 }
 
+func getBoolFieldWithDefault(m map[string]interface{}, key string, defaultValue bool) bool {
+	if v, ok := m[key].(bool); ok {
+		return v
+	}
+	return defaultValue
+}
+
 func getStringArrayField(m map[string]interface{}, key string) []string {
 	// Handle as array
 	if arr, ok := m[key].([]interface{}); ok {
@@ -105,6 +112,13 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		StartupProbeDelaySeconds:    getIntField(raw, "startupProbeDelaySeconds"),
 		StartupProbeIntervalMinutes: getIntField(raw, "startupProbeIntervalMinutes"),
 		NegativeCacheMinutes:        getIntField(raw, "negativeCacheMinutes"),
+		StartupProbeDeepScan:        getBoolField(raw, "startupProbeDeepScan"),
+		ScanUsername:                getStringField(raw, "scanUsername"),
+		ScanPassword:                getStringField(raw, "scanPassword"),
+		ScanAuthHeader:              getStringField(raw, "scanAuthHeader"),
+		ScanVideoOnly:               getBoolField(raw, "scanVideoOnly"),
+		ScanMaxDepth:                getIntField(raw, "scanMaxDepth"),
+		ScanConcurrency:             getIntField(raw, "scanConcurrency"),
 		EnableStrategyStore:         getBoolField(raw, "enableStrategyStore"),
 		StrategyStoreFile:           getStringField(raw, "strategyStoreFile"),
 		StrategyFailToDowngrade:     getIntField(raw, "strategyFailToDowngrade"),
@@ -118,6 +132,7 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		ProbeCooldownMinutes:        getIntField(raw, "probeCooldownMinutes"),
 		ProbeQueueSize:              getIntField(raw, "probeQueueSize"),
 		ProbeMinSizeBytes:           getInt64Field(raw, "probeMinSizeBytes"),
+		PlayFirstFallback:           getBoolFieldWithDefault(raw, "playFirstFallback", true),
 	}
 
 	if passwdListRaw, ok := raw["passwdList"]; ok {

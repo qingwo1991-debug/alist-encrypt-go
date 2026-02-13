@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -25,17 +26,20 @@ import (
 
 // WebDAVHandler handles WebDAV requests
 type WebDAVHandler struct {
-	cfg           *config.Config
-	streamProxy   *proxy.StreamProxy
-	fileDAO       *dao.FileDAO
-	passwdDAO     *dao.PasswdDAO
-	proxyHandler  *ProxyHandler
-	strategyCache *StrategyCache
-	sizeResolver  *FileSizeResolver
-	strategySel   *StrategySelector
-	metaStore     FileMetaStore
-	probe         *ProbeScheduler
-	negCache      *negativePathCache
+	cfg                   *config.Config
+	streamProxy           *proxy.StreamProxy
+	fileDAO               *dao.FileDAO
+	passwdDAO             *dao.PasswdDAO
+	proxyHandler          *ProxyHandler
+	strategyCache         *StrategyCache
+	sizeResolver          *FileSizeResolver
+	strategySel           *StrategySelector
+	metaStore             FileMetaStore
+	probe                 *ProbeScheduler
+	negCache              *negativePathCache
+	finalPassthroughCount uint64
+	sizeConflictCount     uint64
+	strategyFallbackCount uint64
 }
 
 // Stats returns WebDAV handler statistics
@@ -45,8 +49,13 @@ func (h *WebDAVHandler) Stats() map[string]interface{} {
 		selectorStats = h.strategySel.Stats()
 	}
 	return map[string]interface{}{
-		"strategy_cache":    h.strategyCache.Stats(),
-		"size_resolver":     h.sizeResolver.Stats(),
+		"strategy_cache": h.strategyCache.Stats(),
+		"size_resolver":  h.sizeResolver.Stats(),
+		"stream": map[string]interface{}{
+			"final_passthrough_count": atomic.LoadUint64(&h.finalPassthroughCount),
+			"size_conflict_count":     atomic.LoadUint64(&h.sizeConflictCount),
+			"strategy_fallback_count": atomic.LoadUint64(&h.strategyFallbackCount),
+		},
 		"strategy_selector": selectorStats,
 	}
 }
@@ -108,6 +117,16 @@ func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
 	if len(paths) == 0 {
 		return
 	}
+	if h.cfg != nil && h.cfg.AlistServer.StartupProbeDeepScan {
+		h.deepScan(ctx, paths)
+		return
+	}
+	for _, dirPath := range paths {
+		h.probePath(ctx, dirPath)
+	}
+}
+
+func (h *WebDAVHandler) deepScan(ctx context.Context, paths []string) {
 	for _, dirPath := range paths {
 		h.probePath(ctx, dirPath)
 	}
@@ -251,6 +270,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 						trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, davPath)
 					} else {
 						trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, davPath)
+						atomic.AddUint64(&h.strategyFallbackCount, 1)
 					}
 				}
 				h.strategySel.RecordFailure(providerKey, strategy, reason)
@@ -309,12 +329,23 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		if fresh.Error == nil && fresh.Size > 0 {
 			if fileSize > 0 && fresh.Size != fileSize {
 				h.sizeResolver.RecordMetaConflict(providerKey)
+				atomic.AddUint64(&h.sizeConflictCount, 1)
 			}
 			fileSize = fresh.Size
 			success, responseStarted, lastFailure, lastErr = tryStream(fileSize)
 			if success {
 				return
 			}
+		}
+	}
+
+	if !responseStarted && lastFailure != "range_unsatisfiable" && h.cfg != nil && h.cfg.AlistServer.PlayFirstFallback {
+		trace.Logf(r.Context(), "play-first-fallback", "WebDAV passthrough as final fallback")
+		atomic.AddUint64(&h.finalPassthroughCount, 1)
+		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err == nil {
+			return
+		} else {
+			lastErr = err
 		}
 	}
 
@@ -678,8 +709,14 @@ func (h *WebDAVHandler) handlePassthrough(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// parsePropfindResponse parses WebDAV PROPFIND XML response and caches file info
-func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, basePath string) {
+type propfindEntry struct {
+	Path  string
+	Name  string
+	Size  int64
+	IsDir bool
+}
+
+func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 	type PropfindResponse struct {
 		XMLName  xml.Name `xml:"multistatus"`
 		Response []struct {
@@ -696,46 +733,63 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 	var propfind PropfindResponse
 	if err := xml.Unmarshal(body, &propfind); err != nil {
 		log.Debug().Err(err).Msg("Failed to parse PROPFIND response")
-		return
+		return nil
 	}
 
+	entries := make([]propfindEntry, 0, len(propfind.Response))
 	for _, resp := range propfind.Response {
-		// Extract path from href
 		filePath := strings.TrimPrefix(resp.Href, "/dav")
 		if filePath == "" {
 			filePath = "/"
 		}
 
-		// URL decode the path
 		if decoded, err := url.PathUnescape(filePath); err == nil {
 			filePath = decoded
 		}
 
-		info := &dao.FileInfo{
+		entries = append(entries, propfindEntry{
 			Path:  filePath,
 			Name:  resp.Prop.DisplayName,
 			Size:  resp.Prop.ContentLength,
 			IsDir: strings.Contains(resp.Prop.ResourceType, "collection"),
+		})
+	}
+	return entries
+}
+
+// parsePropfindResponse parses WebDAV PROPFIND XML response and caches file info
+func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, basePath string) []propfindEntry {
+	entries := h.parsePropfindEntries(body)
+	if len(entries) == 0 {
+		return nil
+	}
+	for _, entry := range entries {
+		info := &dao.FileInfo{
+			Path:  entry.Path,
+			Name:  entry.Name,
+			Size:  entry.Size,
+			IsDir: entry.IsDir,
 		}
 
 		h.fileDAO.Set(info)
 		if !info.IsDir {
 			if info.Size > 0 {
-				h.upsertMetaFromListing(ctx, filePath, info.Size)
+				h.upsertMetaFromListing(ctx, entry.Path, info.Size)
 			}
-			h.enqueueProbeFromPropfind(ctx, filePath, info.Size)
+			h.enqueueProbeFromPropfind(ctx, entry.Path, info.Size)
 		}
 
 		// Also cache without /dav prefix for compatibility
-		if strings.HasPrefix(filePath, "/") {
+		if strings.HasPrefix(entry.Path, "/") {
 			h.fileDAO.Set(&dao.FileInfo{
-				Path:  filePath,
+				Path:  entry.Path,
 				Name:  info.Name,
 				Size:  info.Size,
 				IsDir: info.IsDir,
 			})
 		}
 	}
+	return entries
 }
 
 func (h *WebDAVHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {

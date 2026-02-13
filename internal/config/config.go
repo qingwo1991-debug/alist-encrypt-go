@@ -57,6 +57,13 @@ type AlistServer struct {
 	StartupProbeDelaySeconds    int                      `json:"startupProbeDelaySeconds"`
 	StartupProbeIntervalMinutes int                      `json:"startupProbeIntervalMinutes"`
 	NegativeCacheMinutes        int                      `json:"negativeCacheMinutes"`
+	StartupProbeDeepScan        bool                     `json:"startupProbeDeepScan"`
+	ScanUsername                string                   `json:"scanUsername"`
+	ScanPassword                string                   `json:"scanPassword"`
+	ScanAuthHeader              string                   `json:"scanAuthHeader"`
+	ScanVideoOnly               bool                     `json:"scanVideoOnly"`
+	ScanMaxDepth                int                      `json:"scanMaxDepth"`
+	ScanConcurrency             int                      `json:"scanConcurrency"`
 	EnableStrategyStore         bool                     `json:"enableStrategyStore"`
 	StrategyStoreFile           string                   `json:"strategyStoreFile"`
 	StrategyFailToDowngrade     int                      `json:"strategyFailToDowngrade"`
@@ -70,6 +77,7 @@ type AlistServer struct {
 	ProbeCooldownMinutes        int                      `json:"probeCooldownMinutes"`
 	ProbeQueueSize              int                      `json:"probeQueueSize"`
 	ProbeMinSizeBytes           int64                    `json:"probeMinSizeBytes"`
+	PlayFirstFallback           bool                     `json:"playFirstFallback"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -127,6 +135,7 @@ type DBConfig struct {
 	FlushIntervalSeconds   int    `json:"flush_interval_seconds"`
 	CleanupDays            int    `json:"cleanup_days"`
 	CleanupIntervalHours   int    `json:"cleanup_interval_hours"`
+	DisableCleanup         bool   `json:"disable_cleanup"`
 }
 
 // Config represents the main configuration (compatible with Node.js version)
@@ -205,6 +214,13 @@ func DefaultConfig() *Config {
 			StartupProbeDelaySeconds:    5,
 			StartupProbeIntervalMinutes: 0,
 			NegativeCacheMinutes:        120,
+			StartupProbeDeepScan:        false,
+			ScanUsername:                "",
+			ScanPassword:                "",
+			ScanAuthHeader:              "",
+			ScanVideoOnly:               true,
+			ScanMaxDepth:                0,
+			ScanConcurrency:             2,
 			EnableStrategyStore:         true,
 			StrategyStoreFile:           "",
 			StrategyFailToDowngrade:     2,
@@ -218,6 +234,7 @@ func DefaultConfig() *Config {
 			ProbeCooldownMinutes:        1440,
 			ProbeQueueSize:              1000,
 			ProbeMinSizeBytes:           100 * 1024 * 1024,
+			PlayFirstFallback:           true,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -260,6 +277,7 @@ func DefaultConfig() *Config {
 			FlushIntervalSeconds:   5,
 			CleanupDays:            30,
 			CleanupIntervalHours:   24,
+			DisableCleanup:         false,
 		},
 		DataDir:   "./data",
 		JWTSecret: "alist-encrypt-secret",
@@ -372,6 +390,9 @@ func (c *Config) applyEnvOverrides() {
 	if dsn := os.Getenv("DB_DSN"); dsn != "" {
 		c.Database.DSN = dsn
 	}
+	if v, ok := getEnvBool("DB_DISABLE_CLEANUP"); ok {
+		c.Database.DisableCleanup = v
+	}
 
 	if v, ok := getEnvBool("PROBE_ENABLE"); ok {
 		c.AlistServer.EnableBackgroundProbe = v
@@ -398,6 +419,9 @@ func (c *Config) applyEnvOverrides() {
 		if v > 0 {
 			c.AlistServer.ProbeMinSizeBytes = int64(v)
 		}
+	}
+	if v, ok := getEnvBool("PLAY_FIRST_FALLBACK"); ok {
+		c.AlistServer.PlayFirstFallback = v
 	}
 }
 

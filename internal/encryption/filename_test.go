@@ -202,3 +202,37 @@ func TestFolderNameEncryption(t *testing.T) {
 		t.Errorf("Passwd: got %q, want %q", gotPasswd, folderPasswd)
 	}
 }
+
+func TestMixBase64DecodeInvalidLength(t *testing.T) {
+	passwdOutward := GetPasswdOutward("testpass", "aesctr")
+	mix64 := NewMixBase64(passwdOutward)
+
+	invalidInputs := []string{"a", "ab", "abc", "abcde"}
+	for _, input := range invalidInputs {
+		t.Run(input, func(t *testing.T) {
+			if _, err := mix64.DecodeString(input); err == nil {
+				t.Fatalf("expected error for invalid length input %q", input)
+			}
+		})
+	}
+}
+
+func TestDecodeNameMalformedInputNoPanic(t *testing.T) {
+	password := "testpass"
+	encType := "aesctr"
+
+	// Craft input that passes CRC check but has invalid MixBase64 payload length (1 char).
+	subEncName := "A"
+	passwdOutward := GetPasswdOutward(password, encType)
+	crc6Check := GetSourceChar(crc6.Checksum([]byte(subEncName + passwdOutward)))
+	malformed := subEncName + string(crc6Check)
+
+	if got := DecodeName(password, encType, malformed); got != "" {
+		t.Fatalf("DecodeName should fail gracefully for malformed input, got %q", got)
+	}
+
+	// Loose decode should also fail gracefully for malformed input.
+	if got := DecodeNameLoose(password, encType, malformed); got != "" {
+		t.Fatalf("DecodeNameLoose should fail gracefully for malformed input, got %q", got)
+	}
+}
