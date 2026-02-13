@@ -18,6 +18,7 @@ type Store struct {
 	flushInterval   time.Duration
 	cleanupInterval time.Duration
 	cleanupDays     int
+	disableCleanup  bool
 	strategyBuffer  *strategyBuffer
 	fileMetaBuffer  *fileMetaBuffer
 }
@@ -83,6 +84,7 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		flushInterval:   flushInterval,
 		cleanupInterval: cleanupInterval,
 		cleanupDays:     cleanupDays,
+		disableCleanup:  cfg.Database.DisableCleanup,
 		strategyBuffer:  newStrategyBuffer(),
 		fileMetaBuffer:  newFileMetaBuffer(),
 	}
@@ -90,8 +92,12 @@ func NewStore(cfg *config.Config) (*Store, error) {
 	if err := store.ensureSchema(context.Background()); err != nil {
 		return nil, err
 	}
-	if err := store.cleanup(context.Background()); err != nil {
-		log.Warn().Err(err).Msg("MySQL cleanup failed on startup")
+	if !store.disableCleanup {
+		if err := store.cleanup(context.Background()); err != nil {
+			log.Warn().Err(err).Msg("MySQL cleanup failed on startup")
+		}
+	} else {
+		log.Info().Msg("MySQL cleanup disabled")
 	}
 
 	store.startLoops()
@@ -114,15 +120,17 @@ func (s *Store) startLoops() {
 		}
 	}()
 
-	go func() {
-		ticker := time.NewTicker(s.cleanupInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			if err := s.cleanup(context.Background()); err != nil {
-				log.Warn().Err(err).Msg("MySQL cleanup failed")
+	if !s.disableCleanup {
+		go func() {
+			ticker := time.NewTicker(s.cleanupInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				if err := s.cleanup(context.Background()); err != nil {
+					log.Warn().Err(err).Msg("MySQL cleanup failed")
+				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
 func (s *Store) flushBuffers(ctx context.Context) {

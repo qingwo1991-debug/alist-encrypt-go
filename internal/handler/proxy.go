@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -24,17 +25,20 @@ import (
 
 // ProxyHandler handles proxy requests
 type ProxyHandler struct {
-	cfg           *config.Config
-	streamProxy   *proxy.StreamProxy
-	fileDAO       *dao.FileDAO
-	passwdDAO     *dao.PasswdDAO
-	redirectMap   sync.Map // key -> redirect info
-	client        *proxy.Client
-	redirectKeys  []string
-	keysMu        sync.Mutex
-	strategyCache *StrategyCache
-	sizeResolver  *FileSizeResolver
-	strategySel   *StrategySelector
+	cfg                   *config.Config
+	streamProxy           *proxy.StreamProxy
+	fileDAO               *dao.FileDAO
+	passwdDAO             *dao.PasswdDAO
+	redirectMap           sync.Map // key -> redirect info
+	client                *proxy.Client
+	redirectKeys          []string
+	keysMu                sync.Mutex
+	strategyCache         *StrategyCache
+	sizeResolver          *FileSizeResolver
+	strategySel           *StrategySelector
+	finalPassthroughCount uint64
+	sizeConflictCount     uint64
+	strategyFallbackCount uint64
 }
 
 const maxRedirectEntries = 10000
@@ -68,6 +72,11 @@ func (h *ProxyHandler) Stats() map[string]interface{} {
 		},
 		"strategy_cache": h.strategyCache.Stats(),
 		"size_resolver":  h.sizeResolver.Stats(),
+		"stream": map[string]interface{}{
+			"final_passthrough_count": atomic.LoadUint64(&h.finalPassthroughCount),
+			"size_conflict_count":     atomic.LoadUint64(&h.sizeConflictCount),
+			"strategy_fallback_count": atomic.LoadUint64(&h.strategyFallbackCount),
+		},
 		"strategy_selector": func() map[string]interface{} {
 			if h.strategySel != nil {
 				return h.strategySel.Stats()
@@ -370,6 +379,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 						trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, displayPath)
 					} else {
 						trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, displayPath)
+						atomic.AddUint64(&h.strategyFallbackCount, 1)
 					}
 				}
 				h.strategySel.RecordFailure(providerKey, strategy, reason)
@@ -421,12 +431,23 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		if fresh.Error == nil && fresh.Size > 0 {
 			if fileInfo.Size > 0 && fresh.Size != fileInfo.Size {
 				h.sizeResolver.RecordMetaConflict(providerKey)
+				atomic.AddUint64(&h.sizeConflictCount, 1)
 			}
 			fileInfo.Size = fresh.Size
 			success, responseStarted, lastFailure, lastErr = tryStream(fileInfo.Size)
 			if success {
 				return
 			}
+		}
+	}
+
+	if !responseStarted && lastFailure != "range_unsatisfiable" && h.cfg != nil && h.cfg.AlistServer.PlayFirstFallback {
+		trace.Logf(r.Context(), "play-first-fallback", "Proxying without decrypt as final fallback")
+		atomic.AddUint64(&h.finalPassthroughCount, 1)
+		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err == nil {
+			return
+		} else {
+			lastErr = err
 		}
 	}
 
