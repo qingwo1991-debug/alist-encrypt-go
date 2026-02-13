@@ -42,6 +42,8 @@ type WebDAVHandler struct {
 	strategyFallbackCount uint64
 }
 
+const propfindPersistentWriteThreshold = 128
+
 // Stats returns WebDAV handler statistics
 func (h *WebDAVHandler) Stats() map[string]interface{} {
 	var selectorStats map[string]interface{}
@@ -524,6 +526,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 // 3. Decrypt filenames in response
 func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, davPath string) {
 	trace.Logf(r.Context(), "propfind", "Listing: %s", davPath)
+	startAt := time.Now()
 
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 
@@ -600,14 +603,21 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+	upstreamCost := time.Since(startAt)
 
 	// Step 3: Parse and cache file info from PROPFIND response
-	h.parsePropfindResponse(r.Context(), respBody, davPath)
+	parseStart := time.Now()
+	entries := h.parsePropfindResponse(r.Context(), respBody, davPath)
+	parseCost := time.Since(parseStart)
 
 	// Step 4: Decrypt filenames in the XML response if encryption is enabled
+	decryptStart := time.Now()
 	if found && passwdInfo.EncName && resp.StatusCode == http.StatusMultiStatus {
 		respBody = h.decryptPropfindResponse(respBody, passwdInfo)
 	}
+	decryptCost := time.Since(decryptStart)
+	trace.Logf(r.Context(), "propfind", "Timings upstream=%s parse=%s decrypt=%s entries=%d bytes=%d",
+		upstreamCost, parseCost, decryptCost, len(entries), len(respBody))
 
 	// Copy response headers (recalculate Content-Length since body may have changed)
 	httputil.CopyResponseHeaders(w, resp, "Content-Length")
@@ -763,6 +773,11 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 	if len(entries) == 0 {
 		return nil
 	}
+
+	// For large directories, avoid per-entry BoltDB writes in request path.
+	// Keep hot data in pathCache and let background mechanisms persist metadata.
+	persistToStore := len(entries) <= propfindPersistentWriteThreshold
+
 	for _, entry := range entries {
 		info := &dao.FileInfo{
 			Path:  entry.Path,
@@ -771,22 +786,16 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 			IsDir: entry.IsDir,
 		}
 
-		h.fileDAO.Set(info)
+		if persistToStore {
+			_ = h.fileDAO.Set(info)
+		} else {
+			h.fileDAO.SetEncPathMappingWithInfo(entry.Path, entry.Path, entry.Name, entry.Size, entry.IsDir)
+		}
 		if !info.IsDir {
 			if info.Size > 0 {
 				h.upsertMetaFromListing(ctx, entry.Path, info.Size)
 			}
 			h.enqueueProbeFromPropfind(ctx, entry.Path, info.Size)
-		}
-
-		// Also cache without /dav prefix for compatibility
-		if strings.HasPrefix(entry.Path, "/") {
-			h.fileDAO.Set(&dao.FileInfo{
-				Path:  entry.Path,
-				Name:  info.Name,
-				Size:  info.Size,
-				IsDir: info.IsDir,
-			})
 		}
 	}
 	return entries
@@ -948,12 +957,8 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 						// This fixes cache key mismatch: PROPFIND caches with encrypted path,
 						// but GET requests look up with display path
 						if fileInfo, ok := h.fileDAO.Get(encryptedPath); ok {
-							h.fileDAO.Set(&dao.FileInfo{
-								Path:  displayPath,
-								Name:  decryptedName,
-								Size:  fileInfo.Size,
-								IsDir: fileInfo.IsDir,
-							})
+							// Keep this mapping hot in memory without forcing a synchronous BoltDB write.
+							h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, decryptedName, fileInfo.Size, fileInfo.IsDir)
 						}
 
 						// Replace only the filename part in the href
