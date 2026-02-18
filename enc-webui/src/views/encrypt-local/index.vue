@@ -33,6 +33,8 @@
           class="ml-2"
           style="margin-right: 10px; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949"
         />
+        后缀
+        <el-input v-model="folderForm.encSuffix" style="max-width: 150px; margin-left: 10px" placeholder=".bin / 默认原文件名后缀" />
       </el-form-item>
       <el-form-item label="文件夹">
         <el-input v-model="folderForm.folderPath" style="max-width: 260px; margin-right: 10px" placeholder="/home/my-video" />
@@ -81,7 +83,8 @@ const folderForm = reactive({
   encType: 'aesctr',
   password: '123456', // 文件夹密码
   operation: 'enc',
-  encName: false
+  encName: false,
+  encSuffix: ''
 })
 
 const alistConfigForm = reactive({})
