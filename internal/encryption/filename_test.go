@@ -279,3 +279,34 @@ func TestConvertRealNameWithSuffixRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+func TestPathExecWildcardAndRuntimePrefixes(t *testing.T) {
+	patterns := []string{"/personal_cloud/encrypt/*"}
+
+	cases := []string{
+		"/personal_cloud/encrypt/a.mp4",
+		"/d/personal_cloud/encrypt/a.mp4",
+		"/p/personal_cloud/encrypt/a.mp4",
+		"/dav/personal_cloud/encrypt/a.mp4",
+	}
+
+	for _, c := range cases {
+		if !PathExec(patterns, c) {
+			t.Fatalf("expected PathExec true for %q", c)
+		}
+	}
+}
+
+func TestPathExecCompatRegexStillWorks(t *testing.T) {
+	patterns := []string{`^/encrypt/.+`}
+	if !PathExec(patterns, "/encrypt/a.mp4") {
+		t.Fatal("regex pattern should still match for compatibility")
+	}
+}
+
+func TestPathExecRegexWithDotStarNotExpanded(t *testing.T) {
+	patterns := []string{`^/dav/.*/encrypt/.*`}
+	if !PathExec(patterns, "/dav/移动云盘/encrypt/a.mp4") {
+		t.Fatal("regex with dot-star should match")
+	}
+}

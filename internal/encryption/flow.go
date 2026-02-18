@@ -51,6 +51,7 @@ var (
 
 // NewFlowEnc creates a new FlowEnc instance using the cipher registry
 func NewFlowEnc(password string, encType string, fileSize int64) (*FlowEnc, error) {
+	encType = normalizeEncType(encType)
 	f := &FlowEnc{
 		password: password,
 		fileSize: fileSize,
@@ -111,6 +112,7 @@ func (f *FlowEnc) GetCipher() Cipher {
 // This matches the Node.js FlowEnc.getPassWdOutward implementation
 // Results are cached to avoid repeated PBKDF2 computation (1000 iterations)
 func GetPasswdOutward(password, encType string) string {
+	encType = normalizeEncType(encType)
 	cacheKey := password + ":" + encType
 
 	// Try read from cache first
@@ -138,6 +140,17 @@ func GetPasswdOutward(password, encType string) string {
 	passwdOutwardCacheMu.Unlock()
 
 	return result
+}
+
+func normalizeEncType(encType string) string {
+	switch encType {
+	case "", "aesctr", "chacha20", "rc4md5":
+		return encType
+	case "rc4":
+		return "rc4md5"
+	default:
+		return encType
+	}
 }
 
 // GetCachedMixBase64 returns a cached MixBase64 instance for the given passwdOutward

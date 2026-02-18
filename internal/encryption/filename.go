@@ -453,28 +453,18 @@ func isMostlyPrintable(s string) bool {
 
 // PathMatcher checks if a path matches encryption patterns
 type PathMatcher struct {
-	patterns []*regexp.Regexp
+	patterns []string
 }
 
 // NewPathMatcher creates a new path matcher from pattern strings
 func NewPathMatcher(patterns []string) *PathMatcher {
-	pm := &PathMatcher{
-		patterns: make([]*regexp.Regexp, 0, len(patterns)),
-	}
-
-	for _, p := range patterns {
-		if re, err := regexp.Compile(p); err == nil {
-			pm.patterns = append(pm.patterns, re)
-		}
-	}
-
-	return pm
+	return &PathMatcher{patterns: patterns}
 }
 
 // Match checks if path matches any pattern
 func (pm *PathMatcher) Match(urlPath string) bool {
-	for _, re := range pm.patterns {
-		if re.MatchString(urlPath) {
+	for _, pattern := range pm.patterns {
+		if pathMatchOne(pattern, urlPath) {
 			return true
 		}
 	}
@@ -484,11 +474,105 @@ func (pm *PathMatcher) Match(urlPath string) bool {
 // PathExec checks if URL matches any encryption path pattern
 func PathExec(encPaths []string, urlPath string) bool {
 	for _, pattern := range encPaths {
-		if re, err := regexp.Compile(pattern); err == nil {
-			if re.MatchString(urlPath) {
-				return true
-			}
+		if pathMatchOne(pattern, urlPath) {
+			return true
 		}
 	}
 	return false
+}
+
+func pathMatchOne(pattern, urlPath string) bool {
+	pattern = strings.TrimSpace(pattern)
+	urlPath = strings.TrimSpace(urlPath)
+	if pattern == "" || urlPath == "" {
+		return false
+	}
+	if !strings.HasPrefix(pattern, "/") && !looksLikeRegexPattern(pattern) {
+		pattern = "/" + pattern
+	}
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/" + urlPath
+	}
+
+	for _, expanded := range expandRuntimePathPatterns(pattern) {
+		if matchPattern(expanded, urlPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func expandRuntimePathPatterns(base string) []string {
+	if looksLikeRegexPattern(base) {
+		return []string{base}
+	}
+
+	out := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	appendUnique := func(v string) {
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+
+	appendUnique(base)
+	appendUnique("/d" + base)
+	appendUnique("/p" + base)
+	appendUnique("/dav" + base)
+
+	return out
+}
+
+func matchPattern(pattern, urlPath string) bool {
+	// For common "dir/*" rules, include direct directory path.
+	if strings.HasSuffix(pattern, "/*") {
+		dir := strings.TrimSuffix(pattern, "/*")
+		if urlPath == dir || urlPath == dir+"/" {
+			return true
+		}
+	}
+
+	regexPattern := wildcardToRegex(pattern)
+	re, err := regexp.Compile(regexPattern)
+	if err != nil {
+		return false
+	}
+	if re.MatchString(urlPath) {
+		return true
+	}
+
+	// Compatibility fallback: old config treated patterns as regular expressions.
+	if legacyRe, err := regexp.Compile(pattern); err == nil {
+		return legacyRe.MatchString(urlPath)
+	}
+	return false
+}
+
+func wildcardToRegex(pattern string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	for _, r := range pattern {
+		switch r {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteString(".")
+		default:
+			if strings.ContainsRune(`.+()[]{}|^$\\`, r) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
+func looksLikeRegexPattern(pattern string) bool {
+	return strings.ContainsAny(pattern, "^$()[]{}|\\.+")
 }
