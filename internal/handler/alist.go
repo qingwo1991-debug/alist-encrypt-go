@@ -55,6 +55,16 @@ const (
 	maxParallelDecryptLimit  = 32
 )
 
+var mediaTypeByExt = map[string]float64{
+	// video
+	".mp4": 2, ".mkv": 2, ".avi": 2, ".mov": 2,
+	".wmv": 2, ".flv": 2, ".webm": 2, ".m4v": 2,
+	".ts": 2, ".rmvb": 2, ".rm": 2, ".3gp": 2,
+	// image
+	".jpg": 5, ".jpeg": 5, ".png": 5, ".gif": 5,
+	".bmp": 5, ".webp": 5, ".svg": 5, ".avif": 5,
+}
+
 func (h *AlistHandler) parallelDecryptEnabled() bool {
 	return h.cfg != nil && h.cfg.AlistServer.EnableParallelDecrypt
 }
@@ -76,6 +86,23 @@ func (h *AlistHandler) parallelDecryptLimit() int {
 func (h *AlistHandler) convertShowName(passwdInfo *config.PasswdInfo, name string) string {
 	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
 	return encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, name, passwdInfo.EncSuffix, allowLoose)
+}
+
+// normalizeDecryptedListItem keeps display fields aligned with decrypted filename,
+// so frontend preview strategy won't be stuck on encrypted suffix/type (e.g. ".bin").
+func normalizeDecryptedListItem(fileData map[string]interface{}, showName string) {
+	if fileData == nil || showName == "" {
+		return
+	}
+
+	if pathText, ok := fileData["path"].(string); ok && pathText != "" {
+		fileData["path"] = path.Join(path.Dir(pathText), showName)
+	}
+
+	ext := strings.ToLower(path.Ext(showName))
+	if fileType, ok := mediaTypeByExt[ext]; ok {
+		fileData["type"] = fileType
+	}
 }
 
 // proxyToAlist creates and executes a proxy request to Alist backend
@@ -225,6 +252,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						if fileData, ok := content[result.index].(map[string]interface{}); ok {
 							encName := fileData["name"].(string)
 							fileData["name"] = result.showName
+							normalizeDecryptedListItem(fileData, result.showName)
 							content[result.index] = fileData
 							trace.Logf(r.Context(), "decrypt", "Decrypt filename: %s -> %s", encName, result.showName)
 
@@ -407,6 +435,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 				if name, ok := data["name"].(string); ok {
 					showName := h.convertShowName(passwdInfo, name)
 					data["name"] = showName
+					normalizeDecryptedListItem(data, showName)
 				}
 			}
 
