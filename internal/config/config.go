@@ -342,8 +342,36 @@ func (c *Config) normalizeEncPaths() bool {
 	if normalizePasswdListEncPaths(c.AlistServer.PasswdList) {
 		changed = true
 	}
+	if normalizePasswdListEncSuffix(c.AlistServer.PasswdList) {
+		changed = true
+	}
 	for i := range c.WebDAVServer {
 		if normalizePasswdListEncPaths(c.WebDAVServer[i].PasswdList) {
+			changed = true
+		}
+		if normalizePasswdListEncSuffix(c.WebDAVServer[i].PasswdList) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func normalizePasswdListEncSuffix(list []PasswdInfo) bool {
+	changed := false
+	for i := range list {
+		curr := strings.TrimSpace(list[i].EncSuffix)
+		if curr == "" {
+			if list[i].EncSuffix != "" {
+				list[i].EncSuffix = ""
+				changed = true
+			}
+			continue
+		}
+		if !strings.HasPrefix(curr, ".") {
+			curr = "." + curr
+		}
+		if list[i].EncSuffix != curr {
+			list[i].EncSuffix = curr
 			changed = true
 		}
 	}

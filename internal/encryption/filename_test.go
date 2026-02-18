@@ -280,6 +280,60 @@ func TestConvertRealNameWithSuffixRoundTrip(t *testing.T) {
 	})
 }
 
+func TestConvertShowNameDuplicateSuffixFallback(t *testing.T) {
+	password := "testpass"
+	encType := "aesctr"
+	original := "movie.mp4"
+
+	encrypted := ConvertRealNameWithSuffix(password, encType, original, ".bin")
+	if !strings.HasSuffix(encrypted, ".bin") {
+		t.Fatalf("encrypted name %q should end with .bin", encrypted)
+	}
+
+	base := strings.TrimSuffix(encrypted, ".bin")
+	withDup := base + "(1).bin"
+
+	show := ConvertShowNameWithSuffixOptions(password, encType, withDup, ".bin", false)
+	if show != "movie(1).mp4" {
+		t.Fatalf("duplicate suffix fallback failed: got %q, want %q", show, "movie(1).mp4")
+	}
+}
+
+func TestConvertShowNameWithSuffixOptionsBranching(t *testing.T) {
+	password := "testpass"
+	encType := "aesctr"
+	original := "movie.mp4"
+
+	// Legacy style encrypted file with original extension.
+	legacyEncrypted := ConvertRealNameWithSuffix(password, encType, original, "")
+	if got := ConvertShowNameWithSuffixOptions(password, encType, legacyEncrypted, ".bin", false); got != original {
+		t.Fatalf("legacy branch decode failed: got %q, want %q", got, original)
+	}
+
+	// Hidden suffix style with duplicate rename fallback.
+	hiddenEncrypted := ConvertRealNameWithSuffix(password, encType, original, "bin")
+	base := strings.TrimSuffix(hiddenEncrypted, ".bin")
+	withDup := base + "(2).bin"
+	if got := ConvertShowNameWithSuffixOptions(password, encType, withDup, ".bin", false); got != "movie(2).mp4" {
+		t.Fatalf("hidden suffix decode failed: got %q, want %q", got, "movie(2).mp4")
+	}
+}
+
+func TestNormalizeEncSuffix(t *testing.T) {
+	cases := map[string]string{
+		"":      "",
+		"   ":   "",
+		".bin":  ".bin",
+		"bin":   ".bin",
+		" .dat": ".dat",
+	}
+	for in, want := range cases {
+		if got := NormalizeEncSuffix(in); got != want {
+			t.Fatalf("NormalizeEncSuffix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestPathExecWildcardAndRuntimePrefixes(t *testing.T) {
 	patterns := []string{"/156天翼云盘个人/encrypt/*"}
 

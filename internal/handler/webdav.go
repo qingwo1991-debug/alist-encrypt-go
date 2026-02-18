@@ -444,12 +444,7 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 	if passwdInfo.EncName {
 		converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
 		fileName := path.Base(davPath)
-		ext := passwdInfo.EncSuffix
-		if ext == "" {
-			ext = path.Ext(fileName)
-		}
-		encName := converter.EncryptFileName(strings.TrimSuffix(fileName, path.Ext(fileName)))
-		realPath = path.Dir(davPath) + "/" + encName + ext
+		realPath = path.Dir(davPath) + "/" + converter.ToRealName(fileName)
 
 		// Cache file info for subsequent PROPFIND (like alist-encrypt does)
 		h.fileDAO.Set(&dao.FileInfo{
@@ -536,12 +531,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 			if destFound && destPasswd.EncName {
 				converter := encryption.NewFileNameConverter(destPasswd.Password, destPasswd.EncType, destPasswd.EncSuffix)
 				fileName := path.Base(destPath)
-				ext := destPasswd.EncSuffix
-				if ext == "" {
-					ext = path.Ext(fileName)
-				}
-				encName := converter.EncryptFileName(strings.TrimSuffix(fileName, path.Ext(fileName)))
-				realDestPath := path.Dir(destPath) + "/" + encName + ext
+				realDestPath := path.Dir(destPath) + "/" + converter.ToRealName(fileName)
 
 				// Rebuild destination URL
 				destURL.Path = "/dav" + realDestPath
@@ -1054,7 +1044,7 @@ func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, pass
 
 		if encryptedName != "" && encryptedName != "/" {
 			allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
-			decryptedName := encryption.ConvertShowNameWithOptions(passwdInfo.Password, passwdInfo.EncType, encryptedName, allowLoose)
+			decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, encryptedName, passwdInfo.EncSuffix, allowLoose)
 			if decryptedName != "" && decryptedName != encryptedName {
 				result = result[:contentStart] + decryptedName + result[endIdx:]
 				searchPos = contentStart + len(decryptedName) + len(endTag)
@@ -1101,7 +1091,7 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 				fileName := path.Base(decodedPath)
 				if fileName != "" && fileName != "/" && fileName != "." {
 					allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
-					decryptedName := encryption.ConvertShowNameWithOptions(passwdInfo.Password, passwdInfo.EncType, fileName, allowLoose)
+					decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, fileName, passwdInfo.EncSuffix, allowLoose)
 					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) && decryptedName != fileName {
 						// Save mapping: display path -> encrypted path (use decoded path)
 						displayPath := path.Dir(decodedPath) + "/" + decryptedName

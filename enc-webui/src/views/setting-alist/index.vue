@@ -72,8 +72,8 @@
         <el-form-item label="文件名">
           加密
           <el-switch v-model="item.encName" class="ml-2" style="margin-right: 10px; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
-          <!-- 后缀
-          <el-input v-model="item.encSuffix" style="max-width: 150px; margin-left: 10px" placeholder="默认原文件名后缀" /> -->
+          后缀
+          <el-input v-model="item.encSuffix" style="max-width: 150px; margin-left: 10px" placeholder=".bin / 默认原文件名后缀" />
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="item.describe" style="max-width: 260px; margin-right: 10px" placeholder="备注描述" />
@@ -203,6 +203,8 @@ const addPasswd = () => {
     password: '123456',
     encType: 'aesctr',
     enable: true,
+    encName: false,
+    encSuffix: '',
     describe: 'my video',
     encPath: '/aliyun/encrypt/*'
   })
