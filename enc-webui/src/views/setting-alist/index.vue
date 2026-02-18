@@ -229,6 +229,15 @@ const decodeFoldName = async () => {
 }
 
 const saveAlistConfig = async () => {
+  for (const passwdInfo of alistConfigForm.passwdList) {
+    if (typeof passwdInfo.encPath === 'string') {
+      passwdInfo.encPath = passwdInfo.encPath
+        .split(',')
+        .map(item => item.trim())
+        .filter(item => item.length > 0)
+        .join(',')
+    }
+  }
   // Save alist config
   saveAlistConfigReq(alistConfigForm).then(res => {
     ElMessage.success(res.msg)
@@ -247,7 +256,11 @@ onMounted(async () => {
   const res = await getAlistConfigReq()
   for (const passwdInfo of res.data.passwdList) {
     passwdInfo.id = Math.random()
-    passwdInfo.encPath = passwdInfo.encPath.reduce((a, b) => `${a},${b}`)
+    if (Array.isArray(passwdInfo.encPath)) {
+      passwdInfo.encPath = passwdInfo.encPath.join(',')
+    } else if (typeof passwdInfo.encPath !== 'string') {
+      passwdInfo.encPath = ''
+    }
   }
   Object.assign(alistConfigForm, res.data)
   // Load proxy H2C setting

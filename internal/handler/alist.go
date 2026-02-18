@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -493,8 +492,6 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 		uploadPath = "/-"
 	}
 
-	fileSize, _ := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(uploadPath)
 	if !found {
 		// No encryption, proxy directly
@@ -503,6 +500,18 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 			log.Error().Err(err).Msg("Failed to proxy upload")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		}
+		return
+	}
+
+	fileSize, err := resolveUploadFileSize(r)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("path", uploadPath).
+			Str("content_length", r.Header.Get("Content-Length")).
+			Str("content_range", r.Header.Get("Content-Range")).
+			Msg("Reject encrypted upload without deterministic file size")
+		RespondHTTPErrorWithStatus(w, "Cannot determine upload file size for encryption", http.StatusBadRequest)
 		return
 	}
 

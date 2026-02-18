@@ -427,7 +427,17 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 		return
 	}
 
-	fileSize, _ := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
+	fileSize, err := resolveUploadFileSize(r)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("path", davPath).
+			Str("content_length", r.Header.Get("Content-Length")).
+			Str("content_range", r.Header.Get("Content-Range")).
+			Msg("Reject encrypted WebDAV upload without deterministic file size")
+		RespondHTTPErrorWithStatus(w, "Cannot determine upload file size for encryption", http.StatusBadRequest)
+		return
+	}
 
 	// Convert display path to real encrypted path
 	realPath := davPath

@@ -327,25 +327,27 @@ func Load() *Config {
 			cfg.Scheme.HTTPPort = cfg.Port
 		}
 
-		// Initialize encPath with /d/, /p/, /dav/ prefixes
-		cfg.initEncPaths()
+		// Normalize/migrate historical encPath expansion pollution and persist once.
+		if cfg.normalizeEncPaths() {
+			if err := cfg.Save(); err != nil {
+				log.Warn().Err(err).Msg("Failed to persist normalized encPath rules")
+			}
+		}
 	})
 	return cfg
 }
 
-// initEncPaths adds /d/, /p/, /dav/ prefixes to encPath
-func (c *Config) initEncPaths() {
-	for i := range c.AlistServer.PasswdList {
-		passwd := &c.AlistServer.PasswdList[i]
-		var expanded []string
-		for _, path := range passwd.EncPath {
-			expanded = append(expanded, path)
-			expanded = append(expanded, "/d"+path)
-			expanded = append(expanded, "/p"+path)
-			expanded = append(expanded, "/dav"+path)
-		}
-		passwd.EncPath = expanded
+func (c *Config) normalizeEncPaths() bool {
+	changed := false
+	if normalizePasswdListEncPaths(c.AlistServer.PasswdList) {
+		changed = true
 	}
+	for i := range c.WebDAVServer {
+		if normalizePasswdListEncPaths(c.WebDAVServer[i].PasswdList) {
+			changed = true
+		}
+	}
+	return changed
 }
 
 // Save saves configuration to file
@@ -370,6 +372,7 @@ func (c *Config) Save() error {
 		JWTSecret:    c.JWTSecret,
 		JWTExpire:    c.JWTExpire,
 	}
+	snapshot.normalizeEncPaths()
 
 	data, err := json.MarshalIndent(snapshot, "", "\t")
 	if err != nil {
@@ -505,18 +508,17 @@ func (c *Config) IsUnixSocketEnabled() bool {
 
 // UpdateAlistServer updates Alist server config and saves
 func (c *Config) UpdateAlistServer(server AlistServer) error {
+	normalizePasswdListEncPaths(server.PasswdList)
 	c.mu.Lock()
 	c.AlistServer = server
 	c.mu.Unlock()
-
-	// Re-init enc paths
-	c.initEncPaths()
 
 	return c.Save()
 }
 
 // AddWebDAVServer adds a new WebDAV server config
 func (c *Config) AddWebDAVServer(server WebDAVServer) error {
+	normalizePasswdListEncPaths(server.PasswdList)
 	c.mu.Lock()
 	c.WebDAVServer = append(c.WebDAVServer, server)
 	c.mu.Unlock()
@@ -525,6 +527,7 @@ func (c *Config) AddWebDAVServer(server WebDAVServer) error {
 
 // UpdateWebDAVServer updates a WebDAV server config
 func (c *Config) UpdateWebDAVServer(server WebDAVServer) error {
+	normalizePasswdListEncPaths(server.PasswdList)
 	c.mu.Lock()
 	for i, s := range c.WebDAVServer {
 		if s.ID == server.ID {

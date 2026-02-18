@@ -1,7 +1,5 @@
 package config
 
-import "strings"
-
 // ParsePasswdList parses a raw passwdList from JSON into PasswdInfo slice
 func ParsePasswdList(raw interface{}) []PasswdInfo {
 	var result []PasswdInfo
@@ -78,11 +76,11 @@ func getStringArrayField(m map[string]interface{}, key string) []string {
 				result = append(result, s)
 			}
 		}
-		return result
+		return NormalizeUserEncPaths(result)
 	}
 	// Handle as comma-separated string
 	if s, ok := m[key].(string); ok && s != "" {
-		return strings.Split(s, ",")
+		return NormalizeUserEncPaths([]string{s})
 	}
 	return nil
 }
