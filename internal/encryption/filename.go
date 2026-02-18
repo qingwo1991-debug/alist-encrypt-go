@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -317,11 +318,17 @@ func DecodeNameLoose(password, encType, encodedName string) string {
 
 // ConvertShowName converts encrypted filename to display name
 func ConvertShowName(password, encType, pathText string) string {
-	return ConvertShowNameWithOptions(password, encType, pathText, false)
+	return ConvertShowNameWithSuffixOptions(password, encType, pathText, "", false)
 }
 
 // ConvertShowNameWithOptions converts encrypted filename to display name with optional loose decode.
 func ConvertShowNameWithOptions(password, encType, pathText string, allowLoose bool) string {
+	return ConvertShowNameWithSuffixOptions(password, encType, pathText, "", allowLoose)
+}
+
+// ConvertShowNameWithSuffixOptions converts encrypted filename to display name with
+// optional configured encrypted suffix and loose decode fallback.
+func ConvertShowNameWithSuffixOptions(password, encType, pathText, encSuffix string, allowLoose bool) string {
 	// URL decode the path using PathUnescape (NOT QueryUnescape!)
 	// QueryUnescape converts '+' to space, but '+' is valid in MixBase64
 	decoded, err := url.PathUnescape(pathText)
@@ -332,16 +339,76 @@ func ConvertShowNameWithOptions(password, encType, pathText string, allowLoose b
 	fileName := path.Base(decoded)
 	ext := path.Ext(fileName)
 	encName := strings.TrimSuffix(fileName, ext)
+	normSuffix := NormalizeEncSuffix(encSuffix)
 
-	showName := DecodeName(password, encType, encName)
-	if showName == "" && allowLoose {
-		showName = DecodeNameLoose(password, encType, encName)
+	// Keep legacy (faster) behavior when encrypted suffix is not in use.
+	// Hidden extension flow is enabled only when the configured suffix matches.
+	useHiddenSuffixFlow := normSuffix != "" && ext == normSuffix
+
+	showName := ""
+	dupSuffix := ""
+	if !useHiddenSuffixFlow {
+		showName = DecodeName(password, encType, encName)
+		if showName == "" && allowLoose {
+			showName = DecodeNameLoose(password, encType, encName)
+		}
+	} else {
+		showName = DecodeName(password, encType, encName)
+		if showName == "" {
+			trimmed, suffix, ok := splitTrailingDuplicateSuffix(encName)
+			if ok {
+				showName = DecodeName(password, encType, trimmed)
+				if showName != "" {
+					dupSuffix = suffix
+				}
+			}
+		}
+		if showName == "" && allowLoose {
+			showName = DecodeNameLoose(password, encType, encName)
+			if showName == "" {
+				trimmed, suffix, ok := splitTrailingDuplicateSuffix(encName)
+				if ok {
+					showName = DecodeNameLoose(password, encType, trimmed)
+					if showName != "" {
+						dupSuffix = suffix
+					}
+				}
+			}
+		}
 	}
 	if showName == "" {
 		return OrigPrefix + fileName
 	}
+	if dupSuffix != "" {
+		showName = appendDuplicateSuffix(showName, dupSuffix)
+	}
 	// Node.js logic: encrypted name includes extension; decrypted name does not append extension
 	return showName
+}
+
+func splitTrailingDuplicateSuffix(name string) (trimmed, suffix string, ok bool) {
+	if !strings.HasSuffix(name, ")") {
+		return "", "", false
+	}
+	left := strings.LastIndex(name, "(")
+	if left <= 0 || left >= len(name)-2 {
+		return "", "", false
+	}
+	numText := name[left+1 : len(name)-1]
+	n, err := strconv.Atoi(numText)
+	if err != nil || n <= 0 {
+		return "", "", false
+	}
+	return name[:left], name[left:], true
+}
+
+func appendDuplicateSuffix(fileName, suffix string) string {
+	ext := path.Ext(fileName)
+	if ext == "" {
+		return fileName + suffix
+	}
+	base := strings.TrimSuffix(fileName, ext)
+	return base + suffix + ext
 }
 
 // ConvertRealName converts display filename to encrypted name
@@ -386,6 +453,7 @@ func ConvertRealNameWithSuffix(password, encType, pathText, encSuffix string) st
 	}
 
 	ext := path.Ext(decoded)
+	encSuffix = NormalizeEncSuffix(encSuffix)
 	if encSuffix != "" {
 		ext = encSuffix
 	}
@@ -395,6 +463,19 @@ func ConvertRealNameWithSuffix(password, encType, pathText, encSuffix string) st
 	encName := EncodeName(password, encType, decoded)
 
 	return encName + ext
+}
+
+// NormalizeEncSuffix normalizes configured encrypted suffix:
+// empty stays empty; non-empty always starts with dot.
+func NormalizeEncSuffix(encSuffix string) string {
+	encSuffix = strings.TrimSpace(encSuffix)
+	if encSuffix == "" {
+		return ""
+	}
+	if strings.HasPrefix(encSuffix, ".") {
+		return encSuffix
+	}
+	return "." + encSuffix
 }
 
 // EncodeFolderName encodes folder password info

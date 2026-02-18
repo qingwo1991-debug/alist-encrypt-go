@@ -50,7 +50,7 @@ func (c *FileNameConverter) EncryptPath(displayPath string) string {
 
 	ext := path.Ext(decoded)
 	if c.EncSuffix != "" {
-		ext = c.EncSuffix
+		ext = NormalizeEncSuffix(c.EncSuffix)
 	}
 
 	baseName := strings.TrimSuffix(decoded, path.Ext(decoded))

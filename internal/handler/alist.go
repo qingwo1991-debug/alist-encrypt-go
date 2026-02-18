@@ -75,7 +75,7 @@ func (h *AlistHandler) parallelDecryptLimit() int {
 
 func (h *AlistHandler) convertShowName(passwdInfo *config.PasswdInfo, name string) string {
 	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
-	return encryption.ConvertShowNameWithOptions(passwdInfo.Password, passwdInfo.EncType, name, allowLoose)
+	return encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, name, passwdInfo.EncSuffix, allowLoose)
 }
 
 // proxyToAlist creates and executes a proxy request to Alist backend

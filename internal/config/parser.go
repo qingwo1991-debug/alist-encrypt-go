@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // ParsePasswdList parses a raw passwdList from JSON into PasswdInfo slice
 func ParsePasswdList(raw interface{}) []PasswdInfo {
 	var result []PasswdInfo
@@ -21,7 +23,7 @@ func ParsePasswdList(raw interface{}) []PasswdInfo {
 			Describe:  getStringField(passwdMap, "describe"),
 			Enable:    getBoolField(passwdMap, "enable"),
 			EncName:   getBoolField(passwdMap, "encName"),
-			EncSuffix: getStringField(passwdMap, "encSuffix"),
+			EncSuffix: normalizeEncSuffixField(getStringField(passwdMap, "encSuffix")),
 			EncPath:   getStringArrayField(passwdMap, "encPath"),
 		}
 		result = append(result, passwd)
@@ -83,6 +85,17 @@ func getStringArrayField(m map[string]interface{}, key string) []string {
 		return NormalizeUserEncPaths([]string{s})
 	}
 	return nil
+}
+
+func normalizeEncSuffixField(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, ".") {
+		return v
+	}
+	return "." + v
 }
 
 // ParseAlistServerFromMap parses an AlistServer from a raw map
