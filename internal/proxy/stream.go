@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	stderrors "errors"
@@ -57,32 +58,6 @@ func applyStreamBufferConfig(cfg *config.Config) {
 	}
 }
 
-type rangeCompatCache struct {
-	entries sync.Map // host -> time.Time (expiry)
-}
-
-func (c *rangeCompatCache) shouldSkip(host string, ttl time.Duration) bool {
-	if host == "" || ttl <= 0 {
-		return false
-	}
-	if val, ok := c.entries.Load(host); ok {
-		if exp, ok2 := val.(time.Time); ok2 {
-			if time.Now().Before(exp) {
-				return true
-			}
-			c.entries.Delete(host)
-		}
-	}
-	return false
-}
-
-func (c *rangeCompatCache) mark(host string, ttl time.Duration) {
-	if host == "" || ttl <= 0 {
-		return
-	}
-	c.entries.Store(host, time.Now().Add(ttl))
-}
-
 func getBuffer() *[]byte {
 	return bufferPool.Get().(*[]byte)
 }
@@ -105,8 +80,9 @@ func PutBuffer(buf *[]byte) {
 type StreamProxy struct {
 	client           *Client
 	cfg              *config.Config
-	compat           *rangeCompatCache
+	compatStore      RangeCompatStore
 	redirectRewriter RedirectRewriter
+	rangeStats       *rangeLearningStats
 }
 
 // RedirectRewriter can rewrite upstream redirect locations for decrypt streams.
@@ -127,6 +103,7 @@ type StreamOutcome struct {
 	Err             error
 	Retryable       bool
 	FailureReason   string
+	NoLearning      bool
 	BytesWritten    int64
 	ExpectedBytes   int64
 	ResponseStarted bool
@@ -135,13 +112,16 @@ type StreamOutcome struct {
 	ETag            string
 }
 
+const defaultRangeCompatReprobe = 30 * time.Minute
+
 // NewStreamProxy creates a new stream proxy
 func NewStreamProxy(cfg *config.Config) *StreamProxy {
 	applyStreamBufferConfig(cfg)
 	return &StreamProxy{
-		client: NewClient(cfg),
-		cfg:    cfg,
-		compat: &rangeCompatCache{},
+		client:      NewClient(cfg),
+		cfg:         cfg,
+		compatStore: NewMemoryRangeCompatStore(),
+		rangeStats:  newRangeLearningStats(),
 	}
 }
 
@@ -150,14 +130,47 @@ func (s *StreamProxy) SetRedirectRewriter(rewriter RedirectRewriter) {
 	s.redirectRewriter = rewriter
 }
 
-func (s *StreamProxy) rangeCompatTTL() time.Duration {
+// SetRangeCompatStore sets a persistent range compatibility store.
+func (s *StreamProxy) SetRangeCompatStore(store RangeCompatStore) {
+	if s == nil {
+		return
+	}
+	if store == nil {
+		s.compatStore = NewMemoryRangeCompatStore()
+		return
+	}
+	s.compatStore = store
+}
+
+func (s *StreamProxy) rangeCompatReprobeInterval() time.Duration {
 	if s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
 		return 0
 	}
-	if s.cfg.AlistServer.RangeCompatTtlMinutes <= 0 {
-		return 0
+	if s.cfg.AlistServer.RangeReprobeMinutes > 0 {
+		return time.Duration(s.cfg.AlistServer.RangeReprobeMinutes) * time.Minute
 	}
-	return time.Duration(s.cfg.AlistServer.RangeCompatTtlMinutes) * time.Minute
+	return defaultRangeCompatReprobe
+}
+
+func (s *StreamProxy) rangeFailToDowngrade() int {
+	if s == nil || s.cfg == nil || s.cfg.AlistServer.RangeFailToDowngrade <= 0 {
+		return 2
+	}
+	return s.cfg.AlistServer.RangeFailToDowngrade
+}
+
+func (s *StreamProxy) rangeSuccessToRecover() int {
+	if s == nil || s.cfg == nil || s.cfg.AlistServer.RangeSuccessToRecover <= 0 {
+		return 3
+	}
+	return s.cfg.AlistServer.RangeSuccessToRecover
+}
+
+func (s *StreamProxy) rangeProbeTimeout() time.Duration {
+	if s == nil || s.cfg == nil || s.cfg.AlistServer.RangeProbeTimeoutSeconds <= 0 {
+		return 8 * time.Second
+	}
+	return time.Duration(s.cfg.AlistServer.RangeProbeTimeoutSeconds) * time.Second
 }
 
 func (s *StreamProxy) rangeCompatHost(targetURL string) string {
@@ -168,48 +181,291 @@ func (s *StreamProxy) rangeCompatHost(targetURL string) string {
 	return parsed.Host
 }
 
-func (s *StreamProxy) shouldSkipRange(targetURL string) bool {
-	if s.compat == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
-		return false
+func normalizeCompatStorageKey(storageKey string) string {
+	storageKey = strings.TrimSpace(storageKey)
+	if storageKey == "" {
+		return "/"
 	}
-	ttl := s.rangeCompatTTL()
-	if ttl <= 0 {
-		return false
+	if !strings.HasPrefix(storageKey, "/") {
+		storageKey = "/" + storageKey
 	}
-	return s.compat.shouldSkip(s.rangeCompatHost(targetURL), ttl)
+	out := strings.TrimRight(storageKey, "/")
+	if out == "" {
+		return "/"
+	}
+	return out
 }
 
-func (s *StreamProxy) markRangeIncompatible(targetURL string) {
-	if s.compat == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+func (s *StreamProxy) rangeCompatKey(targetURL, storageKey string) string {
+	host := s.rangeCompatHost(targetURL)
+	if host == "" {
+		return ""
+	}
+	return host + "::" + normalizeCompatStorageKey(storageKey)
+}
+
+func (s *StreamProxy) shouldSkipRange(targetURL, storageKey string) bool {
+	if s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+		return false
+	}
+	key := s.rangeCompatKey(targetURL, storageKey)
+	if key == "" {
+		return false
+	}
+	state, ok, err := s.compatStore.Get(key)
+	if err != nil || !ok {
+		return false
+	}
+	if !state.Incompatible {
+		return false
+	}
+	if state.NextProbeAt.IsZero() {
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.skipCount, 1)
+		}
+		return true
+	}
+	shouldSkip := time.Now().Before(state.NextProbeAt)
+	if shouldSkip && s.rangeStats != nil {
+		atomic.AddUint64(&s.rangeStats.skipCount, 1)
+	}
+	return shouldSkip
+}
+
+func (s *StreamProxy) recordRangeFailure(targetURL, storageKey, reason string) {
+	if s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
 		return
 	}
-	ttl := s.rangeCompatTTL()
-	if ttl <= 0 {
+	key := s.rangeCompatKey(targetURL, storageKey)
+	if key == "" {
 		return
 	}
-	s.compat.mark(s.rangeCompatHost(targetURL), ttl)
+	state, ok, err := s.compatStore.Get(key)
+	if err != nil {
+		return
+	}
+	if !ok {
+		state = RangeCompatState{}
+	}
+	now := time.Now()
+	state.LastReason = reason
+	state.LastCheckedAt = now
+	state.LastAccessed = now
+	state.UpdatedAt = now
+	if reason != "range_unsatisfiable" {
+		state.ConsecutiveFailures++
+		state.ConsecutiveSuccesses = 0
+		if state.ConsecutiveFailures >= s.rangeFailToDowngrade() {
+			wasIncompatible := state.Incompatible
+			state.Incompatible = true
+			reprobe := s.rangeCompatReprobeInterval()
+			if reprobe <= 0 {
+				reprobe = defaultRangeCompatReprobe
+			}
+			state.NextProbeAt = now.Add(reprobe)
+			if !wasIncompatible && s.rangeStats != nil {
+				atomic.AddUint64(&s.rangeStats.downgradeCount, 1)
+			}
+		}
+	} else {
+		state.ConsecutiveFailures = 0
+		state.ConsecutiveSuccesses = 0
+	}
+	if s.rangeStats != nil {
+		if reason == "range_unsupported" {
+			atomic.AddUint64(&s.rangeStats.reasonUnsupported, 1)
+		}
+		if reason == "range_unsatisfiable" {
+			atomic.AddUint64(&s.rangeStats.reasonUnsatisfiable, 1)
+		}
+	}
+	_ = s.compatStore.Upsert(key, state)
+}
+
+func (s *StreamProxy) recordRangeSuccess(targetURL, storageKey string) {
+	if s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+		return
+	}
+	key := s.rangeCompatKey(targetURL, storageKey)
+	if key == "" {
+		return
+	}
+	state, ok, err := s.compatStore.Get(key)
+	if err != nil {
+		return
+	}
+	if !ok {
+		state = RangeCompatState{}
+	}
+	now := time.Now()
+	state.ConsecutiveSuccesses++
+	state.ConsecutiveFailures = 0
+	state.LastReason = ""
+	state.LastCheckedAt = now
+	state.LastAccessed = now
+	state.UpdatedAt = now
+	if state.Incompatible && state.ConsecutiveSuccesses >= s.rangeSuccessToRecover() {
+		state.Incompatible = false
+		state.NextProbeAt = time.Time{}
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.recoverCount, 1)
+		}
+	}
+	_ = s.compatStore.Upsert(key, state)
+}
+
+// ShouldBackgroundProbeRange returns whether range capability should be probed in background.
+func (s *StreamProxy) ShouldBackgroundProbeRange(targetURL, storageKey string) bool {
+	if s == nil || s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+		return false
+	}
+	key := s.rangeCompatKey(targetURL, storageKey)
+	if key == "" {
+		return false
+	}
+	state, ok, err := s.compatStore.Get(key)
+	if err != nil || !ok {
+		return true // cold start
+	}
+	if state.Incompatible {
+		return state.NextProbeAt.IsZero() || !time.Now().Before(state.NextProbeAt)
+	}
+	return false
+}
+
+// ProbeRangeCompatibility sends a lightweight range probe and updates learning state.
+func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL string, authHeaders http.Header, storageKey string) {
+	if !s.ShouldBackgroundProbeRange(targetURL, storageKey) {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.rangeStats != nil {
+		atomic.AddUint64(&s.rangeStats.probeTotal, 1)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, s.rangeProbeTimeout())
+	defer cancel()
+
+	req, err := httputil.NewRequest(http.MethodGet, targetURL).
+		WithContext(probeCtx).
+		Build()
+	if err != nil {
+		return
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("Accept-Encoding", "identity")
+	copyProbeAuthHeaders(req, authHeaders)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		return
+	}
+	if resp.StatusCode == http.StatusPartialContent && resp.Header.Get("Content-Range") != "" {
+		s.recordRangeSuccess(targetURL, storageKey)
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.probeSuccess, 1)
+		}
+		return
+	}
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") == "" {
+		s.recordRangeFailure(targetURL, storageKey, "range_unsupported")
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+		}
+		return
+	}
+	if resp.StatusCode == http.StatusPartialContent && resp.Header.Get("Content-Range") == "" {
+		s.recordRangeFailure(targetURL, storageKey, "range_unsupported")
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.pseudoRangeCount, 1)
+			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+		}
+		return
+	}
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		s.recordRangeFailure(targetURL, storageKey, "range_unsatisfiable")
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+		}
+		return
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		if s.rangeStats != nil {
+			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+		}
+	}
+}
+
+func copyProbeAuthHeaders(req *http.Request, src http.Header) {
+	if req == nil || src == nil {
+		return
+	}
+	if auth := src.Get("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if cookie := src.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if ua := src.Get("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
 }
 
 // RangeCompatStats returns range compatibility cache stats
 func (s *StreamProxy) RangeCompatStats() map[string]interface{} {
-	count := 0
-	if s.compat != nil {
-		s.compat.entries.Range(func(_, _ interface{}) bool {
-			count++
-			return true
-		})
-	}
-
-	return map[string]interface{}{
+	configStats := map[string]interface{}{
 		"enabled": s.cfg != nil && s.cfg.AlistServer.EnableRangeCompatCache,
-		"ttl_minutes": func() int {
-			if s.cfg != nil {
-				return s.cfg.AlistServer.RangeCompatTtlMinutes
+		"reprobe_minutes": func() int {
+			if s.cfg != nil && s.cfg.AlistServer.RangeReprobeMinutes > 0 {
+				return s.cfg.AlistServer.RangeReprobeMinutes
 			}
-			return 0
+			return int(defaultRangeCompatReprobe / time.Minute)
 		}(),
-		"entries": count,
+		"fail_to_downgrade":  s.rangeFailToDowngrade(),
+		"success_to_recover": s.rangeSuccessToRecover(),
+		"probe_timeout_seconds": func() int {
+			if s != nil && s.cfg != nil && s.cfg.AlistServer.RangeProbeTimeoutSeconds > 0 {
+				return s.cfg.AlistServer.RangeProbeTimeoutSeconds
+			}
+			return 8
+		}(),
 	}
+	runtimeStats := map[string]interface{}{}
+	if s.rangeStats != nil {
+		for k, v := range s.rangeStats.snapshot() {
+			runtimeStats[k] = v
+		}
+	}
+	storeStats := map[string]interface{}{"mode": "unknown"}
+	if provider, ok := s.compatStore.(interface{ Stats() map[string]interface{} }); ok && provider != nil {
+		for k, v := range provider.Stats() {
+			storeStats[k] = v
+		}
+	}
+	flat := map[string]interface{}{
+		"config":  configStats,
+		"runtime": runtimeStats,
+		"store":   storeStats,
+	}
+	for k, v := range configStats {
+		flat[k] = v
+	}
+	for k, v := range runtimeStats {
+		flat[k] = v
+	}
+	for k, v := range storeStats {
+		flat[k] = v
+	}
+	return flat
 }
 
 // ProxyRequest forwards a request to the target and copies response
@@ -248,9 +504,15 @@ func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Reques
 
 // ProxyDownloadDecryptWithStrategy downloads and decrypts content with strategy control.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy) *StreamOutcome {
-	rangeHeader := r.Header.Get("Range")
+	return s.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, fileSize, strategy, "")
+}
 
-	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL) {
+// ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
+func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	rangeHeader := r.Header.Get("Range")
+	rangeSkipped := strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey)
+
+	if rangeSkipped {
 		return &StreamOutcome{
 			Err:           errors.NewProxyError("range unsupported"),
 			Retryable:     true,
@@ -267,9 +529,6 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 		return &StreamOutcome{Err: errors.NewInternalWithCause("failed to create request", err)}
 	}
 	applyStrategyHeaders(req, strategy)
-	if rangeHeader != "" && s.shouldSkipRange(targetURL) {
-		req.Header.Del("Range")
-	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -278,11 +537,11 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 	}
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		defer resp.Body.Close()
-		return s.handleRedirect(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
+		return s.handleRedirect(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
 	defer resp.Body.Close()
 
-	return s.streamDecryptResponse(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
+	return s.streamDecryptResponse(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL, compatStorageKey)
 }
 
 // ProxyUploadEncrypt uploads with encryption
@@ -329,8 +588,13 @@ func (s *StreamProxy) ProxyDownloadDecryptReq(w http.ResponseWriter, req *http.R
 
 // ProxyDownloadDecryptReqWithStrategy downloads and decrypts using a pre-built request and strategy.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy) *StreamOutcome {
+	return s.ProxyDownloadDecryptReqWithStrategyForStorage(w, req, targetURL, passwdInfo, fileSize, strategy, "")
+}
+
+// ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
+func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
 	rangeHeader := req.Header.Get("Range")
-	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL) {
+	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey) {
 		return &StreamOutcome{
 			Err:           errors.NewProxyError("range unsupported"),
 			Retryable:     true,
@@ -345,11 +609,11 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 	}
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		defer resp.Body.Close()
-		return s.handleRedirect(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
+		return s.handleRedirect(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
 	defer resp.Body.Close()
 
-	return s.streamDecryptResponse(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
+	return s.streamDecryptResponse(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL, compatStorageKey)
 }
 
 func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
@@ -358,8 +622,47 @@ func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
 	}
 }
 
-func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL string) *StreamOutcome {
+func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	result := &StreamOutcome{}
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return &StreamOutcome{
+			Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
+			Retryable:     true,
+			FailureReason: "upstream_5xx",
+			NoLearning:    true,
+			StatusCode:    resp.StatusCode,
+		}
+	}
+	if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		if !isPassthroughStatus(resp.StatusCode) {
+			return &StreamOutcome{
+				Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
+				Retryable:     true,
+				FailureReason: "upstream_4xx",
+				NoLearning:    true,
+				StatusCode:    resp.StatusCode,
+			}
+		}
+	}
+	if isPassthroughStatus(resp.StatusCode) {
+		httputil.CopyResponseHeaders(w, resp)
+		w.WriteHeader(resp.StatusCode)
+		result.ResponseStarted = true
+		result.StatusCode = resp.StatusCode
+		result.FailureReason = "upstream_4xx"
+		result.NoLearning = true
+		if req.Method == http.MethodHead {
+			return result
+		}
+		buf := getBuffer()
+		defer putBuffer(buf)
+		written, err := io.CopyBuffer(w, resp.Body, *buf)
+		result.BytesWritten = written
+		if err != nil {
+			result.Err = err
+		}
+		return result
+	}
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
@@ -408,17 +711,24 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 
 	if activeRange != nil && strategy == StreamStrategyRange {
 		if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") == "" {
-			s.markRangeIncompatible(targetURL)
+			if s.rangeStats != nil {
+				atomic.AddUint64(&s.rangeStats.pseudoRangeCount, 1)
+			}
+			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsupported")
 			return &StreamOutcome{Err: errors.NewProxyError("range unsupported"), Retryable: true, FailureReason: "range_unsupported"}
 		}
 		if resp.StatusCode == http.StatusPartialContent && resp.Header.Get("Content-Range") == "" {
-			s.markRangeIncompatible(targetURL)
+			if s.rangeStats != nil {
+				atomic.AddUint64(&s.rangeStats.pseudoRangeCount, 1)
+			}
+			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsupported")
 			return &StreamOutcome{Err: errors.NewProxyError("range unsupported"), Retryable: true, FailureReason: "range_unsupported"}
 		}
 		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 			if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
 				fileSize = total
 			}
+			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsatisfiable")
 			return &StreamOutcome{Err: errors.NewProxyError("range unsatisfiable"), Retryable: true, FailureReason: "range_unsatisfiable"}
 		}
 	}
@@ -462,6 +772,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	if req.Method == http.MethodHead {
 		w.WriteHeader(statusCode)
 		result.ResponseStarted = true
+		if strategy == StreamStrategyRange && activeRange != nil && result.Err == nil {
+			s.recordRangeSuccess(targetURL, compatStorageKey)
+		}
 		return result
 	}
 
@@ -492,18 +805,21 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 		result.Retryable = retryable
 	}
+	if strategy == StreamStrategyRange && activeRange != nil && result.Err == nil {
+		s.recordRangeSuccess(targetURL, compatStorageKey)
+	}
 
 	return result
 }
 
-func (s *StreamProxy) handleRedirect(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL string) *StreamOutcome {
+func (s *StreamProxy) handleRedirect(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	location := resp.Header.Get("Location")
 	if location == "" {
 		return &StreamOutcome{Err: errors.NewProxyError("redirect without Location header")}
 	}
 
 	if s.shouldFollowRedirect(passwdInfo) {
-		return s.followRedirectDecrypt(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL)
+		return s.followRedirectDecrypt(w, req, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
 
 	newLocation := location
@@ -529,7 +845,7 @@ func (s *StreamProxy) shouldFollowRedirect(passwdInfo *config.PasswdInfo) bool {
 	return passwdInfo != nil && passwdInfo.Enable
 }
 
-func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL string) *StreamOutcome {
+func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	baseURL := resp.Request.URL
 	currentURL := resolveRedirectURL(baseURL, resp.Header.Get("Location"))
 	if currentURL == "" {
@@ -552,7 +868,7 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 
 		sanitizeRedirectHeaders(newReq, req.URL, currentURL)
 		applyStrategyHeaders(newReq, strategy)
-		if rangeHeader != "" && s.shouldSkipRange(currentURL) {
+		if rangeHeader != "" && s.shouldSkipRange(currentURL, compatStorageKey) {
 			newReq.Header.Del("Range")
 		}
 
@@ -576,7 +892,7 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 			continue
 		}
 
-		return s.streamDecryptResponse(w, newReq, nextResp, passwdInfo, fileSize, rangeHeader, strategy, currentURL)
+		return s.streamDecryptResponse(w, newReq, nextResp, passwdInfo, fileSize, rangeHeader, strategy, currentURL, compatStorageKey)
 	}
 
 	return &StreamOutcome{Err: errors.NewProxyError("redirect hop limit exceeded")}
@@ -731,6 +1047,15 @@ func classifyStreamError(err error) (string, bool) {
 		return "timeout", false
 	}
 	return "network_error", false
+}
+
+func isPassthroughStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveFileSize extracts file size from response headers if not provided

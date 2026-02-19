@@ -55,3 +55,18 @@ type FileMetaRecord struct {
 	StatusCode   int
 	Active       bool
 }
+
+type RangeCompatRecord struct {
+	KeyHash              string
+	ProviderHost         string
+	StorageKey           string
+	Incompatible         bool
+	ConsecutiveFailures  int
+	ConsecutiveSuccesses int
+	NextProbeAt          time.Time
+	LastReason           string
+	LastCheckedAt        time.Time
+	UpdatedAt            time.Time
+	LastAccessed         time.Time
+	Active               bool
+}

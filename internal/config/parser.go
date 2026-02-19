@@ -111,7 +111,10 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		EnableSizeMap:               getBoolField(raw, "enableSizeMap"),
 		SizeMapTtlMinutes:           getIntField(raw, "sizeMapTtlMinutes"),
 		EnableRangeCompatCache:      getBoolField(raw, "enableRangeCompatCache"),
-		RangeCompatTtlMinutes:       getIntField(raw, "rangeCompatTtlMinutes"),
+		RangeFailToDowngrade:        getIntField(raw, "rangeFailToDowngrade"),
+		RangeSuccessToRecover:       getIntField(raw, "rangeSuccessToRecover"),
+		RangeReprobeMinutes:         getIntField(raw, "rangeReprobeMinutes"),
+		RangeProbeTimeoutSeconds:    getIntField(raw, "rangeProbeTimeoutSeconds"),
 		EnableParallelDecrypt:       getBoolField(raw, "enableParallelDecrypt"),
 		ParallelDecryptConcurrency:  getIntField(raw, "parallelDecryptConcurrency"),
 		StreamBufferKb:              getIntField(raw, "streamBufferKb"),
@@ -135,7 +138,7 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		StrategyFailToDowngrade:     getIntField(raw, "strategyFailToDowngrade"),
 		StrategySuccessToRecover:    getIntField(raw, "strategySuccessToRecover"),
 		StrategyCooldownMinutes:     getIntField(raw, "strategyCooldownMinutes"),
-		EnableBackgroundProbe:       getBoolField(raw, "enableBackgroundProbe"),
+		EnableBackgroundProbe:       getBoolFieldWithDefault(raw, "enableBackgroundProbe", true),
 		ProbeConcurrency:            getIntField(raw, "probeConcurrency"),
 		ProbeProviderConcurrency:    getIntField(raw, "probeProviderConcurrency"),
 		ProbeMinDelayMs:             getIntField(raw, "probeMinDelayMs"),
@@ -152,8 +155,48 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 	if overridesRaw, ok := raw["streamStrategyOverrides"]; ok {
 		server.StreamStrategyOverrides = ParseStreamStrategyOverrides(overridesRaw)
 	}
+	if !hasBoolField(raw, "enableRangeCompatCache") {
+		server.EnableRangeCompatCache = true
+	}
+	if server.RangeFailToDowngrade <= 0 {
+		server.RangeFailToDowngrade = 2
+	}
+	if server.RangeSuccessToRecover <= 0 {
+		server.RangeSuccessToRecover = 3
+	}
+	if server.RangeReprobeMinutes <= 0 {
+		server.RangeReprobeMinutes = 30
+	}
+	if server.RangeProbeTimeoutSeconds <= 0 {
+		server.RangeProbeTimeoutSeconds = 8
+	}
+	server.RangeFailToDowngrade = clampInt(server.RangeFailToDowngrade, 1, 10)
+	server.RangeSuccessToRecover = clampInt(server.RangeSuccessToRecover, 1, 20)
+	server.RangeReprobeMinutes = clampInt(server.RangeReprobeMinutes, 1, 1440)
+	server.RangeProbeTimeoutSeconds = clampInt(server.RangeProbeTimeoutSeconds, 2, 60)
+	server.ProbeConcurrency = clampInt(server.ProbeConcurrency, 1, 20)
+	server.ProbeProviderConcurrency = clampInt(server.ProbeProviderConcurrency, 1, 5)
+	server.ProbeMinDelayMs = clampInt(server.ProbeMinDelayMs, 0, 60000)
+	server.ProbeMaxDelayMs = clampInt(server.ProbeMaxDelayMs, 0, 120000)
+	server.ProbeCooldownMinutes = clampInt(server.ProbeCooldownMinutes, 1, 10080)
+	server.ProbeQueueSize = clampInt(server.ProbeQueueSize, 100, 10000)
 
 	return server
+}
+
+func hasBoolField(m map[string]interface{}, key string) bool {
+	_, ok := m[key].(bool)
+	return ok
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // ParseStreamStrategyOverrides parses overrides from JSON into StreamStrategyOverride slice

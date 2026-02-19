@@ -16,3 +16,27 @@ func TestApplyEnvOverridesDBDisableCleanup(t *testing.T) {
 		t.Fatalf("expected PlayFirstFallback=false from env override")
 	}
 }
+
+func TestApplyEnvOverridesRangeLearning(t *testing.T) {
+	t.Setenv("RANGE_FAIL_TO_DOWNGRADE", "4")
+	t.Setenv("RANGE_SUCCESS_TO_RECOVER", "6")
+	t.Setenv("RANGE_REPROBE_MINUTES", "45")
+	t.Setenv("RANGE_PROBE_TIMEOUT_SECONDS", "12")
+
+	cfg := DefaultConfig()
+	cfg.applyEnvOverrides()
+	cfg.normalizeAlistServerTuning()
+
+	if cfg.AlistServer.RangeFailToDowngrade != 4 {
+		t.Fatalf("RangeFailToDowngrade=%d, want 4", cfg.AlistServer.RangeFailToDowngrade)
+	}
+	if cfg.AlistServer.RangeSuccessToRecover != 6 {
+		t.Fatalf("RangeSuccessToRecover=%d, want 6", cfg.AlistServer.RangeSuccessToRecover)
+	}
+	if cfg.AlistServer.RangeReprobeMinutes != 45 {
+		t.Fatalf("RangeReprobeMinutes=%d, want 45", cfg.AlistServer.RangeReprobeMinutes)
+	}
+	if cfg.AlistServer.RangeProbeTimeoutSeconds != 12 {
+		t.Fatalf("RangeProbeTimeoutSeconds=%d, want 12", cfg.AlistServer.RangeProbeTimeoutSeconds)
+	}
+}

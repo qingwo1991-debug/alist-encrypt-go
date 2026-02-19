@@ -12,12 +12,21 @@ type fileMetaBuffer struct {
 	items map[string]FileMetaRecord
 }
 
+type rangeCompatBuffer struct {
+	mu    sync.Mutex
+	items map[string]RangeCompatRecord
+}
+
 func newStrategyBuffer() *strategyBuffer {
 	return &strategyBuffer{items: make(map[string]StrategyRecord)}
 }
 
 func newFileMetaBuffer() *fileMetaBuffer {
 	return &fileMetaBuffer{items: make(map[string]FileMetaRecord)}
+}
+
+func newRangeCompatBuffer() *rangeCompatBuffer {
+	return &rangeCompatBuffer{items: make(map[string]RangeCompatRecord)}
 }
 
 func (b *strategyBuffer) upsert(record StrategyRecord) {
@@ -53,5 +62,23 @@ func (b *fileMetaBuffer) drain() []FileMetaRecord {
 		out = append(out, value)
 	}
 	b.items = make(map[string]FileMetaRecord)
+	return out
+}
+
+func (b *rangeCompatBuffer) upsert(record RangeCompatRecord) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.items[record.KeyHash] = record
+}
+
+func (b *rangeCompatBuffer) drain() []RangeCompatRecord {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	out := make([]RangeCompatRecord, 0, len(b.items))
+	for _, value := range b.items {
+		out = append(out, value)
+	}
+	b.items = make(map[string]RangeCompatRecord)
 	return out
 }

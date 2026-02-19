@@ -10,6 +10,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/proxy"
 )
 
 type ProbeScheduler struct {
@@ -17,6 +18,7 @@ type ProbeScheduler struct {
 	resolver  *FileSizeResolver
 	fileDAO   *dao.FileDAO
 	metaStore FileMetaStore
+	stream    *proxy.StreamProxy
 	enabled   bool
 
 	queue    chan probeItem
@@ -39,12 +41,13 @@ type probeItem struct {
 	authHeaders http.Header
 }
 
-func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore) *ProbeScheduler {
+func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy) *ProbeScheduler {
 	ps := &ProbeScheduler{
 		cfg:         cfg,
 		resolver:    NewFileSizeResolver(fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		fileDAO:     fileDAO,
 		metaStore:   metaStore,
+		stream:      stream,
 		enabled:     cfg != nil && cfg.AlistServer.EnableBackgroundProbe,
 		seen:        make(map[string]time.Time),
 		providerSem: make(map[string]chan struct{}),
@@ -82,18 +85,32 @@ func (ps *ProbeScheduler) EnqueueWithSize(file FileItem, authHeaders http.Header
 	if file.DisplayPath == "" || file.TargetURL == "" {
 		return
 	}
-	if !ps.shouldProbeSize(reportedSize) {
-		return
-	}
+	sizeProbeNeeded := ps.shouldProbeSize(reportedSize)
+	rangeProbeNeeded := ps.shouldProbeRange(file, reportedSize)
 
-	if size, ok := ps.fileDAO.GetFileSize(file.DisplayPath); ok && !ps.shouldProbeSize(size) {
-		return
+	if size, ok := ps.fileDAO.GetFileSize(file.DisplayPath); ok {
+		if !sizeProbeNeeded {
+			// no-op
+		} else {
+			sizeProbeNeeded = ps.shouldProbeSize(size)
+		}
+		if !rangeProbeNeeded {
+			rangeProbeNeeded = ps.shouldProbeRange(file, size)
+		}
 	}
 	if ps.metaStore != nil {
 		providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
-		if meta, ok, _ := ps.metaStore.Get(context.Background(), providerKey, file.DisplayPath); ok && !ps.shouldProbeSize(meta.Size) {
-			return
+		if meta, ok, _ := ps.metaStore.Get(context.Background(), providerKey, file.DisplayPath); ok {
+			if sizeProbeNeeded {
+				sizeProbeNeeded = ps.shouldProbeSize(meta.Size)
+			}
+			if !rangeProbeNeeded {
+				rangeProbeNeeded = ps.shouldProbeRange(file, meta.Size)
+			}
 		}
+	}
+	if !sizeProbeNeeded && !rangeProbeNeeded {
+		return
 	}
 
 	key := ProviderKey(file.TargetURL, file.DisplayPath)
@@ -117,6 +134,16 @@ func (ps *ProbeScheduler) shouldProbeSize(size int64) bool {
 		return false
 	}
 	return size < ps.minSizeBytes
+}
+
+func (ps *ProbeScheduler) shouldProbeRange(file FileItem, size int64) bool {
+	if ps == nil || ps.stream == nil {
+		return false
+	}
+	if file.TargetURL == "" || file.CompatStorageKey == "" {
+		return false
+	}
+	return ps.stream.ShouldBackgroundProbeRange(file.TargetURL, file.CompatStorageKey)
 }
 
 func (ps *ProbeScheduler) worker() {
@@ -151,6 +178,9 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 	result := ps.resolver.ResolveSingle(context.Background(), item.file, item.authHeaders)
 	if result.Error == nil && result.Size > 0 {
 		ps.fileDAO.SetFileSize(item.file.DisplayPath, result.Size, 24*time.Hour)
+	}
+	if ps.stream != nil {
+		ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, item.authHeaders, item.file.CompatStorageKey)
 	}
 }
 

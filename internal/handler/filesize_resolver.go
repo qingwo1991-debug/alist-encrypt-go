@@ -123,11 +123,12 @@ type SizeResult struct {
 
 // FileItem represents a file to resolve size for
 type FileItem struct {
-	DisplayPath   string
-	EncryptedPath string
-	TargetURL     string
-	FileName      string
-	PropfindSize  int64
+	DisplayPath      string
+	EncryptedPath    string
+	TargetURL        string
+	FileName         string
+	PropfindSize     int64
+	CompatStorageKey string
 }
 
 // MinValidFileSize is the minimum size for a valid file (1KB)

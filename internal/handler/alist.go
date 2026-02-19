@@ -497,10 +497,11 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 	}
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/d"+realPath, r)
 	file := FileItem{
-		DisplayPath:   displayPath,
-		EncryptedPath: realPath,
-		TargetURL:     targetURL,
-		FileName:      path.Base(displayPath),
+		DisplayPath:      displayPath,
+		EncryptedPath:    realPath,
+		TargetURL:        targetURL,
+		FileName:         path.Base(displayPath),
+		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
 	}
 	authHeaders := make(http.Header)
 	if auth := r.Header.Get("Authorization"); auth != "" {

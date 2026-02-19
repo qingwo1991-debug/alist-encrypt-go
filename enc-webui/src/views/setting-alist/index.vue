@@ -35,9 +35,21 @@
         <el-switch v-model="alistConfigForm.enableRangeCompatCache" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
         <span color="gray" style="font-size: 12px; margin-left: 12px">记录不支持Range的上游并降级</span>
       </el-form-item>
-      <el-form-item prop="rangeCompatTtlMinutes" label="兼容TTL">
-        <el-input v-model="alistConfigForm.rangeCompatTtlMinutes" style="max-width: 260px" placeholder="60" />
-        <span color="gray" style="font-size: 12px; margin-left: 12px">分钟</span>
+      <el-form-item prop="rangeFailToDowngrade" label="降级阈值">
+        <el-input v-model="alistConfigForm.rangeFailToDowngrade" style="max-width: 260px" placeholder="2" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">连续失败次数（1-10）</span>
+      </el-form-item>
+      <el-form-item prop="rangeSuccessToRecover" label="恢复阈值">
+        <el-input v-model="alistConfigForm.rangeSuccessToRecover" style="max-width: 260px" placeholder="3" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">连续成功次数（1-20）</span>
+      </el-form-item>
+      <el-form-item prop="rangeReprobeMinutes" label="重探间隔">
+        <el-input v-model="alistConfigForm.rangeReprobeMinutes" style="max-width: 260px" placeholder="30" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">分钟（1-1440）</span>
+      </el-form-item>
+      <el-form-item prop="rangeProbeTimeoutSeconds" label="探测超时">
+        <el-input v-model="alistConfigForm.rangeProbeTimeoutSeconds" style="max-width: 260px" placeholder="8" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">秒（2-60）</span>
       </el-form-item>
       <el-form-item prop="enableParallelDecrypt" label="并行解密">
         <el-switch v-model="alistConfigForm.enableParallelDecrypt" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
@@ -178,7 +190,10 @@ const alistConfigForm = reactive({
   enableSizeMap: true,
   sizeMapTtlMinutes: 1440,
   enableRangeCompatCache: true,
-  rangeCompatTtlMinutes: 60,
+  rangeFailToDowngrade: 2,
+  rangeSuccessToRecover: 3,
+  rangeReprobeMinutes: 30,
+  rangeProbeTimeoutSeconds: 8,
   enableParallelDecrypt: false,
   parallelDecryptConcurrency: 4,
   streamBufferKb: 512,
@@ -231,6 +246,16 @@ const decodeFoldName = async () => {
 }
 
 const saveAlistConfig = async () => {
+  const toInt = (v, d) => {
+    const n = Number.parseInt(v, 10)
+    return Number.isFinite(n) ? n : d
+  }
+  const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
+  alistConfigForm.rangeFailToDowngrade = clamp(toInt(alistConfigForm.rangeFailToDowngrade, 2), 1, 10)
+  alistConfigForm.rangeSuccessToRecover = clamp(toInt(alistConfigForm.rangeSuccessToRecover, 3), 1, 20)
+  alistConfigForm.rangeReprobeMinutes = clamp(toInt(alistConfigForm.rangeReprobeMinutes, 30), 1, 1440)
+  alistConfigForm.rangeProbeTimeoutSeconds = clamp(toInt(alistConfigForm.rangeProbeTimeoutSeconds, 8), 2, 60)
+
   for (const passwdInfo of alistConfigForm.passwdList) {
     if (typeof passwdInfo.encPath === 'string') {
       passwdInfo.encPath = passwdInfo.encPath
