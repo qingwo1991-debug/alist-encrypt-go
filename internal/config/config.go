@@ -45,7 +45,10 @@ type AlistServer struct {
 	EnableSizeMap               bool                     `json:"enableSizeMap"`
 	SizeMapTtlMinutes           int                      `json:"sizeMapTtlMinutes"`
 	EnableRangeCompatCache      bool                     `json:"enableRangeCompatCache"`
-	RangeCompatTtlMinutes       int                      `json:"rangeCompatTtlMinutes"`
+	RangeFailToDowngrade        int                      `json:"rangeFailToDowngrade"`
+	RangeSuccessToRecover       int                      `json:"rangeSuccessToRecover"`
+	RangeReprobeMinutes         int                      `json:"rangeReprobeMinutes"`
+	RangeProbeTimeoutSeconds    int                      `json:"rangeProbeTimeoutSeconds"`
 	EnableParallelDecrypt       bool                     `json:"enableParallelDecrypt"`
 	ParallelDecryptConcurrency  int                      `json:"parallelDecryptConcurrency"`
 	StreamBufferKb              int                      `json:"streamBufferKb"`
@@ -202,7 +205,10 @@ func DefaultConfig() *Config {
 			EnableSizeMap:               true,
 			SizeMapTtlMinutes:           1440,
 			EnableRangeCompatCache:      true,
-			RangeCompatTtlMinutes:       60,
+			RangeFailToDowngrade:        2,
+			RangeSuccessToRecover:       3,
+			RangeReprobeMinutes:         30,
+			RangeProbeTimeoutSeconds:    8,
 			EnableParallelDecrypt:       false,
 			ParallelDecryptConcurrency:  4,
 			StreamBufferKb:              512,
@@ -226,7 +232,7 @@ func DefaultConfig() *Config {
 			StrategyFailToDowngrade:     2,
 			StrategySuccessToRecover:    5,
 			StrategyCooldownMinutes:     30,
-			EnableBackgroundProbe:       false,
+			EnableBackgroundProbe:       true,
 			ProbeConcurrency:            4,
 			ProbeProviderConcurrency:    1,
 			ProbeMinDelayMs:             3000,
@@ -301,6 +307,14 @@ func Load() *Config {
 
 		// Try to load config file
 		if data, err := os.ReadFile(configPath); err == nil {
+			if migrated, migratedData := migrateLegacyRangeCompatTTL(data); migrated {
+				data = migratedData
+				if err := os.WriteFile(configPath, migratedData, 0644); err != nil {
+					log.Warn().Err(err).Msg("Failed to persist migrated range compat config")
+				} else {
+					log.Info().Str("path", configPath).Msg("Migrated legacy rangeCompatTtlMinutes to rangeReprobeMinutes")
+				}
+			}
 			if err := json.Unmarshal(data, cfg); err != nil {
 				log.Error().Err(err).Msg("Failed to parse config file")
 			} else {
@@ -313,6 +327,7 @@ func Load() *Config {
 		}
 
 		cfg.applyEnvOverrides()
+		cfg.normalizeAlistServerTuning()
 
 		cfg.configPath = configPath
 
@@ -454,6 +469,89 @@ func (c *Config) applyEnvOverrides() {
 	if v, ok := getEnvBool("PLAY_FIRST_FALLBACK"); ok {
 		c.AlistServer.PlayFirstFallback = v
 	}
+	if v, ok := getEnvInt("RANGE_FAIL_TO_DOWNGRADE"); ok {
+		c.AlistServer.RangeFailToDowngrade = v
+	}
+	if v, ok := getEnvInt("RANGE_SUCCESS_TO_RECOVER"); ok {
+		c.AlistServer.RangeSuccessToRecover = v
+	}
+	if v, ok := getEnvInt("RANGE_REPROBE_MINUTES"); ok {
+		c.AlistServer.RangeReprobeMinutes = v
+	}
+	if v, ok := getEnvInt("RANGE_PROBE_TIMEOUT_SECONDS"); ok {
+		c.AlistServer.RangeProbeTimeoutSeconds = v
+	}
+}
+
+func (c *Config) normalizeAlistServerTuning() {
+	if c == nil {
+		return
+	}
+	s := &c.AlistServer
+	if s.RangeFailToDowngrade <= 0 {
+		s.RangeFailToDowngrade = 2
+	}
+	if s.RangeSuccessToRecover <= 0 {
+		s.RangeSuccessToRecover = 3
+	}
+	if s.RangeReprobeMinutes <= 0 {
+		s.RangeReprobeMinutes = 30
+	}
+	if s.RangeProbeTimeoutSeconds <= 0 {
+		s.RangeProbeTimeoutSeconds = 8
+	}
+	s.RangeFailToDowngrade = clampIntValue(s.RangeFailToDowngrade, 1, 10)
+	s.RangeSuccessToRecover = clampIntValue(s.RangeSuccessToRecover, 1, 20)
+	s.RangeReprobeMinutes = clampIntValue(s.RangeReprobeMinutes, 1, 1440)
+	s.RangeProbeTimeoutSeconds = clampIntValue(s.RangeProbeTimeoutSeconds, 2, 60)
+
+	s.ProbeConcurrency = clampIntValue(s.ProbeConcurrency, 1, 20)
+	s.ProbeProviderConcurrency = clampIntValue(s.ProbeProviderConcurrency, 1, 5)
+	s.ProbeMinDelayMs = clampIntValue(s.ProbeMinDelayMs, 0, 60000)
+	s.ProbeMaxDelayMs = clampIntValue(s.ProbeMaxDelayMs, 0, 120000)
+	s.ProbeCooldownMinutes = clampIntValue(s.ProbeCooldownMinutes, 1, 10080)
+	s.ProbeQueueSize = clampIntValue(s.ProbeQueueSize, 100, 10000)
+}
+
+func clampIntValue(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func migrateLegacyRangeCompatTTL(data []byte) (bool, []byte) {
+	if len(data) == 0 {
+		return false, data
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false, data
+	}
+	alistRaw, ok := raw["alistServer"].(map[string]interface{})
+	if !ok {
+		return false, data
+	}
+
+	oldValue, hasOld := alistRaw["rangeCompatTtlMinutes"]
+	_, hasNew := alistRaw["rangeReprobeMinutes"]
+	if !hasOld {
+		return false, data
+	}
+	if !hasNew {
+		alistRaw["rangeReprobeMinutes"] = oldValue
+	}
+	delete(alistRaw, "rangeCompatTtlMinutes")
+
+	out, err := json.MarshalIndent(raw, "", "\t")
+	if err != nil {
+		return false, data
+	}
+	return true, out
 }
 
 func getEnvBool(key string) (bool, bool) {
@@ -539,6 +637,7 @@ func (c *Config) UpdateAlistServer(server AlistServer) error {
 	normalizePasswdListEncPaths(server.PasswdList)
 	c.mu.Lock()
 	c.AlistServer = server
+	c.normalizeAlistServerTuning()
 	c.mu.Unlock()
 
 	return c.Save()

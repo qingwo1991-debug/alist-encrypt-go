@@ -269,6 +269,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	trace.Logf(r.Context(), "webdav-get", "Proxying with decryption, target=%s", targetURL)
 	providerKey := ProviderKey(targetURL, davPath)
+	compatStorageKey := buildRangeCompatStorageKey(passwdInfo, davPath)
 	strategies := []proxy.StreamStrategy{proxy.StreamStrategyRange}
 	if override, ok := selectStrategyOverride(h.cfg, davPath); ok {
 		strategies = []proxy.StreamStrategy{override}
@@ -292,12 +293,12 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 				return false, true, "internal_error", err
 			}
 
-			result := h.streamProxy.ProxyDownloadDecryptReqWithStrategy(w, attemptReq, targetURL, passwdInfo, size, strategy)
+			result := h.streamProxy.ProxyDownloadDecryptReqWithStrategyForStorage(w, attemptReq, targetURL, passwdInfo, size, strategy, compatStorageKey)
 			if result.Err == nil && !result.Retryable {
-				if h.strategySel != nil {
+				if h.strategySel != nil && !result.NoLearning {
 					h.strategySel.RecordSuccess(providerKey, strategy)
 				}
-				if h.sizeResolver != nil && r.Method == http.MethodGet {
+				if h.sizeResolver != nil && r.Method == http.MethodGet && !result.NoLearning {
 					metaSize := size
 					if result.ExpectedBytes > 0 {
 						metaSize = result.ExpectedBytes
@@ -319,15 +320,17 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 			}
 
 			if h.strategySel != nil {
-				if result.Retryable && !result.ResponseStarted {
-					if isNonStrategyFailure(reason) {
-						trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, davPath)
-					} else {
-						trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, davPath)
-						atomic.AddUint64(&h.strategyFallbackCount, 1)
+				if !result.NoLearning {
+					if result.Retryable && !result.ResponseStarted {
+						if isNonStrategyFailure(reason) {
+							trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, davPath)
+						} else {
+							trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, davPath)
+							atomic.AddUint64(&h.strategyFallbackCount, 1)
+						}
 					}
+					h.strategySel.RecordFailure(providerKey, strategy, reason)
 				}
-				h.strategySel.RecordFailure(providerKey, strategy, reason)
 			}
 
 			if result.Err != nil {
@@ -351,12 +354,12 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 				CopyHeaders(r).
 				Build()
 			if err == nil {
-				fallback := h.streamProxy.ProxyDownloadDecryptReqWithStrategy(w, attemptReq, targetURL, passwdInfo, size, proxy.StreamStrategyFull)
+				fallback := h.streamProxy.ProxyDownloadDecryptReqWithStrategyForStorage(w, attemptReq, targetURL, passwdInfo, size, proxy.StreamStrategyFull, compatStorageKey)
 				if fallback.Err == nil && !fallback.Retryable {
-					if h.strategySel != nil {
+					if h.strategySel != nil && !fallback.NoLearning {
 						h.strategySel.RecordSuccess(providerKey, proxy.StreamStrategyFull)
 					}
-					if h.sizeResolver != nil && r.Method == http.MethodGet {
+					if h.sizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
 						metaSize := size
 						if fallback.ExpectedBytes > 0 {
 							metaSize = fallback.ExpectedBytes
@@ -907,10 +910,11 @@ func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPat
 	}
 	targetURL := h.cfg.GetAlistURL() + "/dav" + realPath
 	file := FileItem{
-		DisplayPath:   displayPath,
-		EncryptedPath: realPath,
-		TargetURL:     targetURL,
-		FileName:      path.Base(displayPath),
+		DisplayPath:      displayPath,
+		EncryptedPath:    realPath,
+		TargetURL:        targetURL,
+		FileName:         path.Base(displayPath),
+		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
 	}
 	authHeaders := make(http.Header)
 	if auth := ctx.Value(webdavAuthContextKey); auth != nil {

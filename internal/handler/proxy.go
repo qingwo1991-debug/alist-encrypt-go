@@ -334,6 +334,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providerKey := ProviderKey(targetURL, displayPath)
+	compatStorageKey := buildRangeCompatStorageKey(passwdInfo, displayPath)
 	strategies := []proxy.StreamStrategy{proxy.StreamStrategyRange}
 	if override, ok := selectStrategyOverride(h.cfg, displayPath); ok {
 		strategies = []proxy.StreamStrategy{override}
@@ -347,12 +348,12 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		var responseStarted bool
 
 		for _, strategy := range strategies {
-			result := h.streamProxy.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, size, strategy)
+			result := h.streamProxy.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, size, strategy, compatStorageKey)
 			if result.Err == nil && !result.Retryable {
-				if h.strategySel != nil {
+				if h.strategySel != nil && !result.NoLearning {
 					h.strategySel.RecordSuccess(providerKey, strategy)
 				}
-				if h.sizeResolver != nil && r.Method == http.MethodGet {
+				if h.sizeResolver != nil && r.Method == http.MethodGet && !result.NoLearning {
 					metaSize := size
 					if result.ExpectedBytes > 0 {
 						metaSize = result.ExpectedBytes
@@ -374,15 +375,17 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if h.strategySel != nil {
-				if result.Retryable && !result.ResponseStarted {
-					if isNonStrategyFailure(reason) {
-						trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, displayPath)
-					} else {
-						trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, displayPath)
-						atomic.AddUint64(&h.strategyFallbackCount, 1)
+				if !result.NoLearning {
+					if result.Retryable && !result.ResponseStarted {
+						if isNonStrategyFailure(reason) {
+							trace.Logf(r.Context(), "network-skip", "reason: %s, provider=%s, path=%s", reason, providerKey, displayPath)
+						} else {
+							trace.Logf(r.Context(), "strategy-fallback", "reason: %s, strategy=%s, provider=%s, path=%s", reason, strategy, providerKey, displayPath)
+							atomic.AddUint64(&h.strategyFallbackCount, 1)
+						}
 					}
+					h.strategySel.RecordFailure(providerKey, strategy, reason)
 				}
-				h.strategySel.RecordFailure(providerKey, strategy, reason)
 			}
 
 			if result.Err != nil {
@@ -400,12 +403,12 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if lastFailure == "range_unsatisfiable" && !responseStarted {
-			fallback := h.streamProxy.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, size, proxy.StreamStrategyFull)
+			fallback := h.streamProxy.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, size, proxy.StreamStrategyFull, compatStorageKey)
 			if fallback.Err == nil && !fallback.Retryable {
-				if h.strategySel != nil {
+				if h.strategySel != nil && !fallback.NoLearning {
 					h.strategySel.RecordSuccess(providerKey, proxy.StreamStrategyFull)
 				}
-				if h.sizeResolver != nil && r.Method == http.MethodGet {
+				if h.sizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
 					metaSize := size
 					if fallback.ExpectedBytes > 0 {
 						metaSize = fallback.ExpectedBytes

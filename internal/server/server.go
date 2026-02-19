@@ -110,6 +110,7 @@ func (s *Server) setupRoutes() {
 	if s.mysqlStore != nil {
 		strategyStore = handler.NewMySQLStrategyStore(s.mysqlStore)
 		metaStore = handler.NewMySQLFileMetaStore(s.mysqlStore)
+		s.streamProxy.SetRangeCompatStore(handler.NewMySQLRangeCompatStore(s.mysqlStore))
 		if err := migrateStrategyStore(s.cfg, strategyStore); err != nil {
 			log.Warn().Err(err).Msg("Failed to migrate strategy store JSON")
 		}
@@ -119,7 +120,7 @@ func (s *Server) setupRoutes() {
 		log.Warn().Err(err).Msg("Failed to initialize strategy selector")
 		strategySelector, _ = handler.NewStrategySelector(s.cfg, handler.NewMemoryStrategyStore())
 	}
-	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore)
+	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)

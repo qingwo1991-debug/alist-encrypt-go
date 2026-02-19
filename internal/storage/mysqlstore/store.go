@@ -14,13 +14,14 @@ import (
 )
 
 type Store struct {
-	db              *sql.DB
-	flushInterval   time.Duration
-	cleanupInterval time.Duration
-	cleanupDays     int
-	disableCleanup  bool
-	strategyBuffer  *strategyBuffer
-	fileMetaBuffer  *fileMetaBuffer
+	db                *sql.DB
+	flushInterval     time.Duration
+	cleanupInterval   time.Duration
+	cleanupDays       int
+	disableCleanup    bool
+	strategyBuffer    *strategyBuffer
+	fileMetaBuffer    *fileMetaBuffer
+	rangeCompatBuffer *rangeCompatBuffer
 }
 
 func NewStore(cfg *config.Config) (*Store, error) {
@@ -80,13 +81,14 @@ func NewStore(cfg *config.Config) (*Store, error) {
 	}
 
 	store := &Store{
-		db:              db,
-		flushInterval:   flushInterval,
-		cleanupInterval: cleanupInterval,
-		cleanupDays:     cleanupDays,
-		disableCleanup:  cfg.Database.DisableCleanup,
-		strategyBuffer:  newStrategyBuffer(),
-		fileMetaBuffer:  newFileMetaBuffer(),
+		db:                db,
+		flushInterval:     flushInterval,
+		cleanupInterval:   cleanupInterval,
+		cleanupDays:       cleanupDays,
+		disableCleanup:    cfg.Database.DisableCleanup,
+		strategyBuffer:    newStrategyBuffer(),
+		fileMetaBuffer:    newFileMetaBuffer(),
+		rangeCompatBuffer: newRangeCompatBuffer(),
 	}
 
 	if err := store.ensureSchema(context.Background()); err != nil {
@@ -151,6 +153,15 @@ func (s *Store) flushBuffers(ctx context.Context) {
 			log.Debug().Int("count", len(metaRecords)).Msg("MySQL file meta flush complete")
 		}
 	}
+
+	rangeCompatRecords := s.rangeCompatBuffer.drain()
+	if len(rangeCompatRecords) > 0 {
+		if err := s.upsertRangeCompats(ctx, rangeCompatRecords); err != nil {
+			log.Warn().Err(err).Int("count", len(rangeCompatRecords)).Msg("MySQL range compat flush failed")
+		} else {
+			log.Debug().Int("count", len(rangeCompatRecords)).Msg("MySQL range compat flush complete")
+		}
+	}
 }
 
 func (s *Store) cleanup(ctx context.Context) error {
@@ -159,6 +170,9 @@ func (s *Store) cleanup(ctx context.Context) error {
 		return err
 	}
 	if err := s.markFileMetaExpired(ctx, cutoff); err != nil {
+		return err
+	}
+	if err := s.markRangeCompatExpired(ctx, cutoff); err != nil {
 		return err
 	}
 	log.Debug().Time("cutoff", cutoff).Msg("MySQL cleanup complete")

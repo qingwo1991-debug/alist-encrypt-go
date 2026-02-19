@@ -145,6 +145,30 @@ DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&par
 | `ALIST_HOST` | Alist 服务器地址 | `localhost` |
 | `ALIST_PORT` | Alist 服务器端口 | `5244` |
 | `TZ` | 时区 | `UTC` |
+| `RANGE_FAIL_TO_DOWNGRADE` | Range 连续失败后降级阈值 | `2` |
+| `RANGE_SUCCESS_TO_RECOVER` | Range 连续成功后恢复阈值 | `3` |
+| `RANGE_REPROBE_MINUTES` | Range 不兼容后的重探间隔（分钟） | `30` |
+| `RANGE_PROBE_TIMEOUT_SECONDS` | 后台 Range 探测超时（秒） | `8` |
+
+## 智能学习配置（默认开启）
+
+以下配置属于“收益大于成本”的项，默认已开启；并且服务端会做范围收敛，超出范围会自动夹紧到合法区间。
+`rangeCompatTtlMinutes` 已废弃，不再生效，请使用 `rangeReprobeMinutes`。
+
+| 配置项 | 默认值 | 合法范围 | 说明 |
+|------|------|------|------|
+| `enableRangeCompatCache` | `true` | `true/false` | 启用 Range 能力学习（建议保持开启） |
+| `enableBackgroundProbe` | `true` | `true/false` | 启用后台低频补探（冷启动与失效重探） |
+| `rangeFailToDowngrade` | `2` | `1-10` | 连续失败多少次后标记不兼容并降级 |
+| `rangeSuccessToRecover` | `3` | `1-20` | 连续成功多少次后恢复 Range 首选 |
+| `rangeReprobeMinutes` | `30` | `1-1440` | 不兼容后下一次后台重探间隔 |
+| `rangeProbeTimeoutSeconds` | `8` | `2-60` | 单次后台 Range 探测超时 |
+| `probeConcurrency` | `4` | `1-20` | 后台探测总并发 |
+| `probeProviderConcurrency` | `1` | `1-5` | 单 provider 探测并发上限 |
+| `probeMinDelayMs` | `3000` | `0-60000` | 后台探测最小随机延迟 |
+| `probeMaxDelayMs` | `15000` | `0-120000` | 后台探测最大随机延迟 |
+| `probeCooldownMinutes` | `1440` | `1-10080` | 同一路径探测冷却时间 |
+| `probeQueueSize` | `1000` | `100-10000` | 后台探测队列容量 |
 
 ## 加密算法选择
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/auth"
@@ -15,6 +16,7 @@ import (
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/restart"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
+	"github.com/rs/zerolog/log"
 )
 
 // generateUUID generates a UUID v4 string like Node.js crypto.randomUUID()
@@ -35,6 +37,8 @@ type APIHandler struct {
 	passwdDAO  *dao.PasswdDAO
 	mysqlStore *mysqlstore.Store
 }
+
+var deprecatedRangeCompatTTLWarned uint32
 
 // NewAPIHandler creates a new API handler
 func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.PasswdDAO, mysqlStore *mysqlstore.Store) *APIHandler {
@@ -178,6 +182,16 @@ func (h *APIHandler) SaveAlistConfig(w http.ResponseWriter, r *http.Request) {
 	var raw map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		RespondAPIError(w, 500, "Invalid request: "+err.Error())
+		return
+	}
+	if _, hasLegacy := raw["rangeCompatTtlMinutes"]; hasLegacy {
+		if atomic.CompareAndSwapUint32(&deprecatedRangeCompatTTLWarned, 0, 1) {
+			log.Warn().
+				Str("remote_addr", r.RemoteAddr).
+				Str("user_agent", r.UserAgent()).
+				Msg("Deprecated config key 'rangeCompatTtlMinutes' received from client; please upgrade to 'rangeReprobeMinutes'")
+		}
+		RespondAPIError(w, 500, "rangeCompatTtlMinutes is deprecated, use rangeReprobeMinutes")
 		return
 	}
 
