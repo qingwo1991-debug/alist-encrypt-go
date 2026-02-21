@@ -61,6 +61,44 @@
       <el-form-item prop="streamBufferKb" label="缓冲区KB">
         <el-input v-model="alistConfigForm.streamBufferKb" style="max-width: 260px" placeholder="512" />
       </el-form-item>
+      <el-divider content-position="left">代理分流配置</el-divider>
+      <el-form-item label="代理模式">
+        <el-radio-group v-model="proxyRoutingForm.mode" size="small">
+          <el-radio label="direct" border>直连</el-radio>
+          <el-radio label="env" border>环境变量</el-radio>
+          <el-radio label="fixed" border>固定代理</el-radio>
+          <el-radio label="rules" border>规则分流</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item label="代理地址">
+        <el-input v-model="proxyRoutingForm.url" style="max-width: 380px" placeholder="http://host.docker.internal:7890" />
+      </el-form-item>
+      <el-form-item label="网盘多选">
+        <el-select
+          v-model="proxyRoutingForm.selectedProviderIDs"
+          style="width: 680px"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          filterable
+          clearable
+          placeholder="选择要走代理的网盘（支持多选）"
+        >
+          <el-option
+            v-for="provider in providerOptions"
+            :key="provider.id"
+            :label="`${provider.provider_name_zh} (${provider.provider_name_en}) [${provider.category}]`"
+            :value="provider.id"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="域名预览">
+        <el-input v-model="selectedDomainPreview" type="textarea" :rows="4" readonly style="max-width: 680px" />
+      </el-form-item>
+      <el-form-item label="字典操作">
+        <el-button type="primary" plain @click="refreshProviderDictionary">从 OpenList 刷新字典</el-button>
+        <span color="gray" style="font-size: 12px; margin-left: 12px">显示中文网盘名，名单外默认直连</span>
+      </el-form-item>
 
       <el-form-item label="密码设置">
         <el-button type="success" @click="addPasswd">添加</el-button>
@@ -102,6 +140,7 @@
       </div>
       <el-form-item>
         <el-button type="primary" @click="saveAlistConfig">保存</el-button>
+        <el-button type="warning" @click="saveProxyRouting">保存代理分流</el-button>
       </el-form-item>
       <el-dialog v-model="dialogFolderFormVisible" title="获取文件夹密文" style="min-width: 320px">
         <el-tabs v-model="activeName" class="demo-tabs" @tab-click="handleClick">
@@ -147,12 +186,23 @@
   </div>
 </template>
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useConfigStore } from '@/store/config'
 import { useBasicStore } from '@/store/basic'
-import { getAlistConfigReq, saveAlistConfigReq, encodeFoldNameReq, decodeFoldNameReq, getSchemeConfigReq, saveSchemeConfigReq } from '@/api/user'
+import {
+  getAlistConfigReq,
+  saveAlistConfigReq,
+  encodeFoldNameReq,
+  decodeFoldNameReq,
+  getSchemeConfigReq,
+  saveSchemeConfigReq,
+  getProxyDomainDictionaryReq,
+  refreshProxyDomainDictionaryReq,
+  getProxyRoutingConfigReq,
+  saveProxyRoutingConfigReq
+} from '@/api/user'
 
 import { Check, Delete, Edit, Message, Search, Star, CirclePlus, Folder } from '@element-plus/icons-vue'
 import { random } from 'lodash'
@@ -211,6 +261,37 @@ const alistConfigForm = reactive({
   ]
 })
 const refSearchForm = ref()
+const providerOptions = ref([])
+
+const proxyRoutingForm = reactive({
+  mode: 'direct',
+  url: '',
+  noProxy: [],
+  selectedProviderIDs: [],
+  selectedDomains: [],
+  rules: [],
+  dial_timeout_seconds: 30,
+  tls_handshake_timeout_seconds: 10,
+  response_header_timeout_seconds: 15
+})
+
+const collectSelectedDomains = () => {
+  const selectedSet = new Set((proxyRoutingForm.selectedProviderIDs || []).map((item) => String(item).toLowerCase()))
+  const domains = []
+  for (const provider of providerOptions.value) {
+    if (!selectedSet.has(String(provider.id).toLowerCase())) {
+      continue
+    }
+    for (const domain of provider.domains || []) {
+      domains.push(domain)
+    }
+  }
+  return [...new Set(domains)].sort()
+}
+
+const selectedDomainPreview = computed(() => {
+  return collectSelectedDomains().join(', ')
+})
 // 添加密码配置
 const addPasswd = () => {
   alistConfigForm.passwdList.push({
@@ -279,6 +360,55 @@ const saveAlistConfig = async () => {
     console.error('Failed to save proxy H2C setting:', err)
   }
 }
+
+const loadProxyDictionary = async () => {
+  const res = await getProxyDomainDictionaryReq()
+  const providers = (res?.data?.providers || []).map((item) => ({
+    ...item,
+    id: String(item.id || '').toLowerCase()
+  }))
+  providerOptions.value = providers
+  if ((proxyRoutingForm.selectedProviderIDs || []).length === 0) {
+    proxyRoutingForm.selectedProviderIDs = providers.filter((item) => item.default_selected).map((item) => item.id)
+  }
+}
+
+const refreshProviderDictionary = async () => {
+  const res = await refreshProxyDomainDictionaryReq()
+  const providers = (res?.data?.providers || []).map((item) => ({
+    ...item,
+    id: String(item.id || '').toLowerCase()
+  }))
+  providerOptions.value = providers
+  ElMessage.success('已刷新网盘字典')
+}
+
+const loadProxyRouting = async () => {
+  const res = await getProxyRoutingConfigReq()
+  if (res?.data) {
+    Object.assign(proxyRoutingForm, {
+      ...proxyRoutingForm,
+      ...res.data,
+      selectedProviderIDs: (res.data.selected_provider_ids || res.data.selectedProviderIDs || []).map((item) => String(item).toLowerCase()),
+      selectedDomains: res.data.selected_domains || res.data.selectedDomains || []
+    })
+  }
+}
+
+const saveProxyRouting = async () => {
+  if (proxyRoutingForm.mode === 'rules' && !proxyRoutingForm.url) {
+    ElMessage.error('规则分流模式需要填写代理地址')
+    return
+  }
+  const payload = {
+    ...proxyRoutingForm,
+    selectedDomains: collectSelectedDomains(),
+    selected_provider_ids: proxyRoutingForm.selectedProviderIDs,
+    selected_domains: collectSelectedDomains()
+  }
+  const res = await saveProxyRoutingConfigReq(payload)
+  ElMessage.success(res.msg || '保存成功')
+}
 onMounted(async () => {
   const res = await getAlistConfigReq()
   for (const passwdInfo of res.data.passwdList) {
@@ -299,5 +429,7 @@ onMounted(async () => {
   } catch (err) {
     console.error('Failed to load proxy H2C setting:', err)
   }
+  await loadProxyDictionary()
+  await loadProxyRouting()
 })
 </script>

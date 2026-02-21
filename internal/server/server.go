@@ -186,6 +186,10 @@ func (s *Server) setupRoutes() {
 			protected.Any("/saveSchemeConfig", ginWrap(apiHandler.SaveSchemeConfig))
 			protected.Any("/exportFileMeta", ginWrap(apiHandler.ExportFileMeta))
 			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
+			protected.Any("/getProxyDomainDictionary", ginWrap(apiHandler.GetProxyDomainDictionary))
+			protected.Any("/refreshProxyDomainDictionary", ginWrap(apiHandler.RefreshProxyDomainDictionary))
+			protected.Any("/getProxyRoutingConfig", ginWrap(apiHandler.GetProxyRoutingConfig))
+			protected.Any("/saveProxyRoutingConfig", ginWrap(apiHandler.SaveProxyRoutingConfig))
 		}
 	}
 

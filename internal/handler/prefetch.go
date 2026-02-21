@@ -9,6 +9,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/rs/zerolog/log"
 )
 
@@ -100,7 +101,7 @@ func (pm *PrefetchManager) PrefetchFileSize(displayPath, encryptedPath string, p
 		}
 
 		// Execute HEAD request
-		client := &http.Client{Timeout: 10 * time.Second}
+		client := proxy.NewHTTPClient(pm.cfg, 10*time.Second)
 		headResp, err := client.Do(headReq)
 		if err != nil {
 			log.Debug().Err(err).Str("path", displayPath).Msg("Prefetch HEAD request failed")
@@ -173,8 +174,8 @@ func (pm *PrefetchManager) Stats() map[string]interface{} {
 	})
 
 	return map[string]interface{}{
-		"max_workers":  pm.maxWorkers,
-		"active_jobs":  activeCount,
+		"max_workers":     pm.maxWorkers,
+		"active_jobs":     activeCount,
 		"file_size_cache": pm.fileDAO.FileSizeCacheStats(),
 	}
 }

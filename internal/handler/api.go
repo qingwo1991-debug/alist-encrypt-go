@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/proxydict"
 	"github.com/alist-encrypt-go/internal/restart"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 	"github.com/rs/zerolog/log"
@@ -36,6 +39,7 @@ type APIHandler struct {
 	userDAO    *dao.UserDAO
 	passwdDAO  *dao.PasswdDAO
 	mysqlStore *mysqlstore.Store
+	dictMgr    *proxydict.Manager
 }
 
 var deprecatedRangeCompatTTLWarned uint32
@@ -52,6 +56,7 @@ func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.Pass
 		userDAO:    userDAO,
 		passwdDAO:  passwdDAO,
 		mysqlStore: mysqlStore,
+		dictMgr:    proxydict.NewManager("/root/AI/OpenList", filepath.Join("conf", "proxy_domain_dict.json")),
 	}
 }
 
@@ -423,4 +428,109 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 		"next_since_rfc3339": nextSinceRFC3339,
 		"next_cursor":        nextCursor,
 	})
+}
+
+// GetProxyDomainDictionary returns cached proxy provider dictionary.
+func (h *APIHandler) GetProxyDomainDictionary(w http.ResponseWriter, r *http.Request) {
+	if h.dictMgr == nil {
+		RespondAPIError(w, 500, "proxy dictionary not initialized")
+		return
+	}
+	dict, err := h.dictMgr.LoadOrRefresh()
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+	RespondSuccess(w, dict)
+}
+
+// RefreshProxyDomainDictionary rescans OpenList and refreshes dictionary.
+func (h *APIHandler) RefreshProxyDomainDictionary(w http.ResponseWriter, r *http.Request) {
+	if h.dictMgr == nil {
+		RespondAPIError(w, 500, "proxy dictionary not initialized")
+		return
+	}
+	dict, err := h.dictMgr.Refresh()
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+	RespondSuccess(w, dict)
+}
+
+// GetProxyRoutingConfig returns current proxy configuration.
+func (h *APIHandler) GetProxyRoutingConfig(w http.ResponseWriter, r *http.Request) {
+	RespondSuccess(w, h.cfg.Proxy)
+}
+
+func (h *APIHandler) buildRulesFromSelection(proxyCfg *config.ProxyConfig) {
+	if proxyCfg == nil || len(proxyCfg.SelectedProviderIDs) == 0 || h.dictMgr == nil {
+		return
+	}
+	dict, err := h.dictMgr.LoadOrRefresh()
+	if err != nil || dict == nil {
+		return
+	}
+	selected := make(map[string]struct{}, len(proxyCfg.SelectedProviderIDs))
+	for _, id := range proxyCfg.SelectedProviderIDs {
+		item := strings.ToLower(strings.TrimSpace(id))
+		if item != "" {
+			selected[item] = struct{}{}
+		}
+	}
+	domainSet := make(map[string]struct{})
+	priority := 100
+	rules := make([]config.ProxyRule, 0, 128)
+	for _, provider := range dict.Providers {
+		if _, ok := selected[strings.ToLower(provider.ID)]; !ok {
+			continue
+		}
+		for _, domain := range provider.Domains {
+			domain = strings.ToLower(strings.TrimSpace(domain))
+			if domain == "" {
+				continue
+			}
+			if _, ok := domainSet[domain]; ok {
+				continue
+			}
+			domainSet[domain] = struct{}{}
+			rules = append(rules, config.ProxyRule{
+				ID:         provider.ID + "-" + domain,
+				ProviderID: provider.ID,
+				MatchType:  "domain_suffix",
+				Pattern:    domain,
+				Action:     "proxy",
+				Enabled:    true,
+				Priority:   priority,
+			})
+			priority++
+		}
+	}
+	if len(rules) > 0 {
+		proxyCfg.Rules = rules
+	}
+	if len(domainSet) > 0 {
+		domains := make([]string, 0, len(domainSet))
+		for domain := range domainSet {
+			domains = append(domains, domain)
+		}
+		proxyCfg.SelectedDomains = domains
+	}
+}
+
+// SaveProxyRoutingConfig saves current proxy config.
+func (h *APIHandler) SaveProxyRoutingConfig(w http.ResponseWriter, r *http.Request) {
+	var proxyCfg config.ProxyConfig
+	if err := json.NewDecoder(r.Body).Decode(&proxyCfg); err != nil {
+		RespondAPIError(w, 500, "Invalid request: "+err.Error())
+		return
+	}
+	if proxyCfg.Mode == "rules" && len(proxyCfg.Rules) == 0 && len(proxyCfg.SelectedProviderIDs) > 0 {
+		h.buildRulesFromSelection(&proxyCfg)
+	}
+	if err := h.cfg.UpdateProxy(proxyCfg); err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+	RespondSuccessMsg(w, "save ok")
 }

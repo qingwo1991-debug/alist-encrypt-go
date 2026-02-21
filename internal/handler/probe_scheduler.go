@@ -44,7 +44,7 @@ type probeItem struct {
 func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy) *ProbeScheduler {
 	ps := &ProbeScheduler{
 		cfg:         cfg,
-		resolver:    NewFileSizeResolver(fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		resolver:    NewFileSizeResolver(cfg, fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		fileDAO:     fileDAO,
 		metaStore:   metaStore,
 		stream:      stream,

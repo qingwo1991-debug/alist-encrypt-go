@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/rs/zerolog/log"
 )
 
@@ -66,20 +68,12 @@ const (
 )
 
 // NewFileSizeResolver creates a new file size resolver
-func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64, maxRedirects int) *FileSizeResolver {
+func NewFileSizeResolver(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64, maxRedirects int) *FileSizeResolver {
 	if maxWorkers <= 0 {
 		maxWorkers = 20
 	}
 	if maxRedirects <= 0 {
 		maxRedirects = 2
-	}
-
-	// Connection pool with keep-alive
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
 	}
 
 	return &FileSizeResolver{
@@ -88,14 +82,8 @@ func NewFileSizeResolver(fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorke
 		semaphore:        make(chan struct{}, maxWorkers),
 		maxWorkers:       maxWorkers,
 		minMetaSizeBytes: minMetaSizeBytes,
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   15 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		maxRedirects: maxRedirects,
+		client:           proxy.NewHTTPClient(cfg, 15*time.Second),
+		maxRedirects:     maxRedirects,
 	}
 }
 

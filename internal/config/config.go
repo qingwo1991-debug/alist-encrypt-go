@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,12 +113,32 @@ type SchemeConfig struct {
 
 // ProxyConfig represents HTTP proxy client configuration
 type ProxyConfig struct {
-	MaxIdleConns        int  `json:"max_idle_conns"`
-	MaxIdleConnsPerHost int  `json:"max_idle_conns_per_host"`
-	MaxConnsPerHost     int  `json:"max_conns_per_host"`
-	IdleConnTimeout     int  `json:"idle_conn_timeout"` // seconds
-	EnableHTTP2         bool `json:"enable_http2"`
-	InsecureSkipVerify  bool `json:"insecure_skip_verify"`
+	MaxIdleConns        int         `json:"max_idle_conns"`
+	MaxIdleConnsPerHost int         `json:"max_idle_conns_per_host"`
+	MaxConnsPerHost     int         `json:"max_conns_per_host"`
+	IdleConnTimeout     int         `json:"idle_conn_timeout"` // seconds
+	EnableHTTP2         bool        `json:"enable_http2"`
+	InsecureSkipVerify  bool        `json:"insecure_skip_verify"`
+	Mode                string      `json:"mode"`                            // direct, env, fixed, rules
+	URL                 string      `json:"url"`                             // proxy url for fixed/rules mode
+	NoProxy             []string    `json:"no_proxy"`                        // domain suffix, host, cidr
+	Rules               []ProxyRule `json:"rules"`                           // route rules for rules mode
+	SelectedProviderIDs []string    `json:"selected_provider_ids,omitempty"` // UI selection state
+	SelectedDomains     []string    `json:"selected_domains,omitempty"`      // expanded selected domains
+	DialTimeoutSeconds  int         `json:"dial_timeout_seconds"`            // default 30
+	TLSHandshakeSeconds int         `json:"tls_handshake_timeout_seconds"`   // default 10
+	ResponseHeaderSecs  int         `json:"response_header_timeout_seconds"` // default 15
+}
+
+// ProxyRule describes how to route one pattern.
+type ProxyRule struct {
+	ID         string `json:"id"`
+	ProviderID string `json:"provider_id,omitempty"`
+	MatchType  string `json:"match_type"` // domain_suffix, domain, host, cidr
+	Pattern    string `json:"pattern"`
+	Action     string `json:"action"` // proxy, direct
+	Enabled    bool   `json:"enabled"`
+	Priority   int    `json:"priority"`
 }
 
 // LogConfig represents logging configuration
@@ -267,6 +289,15 @@ func DefaultConfig() *Config {
 			IdleConnTimeout:     90,
 			EnableHTTP2:         true,
 			InsecureSkipVerify:  false,
+			Mode:                "direct",
+			URL:                 "",
+			NoProxy:             []string{},
+			Rules:               []ProxyRule{},
+			SelectedProviderIDs: []string{},
+			SelectedDomains:     []string{},
+			DialTimeoutSeconds:  30,
+			TLSHandshakeSeconds: 10,
+			ResponseHeaderSecs:  15,
 		},
 		Log: &LogConfig{
 			Enable: true,
@@ -328,6 +359,7 @@ func Load() *Config {
 
 		cfg.applyEnvOverrides()
 		cfg.normalizeAlistServerTuning()
+		cfg.normalizeProxyConfig()
 
 		cfg.configPath = configPath
 
@@ -513,6 +545,126 @@ func (c *Config) normalizeAlistServerTuning() {
 	s.ProbeQueueSize = clampIntValue(s.ProbeQueueSize, 100, 10000)
 }
 
+func normalizeProxyMatchType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "domain_suffix", "suffix":
+		return "domain_suffix"
+	case "domain":
+		return "domain"
+	case "host":
+		return "host"
+	case "cidr":
+		return "cidr"
+	default:
+		return ""
+	}
+}
+
+func normalizeProxyAction(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "proxy":
+		return "proxy"
+	case "direct":
+		return "direct"
+	default:
+		return ""
+	}
+}
+
+func normalizeNoProxyEntries(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, raw := range entries {
+		item := strings.ToLower(strings.TrimSpace(raw))
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeProxyRules(entries []ProxyRule) []ProxyRule {
+	out := make([]ProxyRule, 0, len(entries))
+	for _, raw := range entries {
+		rule := raw
+		rule.MatchType = normalizeProxyMatchType(rule.MatchType)
+		rule.Action = normalizeProxyAction(rule.Action)
+		rule.Pattern = strings.ToLower(strings.TrimSpace(rule.Pattern))
+		rule.ProviderID = strings.TrimSpace(rule.ProviderID)
+		if rule.MatchType == "" || rule.Action == "" || rule.Pattern == "" {
+			continue
+		}
+		if rule.MatchType == "domain_suffix" {
+			rule.Pattern = strings.TrimPrefix(rule.Pattern, ".")
+		}
+		if rule.MatchType == "cidr" {
+			if _, err := netip.ParsePrefix(rule.Pattern); err != nil {
+				continue
+			}
+		}
+		out = append(out, rule)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		if out[i].ProviderID != out[j].ProviderID {
+			return out[i].ProviderID < out[j].ProviderID
+		}
+		return out[i].Pattern < out[j].Pattern
+	})
+	return out
+}
+
+func (c *Config) normalizeProxyConfig() {
+	if c == nil {
+		return
+	}
+	if c.Proxy == nil {
+		c.Proxy = &ProxyConfig{}
+	}
+	p := c.Proxy
+	if p.MaxIdleConns <= 0 {
+		p.MaxIdleConns = 100
+	}
+	if p.MaxIdleConnsPerHost <= 0 {
+		p.MaxIdleConnsPerHost = 100
+	}
+	if p.MaxConnsPerHost <= 0 {
+		p.MaxConnsPerHost = 100
+	}
+	if p.IdleConnTimeout <= 0 {
+		p.IdleConnTimeout = 90
+	}
+	if p.DialTimeoutSeconds <= 0 {
+		p.DialTimeoutSeconds = 30
+	}
+	if p.TLSHandshakeSeconds <= 0 {
+		p.TLSHandshakeSeconds = 10
+	}
+	if p.ResponseHeaderSecs <= 0 {
+		p.ResponseHeaderSecs = 15
+	}
+	mode := strings.ToLower(strings.TrimSpace(p.Mode))
+	switch mode {
+	case "direct", "env", "fixed", "rules":
+		p.Mode = mode
+	default:
+		p.Mode = "direct"
+	}
+	p.URL = strings.TrimSpace(p.URL)
+	p.NoProxy = normalizeNoProxyEntries(p.NoProxy)
+	p.Rules = normalizeProxyRules(p.Rules)
+	p.SelectedDomains = normalizeNoProxyEntries(p.SelectedDomains)
+	p.SelectedProviderIDs = normalizeNoProxyEntries(p.SelectedProviderIDs)
+}
+
 func clampIntValue(v, min, max int) int {
 	if v < min {
 		return min
@@ -694,6 +846,18 @@ func (c *Config) UpdateScheme(scheme SchemeConfig) (bool, error) {
 	c.mu.Unlock()
 
 	return needRestart, c.Save()
+}
+
+// UpdateProxy updates proxy configuration and saves.
+func (c *Config) UpdateProxy(proxyCfg ProxyConfig) error {
+	c.mu.Lock()
+	if c.Proxy == nil {
+		c.Proxy = &ProxyConfig{}
+	}
+	*c.Proxy = proxyCfg
+	c.normalizeProxyConfig()
+	c.mu.Unlock()
+	return c.Save()
 }
 
 func getWorkDir() string {

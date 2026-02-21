@@ -95,7 +95,7 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		passwdDAO:     passwdDAO,
 		client:        proxy.NewClient(cfg),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		strategySel:   selector,
 	}
 	if h.streamProxy != nil {

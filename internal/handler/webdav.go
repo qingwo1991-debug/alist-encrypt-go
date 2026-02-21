@@ -73,7 +73,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		passwdDAO:     passwdDAO,
 		proxyHandler:  NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		strategySel:   selector,
 		metaStore:     metaStore,
 		probe:         nil,
@@ -489,7 +489,7 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		return
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
+	client := proxy.NewHTTPClient(h.cfg, getAlistRequestTimeout(h.cfg))
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV DELETE failed")
@@ -560,7 +560,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		proxyReq.Header.Set("Destination", destination)
 	}
 
-	client := &http.Client{}
+	client := proxy.NewHTTPClient(h.cfg, 0)
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msgf("WebDAV %s failed", method)
@@ -617,7 +617,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	client := &http.Client{}
+	client := proxy.NewHTTPClient(h.cfg, 0)
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV PROPFIND failed")
@@ -703,7 +703,7 @@ func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) []propfin
 		req.Header.Set("Authorization", auth)
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
+	client := proxy.NewHTTPClient(h.cfg, getAlistRequestTimeout(h.cfg))
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil
