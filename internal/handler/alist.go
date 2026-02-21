@@ -23,6 +23,7 @@ import (
 type AlistHandler struct {
 	cfg          *config.Config
 	streamProxy  *proxy.StreamProxy
+	httpClient   *http.Client
 	fileDAO      *dao.FileDAO
 	passwdDAO    *dao.PasswdDAO
 	proxyHandler *ProxyHandler
@@ -36,6 +37,7 @@ func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 	return &AlistHandler{
 		cfg:          cfg,
 		streamProxy:  streamProxy,
+		httpClient:   proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
 		fileDAO:      fileDAO,
 		passwdDAO:    passwdDAO,
 		proxyHandler: proxyHandler,
@@ -119,8 +121,7 @@ func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, bo
 		return nil, err
 	}
 
-	client := &http.Client{}
-	return client.Do(req)
+	return h.httpClient.Do(req)
 }
 
 // HandleFsList intercepts /api/fs/list to handle filename decryption
@@ -162,8 +163,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
-	resp, err := client.Do(proxyReq)
+	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/list")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -396,8 +396,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
-	resp, err := client.Do(proxyReq)
+	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/get")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -626,8 +625,7 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
-	resp, err := client.Do(proxyReq)
+	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/remove")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -716,8 +714,7 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
-	resp, err := client.Do(proxyReq)
+	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/rename")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -814,8 +811,7 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	client := &http.Client{Timeout: getAlistRequestTimeout(h.cfg)}
-	resp, err := client.Do(proxyReq)
+	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy " + endpoint)
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)

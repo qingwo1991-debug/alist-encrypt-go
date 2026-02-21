@@ -10,6 +10,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
 )
 
@@ -155,7 +156,7 @@ func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, r *http.
 		return 0, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := proxy.NewHTTPClient(h.cfg, 10*time.Second)
 	headResp, err := client.Do(headReq)
 	if err != nil {
 		trace.Logf(ctx, "head-request", "HEAD request failed: %v", err)

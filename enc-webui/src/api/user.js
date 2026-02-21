@@ -142,3 +142,32 @@ export const saveSchemeConfigReq = (subForm) => {
     method: 'post'
   })
 }
+
+export const getProxyDomainDictionaryReq = () => {
+  return axiosReq({
+    url: '/enc-api/getProxyDomainDictionary',
+    method: 'post'
+  })
+}
+
+export const refreshProxyDomainDictionaryReq = () => {
+  return axiosReq({
+    url: '/enc-api/refreshProxyDomainDictionary',
+    method: 'post'
+  })
+}
+
+export const getProxyRoutingConfigReq = () => {
+  return axiosReq({
+    url: '/enc-api/getProxyRoutingConfig',
+    method: 'post'
+  })
+}
+
+export const saveProxyRoutingConfigReq = (subForm) => {
+  return axiosReq({
+    url: '/enc-api/saveProxyRoutingConfig',
+    data: subForm,
+    method: 'post'
+  })
+}

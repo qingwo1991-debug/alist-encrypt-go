@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
 )
 
@@ -139,7 +140,7 @@ func (h *WebDAVHandler) executeHEADRequest(targetURL, realPath string, r *http.R
 		return 0, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := proxy.NewHTTPClient(h.cfg, 10*time.Second)
 	headResp, err := client.Do(headReq)
 	if err != nil {
 		trace.Logf(ctx, "head-request", "HEAD request failed: %v", err)
@@ -191,7 +192,7 @@ func (h *WebDAVHandler) executeRangeRequest(targetURL string, r *http.Request) (
 		return 0, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := proxy.NewHTTPClient(h.cfg, 10*time.Second)
 	resp, err := client.Do(rangeReq)
 	if err != nil {
 		return 0, err
