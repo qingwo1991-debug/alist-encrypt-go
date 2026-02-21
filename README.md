@@ -155,7 +155,9 @@ DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&par
 - 支持 `direct/env/fixed/rules` 四种代理模式（默认 `direct`）。
 - `rules` 模式下可按“网盘 -> 域名”分流，未命中规则默认直连。
 - 管理页会显示网盘中文名（如“谷歌云盘/谷歌相册/微软网盘”），支持多选并自动展开域名规则。
-- 代理字典首次可从 `/root/AI/OpenList` 提取，保存于 `conf/proxy_domain_dict.json`。
+- 默认使用内置字典种子 + 手工维护（适配 OpenList/本项目分离部署）。
+- 仅当设置 `OPENLIST_PATH` 且路径可用时，才会启用从 OpenList 代码扫描刷新字典。
+- 字典文件保存于 `conf/proxy_domain_dict.json`。
 
 ## 智能学习配置（默认开启）
 

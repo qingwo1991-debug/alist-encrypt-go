@@ -2,6 +2,7 @@ package proxydict
 
 import (
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -83,21 +84,44 @@ func (m *Manager) LoadOrRefresh() (*Dictionary, error) {
 }
 
 func (m *Manager) Refresh() (*Dictionary, error) {
-	scanned, err := scanOpenListDrivers(m.openListPath)
+	openListPath := strings.TrimSpace(m.openListPath)
+	if openListPath == "" {
+		return m.refreshFromSeedOnly()
+	}
+	if _, err := os.Stat(filepath.Join(openListPath, "drivers")); err != nil {
+		return m.refreshFromSeedOnly()
+	}
+	scanned, err := scanOpenListDrivers(openListPath)
 	if err != nil {
-		seed, seedErr := m.loadSeed()
-		if seedErr == nil && len(seed.Providers) > 0 {
-			seed.Source = "seed_fallback"
-			seed.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-			_ = m.Save(seed)
-			return seed, nil
-		}
-		return nil, err
+		return m.refreshFromSeedOnlyWithErr(err)
 	}
 	existing, _ := m.Load()
 	dict := mergeDictionary(scanned, existing)
 	dict.Version = "v1"
 	dict.Source = "openlist_scan+manual"
+	dict.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := m.Save(dict); err != nil {
+		return nil, err
+	}
+	return dict, nil
+}
+
+func (m *Manager) refreshFromSeedOnly() (*Dictionary, error) {
+	return m.refreshFromSeedOnlyWithErr(nil)
+}
+
+func (m *Manager) refreshFromSeedOnlyWithErr(cause error) (*Dictionary, error) {
+	seed, seedErr := m.loadSeed()
+	if seedErr != nil {
+		if cause != nil {
+			return nil, errors.Join(cause, seedErr)
+		}
+		return nil, seedErr
+	}
+	existing, _ := m.Load()
+	dict := mergeDictionary(seed, existing)
+	dict.Version = "v1"
+	dict.Source = "seed+manual"
 	dict.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if err := m.Save(dict); err != nil {
 		return nil, err
