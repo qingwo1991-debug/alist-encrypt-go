@@ -1,0 +1,87 @@
+{
+	"version": "v1",
+	"source": "seed",
+	"updated_at": "2026-02-21T00:00:00Z",
+	"providers": [
+		{
+			"id": "google_drive",
+			"provider_name_zh": "谷歌云盘",
+			"provider_name_en": "GoogleDrive",
+			"category": "overseas",
+			"domains": ["googleapis.com", "googleusercontent.com", "drive.google.com"],
+			"default_selected": true
+		},
+		{
+			"id": "google_photo",
+			"provider_name_zh": "谷歌相册",
+			"provider_name_en": "GooglePhoto",
+			"category": "overseas",
+			"domains": ["photoslibrary.googleapis.com", "ggpht.com"],
+			"default_selected": true
+		},
+		{
+			"id": "onedrive",
+			"provider_name_zh": "微软网盘",
+			"provider_name_en": "Onedrive",
+			"category": "overseas",
+			"domains": ["graph.microsoft.com", "login.microsoftonline.com", "onedrive.live.com", "1drv.ms", "sharepoint.com"],
+			"default_selected": true
+		},
+		{
+			"id": "dropbox",
+			"provider_name_zh": "Dropbox 网盘",
+			"provider_name_en": "Dropbox",
+			"category": "overseas",
+			"domains": ["dropboxapi.com", "content.dropboxapi.com"],
+			"default_selected": true
+		},
+		{
+			"id": "proton_drive",
+			"provider_name_zh": "Proton 网盘",
+			"provider_name_en": "ProtonDrive",
+			"category": "overseas",
+			"domains": ["drive.proton.me"],
+			"default_selected": true
+		},
+		{
+			"id": "yandex_disk",
+			"provider_name_zh": "Yandex 网盘",
+			"provider_name_en": "YandexDisk",
+			"category": "overseas",
+			"domains": ["cloud-api.yandex.net", "oauth.yandex.com"],
+			"default_selected": true
+		},
+		{
+			"id": "aliyundrive",
+			"provider_name_zh": "阿里云盘",
+			"provider_name_en": "Aliyundrive",
+			"category": "domestic",
+			"domains": ["api.alipan.com", "api.aliyundrive.com", "auth.alipan.com"],
+			"default_selected": false
+		},
+		{
+			"id": "baidu_netdisk",
+			"provider_name_zh": "百度网盘",
+			"provider_name_en": "BaiduNetdisk",
+			"category": "domestic",
+			"domains": ["pan.baidu.com", "d.pcs.baidu.com", "openapi.baidu.com"],
+			"default_selected": false
+		},
+		{
+			"id": "quark_uc",
+			"provider_name_zh": "夸克/UC 网盘",
+			"provider_name_en": "QuarkOrUC",
+			"category": "domestic",
+			"domains": ["drive.quark.cn", "open-api-drive.quark.cn", "pc-api.uc.cn", "open-api-drive.uc.cn"],
+			"default_selected": false
+		},
+		{
+			"id": "weiyun",
+			"provider_name_zh": "微云",
+			"provider_name_en": "WeiYun",
+			"category": "domestic",
+			"domains": ["weiyun.com"],
+			"default_selected": false
+		}
+	]
+}

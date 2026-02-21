@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -50,13 +51,17 @@ func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.Pass
 	if expireHours <= 0 {
 		expireHours = 48
 	}
+	openListPath := strings.TrimSpace(os.Getenv("OPENLIST_PATH"))
+	if openListPath == "" {
+		openListPath = "/app/openlist"
+	}
 	return &APIHandler{
 		cfg:        cfg,
 		jwtAuth:    auth.NewJWTAuth(cfg.JWTSecret, time.Duration(expireHours)*time.Hour),
 		userDAO:    userDAO,
 		passwdDAO:  passwdDAO,
 		mysqlStore: mysqlStore,
-		dictMgr:    proxydict.NewManager("/root/AI/OpenList", filepath.Join("conf", "proxy_domain_dict.json")),
+		dictMgr:    proxydict.NewManager(openListPath, filepath.Join("conf", "proxy_domain_dict.json"), filepath.Join("configs", "proxy_domain_dict.seed.json")),
 	}
 }
 

@@ -31,12 +31,14 @@ type Dictionary struct {
 type Manager struct {
 	openListPath string
 	dictPath     string
+	seedPath     string
 }
 
-func NewManager(openListPath, dictPath string) *Manager {
+func NewManager(openListPath, dictPath, seedPath string) *Manager {
 	return &Manager{
 		openListPath: openListPath,
 		dictPath:     dictPath,
+		seedPath:     seedPath,
 	}
 }
 
@@ -74,12 +76,22 @@ func (m *Manager) LoadOrRefresh() (*Dictionary, error) {
 	if dict, err := m.Load(); err == nil && len(dict.Providers) > 0 {
 		return dict, nil
 	}
-	return m.Refresh()
+	if dict, err := m.Refresh(); err == nil && len(dict.Providers) > 0 {
+		return dict, nil
+	}
+	return m.loadSeed()
 }
 
 func (m *Manager) Refresh() (*Dictionary, error) {
 	scanned, err := scanOpenListDrivers(m.openListPath)
 	if err != nil {
+		seed, seedErr := m.loadSeed()
+		if seedErr == nil && len(seed.Providers) > 0 {
+			seed.Source = "seed_fallback"
+			seed.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			_ = m.Save(seed)
+			return seed, nil
+		}
 		return nil, err
 	}
 	existing, _ := m.Load()
@@ -91,6 +103,30 @@ func (m *Manager) Refresh() (*Dictionary, error) {
 		return nil, err
 	}
 	return dict, nil
+}
+
+func (m *Manager) loadSeed() (*Dictionary, error) {
+	if strings.TrimSpace(m.seedPath) == "" {
+		return nil, os.ErrNotExist
+	}
+	data, err := os.ReadFile(m.seedPath)
+	if err != nil {
+		return nil, err
+	}
+	var out Dictionary
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	if out.Version == "" {
+		out.Version = "v1"
+	}
+	if out.Source == "" {
+		out.Source = "seed"
+	}
+	if out.UpdatedAt == "" {
+		out.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	return &out, nil
 }
 
 type scanProvider struct {
