@@ -52,9 +52,6 @@ func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.Pass
 		expireHours = 48
 	}
 	openListPath := strings.TrimSpace(os.Getenv("OPENLIST_PATH"))
-	if openListPath == "" {
-		openListPath = "/app/openlist"
-	}
 	return &APIHandler{
 		cfg:        cfg,
 		jwtAuth:    auth.NewJWTAuth(cfg.JWTSecret, time.Duration(expireHours)*time.Hour),
