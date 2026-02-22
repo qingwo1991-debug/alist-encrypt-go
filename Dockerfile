@@ -28,8 +28,8 @@ COPY --from=builder /alist-encrypt-go .
 # Copy web static files (frontend UI)
 COPY --from=builder /app/web/public ./web/public
 
-# Copy config example
-COPY --from=builder /app/configs/config.example.json ./configs/
+# Copy configs (includes config.example.json and proxy_domain_dict.seed.json)
+COPY --from=builder /app/configs/ ./configs/
 
 # Create data and conf directories for persistence
 RUN mkdir -p /app/data /app/conf
