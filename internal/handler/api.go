@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -21,16 +20,6 @@ import (
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 	"github.com/rs/zerolog/log"
 )
-
-// generateUUID generates a UUID v4 string like Node.js crypto.randomUUID()
-func generateUUID() string {
-	uuid := make([]byte, 16)
-	rand.Read(uuid)
-	// Set version (4) and variant (RFC 4122)
-	uuid[6] = (uuid[6] & 0x0f) | 0x40
-	uuid[8] = (uuid[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
-}
 
 // APIHandler handles /enc-api/* routes
 type APIHandler struct {
@@ -77,8 +66,11 @@ func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate UUID token like Node.js version (not JWT)
-	token := generateUUID()
+	token, err := h.jwtAuth.GenerateToken(req.Username)
+	if err != nil {
+		RespondAPIError(w, 500, "token generate failed")
+		return
+	}
 
 	RespondSuccess(w, map[string]interface{}{
 		"userInfo": map[string]interface{}{

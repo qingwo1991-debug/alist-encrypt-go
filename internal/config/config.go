@@ -307,9 +307,9 @@ func DefaultConfig() *Config {
 		Database: &DBConfig{
 			Type:                   "",
 			DSN:                    "",
-			MaxOpenConns:           10,
-			MaxIdleConns:           5,
-			ConnMaxLifetimeSeconds: 300,
+			MaxOpenConns:           100,
+			MaxIdleConns:           10,
+			ConnMaxLifetimeSeconds: 3600,
 			ConnMaxIdleSeconds:     60,
 			FlushIntervalSeconds:   5,
 			CleanupDays:            30,
