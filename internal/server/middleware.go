@@ -3,10 +3,12 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/alist-encrypt-go/internal/auth"
 	"github.com/alist-encrypt-go/internal/trace"
 )
 
@@ -81,6 +83,21 @@ func ForceHTTPSMiddleware(httpsPort int) gin.HandlerFunc {
 
 // AuthMiddleware validates JWT tokens
 func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
+	jwtAuth := auth.NewJWTAuth(jwtSecret, 0)
+
+	extractToken := func(c *gin.Context) string {
+		if token := strings.TrimSpace(c.GetHeader("Authorizetoken")); token != "" {
+			return token
+		}
+		if authz := strings.TrimSpace(c.GetHeader("Authorization")); authz != "" {
+			if len(authz) >= 7 && strings.EqualFold(authz[:7], "Bearer ") {
+				return strings.TrimSpace(authz[7:])
+			}
+			return authz
+		}
+		return strings.TrimSpace(c.Query("token"))
+	}
+
 	return func(c *gin.Context) {
 		// Skip auth for login endpoint
 		if c.Request.URL.Path == "/enc-api/login" {
@@ -88,18 +105,16 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 			return
 		}
 
-		// Check multiple header names for compatibility with original Node.js version
-		token := c.GetHeader("Authorizetoken") // Primary: matches Node.js version
-		if token == "" {
-			token = c.GetHeader("Authorization")
-		}
-		if token == "" {
-			token = c.Query("token")
-		}
+		token := extractToken(c)
 
 		if token == "" {
-			// Return JSON error for frontend compatibility - matches Node.js: { code: 401, msg: 'user unlogin' }
-			c.JSON(http.StatusOK, gin.H{"code": 401, "msg": "user unlogin"})
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "user unlogin"})
+			c.Abort()
+			return
+		}
+
+		if _, err := jwtAuth.ValidateToken(token); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "user unlogin"})
 			c.Abort()
 			return
 		}

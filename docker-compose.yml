@@ -21,6 +21,9 @@ services:
       # ALIST_ENCRYPT_SCHEME_ENABLE_H2C: "false"
       # ALIST_ENCRYPT_ALIST_HOST: alist
       # ALIST_ENCRYPT_ALIST_PORT: 5244
+      # Enable MySQL only when BOTH variables are set:
+      # DB_TYPE: mysql
+      # DB_DSN: user:password@tcp(mysql:3306)/alist_encrypt?charset=utf8mb4&parseTime=True&loc=Local
       - TZ=Asia/Shanghai
     networks:
       - alist-network

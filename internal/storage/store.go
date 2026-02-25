@@ -75,7 +75,10 @@ func (s *Store) Get(bucket []byte, key string) ([]byte, error) {
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)
 		}
-		value = b.Get([]byte(key))
+		raw := b.Get([]byte(key))
+		if raw != nil {
+			value = append([]byte(nil), raw...)
+		}
 		return nil
 	})
 	return value, err
@@ -112,7 +115,7 @@ func (s *Store) GetAll(bucket []byte) (map[string][]byte, error) {
 			return fmt.Errorf("bucket not found: %s", bucket)
 		}
 		return b.ForEach(func(k, v []byte) error {
-			result[string(k)] = v
+			result[string(k)] = append([]byte(nil), v...)
 			return nil
 		})
 	})
@@ -128,6 +131,7 @@ func (s *Store) GetJSON(bucket []byte, key string, v interface{}) error {
 	if data == nil {
 		return nil
 	}
+	data = append([]byte(nil), data...)
 	return json.Unmarshal(data, v)
 }
 

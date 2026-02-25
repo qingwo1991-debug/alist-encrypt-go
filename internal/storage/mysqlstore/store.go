@@ -45,15 +45,21 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		return nil, err
 	}
 
+	maxOpenConns := 100
 	if cfg.Database.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(cfg.Database.MaxOpenConns)
+		maxOpenConns = cfg.Database.MaxOpenConns
 	}
+	maxIdleConns := 10
 	if cfg.Database.MaxIdleConns > 0 {
-		db.SetMaxIdleConns(cfg.Database.MaxIdleConns)
+		maxIdleConns = cfg.Database.MaxIdleConns
 	}
+	connMaxLifetime := time.Hour
 	if cfg.Database.ConnMaxLifetimeSeconds > 0 {
-		db.SetConnMaxLifetime(time.Duration(cfg.Database.ConnMaxLifetimeSeconds) * time.Second)
+		connMaxLifetime = time.Duration(cfg.Database.ConnMaxLifetimeSeconds) * time.Second
 	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
 	if cfg.Database.ConnMaxIdleSeconds > 0 {
 		db.SetConnMaxIdleTime(time.Duration(cfg.Database.ConnMaxIdleSeconds) * time.Second)
 	}

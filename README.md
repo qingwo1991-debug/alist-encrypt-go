@@ -107,8 +107,6 @@ docker run -d \
 git clone https://github.com/qingwo1991-debug/alist-encrypt-go.git
 cd alist-encrypt-go
 
-| `DB_TYPE` | 数据库类型（仅支持 mysql） | 空 |
-| `DB_DSN` | 数据库连接串 | 空 |
 # 构建前端
 cd enc-webui
 npm install
@@ -117,26 +115,24 @@ cd ..
 
 # 复制前端到嵌入目录
 cp -r enc-webui/dist/* web/public/
-  -e DB_TYPE=mysql \
-  -e DB_DSN="<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&parseTime=True&loc=Local" \
 
 # 构建 Go 二进制
 go build -o alist-encrypt-go ./cmd/server
 
+# 运行
+./alist-encrypt-go
+```
 
 ### 数据库配置（可选）
 
-启用 MySQL 持久化（Host 策略与文件元数据）时，建议使用环境变量配置：
+启用 MySQL 持久化（Host 策略与文件元数据）时，必须同时设置以下两个环境变量：
 
 ```text
 DB_TYPE=mysql
 DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&parseTime=True&loc=Local
 ```
 
-如未设置数据库连接，将自动降级为纯内存模式。
-# 运行
-./alist-encrypt-go
-```
+仅设置其中一个不会启用 MySQL，将自动使用内存模式。
 
 ## 环境变量
 
@@ -145,6 +141,8 @@ DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&par
 | `ALIST_HOST` | Alist 服务器地址 | `localhost` |
 | `ALIST_PORT` | Alist 服务器端口 | `5244` |
 | `TZ` | 时区 | `UTC` |
+| `DB_TYPE` | 数据库类型（仅支持 `mysql`；需与 `DB_DSN` 同时设置才启用） | 空 |
+| `DB_DSN` | MySQL 连接串（需与 `DB_TYPE` 同时设置才启用） | 空 |
 | `RANGE_FAIL_TO_DOWNGRADE` | Range 连续失败后降级阈值 | `2` |
 | `RANGE_SUCCESS_TO_RECOVER` | Range 连续成功后恢复阈值 | `3` |
 | `RANGE_REPROBE_MINUTES` | Range 不兼容后的重探间隔（分钟） | `30` |
