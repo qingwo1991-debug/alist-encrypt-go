@@ -138,6 +138,67 @@ func cloneStringMap(src map[string]interface{}) map[string]interface{} {
 	return dst
 }
 
+func resolveSearchRootPath(reqData fsSearchRequest) string {
+	candidates := []string{
+		strings.TrimSpace(reqData.Path),
+		strings.TrimSpace(reqData.Parent),
+	}
+	for _, candidate := range candidates {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return "/"
+}
+
+func extractSearchRootFromPattern(pattern string) string {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, r := range pattern {
+		switch r {
+		case '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '^', '$', '.', '\\':
+			return strings.TrimRight(b.String(), "/")
+		default:
+			b.WriteRune(r)
+		}
+	}
+
+	return strings.TrimRight(b.String(), "/")
+}
+
+func (h *AlistHandler) collectEncryptedSearchRoots() []string {
+	seen := make(map[string]struct{})
+	roots := make([]string, 0)
+
+	if h.cfg == nil {
+		return roots
+	}
+
+	for i := range h.cfg.AlistServer.PasswdList {
+		passwdInfo := &h.cfg.AlistServer.PasswdList[i]
+		if !passwdInfo.Enable {
+			continue
+		}
+		for _, pattern := range passwdInfo.EncPath {
+			root := extractSearchRootFromPattern(pattern)
+			if root == "" {
+				continue
+			}
+			if _, ok := seen[root]; ok {
+				continue
+			}
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+
+	return roots
+}
+
 func (h *AlistHandler) resolveRemoveName(dirPath, name string, passwdInfo *config.PasswdInfo) string {
 	displayPath := path.Join(dirPath, name)
 
@@ -305,6 +366,35 @@ func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword st
 	return matches, len(matches), nil
 }
 
+func (h *AlistHandler) searchAllEncryptedRoots(r *http.Request, keyword string, scope int) ([]interface{}, int, error) {
+	roots := h.collectEncryptedSearchRoots()
+	if len(roots) == 0 {
+		return nil, 0, nil
+	}
+
+	var matches []interface{}
+	for _, root := range roots {
+		passwdInfo, found := h.passwdDAO.PathFindPasswd(root)
+		if !found || passwdInfo == nil {
+			if dirPasswd, ok := h.passwdDAO.FindByDir(root); ok {
+				passwdInfo = dirPasswd
+				found = true
+			}
+		}
+		if !found || passwdInfo == nil || !passwdInfo.EncName {
+			continue
+		}
+
+		rootMatches, _, err := h.searchEncryptedTree(r, root, keyword, scope, passwdInfo)
+		if err != nil {
+			return nil, 0, err
+		}
+		matches = append(matches, rootMatches...)
+	}
+
+	return matches, len(matches), nil
+}
+
 // HandleFsSearch intercepts /api/fs/search to search by display names for encrypted paths.
 func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
@@ -319,13 +409,7 @@ func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rootPath := strings.TrimSpace(reqData.Parent)
-	if rootPath == "" {
-		rootPath = strings.TrimSpace(reqData.Path)
-	}
-	if rootPath == "" {
-		rootPath = "/"
-	}
+	rootPath := resolveSearchRootPath(reqData)
 
 	keyword := strings.TrimSpace(reqData.Keywords)
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(rootPath)
@@ -336,6 +420,43 @@ func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if keyword == "" || !found || passwdInfo == nil || !passwdInfo.EncName {
+		if keyword != "" {
+			if matches, total, err := h.searchAllEncryptedRoots(r, keyword, reqData.Scope); err == nil && (total > 0 || rootPath == "/" || found) {
+				page := reqData.Page
+				if page <= 0 {
+					page = 1
+				}
+				perPage := reqData.PerPage
+				if perPage <= 0 {
+					perPage = 20
+				}
+
+				start := (page - 1) * perPage
+				if start > total {
+					start = total
+				}
+				end := start + perPage
+				if end > total {
+					end = total
+				}
+
+				content := make([]interface{}, 0, end-start)
+				if start < end {
+					content = append(content, matches[start:end]...)
+				}
+
+				RespondJSON(w, http.StatusOK, map[string]interface{}{
+					"code":    200,
+					"message": "success",
+					"data": map[string]interface{}{
+						"content": content,
+						"total":   total,
+					},
+				})
+				return
+			}
+		}
+
 		resp, err := h.proxyToAlist(nil, "POST", "/api/fs/search", body, r)
 		if err != nil {
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
