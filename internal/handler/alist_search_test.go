@@ -141,7 +141,7 @@ func TestHandleFsSearchRecursiveDecryptsDisplayNames(t *testing.T) {
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/personal_cloud/encrypt","keywords":"hhd800","scope":2,"page":1,"per_page":20}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/personal_cloud","path":"/personal_cloud/encrypt","keywords":"hhd800","scope":2,"page":1,"per_page":20}`))
 	rec := httptest.NewRecorder()
 	handler.HandleFsSearch(rec, req)
 
@@ -260,6 +260,80 @@ func TestHandleFsSearchScopeZeroDoesNotRecurse(t *testing.T) {
 	}
 	if resp.Data.Total != 0 {
 		t.Fatalf("total = %d, want 0 when scope=0", resp.Data.Total)
+	}
+}
+
+func TestHandleFsSearchRootSearchesEncryptedRoots(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: "",
+		EncPath:   []string{"/personal_cloud/encrypt/*"},
+	}
+	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
+	leafDisplay := "sample_420HOI-291.mp4"
+	leafRaw := converter.ToRealName(leafDisplay)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]interface{}
+		_ = json.Unmarshal(body, &req)
+
+		pathValue, _ := req["path"].(string)
+		if pathValue != "/personal_cloud/encrypt" {
+			t.Fatalf("unexpected list path: %s", pathValue)
+		}
+
+		writeJSONResponse(w, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{
+						"name":   leafRaw,
+						"is_dir": false,
+						"size":   float64(222),
+						"type":   float64(2),
+					},
+				},
+				"total": float64(1),
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"hhd","scope":0,"page":1,"per_page":100,"password":""}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsSearch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			Total   int                      `json:"total"`
+			Content []map[string]interface{} `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Data.Total != 1 {
+		t.Fatalf("total = %d, want 1", resp.Data.Total)
+	}
+	if len(resp.Data.Content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(resp.Data.Content))
+	}
+	if got := resp.Data.Content[0]["name"].(string); got != leafDisplay {
+		t.Fatalf("name = %q, want %q", got, leafDisplay)
 	}
 }
 
