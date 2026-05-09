@@ -259,6 +259,10 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		}
 	}
 	if fileSize == 0 {
+		if h.cfg == nil || h.cfg.AlistServer.SizeUnknownStrict {
+			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
+			return
+		}
 		trace.Logf(r.Context(), "webdav-get", "Size unknown, passthrough")
 		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
 			log.Error().Err(err).Str("path", davPath).Msg("WebDAV passthrough failed")
@@ -441,6 +445,15 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 		RespondHTTPErrorWithStatus(w, "Cannot determine upload file size for encryption", http.StatusBadRequest)
 		return
 	}
+	startOffset, hasRange, err := parseContentRangeStart(r.Header.Get("Content-Range"))
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "Invalid Content-Range header", http.StatusBadRequest)
+		return
+	}
+	if hasRange && startOffset >= fileSize {
+		RespondHTTPErrorWithStatus(w, "Invalid Content-Range start offset", http.StatusBadRequest)
+		return
+	}
 
 	// Convert display path to real encrypted path
 	realPath := davPath
@@ -461,7 +474,7 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
 
-	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize); err != nil {
+	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
 		log.Error().Err(err).Str("path", davPath).Msg("WebDAV PUT encryption failed")
 		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
 	}

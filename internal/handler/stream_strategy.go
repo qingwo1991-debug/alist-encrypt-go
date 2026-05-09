@@ -2,6 +2,9 @@ package handler
 
 import (
 	"net/url"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -32,6 +35,19 @@ type StrategySelectorConfig struct {
 type StrategySelector struct {
 	cfg   StrategySelectorConfig
 	store StrategyStore
+
+	obsMu           sync.Mutex
+	reasonCounts    map[string]uint64
+	recentEvents    []StrategyEvent
+	maxRecentEvents int
+}
+
+type StrategyEvent struct {
+	Time     time.Time            `json:"time"`
+	Provider string               `json:"provider"`
+	From     proxy.StreamStrategy `json:"from"`
+	To       proxy.StreamStrategy `json:"to"`
+	Reason   string               `json:"reason"`
 }
 
 func NewStrategySelector(cfg *config.Config, store StrategyStore) (*StrategySelector, error) {
@@ -50,7 +66,9 @@ func NewStrategySelector(cfg *config.Config, store StrategyStore) (*StrategySele
 				proxy.StreamStrategyFull,
 			},
 		},
-		store: store,
+		store:           store,
+		reasonCounts:    make(map[string]uint64),
+		maxRecentEvents: 50,
 	}
 	selector.applyDefaults()
 	return selector, nil
@@ -73,15 +91,39 @@ func (s *StrategySelector) applyDefaults() {
 
 func (s *StrategySelector) Stats() map[string]interface{} {
 	states := s.store.List()
+	providerStrategy := make(map[string]string, len(states))
+	providers := make([]string, 0, len(states))
+	for provider, state := range states {
+		providers = append(providers, provider)
+		if state != nil {
+			providerStrategy[provider] = string(state.Preferred)
+		}
+	}
+	sort.Strings(providers)
+
+	s.obsMu.Lock()
+	reasons := make(map[string]uint64, len(s.reasonCounts))
+	for k, v := range s.reasonCounts {
+		reasons[k] = v
+	}
+	events := make([]StrategyEvent, len(s.recentEvents))
+	copy(events, s.recentEvents)
+	s.obsMu.Unlock()
+
 	return map[string]interface{}{
 		"providers":          len(states),
 		"fail_to_downgrade":  s.cfg.FailToDowngrade,
 		"success_to_recover": s.cfg.SuccessToRecover,
 		"cooldown_minutes":   int(s.cfg.Cooldown.Minutes()),
+		"provider_order":     providers,
+		"provider_strategy":  providerStrategy,
+		"reason_counts":      reasons,
+		"recent_events":      events,
 	}
 }
 
 func (s *StrategySelector) Select(provider string) []proxy.StreamStrategy {
+	provider = normalizeStrategyProviderKey(provider)
 	state := s.ensureState(provider)
 	order := s.cfg.ProviderFallbacks
 
@@ -106,6 +148,7 @@ func (s *StrategySelector) Select(provider string) []proxy.StreamStrategy {
 }
 
 func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamStrategy) {
+	provider = normalizeStrategyProviderKey(provider)
 	state := s.ensureState(provider)
 	state.TotalSuccesses++
 	state.SuccessStreak++
@@ -122,15 +165,20 @@ func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamS
 
 	// If probe succeeded, promote to higher priority
 	if strategyIndex != -1 && preferredIndex != -1 && strategyIndex < preferredIndex {
+		prev := state.Preferred
 		state.Preferred = strategy
 		state.SuccessStreak = 1
 		state.CooldownUntil = time.Time{}
+		s.appendEvent(provider, prev, strategy, "recovery_probe_success")
 	}
 
 	_ = s.store.Set(provider, state)
 }
 
 func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamStrategy, reason string) {
+	provider = normalizeStrategyProviderKey(provider)
+	reason = normalizeFailureReason(reason)
+	s.recordReason(reason)
 	state := s.ensureState(provider)
 	state.TotalFailures++
 	state.SuccessStreak = 0
@@ -157,14 +205,45 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 
 	if strategy == state.Preferred && state.Failures[strategy] >= s.cfg.FailToDowngrade {
 		if preferredIndex >= 0 && preferredIndex+1 < len(order) {
+			prev := state.Preferred
 			state.Preferred = order[preferredIndex+1]
 			state.Failures[strategy] = 0
 			state.LastDowngrade = time.Now()
 			state.CooldownUntil = time.Now().Add(s.cfg.Cooldown)
+			s.appendEvent(provider, prev, state.Preferred, reason)
 		}
 	}
 
 	_ = s.store.Set(provider, state)
+}
+
+func normalizeFailureReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "unknown"
+	}
+	return reason
+}
+
+func (s *StrategySelector) recordReason(reason string) {
+	s.obsMu.Lock()
+	defer s.obsMu.Unlock()
+	s.reasonCounts[reason]++
+}
+
+func (s *StrategySelector) appendEvent(provider string, from, to proxy.StreamStrategy, reason string) {
+	s.obsMu.Lock()
+	defer s.obsMu.Unlock()
+	s.recentEvents = append(s.recentEvents, StrategyEvent{
+		Time:     time.Now(),
+		Provider: provider,
+		From:     from,
+		To:       to,
+		Reason:   reason,
+	})
+	if len(s.recentEvents) > s.maxRecentEvents {
+		s.recentEvents = s.recentEvents[len(s.recentEvents)-s.maxRecentEvents:]
+	}
 }
 
 func isNonStrategyFailure(reason string) bool {
@@ -177,9 +256,7 @@ func isNonStrategyFailure(reason string) bool {
 }
 
 func (s *StrategySelector) ensureState(provider string) *ProviderStrategyState {
-	if provider == "" {
-		provider = "default"
-	}
+	provider = normalizeStrategyProviderKey(provider)
 	if state, ok := s.store.Get(provider); ok {
 		return state
 	}
@@ -192,15 +269,26 @@ func (s *StrategySelector) ensureState(provider string) *ProviderStrategyState {
 	return state
 }
 
-func ProviderKey(targetURL string, davPath string) string {
+func ProviderKey(targetURL string, _ string) string {
 	host := ""
 	if parsed, err := url.Parse(targetURL); err == nil {
 		host = parsed.Host
 	}
-	if host == "" {
-		return davPath
+	return normalizeStrategyProviderKey(host)
+}
+
+func normalizeStrategyProviderKey(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return "default"
 	}
-	return host + "::" + davPath
+	if idx := strings.Index(provider, "::"); idx >= 0 {
+		provider = provider[:idx]
+	}
+	if provider == "" {
+		return "default"
+	}
+	return provider
 }
 
 func indexOfStrategy(order []proxy.StreamStrategy, target proxy.StreamStrategy) int {

@@ -134,6 +134,12 @@ DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&par
 
 仅设置其中一个不会启用 MySQL，将自动使用内存模式。
 
+## 验证与调优
+
+- 分片上传与策略观测验证：`bash tools/verify_chunk_upload.sh`
+- 分片上传验证说明：`docs/UPLOAD_CHUNK_VERIFICATION.md`
+- 生产调优建议：`docs/PRODUCTION_TUNING_PROFILES.md`
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |

@@ -29,3 +29,21 @@ func TestGetStreamStatsMissingStream(t *testing.T) {
 		t.Fatalf("unexpected non-zero stats: %#v", got)
 	}
 }
+
+func TestGetSelectorStats(t *testing.T) {
+	want := map[string]interface{}{
+		"reason_counts":     map[string]uint64{"timeout": 3},
+		"provider_strategy": map[string]string{"a.example.com": "full"},
+		"recent_events":     []interface{}{},
+	}
+	stats := map[string]interface{}{
+		"strategy_selector": want,
+	}
+	got := getSelectorStats(stats)
+	if got["reason_counts"] == nil {
+		t.Fatalf("missing reason_counts: %#v", got)
+	}
+	if got["provider_strategy"] == nil {
+		t.Fatalf("missing provider_strategy: %#v", got)
+	}
+}

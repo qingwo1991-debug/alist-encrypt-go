@@ -33,6 +33,8 @@ type FileSizeResolver struct {
 
 	// Circuit breaker state per host
 	circuitBreakers sync.Map // host -> *CircuitBreaker
+	hostRTT         sync.Map // host -> *hostRTTState
+	hotCache        sync.Map // cacheKey -> *hotSizeEntry
 
 	// Stats
 	totalRequests uint64
@@ -43,12 +45,22 @@ type FileSizeResolver struct {
 	failures      uint64
 	earlyReturns  uint64
 	circuitBreaks uint64
+	hotCacheHits  uint64
 }
 
 type providerMetaState struct {
 	mu        sync.Mutex
 	conflicts int
 	disabled  bool
+}
+
+type hostRTTState struct {
+	avgMillis int64
+}
+
+type hotSizeEntry struct {
+	result    SizeResult
+	expiresAt time.Time
 }
 
 // CircuitBreaker implements circuit breaker pattern
@@ -175,9 +187,14 @@ func (r *FileSizeResolver) ResolveBatch(ctx context.Context, items []FileItem, a
 // ResolveSingle resolves file size with early termination on high confidence
 func (r *FileSizeResolver) ResolveSingle(ctx context.Context, file FileItem, authHeaders http.Header) SizeResult {
 	atomic.AddUint64(&r.totalRequests, 1)
+	if result, ok := r.getHotCache(file); ok {
+		atomic.AddUint64(&r.hotCacheHits, 1)
+		return result
+	}
 
 	// Fast path: Check cache first (synchronous, ~64ns)
 	if result, ok := r.tryFastPath(ctx, file); ok {
+		r.setHotCache(file, result, 45*time.Second)
 		return result
 	}
 
@@ -192,6 +209,7 @@ func (r *FileSizeResolver) ResolveSingleFresh(ctx context.Context, file FileItem
 	result := r.resolveWithEarlyTermination(ctx, file, authHeaders)
 	if result.Size > 0 && result.Error == nil {
 		r.cacheResult(ctx, file, result)
+		r.setHotCache(file, result, 45*time.Second)
 	}
 	return result
 }
@@ -411,7 +429,7 @@ func (r *FileSizeResolver) tryHEADWithRetry(ctx context.Context, file FileItem, 
 			}
 		}
 
-		size, contentType, etag, status, err := r.headRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
+		size, contentType, etag, status, err := r.headRequest(ctx, file.TargetURL, authHeaders, r.timeoutForHost(host, 8*time.Second))
 		if err == nil && IsValidSize(size) {
 			r.recordSuccess(host)
 			atomic.AddUint64(&r.headHits, 1)
@@ -465,7 +483,7 @@ func (r *FileSizeResolver) tryRangeWithRetry(ctx context.Context, file FileItem,
 			}
 		}
 
-		size, contentType, etag, status, err := r.rangeRequest(ctx, file.TargetURL, authHeaders, 8*time.Second)
+		size, contentType, etag, status, err := r.rangeRequest(ctx, file.TargetURL, authHeaders, r.timeoutForHost(host, 8*time.Second))
 		if err == nil && IsValidSize(size) {
 			r.recordSuccess(host)
 			atomic.AddUint64(&r.rangeHits, 1)
@@ -612,6 +630,7 @@ func (r *FileSizeResolver) recordSourceHit(source SizeSource) {
 // cacheResult stores the resolved size
 
 func (r *FileSizeResolver) cacheResult(ctx context.Context, file FileItem, result SizeResult) {
+	r.setHotCache(file, result, 45*time.Second)
 	r.fileDAO.SetFileSize(file.DisplayPath, result.Size, 24*time.Hour)
 	if file.EncryptedPath != "" && file.EncryptedPath != file.DisplayPath {
 		r.fileDAO.SetFileSize(file.EncryptedPath, result.Size, 24*time.Hour)
@@ -648,6 +667,15 @@ func (r *FileSizeResolver) cacheResult(ctx context.Context, file FileItem, resul
 }
 
 func (r *FileSizeResolver) RecordPlaybackSuccess(ctx context.Context, file FileItem, size int64, statusCode int, contentType, etag string) {
+	r.setHotCache(file, SizeResult{
+		Path:        file.DisplayPath,
+		Size:        size,
+		Source:      SourceCache,
+		Confidence:  HighConfidenceThreshold,
+		ContentType: contentType,
+		StatusCode:  statusCode,
+		ETag:        etag,
+	}, time.Minute)
 	providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
 	r.resetProviderMeta(providerKey)
 
@@ -744,10 +772,12 @@ func (r *FileSizeResolver) headRequest(ctx context.Context, url string, authHead
 
 		copyAuthHeadersConditional(req, authHeaders, origHost, hostOfURL(currentURL))
 
+		start := time.Now()
 		resp, err := r.client.Do(req)
 		if err != nil {
 			return 0, "", "", 0, err
 		}
+		r.observeHostRTT(hostOfURL(currentURL), time.Since(start))
 		if isRedirectStatusCode(resp.StatusCode) {
 			location := resp.Header.Get("Location")
 			resp.Body.Close()
@@ -801,10 +831,12 @@ func (r *FileSizeResolver) rangeRequest(ctx context.Context, url string, authHea
 		req.Header.Set("Range", "bytes=0-0")
 		copyAuthHeadersConditional(req, authHeaders, origHost, hostOfURL(currentURL))
 
+		start := time.Now()
 		resp, err := r.client.Do(req)
 		if err != nil {
 			return 0, "", "", 0, err
 		}
+		r.observeHostRTT(hostOfURL(currentURL), time.Since(start))
 
 		if isRedirectStatusCode(resp.StatusCode) {
 			location := resp.Header.Get("Location")
@@ -863,6 +895,7 @@ func (r *FileSizeResolver) Stats() map[string]interface{} {
 	failures := atomic.LoadUint64(&r.failures)
 	earlyReturns := atomic.LoadUint64(&r.earlyReturns)
 	circuitBreaks := atomic.LoadUint64(&r.circuitBreaks)
+	hotCacheHits := atomic.LoadUint64(&r.hotCacheHits)
 
 	hitRate := float64(0)
 	if total > 0 {
@@ -878,12 +911,107 @@ func (r *FileSizeResolver) Stats() map[string]interface{} {
 		"failures":       failures,
 		"early_returns":  earlyReturns,
 		"circuit_breaks": circuitBreaks,
+		"hot_cache_hits": hotCacheHits,
 		"hit_rate":       hitRate,
 		"max_workers":    r.maxWorkers,
 	}
 }
 
 // Helper functions
+func (r *FileSizeResolver) timeoutForHost(host string, base time.Duration) time.Duration {
+	if base <= 0 {
+		base = 8 * time.Second
+	}
+	state, ok := r.hostRTT.Load(host)
+	if !ok {
+		return base
+	}
+	avgMs := atomic.LoadInt64(&state.(*hostRTTState).avgMillis)
+	if avgMs <= 0 {
+		return base
+	}
+	avg := time.Duration(avgMs) * time.Millisecond
+	switch {
+	case avg < 300*time.Millisecond:
+		if base/2 < 2*time.Second {
+			return 2 * time.Second
+		}
+		return base / 2
+	case avg > 2*time.Second:
+		boosted := base + base/2
+		if boosted > 20*time.Second {
+			return 20 * time.Second
+		}
+		return boosted
+	default:
+		return base
+	}
+}
+
+func (r *FileSizeResolver) observeHostRTT(host string, elapsed time.Duration) {
+	if host == "" || elapsed <= 0 {
+		return
+	}
+	value, _ := r.hostRTT.LoadOrStore(host, &hostRTTState{})
+	state := value.(*hostRTTState)
+	sample := elapsed.Milliseconds()
+	if sample <= 0 {
+		return
+	}
+	for {
+		cur := atomic.LoadInt64(&state.avgMillis)
+		next := sample
+		if cur > 0 {
+			// EWMA: 80% old + 20% new
+			next = (cur*8 + sample*2) / 10
+		}
+		if atomic.CompareAndSwapInt64(&state.avgMillis, cur, next) {
+			return
+		}
+	}
+}
+
+func (r *FileSizeResolver) hotCacheKey(file FileItem) string {
+	if file.DisplayPath != "" {
+		return file.DisplayPath + "::" + extractHost(file.TargetURL)
+	}
+	return file.EncryptedPath + "::" + extractHost(file.TargetURL)
+}
+
+func (r *FileSizeResolver) getHotCache(file FileItem) (SizeResult, bool) {
+	key := r.hotCacheKey(file)
+	if key == "" {
+		return SizeResult{}, false
+	}
+	entryRaw, ok := r.hotCache.Load(key)
+	if !ok {
+		return SizeResult{}, false
+	}
+	entry := entryRaw.(*hotSizeEntry)
+	if time.Now().After(entry.expiresAt) {
+		r.hotCache.Delete(key)
+		return SizeResult{}, false
+	}
+	return entry.result, true
+}
+
+func (r *FileSizeResolver) setHotCache(file FileItem, result SizeResult, ttl time.Duration) {
+	if result.Error != nil || result.Size <= 0 {
+		return
+	}
+	key := r.hotCacheKey(file)
+	if key == "" {
+		return
+	}
+	if ttl <= 0 {
+		ttl = 45 * time.Second
+	}
+	r.hotCache.Store(key, &hotSizeEntry{
+		result:    result,
+		expiresAt: time.Now().Add(ttl),
+	})
+}
+
 func copyAuthHeaders(req *http.Request, authHeaders http.Header) {
 	for _, key := range []string{"Authorization", "Cookie"} {
 		if values := authHeaders[key]; len(values) > 0 {

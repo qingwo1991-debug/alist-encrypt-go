@@ -83,6 +83,8 @@ type AlistServer struct {
 	ProbeQueueSize              int                      `json:"probeQueueSize"`
 	ProbeMinSizeBytes           int64                    `json:"probeMinSizeBytes"`
 	PlayFirstFallback           bool                     `json:"playFirstFallback"`
+	SizeUnknownStrict           bool                     `json:"sizeUnknownStrict"`
+	ChunkedSeekMaxDiscardBytes  int64                    `json:"chunkedSeekMaxDiscardBytes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -263,6 +265,8 @@ func DefaultConfig() *Config {
 			ProbeQueueSize:              1000,
 			ProbeMinSizeBytes:           100 * 1024 * 1024,
 			PlayFirstFallback:           true,
+			SizeUnknownStrict:           true,
+			ChunkedSeekMaxDiscardBytes:  8 * 1024 * 1024,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -501,6 +505,12 @@ func (c *Config) applyEnvOverrides() {
 	if v, ok := getEnvBool("PLAY_FIRST_FALLBACK"); ok {
 		c.AlistServer.PlayFirstFallback = v
 	}
+	if v, ok := getEnvBool("SIZE_UNKNOWN_STRICT"); ok {
+		c.AlistServer.SizeUnknownStrict = v
+	}
+	if v, ok := getEnvInt("CHUNKED_SEEK_MAX_DISCARD_BYTES"); ok && v >= 0 {
+		c.AlistServer.ChunkedSeekMaxDiscardBytes = int64(v)
+	}
 	if v, ok := getEnvInt("RANGE_FAIL_TO_DOWNGRADE"); ok {
 		c.AlistServer.RangeFailToDowngrade = v
 	}
@@ -543,6 +553,13 @@ func (c *Config) normalizeAlistServerTuning() {
 	s.ProbeMaxDelayMs = clampIntValue(s.ProbeMaxDelayMs, 0, 120000)
 	s.ProbeCooldownMinutes = clampIntValue(s.ProbeCooldownMinutes, 1, 10080)
 	s.ProbeQueueSize = clampIntValue(s.ProbeQueueSize, 100, 10000)
+	if s.ChunkedSeekMaxDiscardBytes <= 0 {
+		s.ChunkedSeekMaxDiscardBytes = 8 * 1024 * 1024
+	}
+	const maxDiscard = int64(1) << 30 // 1GiB hard cap for safety
+	if s.ChunkedSeekMaxDiscardBytes > maxDiscard {
+		s.ChunkedSeekMaxDiscardBytes = maxDiscard
+	}
 }
 
 func normalizeProxyMatchType(v string) string {

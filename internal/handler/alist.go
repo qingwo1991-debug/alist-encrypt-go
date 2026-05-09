@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -105,6 +106,294 @@ func normalizeDecryptedListItem(fileData map[string]interface{}, showName string
 	if fileType, ok := mediaTypeByExt[ext]; ok {
 		fileData["type"] = fileType
 	}
+}
+
+type fsSearchRequest struct {
+	Parent   string `json:"parent"`
+	Path     string `json:"path"`
+	Keywords string `json:"keywords"`
+	Scope    int    `json:"scope"`
+	Page     int    `json:"page"`
+	PerPage  int    `json:"per_page"`
+	Refresh  bool   `json:"refresh"`
+}
+
+func containsSearchTerm(value, keyword string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	keyword = strings.TrimSpace(strings.ToLower(keyword))
+	if value == "" || keyword == "" {
+		return false
+	}
+	return strings.Contains(value, keyword)
+}
+
+func cloneStringMap(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func (h *AlistHandler) resolveRemoveName(dirPath, name string, passwdInfo *config.PasswdInfo) string {
+	displayPath := path.Join(dirPath, name)
+
+	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok {
+		return path.Base(encPath)
+	}
+
+	if fileInfo, ok := h.fileDAO.Get(url.QueryEscape(displayPath)); ok && fileInfo != nil && fileInfo.Path != "" {
+		if base := path.Base(fileInfo.Path); base != "" {
+			return base
+		}
+	}
+
+	if passwdInfo != nil && passwdInfo.EncName {
+		converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
+		fileName := path.Base(name)
+		encBase := strings.TrimSuffix(fileName, path.Ext(fileName))
+		if converter.DecryptFileName(encBase) != "" {
+			return name
+		}
+		if strings.HasPrefix(fileName, encryption.OrigPrefix) {
+			return strings.TrimPrefix(fileName, encryption.OrigPrefix)
+		}
+		return converter.ToRealName(name)
+	}
+
+	return name
+}
+
+func (h *AlistHandler) resolveRemoveNames(dirPath string, names []string, passwdInfo *config.PasswdInfo) []string {
+	if len(names) == 0 {
+		return nil
+	}
+
+	resolved := make([]string, 0, len(names))
+	for _, name := range names {
+		resolved = append(resolved, h.resolveRemoveName(dirPath, name, passwdInfo))
+	}
+	return resolved
+}
+
+func (h *AlistHandler) fetchFsListContent(r *http.Request, realPath string) ([]interface{}, error) {
+	const perPage = 1000
+
+	var all []interface{}
+	for page := 1; ; page++ {
+		reqData := map[string]interface{}{
+			"path":     realPath,
+			"page":     page,
+			"per_page": perPage,
+			"refresh":  false,
+		}
+		body, _ := json.Marshal(reqData)
+		resp, err := h.proxyToAlist(nil, "POST", "/api/fs/list", body, r)
+		if err != nil {
+			return nil, err
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		var respData map[string]interface{}
+		if err := json.Unmarshal(respBody, &respData); err != nil {
+			return nil, err
+		}
+		code, _ := respData["code"].(float64)
+		if code != 200 {
+			return nil, fmt.Errorf("list failed with code %.0f", code)
+		}
+		data, _ := respData["data"].(map[string]interface{})
+		if data == nil {
+			return nil, nil
+		}
+		content, _ := data["content"].([]interface{})
+		if len(content) == 0 {
+			break
+		}
+		all = append(all, content...)
+		if len(content) < perPage {
+			break
+		}
+	}
+
+	return all, nil
+}
+
+func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword string, scope int, passwdInfo *config.PasswdInfo) ([]interface{}, int, error) {
+	type node struct {
+		displayPath string
+		realPath    string
+	}
+
+	recursive := scope != 0
+	queue := []node{{
+		displayPath: rootPath,
+		realPath:    rootPath,
+	}}
+	visited := make(map[string]struct{})
+	var matches []interface{}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if _, ok := visited[current.realPath]; ok {
+			continue
+		}
+		visited[current.realPath] = struct{}{}
+
+		currentPasswd, found := h.passwdDAO.PathFindPasswd(current.displayPath)
+		if !found || currentPasswd == nil {
+			currentPasswd = passwdInfo
+		}
+
+		content, err := h.fetchFsListContent(r, current.realPath)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		for _, item := range content {
+			fileData, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			rawName, _ := fileData["name"].(string)
+			isDir, _ := fileData["is_dir"].(bool)
+			if rawName == "" {
+				continue
+			}
+
+			childDisplayName := rawName
+			if currentPasswd != nil && currentPasswd.EncName {
+				childDisplayName = h.convertShowName(currentPasswd, rawName)
+			}
+			if childDisplayName == "" {
+				childDisplayName = rawName
+			}
+
+			childDisplayPath := path.Join(current.displayPath, childDisplayName)
+			childRealPath := path.Join(current.realPath, rawName)
+
+			matchTarget := strings.ToLower(childDisplayName + " " + childDisplayPath + " " + rawName)
+			if containsSearchTerm(matchTarget, keyword) {
+				normalized := cloneStringMap(fileData)
+				normalized["name"] = childDisplayName
+				normalized["path"] = childDisplayPath
+				if currentPasswd != nil && currentPasswd.EncName {
+					normalizeDecryptedListItem(normalized, childDisplayName)
+					h.fileDAO.SetEncPathMapping(childDisplayPath, childRealPath)
+				}
+				matches = append(matches, normalized)
+			}
+
+			if recursive && isDir {
+				queue = append(queue, node{
+					displayPath: childDisplayPath,
+					realPath:    childRealPath,
+				})
+			}
+		}
+	}
+
+	return matches, len(matches), nil
+}
+
+// HandleFsSearch intercepts /api/fs/search to search by display names for encrypted paths.
+func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
+		return
+	}
+
+	var reqData fsSearchRequest
+	if err := json.Unmarshal(body, &reqData); err != nil {
+		RespondHTTPErrorWithStatus(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	rootPath := strings.TrimSpace(reqData.Parent)
+	if rootPath == "" {
+		rootPath = strings.TrimSpace(reqData.Path)
+	}
+	if rootPath == "" {
+		rootPath = "/"
+	}
+
+	keyword := strings.TrimSpace(reqData.Keywords)
+	passwdInfo, found := h.passwdDAO.PathFindPasswd(rootPath)
+	if !found {
+		if dirPasswd, ok := h.passwdDAO.FindByDir(rootPath); ok {
+			passwdInfo = dirPasswd
+			found = true
+		}
+	}
+	if keyword == "" || !found || passwdInfo == nil || !passwdInfo.EncName {
+		resp, err := h.proxyToAlist(nil, "POST", "/api/fs/search", body, r)
+		if err != nil {
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+		return
+	}
+
+	matches, total, err := h.searchEncryptedTree(r, rootPath, keyword, reqData.Scope, passwdInfo)
+	if err != nil {
+		log.Warn().Err(err).Str("path", rootPath).Msg("Encrypted search failed, falling back to upstream search")
+		resp, proxyErr := h.proxyToAlist(nil, "POST", "/api/fs/search", body, r)
+		if proxyErr != nil {
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+		return
+	}
+
+	page := reqData.Page
+	if page <= 0 {
+		page = 1
+	}
+	perPage := reqData.PerPage
+	if perPage <= 0 {
+		perPage = 20
+	}
+
+	start := (page - 1) * perPage
+	if start > total {
+		start = total
+	}
+	end := start + perPage
+	if end > total {
+		end = total
+	}
+
+	content := make([]interface{}, 0, end-start)
+	if start < end {
+		content = append(content, matches[start:end]...)
+	}
+
+	RespondJSON(w, http.StatusOK, map[string]interface{}{
+		"code":    200,
+		"message": "success",
+		"data": map[string]interface{}{
+			"content": content,
+			"total":   total,
+		},
+	})
 }
 
 // proxyToAlist creates and executes a proxy request to Alist backend
@@ -543,6 +832,15 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 		RespondHTTPErrorWithStatus(w, "Cannot determine upload file size for encryption", http.StatusBadRequest)
 		return
 	}
+	startOffset, hasRange, err := parseContentRangeStart(r.Header.Get("Content-Range"))
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "Invalid Content-Range header", http.StatusBadRequest)
+		return
+	}
+	if hasRange && startOffset >= fileSize {
+		RespondHTTPErrorWithStatus(w, "Invalid Content-Range start offset", http.StatusBadRequest)
+		return
+	}
 
 	// Handle filename encryption
 	var encryptedPath string
@@ -562,7 +860,7 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 	// Encrypt and upload
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/put", r)
 
-	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize); err != nil {
+	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
 		log.Error().Err(err).Str("path", uploadPath).Msg("Failed to encrypt upload")
 		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
 		return
@@ -593,17 +891,17 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(reqData.Dir)
-
-	// Build file names list
-	fileNames := make([]string, 0, len(reqData.Names)*2)
-	fileNames = append(fileNames, reqData.Names...)
-
-	if found && passwdInfo.EncName {
-		converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-		for _, name := range reqData.Names {
-			realName := converter.ToRealName(name)
-			fileNames = append(fileNames, realName)
+	if !found {
+		if dirPasswd, ok := h.passwdDAO.FindByDir(reqData.Dir); ok {
+			passwdInfo = dirPasswd
+			found = true
 		}
+	}
+
+	// Resolve each name to a single upstream target.
+	fileNames := reqData.Names
+	if found && passwdInfo.EncName {
+		fileNames = h.resolveRemoveNames(reqData.Dir, reqData.Names, passwdInfo)
 	}
 
 	// Forward modified request

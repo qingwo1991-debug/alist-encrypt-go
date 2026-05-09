@@ -51,3 +51,26 @@ func TestResolveUploadFileSizeByExpectedEntityLength(t *testing.T) {
 		t.Fatalf("size=%d, want 8192", size)
 	}
 }
+
+func TestParseContentRangeStart(t *testing.T) {
+	start, ok, err := parseContentRangeStart("bytes 1024-2047/4096")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if start != 1024 {
+		t.Fatalf("start=%d, want 1024", start)
+	}
+}
+
+func TestParseContentRangeStartInvalid(t *testing.T) {
+	_, ok, err := parseContentRangeStart("bytes abc-2047/4096")
+	if err == nil {
+		t.Fatal("expected error for invalid range start")
+	}
+	if !ok {
+		t.Fatal("expected ok=true when header is present")
+	}
+}

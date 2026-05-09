@@ -21,9 +21,10 @@ func NewMySQLStrategyStore(store *mysqlstore.Store) *MySQLStrategyStore {
 }
 
 func (s *MySQLStrategyStore) Get(provider string) (*ProviderStrategyState, bool) {
+	provider = normalizeStrategyProviderKey(provider)
 	record, ok, err := s.store.GetStrategy(context.Background(), provider)
 	if err != nil || !ok {
-		return nil, false
+		return s.getLegacyAggregated(provider)
 	}
 
 	failures := make(map[proxy.StreamStrategy]int)
@@ -46,10 +47,49 @@ func (s *MySQLStrategyStore) Get(provider string) (*ProviderStrategyState, bool)
 	}, true
 }
 
+func (s *MySQLStrategyStore) getLegacyAggregated(provider string) (*ProviderStrategyState, bool) {
+	records, err := s.store.ListStrategies(context.Background())
+	if err != nil || len(records) == 0 {
+		return nil, false
+	}
+	var best *mysqlstore.StrategyRecord
+	for i := range records {
+		record := records[i]
+		if normalizeStrategyProviderKey(record.ProviderHost) != provider {
+			continue
+		}
+		if best == nil || record.UpdatedAt.After(best.UpdatedAt) {
+			copyRecord := record
+			best = &copyRecord
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	failures := make(map[proxy.StreamStrategy]int)
+	for key, value := range mysqlstore.DecodeFailures(best.FailuresJSON) {
+		failures[proxy.StreamStrategy(key)] = value
+	}
+	return &ProviderStrategyState{
+		Provider:       provider,
+		Preferred:      proxy.StreamStrategy(best.Preferred),
+		Failures:       failures,
+		SuccessStreak:  best.SuccessStreak,
+		CooldownUntil:  best.CooldownUntil,
+		LastDowngrade:  best.LastDowngrade,
+		LastUpdate:     best.UpdatedAt,
+		LastFailure:    best.LastFailure,
+		LastStrategy:   proxy.StreamStrategy(best.LastStrategy),
+		TotalFailures:  best.TotalFailures,
+		TotalSuccesses: best.TotalSuccesses,
+	}, true
+}
+
 func (s *MySQLStrategyStore) Set(provider string, state *ProviderStrategyState) error {
 	if state == nil {
 		return nil
 	}
+	provider = normalizeStrategyProviderKey(provider)
 	providerHost, originalPath := mysqlstore.SplitProviderKey(provider)
 
 	stringFailures := make(map[string]int)
@@ -84,12 +124,13 @@ func (s *MySQLStrategyStore) List() map[string]*ProviderStrategyState {
 
 	out := make(map[string]*ProviderStrategyState, len(records))
 	for _, record := range records {
-		provider := record.ProviderHost + "::" + record.OriginalPath
+		provider := normalizeStrategyProviderKey(record.ProviderHost)
 		failures := make(map[proxy.StreamStrategy]int)
 		for key, value := range mysqlstore.DecodeFailures(record.FailuresJSON) {
 			failures[proxy.StreamStrategy(key)] = value
 		}
-		out[provider] = &ProviderStrategyState{
+		existing, ok := out[provider]
+		candidate := &ProviderStrategyState{
 			Provider:       provider,
 			Preferred:      proxy.StreamStrategy(record.Preferred),
 			Failures:       failures,
@@ -101,6 +142,9 @@ func (s *MySQLStrategyStore) List() map[string]*ProviderStrategyState {
 			LastStrategy:   proxy.StreamStrategy(record.LastStrategy),
 			TotalFailures:  record.TotalFailures,
 			TotalSuccesses: record.TotalSuccesses,
+		}
+		if !ok || candidate.LastUpdate.After(existing.LastUpdate) {
+			out[provider] = candidate
 		}
 	}
 	return out

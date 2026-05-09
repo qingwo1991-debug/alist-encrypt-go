@@ -173,6 +173,13 @@ func (s *StreamProxy) rangeProbeTimeout() time.Duration {
 	return time.Duration(s.cfg.AlistServer.RangeProbeTimeoutSeconds) * time.Second
 }
 
+func (s *StreamProxy) chunkedSeekMaxDiscardBytes() int64 {
+	if s == nil || s.cfg == nil || s.cfg.AlistServer.ChunkedSeekMaxDiscardBytes <= 0 {
+		return 8 * 1024 * 1024
+	}
+	return s.cfg.AlistServer.ChunkedSeekMaxDiscardBytes
+}
+
 func (s *StreamProxy) rangeCompatHost(targetURL string) string {
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
@@ -544,12 +551,18 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	return s.streamDecryptResponse(w, r, resp, passwdInfo, fileSize, rangeHeader, strategy, targetURL, compatStorageKey)
 }
 
-// ProxyUploadEncrypt uploads with encryption
-func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
+// ProxyUploadEncrypt uploads with encryption.
+// startOffset should be the absolute file offset for chunked/resume uploads.
+func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, startOffset int64) error {
 	// Create encryption stream
 	flowEnc, err := encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
 	if err != nil {
 		return errors.NewEncryptionErrorWithCause("failed to create cipher", err)
+	}
+	if startOffset > 0 {
+		if err := flowEnc.SetPosition(startOffset); err != nil {
+			return errors.NewEncryptionErrorWithCause("failed to set upload offset", err)
+		}
 	}
 
 	encryptedBody := flowEnc.EncryptReader(r.Body)
@@ -617,6 +630,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 }
 
 func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
+	req.Header.Set("Accept-Encoding", "identity")
 	if strategy == StreamStrategyFull || strategy == StreamStrategyChunked {
 		req.Header.Del("Range")
 	}
@@ -781,6 +795,14 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	readerToStream := flowEnc.DecryptReader(resp.Body)
 	if activeRange != nil {
 		if strategy == StreamStrategyChunked {
+			maxDiscard := s.chunkedSeekMaxDiscardBytes()
+			if maxDiscard > 0 && activeRange.Start > maxDiscard {
+				return &StreamOutcome{
+					Err:           errors.NewProxyError("chunked seek offset too large"),
+					Retryable:     true,
+					FailureReason: "chunked_seek_too_large",
+				}
+			}
 			if err := discardBytes(resp.Body, activeRange.Start); err != nil {
 				result.Err = errors.NewProxyErrorWithCause("failed to discard range bytes", err)
 				return result

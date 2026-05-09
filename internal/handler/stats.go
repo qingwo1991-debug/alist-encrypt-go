@@ -37,6 +37,7 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 	webdavStats := h.webdavHandler.Stats()
 	proxyStream := getStreamStats(proxyStats)
 	webdavStream := getStreamStats(webdavStats)
+	selectorStats := getSelectorStats(proxyStats, webdavStats)
 
 	data := map[string]interface{}{
 		"version": config.Version,
@@ -49,6 +50,9 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 			"final_passthrough_count": proxyStream["final_passthrough_count"] + webdavStream["final_passthrough_count"],
 			"size_conflict_count":     proxyStream["size_conflict_count"] + webdavStream["size_conflict_count"],
 			"strategy_fallback_count": proxyStream["strategy_fallback_count"] + webdavStream["strategy_fallback_count"],
+			"strategy_reason_counts":  selectorStats["reason_counts"],
+			"provider_strategy":       selectorStats["provider_strategy"],
+			"recent_strategy_events":  selectorStats["recent_events"],
 		},
 		"cache": map[string]interface{}{
 			"path_cache":      h.fileDAO.PathCacheStats(),
@@ -60,6 +64,19 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondSuccess(w, data)
+}
+
+func getSelectorStats(stats ...map[string]interface{}) map[string]interface{} {
+	for _, item := range stats {
+		if selector, ok := item["strategy_selector"].(map[string]interface{}); ok && selector != nil {
+			return selector
+		}
+	}
+	return map[string]interface{}{
+		"reason_counts":     map[string]uint64{},
+		"provider_strategy": map[string]string{},
+		"recent_events":     []interface{}{},
+	}
 }
 
 func getStreamStats(stats map[string]interface{}) map[string]uint64 {
