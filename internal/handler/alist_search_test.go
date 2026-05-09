@@ -466,3 +466,60 @@ func TestResolveRemoveNameStripsOriginalPrefix(t *testing.T) {
 		t.Fatalf("captured name = %q, want %q", captured.Names[0], want)
 	}
 }
+
+func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: "",
+		EncPath:   []string{"/encrypt/*"},
+	}
+	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
+	leafDisplay := "sample_420HOI-291.mp4"
+	leafRaw := converter.ToRealName(leafDisplay)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Fatalf("upstream received Authorization header: %s", auth)
+		}
+		if auth := r.Header.Get("Authorizetoken"); auth != "" {
+			t.Fatalf("upstream received Authorizetoken header: %s", auth)
+		}
+		if auth := r.Header.Get("X-User-Token"); auth != "" {
+			t.Fatalf("upstream received X-User-Token header: %s", auth)
+		}
+
+		writeJSONResponse(w, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{
+						"name":   leafRaw,
+						"is_dir": false,
+						"size":   float64(222),
+						"type":   float64(2),
+					},
+				},
+				"total": float64(1),
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"hhd","scope":0,"page":1,"per_page":100,"password":""}`))
+	req.Header.Set("Authorization", "Bearer frontend-token")
+	req.Header.Set("Authorizetoken", "frontend-token")
+	rec := httptest.NewRecorder()
+	handler.HandleFsSearch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}

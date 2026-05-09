@@ -524,7 +524,7 @@ func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, bo
 	req, err := httputil.NewRequest(method, targetURL).
 		WithContext(srcReq.Context()).
 		WithBody(body).
-		CopyHeadersExcept(srcReq, "Content-Length").
+		CopyHeadersExcept(srcReq, "Content-Length", "Authorization", "Authorizetoken", "X-User-Token").
 		WithHeader("Content-Type", "application/json").
 		Build()
 	if err != nil {
