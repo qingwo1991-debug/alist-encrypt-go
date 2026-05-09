@@ -174,7 +174,18 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Host")
 	r.Host = ""
-	if !decryptEnabled || info.FileSize == 0 {
+	if !decryptEnabled {
+		if err := h.streamProxy.ProxyRequest(w, r, info.URL); err != nil {
+			log.Error().Err(err).Str("key", key).Msg("Failed to proxy redirect (passthrough)")
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+		}
+		return
+	}
+	if info.FileSize == 0 {
+		if h.cfg == nil || h.cfg.AlistServer.SizeUnknownStrict {
+			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
+			return
+		}
 		if err := h.streamProxy.ProxyRequest(w, r, info.URL); err != nil {
 			log.Error().Err(err).Str("key", key).Msg("Failed to proxy redirect (passthrough)")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -327,6 +338,10 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if fileInfo.Size == 0 {
+		if h.cfg == nil || h.cfg.AlistServer.SizeUnknownStrict {
+			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
+			return
+		}
 		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
 			log.Error().Err(err).Str("path", displayPath).Msg("Failed to proxy download (size unknown)")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)

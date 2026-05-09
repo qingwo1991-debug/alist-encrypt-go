@@ -2,8 +2,16 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/encryption"
 )
 
 type timeoutErr struct{}
@@ -11,6 +19,16 @@ type timeoutErr struct{}
 func (timeoutErr) Error() string   { return "timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newTestClient(fn roundTripFunc) *Client {
+	return &Client{Client: &http.Client{Transport: fn}}
+}
 
 func TestClassifyStreamErrorTimeout(t *testing.T) {
 	reason, retryable := classifyStreamError(context.DeadlineExceeded)
@@ -28,5 +46,155 @@ func TestClassifyStreamErrorTimeout(t *testing.T) {
 	}
 	if retryable {
 		t.Fatalf("expected retryable=false for net.Error timeout")
+	}
+}
+
+func TestProxyUploadEncryptUsesStartOffsetForChunkedUpload(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(64)
+	start := int64(17)
+	chunk := []byte("chunk-data-for-offset")
+
+	fullPlain := make([]byte, fileSize)
+	copy(fullPlain[start:], chunk)
+	fullEncrypted := make([]byte, len(fullPlain))
+	copy(fullEncrypted, fullPlain)
+
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to create flow enc: %v", err)
+	}
+	flow.Encrypt(fullEncrypted)
+	expectedChunk := fullEncrypted[start : start+int64(len(chunk))]
+
+	var received []byte
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		received = append([]byte(nil), body...)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("{}")),
+			Request:    r,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/fs/put", strings.NewReader(string(chunk)))
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	if err := sp.ProxyUploadEncrypt(rr, req, "http://upstream.local/put", passwd, fileSize, start); err != nil {
+		t.Fatalf("ProxyUploadEncrypt failed: %v", err)
+	}
+	if string(received) != string(expectedChunk) {
+		t.Fatalf("encrypted chunk mismatch")
+	}
+}
+
+func TestDecryptRequestForcesIdentityEncoding(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	var acceptEncoding string
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		acceptEncoding = r.Header.Get("Accept-Encoding")
+		headers := make(http.Header)
+		headers.Set("Content-Length", "16")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     headers,
+			Body:       io.NopCloser(strings.NewReader("0123456789abcdef")),
+			Request:    r,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/d/test.bin", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/file", passwd, 16, StreamStrategyFull, "/")
+	if result.Err != nil {
+		t.Fatalf("unexpected stream error: %v", result.Err)
+	}
+	if acceptEncoding != "identity" {
+		t.Fatalf("Accept-Encoding=%q, want identity", acceptEncoding)
+	}
+}
+
+func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(80)
+	firstStart := int64(0)
+	firstChunk := []byte("first-segment-plain")
+	secondStart := int64(len(firstChunk))
+	secondChunk := []byte("second-segment-plain-data")
+
+	fullPlain := make([]byte, fileSize)
+	copy(fullPlain[firstStart:], firstChunk)
+	copy(fullPlain[secondStart:], secondChunk)
+
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to create flow enc: %v", err)
+	}
+	fullCipher := make([]byte, len(fullPlain))
+	copy(fullCipher, fullPlain)
+	flow.Encrypt(fullCipher)
+
+	expectedFirst := fullCipher[firstStart : firstStart+int64(len(firstChunk))]
+	expectedSecond := fullCipher[secondStart : secondStart+int64(len(secondChunk))]
+
+	received := map[int][]byte{}
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		parsed, _ := url.Parse(r.URL.String())
+		part := parsed.Query().Get("part")
+		receivedPart := 1
+		if part == "2" {
+			receivedPart = 2
+		}
+		received[receivedPart] = append([]byte(nil), body...)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("{}")),
+			Request:    r,
+		}, nil
+	})
+
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+
+	req1 := httptest.NewRequest(http.MethodPut, "/api/fs/put", strings.NewReader(string(firstChunk)))
+	rr1 := httptest.NewRecorder()
+	if err := sp.ProxyUploadEncrypt(rr1, req1, "http://upstream.local/put?part=1", passwd, fileSize, firstStart); err != nil {
+		t.Fatalf("first chunk upload failed: %v", err)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPut, "/api/fs/put", strings.NewReader(string(secondChunk)))
+	rr2 := httptest.NewRecorder()
+	if err := sp.ProxyUploadEncrypt(rr2, req2, "http://upstream.local/put?part=2", passwd, fileSize, secondStart); err != nil {
+		t.Fatalf("second chunk upload failed: %v", err)
+	}
+
+	if string(received[1]) != string(expectedFirst) {
+		t.Fatalf("first encrypted chunk mismatch")
+	}
+	if string(received[2]) != string(expectedSecond) {
+		t.Fatalf("second encrypted chunk mismatch")
 	}
 }

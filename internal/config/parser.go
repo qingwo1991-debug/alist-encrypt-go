@@ -147,6 +147,8 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		ProbeQueueSize:              getIntField(raw, "probeQueueSize"),
 		ProbeMinSizeBytes:           getInt64Field(raw, "probeMinSizeBytes"),
 		PlayFirstFallback:           getBoolFieldWithDefault(raw, "playFirstFallback", true),
+		SizeUnknownStrict:           getBoolFieldWithDefault(raw, "sizeUnknownStrict", true),
+		ChunkedSeekMaxDiscardBytes:  getInt64Field(raw, "chunkedSeekMaxDiscardBytes"),
 	}
 
 	if passwdListRaw, ok := raw["passwdList"]; ok {
@@ -180,6 +182,12 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 	server.ProbeMaxDelayMs = clampInt(server.ProbeMaxDelayMs, 0, 120000)
 	server.ProbeCooldownMinutes = clampInt(server.ProbeCooldownMinutes, 1, 10080)
 	server.ProbeQueueSize = clampInt(server.ProbeQueueSize, 100, 10000)
+	if server.ChunkedSeekMaxDiscardBytes <= 0 {
+		server.ChunkedSeekMaxDiscardBytes = 8 * 1024 * 1024
+	}
+	if server.ChunkedSeekMaxDiscardBytes > 1<<30 {
+		server.ChunkedSeekMaxDiscardBytes = 1 << 30
+	}
 
 	return server
 }

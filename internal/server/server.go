@@ -219,6 +219,7 @@ func (s *Server) setupRoutes() {
 	// /api/fs/* - Alist API interception
 	r.POST("/api/fs/get", ginWrap(alistHandler.HandleFsGet))
 	r.POST("/api/fs/list", ginWrap(alistHandler.HandleFsList))
+	r.POST("/api/fs/search", ginWrap(alistHandler.HandleFsSearch))
 	r.PUT("/api/fs/put", ginWrap(alistHandler.HandleFsPut))
 	r.POST("/api/fs/remove", ginWrap(alistHandler.HandleFsRemove))
 	r.POST("/api/fs/rename", ginWrap(alistHandler.HandleFsRename))
