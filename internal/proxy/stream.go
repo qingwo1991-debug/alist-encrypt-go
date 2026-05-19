@@ -17,6 +17,7 @@ import (
 
 	stderrors "errors"
 
+	"github.com/alist-encrypt-go/internal/backoff"
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/errors"
@@ -83,6 +84,7 @@ type StreamProxy struct {
 	compatStore      RangeCompatStore
 	redirectRewriter RedirectRewriter
 	rangeStats       *rangeLearningStats
+	cbGate           *backoff.Gate // circuit breaker for upstream failures
 }
 
 // RedirectRewriter can rewrite upstream redirect locations for decrypt streams.
@@ -140,6 +142,7 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 		cfg:         cfg,
 		compatStore: NewMemoryRangeCompatStore(),
 		rangeStats:  newRangeLearningStats(),
+		cbGate:      backoff.NewGate(5, 30*time.Second), // 5 failures → 30s cooldown
 	}
 }
 
@@ -495,6 +498,10 @@ func (s *StreamProxy) RangeCompatStats() map[string]interface{} {
 
 // ProxyRequest forwards a request to the target and copies response
 func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targetURL string) error {
+	if !s.cbGate.Allow() {
+		return errors.NewProxyError("upstream temporarily unavailable (circuit open)")
+	}
+
 	req, err := httputil.NewRequest(r.Method, targetURL).
 		WithContext(r.Context()).
 		WithBodyReader(r.Body).
@@ -506,9 +513,16 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.cbGate.RecordFailure()
 		return errors.NewProxyErrorWithCause("failed to proxy request", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode >= 500 {
+		s.cbGate.RecordFailure()
+	} else {
+		s.cbGate.RecordSuccess()
+	}
 
 	// Copy response headers and write response
 	httputil.CopyResponseHeaders(w, resp)
@@ -534,6 +548,14 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	if !s.cbGate.Allow() {
+		return &StreamOutcome{
+			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
+			Retryable:     true,
+			FailureReason: "circuit_open",
+		}
+	}
+
 	rangeHeader := r.Header.Get("Range")
 	rangeSkipped := strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey)
 
@@ -657,6 +679,7 @@ func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
 func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	result := &StreamOutcome{}
 	if resp.StatusCode >= http.StatusInternalServerError {
+		s.cbGate.RecordFailure()
 		return &StreamOutcome{
 			Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
 			Retryable:     true,
@@ -695,6 +718,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 		return result
 	}
+
+	// Upstream responded successfully (< 500), reset circuit breaker
+	s.cbGate.RecordSuccess()
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
