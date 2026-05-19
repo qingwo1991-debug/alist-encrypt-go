@@ -167,12 +167,16 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		return
 	}
 
-	if ps.maxDelay > ps.minDelay {
-		delta := ps.maxDelay - ps.minDelay
-		sleep := ps.minDelay + time.Duration(rand.Int63n(int64(delta)))
-		time.Sleep(sleep)
-	} else if ps.minDelay > 0 {
-		time.Sleep(ps.minDelay)
+	// Only delay re-probes (items that already have cached data).
+	// First-time probes execute immediately to warm the cache before user clicks download.
+	_, hasCache := ps.fileDAO.GetFileSize(item.file.DisplayPath)
+	if hasCache && ps.maxDelay > 0 {
+		delay := ps.minDelay
+		if ps.maxDelay > ps.minDelay {
+			delta := ps.maxDelay - ps.minDelay
+			delay += time.Duration(rand.Int63n(int64(delta)))
+		}
+		time.Sleep(delay)
 	}
 
 	result := ps.resolver.ResolveSingle(context.Background(), item.file, item.authHeaders)
