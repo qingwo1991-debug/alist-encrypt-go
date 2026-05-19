@@ -1050,7 +1050,10 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	readerToStream := flowEnc.DecryptReader(resp.Body)
+	sniffOffset := int64(0)
+	if activeRange != nil {
+		sniffOffset = activeRange.Start
+	}
 	if activeRange != nil {
 		if strategy == StreamStrategyChunked {
 			maxDiscard := s.chunkedSeekMaxDiscardBytes()
@@ -1066,12 +1069,20 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 				return result
 			}
 		}
-		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), activeRange.ContentLength())
+	}
+	if strategy == StreamStrategyFull && fullRangeStart > 0 {
+		sniffOffset = fullRangeStart
+	}
+
+	readerToStream := flowEnc.DecryptReader(resp.Body)
+	if activeRange != nil {
+		readerToStream = io.LimitReader(readerToStream, activeRange.ContentLength())
 	}
 
 	// Sniff first bytes of decrypted output to detect wrong password/fileSize.
 	// Can be disabled via config (enableSniff: false) for performance.
-	if s.cfg == nil || s.cfg.AlistServer.EnableSniff {
+	if shouldSniffDecryptedContent(req.Method, resp.Header.Get("Content-Type"), sniffOffset) &&
+		(s.cfg == nil || s.cfg.AlistServer.EnableSniff) {
 		if sniffBytes, ok := sniffDecrypted(readerToStream); !ok {
 			resp.Body.Close()
 			return &StreamOutcome{
@@ -1418,4 +1429,18 @@ func sniffDecrypted(r io.Reader) (io.Reader, bool) {
 
 	// Prepend the consumed bytes
 	return io.MultiReader(bytes.NewReader(sample), r), true
+}
+
+func shouldSniffDecryptedContent(method, contentType string, startOffset int64) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	if startOffset > 0 {
+		return false
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if strings.HasPrefix(mediaType, "video/") || strings.HasPrefix(mediaType, "audio/") {
+		return false
+	}
+	return true
 }

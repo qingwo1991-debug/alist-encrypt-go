@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -196,5 +197,99 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 	}
 	if string(received[2]) != string(expectedSecond) {
 		t.Fatalf("second encrypted chunk mismatch")
+	}
+}
+
+func TestRangeSeekSkipsSniffForMidstreamBinaryPayload(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(2048)
+	plain := bytes.Repeat([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, 128)
+	if int64(len(plain)) != fileSize {
+		t.Fatalf("plain length=%d, want %d", len(plain), fileSize)
+	}
+	ciphertext := append([]byte(nil), plain...)
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to create flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	rangeStart := int64(1024)
+	rangeEnd := int64(1535)
+	expected := plain[rangeStart : rangeEnd+1]
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Range"); got != "bytes=1024-1535" {
+			t.Fatalf("upstream Range=%q", got)
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Range", "bytes 1024-1535/2048")
+		w.Header().Set("Content-Length", "512")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(ciphertext[rangeStart : rangeEnd+1])
+	}))
+	defer ts.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/d/test.bin", nil)
+	req.Header.Set("Range", "bytes=1024-1535")
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, ts.URL, passwd, fileSize, StreamStrategyRange, "/encrypt/test.bin")
+	if result.Err != nil {
+		t.Fatalf("unexpected stream error: %v", result.Err)
+	}
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d", rr.Code, http.StatusPartialContent)
+	}
+	if body := rr.Body.Bytes(); !bytes.Equal(body, expected) {
+		t.Fatalf("decrypted range mismatch: got %d bytes", len(body))
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 1024-1535/2048" {
+		t.Fatalf("Content-Range=%q", got)
+	}
+}
+
+func TestMediaContentTypeSkipsSniffAtStart(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(1024)
+	plain := bytes.Repeat([]byte{0, 1, 2, 3, 4, 5, 6, 7}, 128)
+	ciphertext := append([]byte(nil), plain...)
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to create flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(ciphertext)
+	}))
+	defer ts.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/d/test.ts", nil)
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, ts.URL, passwd, fileSize, StreamStrategyFull, "/encrypt/test.ts")
+	if result.Err != nil {
+		t.Fatalf("unexpected stream error: %v", result.Err)
+	}
+	if body := rr.Body.Bytes(); !bytes.Equal(body, plain) {
+		t.Fatalf("decrypted body mismatch: got %d bytes", len(body))
 	}
 }
