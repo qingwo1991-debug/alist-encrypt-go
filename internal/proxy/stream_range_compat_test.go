@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
 )
@@ -80,5 +81,145 @@ func TestPassthroughStatusNoLearning(t *testing.T) {
 	}
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status=%d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestSelectOptimalStrategyUsesChunkedForSmallSeekOnIncompatibleProvider(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+	cfg.AlistServer.ChunkedSeekMaxDiscardBytes = 8 * 1024 * 1024
+	sp := NewStreamProxy(cfg)
+
+	key := sp.rangeCompatKey("https://example.com/file", "/encrypt/movie.mkv")
+	if key == "" {
+		t.Fatal("empty compat key")
+	}
+	err := sp.compatStore.Upsert(key, RangeCompatState{
+		Incompatible: true,
+		NextProbeAt:  time.Now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("failed to seed compat store: %v", err)
+	}
+
+	got := sp.SelectOptimalStrategy("https://example.com/file", "/encrypt/movie.mkv", http.MethodGet, "bytes=1048576-")
+	if got != StreamStrategyChunked {
+		t.Fatalf("strategy=%s, want %s", got, StreamStrategyChunked)
+	}
+}
+
+func TestSelectOptimalStrategyUsesFullForLargeSeekOnIncompatibleProvider(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+	cfg.AlistServer.ChunkedSeekMaxDiscardBytes = 1024
+	sp := NewStreamProxy(cfg)
+
+	key := sp.rangeCompatKey("https://example.com/file", "/encrypt/movie.mkv")
+	if key == "" {
+		t.Fatal("empty compat key")
+	}
+	err := sp.compatStore.Upsert(key, RangeCompatState{
+		Incompatible: true,
+		NextProbeAt:  time.Now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("failed to seed compat store: %v", err)
+	}
+
+	got := sp.SelectOptimalStrategy("https://example.com/file", "/encrypt/movie.mkv", http.MethodGet, "bytes=4096-")
+	if got != StreamStrategyFull {
+		t.Fatalf("strategy=%s, want %s", got, StreamStrategyFull)
+	}
+}
+
+func TestSelectOptimalStrategyKeepsRangeWhenProviderCompatible(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+	sp := NewStreamProxy(cfg)
+
+	got := sp.SelectOptimalStrategy("https://example.com/file", "/encrypt/movie.mkv", http.MethodGet, "bytes=0-1023")
+	if got != StreamStrategyRange {
+		t.Fatalf("strategy=%s, want %s", got, StreamStrategyRange)
+	}
+}
+
+func TestClassifyRequestRangeMarksFirstFrameWindow(t *testing.T) {
+	profile := classifyRequestRange(http.MethodGet, "bytes=0-1048575")
+	if !profile.HasRange {
+		t.Fatal("expected range profile")
+	}
+	if !profile.IsFirstFrameHint {
+		t.Fatalf("expected first-frame hint, got %#v", profile)
+	}
+	if profile.EstimatedLength != 1048576 {
+		t.Fatalf("estimated length=%d, want 1048576", profile.EstimatedLength)
+	}
+}
+
+func TestClassifyRequestRangeDoesNotMarkLargeStartAsFirstFrame(t *testing.T) {
+	profile := classifyRequestRange(http.MethodGet, "bytes=2097152-4194304")
+	if !profile.HasRange {
+		t.Fatal("expected range profile")
+	}
+	if profile.IsFirstFrameHint {
+		t.Fatalf("did not expect first-frame hint, got %#v", profile)
+	}
+}
+
+func TestSelectOptimalStrategyUsesChunkedForOpenEndedFirstFrameOnIncompatibleProvider(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+	cfg.AlistServer.ChunkedSeekMaxDiscardBytes = 1
+	sp := NewStreamProxy(cfg)
+
+	key := sp.rangeCompatKey("https://example.com/file", "/encrypt/movie.mkv")
+	if key == "" {
+		t.Fatal("empty compat key")
+	}
+	err := sp.compatStore.Upsert(key, RangeCompatState{
+		Incompatible: true,
+		NextProbeAt:  time.Now().Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("failed to seed compat store: %v", err)
+	}
+
+	got := sp.SelectOptimalStrategy("https://example.com/file", "/encrypt/movie.mkv", http.MethodGet, "bytes=0-")
+	if got != StreamStrategyChunked {
+		t.Fatalf("strategy=%s, want %s", got, StreamStrategyChunked)
+	}
+}
+
+func TestSelectOptimalStrategyReusesRecentChunkedHint(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+	cfg.AlistServer.ChunkedSeekMaxDiscardBytes = 8 * 1024 * 1024
+	sp := NewStreamProxy(cfg)
+
+	sp.RecordPlaybackHint("https://example.com/file", "/encrypt/movie.mkv", StreamStrategyChunked)
+
+	got := sp.SelectOptimalStrategy("https://example.com/file", "/encrypt/movie.mkv", http.MethodGet, "bytes=1048576-2097151")
+	if got != StreamStrategyChunked {
+		t.Fatalf("strategy=%s, want %s", got, StreamStrategyChunked)
+	}
+}
+
+func TestSelectOptimalStrategyIgnoresExpiredPlaybackHint(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+	sp := NewStreamProxy(cfg)
+
+	key := sp.rangeCompatKey("https://example.com/file", "/encrypt/movie.mkv")
+	if key == "" {
+		t.Fatal("empty compat key")
+	}
+	sp.playbackHints[key] = recentPlaybackHint{
+		Strategy:  StreamStrategyChunked,
+		UpdatedAt: time.Now().Add(-recentPlaybackHintTTL - time.Second),
+	}
+
+	got := sp.SelectOptimalStrategy("https://example.com/file", "/encrypt/movie.mkv", http.MethodGet, "bytes=1048576-2097151")
+	if got != StreamStrategyRange {
+		t.Fatalf("strategy=%s, want %s", got, StreamStrategyRange)
 	}
 }

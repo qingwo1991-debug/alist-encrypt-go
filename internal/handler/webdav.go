@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -41,6 +40,9 @@ type WebDAVHandler struct {
 	finalPassthroughCount uint64
 	sizeConflictCount     uint64
 	strategyFallbackCount uint64
+	firstFrameCount       uint64
+	firstFrameFallbacks   uint64
+	warmupEnqueueCount    uint64
 }
 
 const propfindPersistentWriteThreshold = 128
@@ -59,7 +61,16 @@ func (h *WebDAVHandler) Stats() map[string]interface{} {
 			"final_passthrough_count": atomic.LoadUint64(&h.finalPassthroughCount),
 			"size_conflict_count":     atomic.LoadUint64(&h.sizeConflictCount),
 			"strategy_fallback_count": atomic.LoadUint64(&h.strategyFallbackCount),
+			"first_frame_count":       atomic.LoadUint64(&h.firstFrameCount),
+			"first_frame_fallbacks":   atomic.LoadUint64(&h.firstFrameFallbacks),
+			"warmup_enqueue_count":    atomic.LoadUint64(&h.warmupEnqueueCount),
 		},
+		"probe_scheduler": func() map[string]interface{} {
+			if h.probe != nil {
+				return h.probe.Stats()
+			}
+			return nil
+		}(),
 		"strategy_selector": selectorStats,
 	}
 }
@@ -246,147 +257,36 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	trace.Logf(r.Context(), "webdav-get", "File size: %d, strategy: %s", fileSize, usedStrategy)
 	fileItem := FileItem{
-		DisplayPath:   davPath,
-		EncryptedPath: realPath,
-		TargetURL:     targetURL,
-		FileName:      path.Base(davPath),
+		DisplayPath:      davPath,
+		EncryptedPath:    realPath,
+		TargetURL:        targetURL,
+		FileName:         path.Base(davPath),
+		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, davPath),
 	}
-	authHeaders := make(http.Header)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		authHeaders.Set("Authorization", auth)
-	}
-	if cookie := r.Header.Get("Cookie"); cookie != "" {
-		authHeaders.Set("Cookie", cookie)
-	}
-	if fileSize == 0 {
-		if h.sizeResolver != nil {
-			fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
-			if fresh.Error == nil && fresh.Size > 0 {
-				fileSize = fresh.Size
-			}
-		}
-	}
-	if fileSize == 0 {
-		if h.cfg == nil || h.cfg.AlistServer.SizeUnknownStrict {
-			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
-			return
-		}
-		trace.Logf(r.Context(), "webdav-get", "Size unknown, passthrough")
-		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
-			log.Error().Err(err).Str("path", davPath).Msg("WebDAV passthrough failed")
-			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
-		}
-		return
-	}
-
 	trace.Logf(r.Context(), "webdav-get", "Proxying with decryption, target=%s", targetURL)
-	providerKey := ProviderKey(targetURL, davPath)
-	compatStorageKey := buildRangeCompatStorageKey(passwdInfo, davPath)
-		// Single-strategy dispatch based on range compatibility cache.
-		strategy := h.streamProxy.SelectOptimalStrategy(targetURL, compatStorageKey, r.Header.Get("Range") != "")
-		if override, ok := selectStrategyOverride(h.cfg, davPath); ok {
-			strategy = override
-		}
-
-		trySingle := func(size int64) (bool, string, error) {
-			result := h.streamProxy.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, size, strategy, compatStorageKey)
-			if result.Err == nil && !result.Retryable {
-				if h.strategySel != nil && !result.NoLearning {
-					h.strategySel.RecordSuccess(providerKey, strategy)
-				}
-				if h.sizeResolver != nil && r.Method == http.MethodGet && !result.NoLearning {
-					metaSize := size
-					if result.ExpectedBytes > 0 {
-						metaSize = result.ExpectedBytes
-					}
-					h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, result.StatusCode, result.ContentType, result.ETag)
-				}
-				return true, "", nil
-			}
-
-			reason := result.FailureReason
-			if reason == "" && result.Err != nil {
-				reason = "stream_error"
-			}
-			if reason == "" {
-				reason = "unknown"
-			}
-
-			if h.strategySel != nil && !result.NoLearning && result.Retryable && !result.ResponseStarted {
-				h.strategySel.RecordFailure(providerKey, strategy, reason)
-			}
-
-			// Only retry on range_unsatisfiable (server-side file size mismatch)
-			if reason == "range_unsatisfiable" && !result.ResponseStarted {
-				trace.Logf(r.Context(), "range-fix", "Range unsatisfiable, retrying with Full strategy")
-				fallback := h.streamProxy.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, size, proxy.StreamStrategyFull, compatStorageKey)
-				if fallback.Err == nil && !fallback.Retryable {
-					if h.strategySel != nil && !fallback.NoLearning {
-						h.strategySel.RecordSuccess(providerKey, proxy.StreamStrategyFull)
-					}
-					if h.sizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
-						metaSize := size
-						if fallback.ExpectedBytes > 0 {
-							metaSize = fallback.ExpectedBytes
-						}
-						h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag)
-					}
-					return true, "", nil
-				}
-				if fallback.Err != nil {
-					return false, "range_unsatisfiable", fallback.Err
-				}
-				return false, "range_unsatisfiable", result.Err
-			}
-
-			if result.Err != nil {
-				return false, reason, result.Err
-			}
-			return false, reason, fmt.Errorf("strategy %s failed: %s", strategy, reason)
-		}
-
-		success, lastFailure, lastErr := trySingle(fileSize)
-	if success {
-		return
-	}
-
-	if h.sizeResolver != nil {
-		fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
-		if fresh.Error == nil && fresh.Size > 0 {
-			if fileSize > 0 && fresh.Size != fileSize {
-				h.sizeResolver.RecordMetaConflict(providerKey)
-				atomic.AddUint64(&h.sizeConflictCount, 1)
-			}
-			fileSize = fresh.Size
-			success, lastFailure, lastErr = trySingle(fileSize)
-			if success {
-				return
-			}
-		}
-	}
-
-	if lastFailure != "range_unsatisfiable" && h.cfg != nil && h.cfg.AlistServer.PlayFirstFallback {
-		// WARNING: PlayFirstFallback is deprecated as it returns encrypted content to the user.
-		log.Warn().Str("path", davPath).Str("failure", lastFailure).Msg("PlayFirstFallback: proxying encrypted WebDAV content as final fallback (consider disabling playFirstFallback in config)")
-		atomic.AddUint64(&h.finalPassthroughCount, 1)
-		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err == nil {
-			return
-		} else {
-			lastErr = err
-		}
-	}
-
-	if lastFailure == "range_unsatisfiable" {
-		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-	if lastErr != nil {
-		log.Error().Err(lastErr).Str("path", davPath).Str("failure", lastFailure).Msg("WebDAV GET decryption failed")
-		RespondHTTPErrorWithStatus(w, "Decryption error: "+lastFailure, http.StatusBadGateway)
-	} else if !success {
-		log.Error().Str("path", davPath).Str("failure", lastFailure).Msg("WebDAV GET decryption failed with no specific error")
-		RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
-	}
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter:        w,
+		Request:               r,
+		Config:                h.cfg,
+		Probe:                 h.probe,
+		StreamProxy:           h.streamProxy,
+		SizeResolver:          h.sizeResolver,
+		StrategySel:           h.strategySel,
+		PasswdInfo:            passwdInfo,
+		FileItem:              fileItem,
+		TargetURL:             targetURL,
+		ProviderKey:           ProviderKey(targetURL, davPath),
+		Path:                  davPath,
+		InitialSize:           fileSize,
+		OverridePath:          davPath,
+		CompatKey:             buildRangeCompatStorageKey(passwdInfo, davPath),
+		FailureLogMsg:         "WebDAV GET decryption failed",
+		FinalPassthroughCount: &h.finalPassthroughCount,
+		SizeConflictCount:     &h.sizeConflictCount,
+		FirstFrameCount:       &h.firstFrameCount,
+		FirstFrameFallbacks:   &h.firstFrameFallbacks,
+		WarmupEnqueueCount:    &h.warmupEnqueueCount,
+	})
 }
 
 // handlePut handles PUT requests with encryption and filename encryption

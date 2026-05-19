@@ -50,6 +50,9 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 			"final_passthrough_count": proxyStream["final_passthrough_count"] + webdavStream["final_passthrough_count"],
 			"size_conflict_count":     proxyStream["size_conflict_count"] + webdavStream["size_conflict_count"],
 			"strategy_fallback_count": proxyStream["strategy_fallback_count"] + webdavStream["strategy_fallback_count"],
+			"first_frame_count":       proxyStream["first_frame_count"] + webdavStream["first_frame_count"],
+			"first_frame_fallbacks":   proxyStream["first_frame_fallbacks"] + webdavStream["first_frame_fallbacks"],
+			"warmup_enqueue_count":    proxyStream["warmup_enqueue_count"] + webdavStream["warmup_enqueue_count"],
 			"strategy_reason_counts":  selectorStats["reason_counts"],
 			"provider_strategy":       selectorStats["provider_strategy"],
 			"recent_strategy_events":  selectorStats["recent_events"],
@@ -61,6 +64,7 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 		"proxy":              proxyStats,
 		"webdav":             webdavStats,
 		"range_compat_cache": h.streamProxy.RangeCompatStats(),
+		"probe_scheduler":    getProbeSchedulerStats(proxyStats, webdavStats),
 	}
 
 	RespondSuccess(w, data)
@@ -84,6 +88,9 @@ func getStreamStats(stats map[string]interface{}) map[string]uint64 {
 		"final_passthrough_count": 0,
 		"size_conflict_count":     0,
 		"strategy_fallback_count": 0,
+		"first_frame_count":       0,
+		"first_frame_fallbacks":   0,
+		"warmup_enqueue_count":    0,
 	}
 
 	rawStream, ok := stats["stream"].(map[string]interface{})
@@ -104,4 +111,13 @@ func getStreamStats(stats map[string]interface{}) map[string]uint64 {
 		}
 	}
 	return out
+}
+
+func getProbeSchedulerStats(stats ...map[string]interface{}) map[string]interface{} {
+	for _, item := range stats {
+		if probeStats, ok := item["probe_scheduler"].(map[string]interface{}); ok && probeStats != nil {
+			return probeStats
+		}
+	}
+	return map[string]interface{}{}
 }

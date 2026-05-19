@@ -36,9 +36,13 @@ type ProxyHandler struct {
 	strategyCache         *StrategyCache
 	sizeResolver          *FileSizeResolver
 	strategySel           *StrategySelector
+	probe                 *ProbeScheduler
 	finalPassthroughCount uint64
 	sizeConflictCount     uint64
 	strategyFallbackCount uint64
+	firstFrameCount       uint64
+	firstFrameFallbacks   uint64
+	warmupEnqueueCount    uint64
 }
 
 const maxRedirectEntries = 10000
@@ -76,7 +80,16 @@ func (h *ProxyHandler) Stats() map[string]interface{} {
 			"final_passthrough_count": atomic.LoadUint64(&h.finalPassthroughCount),
 			"size_conflict_count":     atomic.LoadUint64(&h.sizeConflictCount),
 			"strategy_fallback_count": atomic.LoadUint64(&h.strategyFallbackCount),
+			"first_frame_count":       atomic.LoadUint64(&h.firstFrameCount),
+			"first_frame_fallbacks":   atomic.LoadUint64(&h.firstFrameFallbacks),
+			"warmup_enqueue_count":    atomic.LoadUint64(&h.warmupEnqueueCount),
 		},
+		"probe_scheduler": func() map[string]interface{} {
+			if h.probe != nil {
+				return h.probe.Stats()
+			}
+			return nil
+		}(),
 		"strategy_selector": func() map[string]interface{} {
 			if h.strategySel != nil {
 				return h.strategySel.Stats()
@@ -103,6 +116,10 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 	}
 	go h.cleanupRedirects()
 	return h
+}
+
+func (h *ProxyHandler) SetProbeScheduler(probe *ProbeScheduler) {
+	h.probe = probe
 }
 
 func (h *ProxyHandler) cleanupRedirects() {
@@ -180,14 +197,14 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		}
 	}
-		if info.FileSize == 0 {
-			// When decryption is explicitly requested (decode=1), we must not
-			// silently return encrypted content. SizeUnknownStrict only
-			// controls non-decrypt paths.
-			log.Warn().Str("key", key).Msg("Decryption requested but file size is unknown, refusing to serve encrypted content")
-			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size for decryption", http.StatusBadGateway)
-			return
-		}
+	if info.FileSize == 0 {
+		// When decryption is explicitly requested (decode=1), we must not
+		// silently return encrypted content. SizeUnknownStrict only
+		// controls non-decrypt paths.
+		log.Warn().Str("key", key).Msg("Decryption requested but file size is unknown, refusing to serve encrypted content")
+		RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size for decryption", http.StatusBadGateway)
+		return
+	}
 
 	passwdInfo := &config.PasswdInfo{
 		Password: info.Password,
@@ -324,148 +341,35 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)
 	fileItem := FileItem{
-		DisplayPath:   displayPath,
-		EncryptedPath: realPath,
-		TargetURL:     targetURL,
-		FileName:      path.Base(displayPath),
+		DisplayPath:      displayPath,
+		EncryptedPath:    realPath,
+		TargetURL:        targetURL,
+		FileName:         path.Base(displayPath),
+		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
 	}
-	authHeaders := make(http.Header)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		authHeaders.Set("Authorization", auth)
-	}
-	if cookie := r.Header.Get("Cookie"); cookie != "" {
-		authHeaders.Set("Cookie", cookie)
-	}
-	if fileInfo.Size == 0 {
-		if h.sizeResolver != nil {
-			fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
-			if fresh.Error == nil && fresh.Size > 0 {
-				fileInfo.Size = fresh.Size
-			}
-		}
-	}
-	if fileInfo.Size == 0 {
-		if h.cfg == nil || h.cfg.AlistServer.SizeUnknownStrict {
-			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
-			return
-		}
-		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err != nil {
-			log.Error().Err(err).Str("path", displayPath).Msg("Failed to proxy download (size unknown)")
-			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
-		}
-		return
-	}
-		providerKey := ProviderKey(targetURL, displayPath)
-		compatStorageKey := buildRangeCompatStorageKey(passwdInfo, displayPath)
-
-		// Single-strategy dispatch based on range compatibility cache.
-		// Eliminates the wasteful retry loop on known-incompatible providers.
-		strategy := h.streamProxy.SelectOptimalStrategy(targetURL, compatStorageKey, r.Header.Get("Range") != "")
-		if override, ok := selectStrategyOverride(h.cfg, displayPath); ok {
-			strategy = override
-		}
-
-		trySingle := func(size int64) (bool, string, error) {
-			result := h.streamProxy.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, size, strategy, compatStorageKey)
-			if result.Err == nil && !result.Retryable {
-				if h.strategySel != nil && !result.NoLearning {
-					h.strategySel.RecordSuccess(providerKey, strategy)
-				}
-				if h.sizeResolver != nil && r.Method == http.MethodGet && !result.NoLearning {
-					metaSize := size
-					if result.ExpectedBytes > 0 {
-						metaSize = result.ExpectedBytes
-					}
-					h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, result.StatusCode, result.ContentType, result.ETag)
-				}
-				return true, "", nil
-			}
-
-			reason := result.FailureReason
-			if reason == "" && result.Err != nil {
-				reason = "stream_error"
-			}
-			if reason == "" {
-				reason = "unknown"
-			}
-
-			if h.strategySel != nil && !result.NoLearning && result.Retryable && !result.ResponseStarted {
-				h.strategySel.RecordFailure(providerKey, strategy, reason)
-			}
-
-			// Only retry on range_unsatisfiable (server-side file size changed)
-			if reason == "range_unsatisfiable" && !result.ResponseStarted {
-				trace.Logf(r.Context(), "range-fix", "Range unsatisfiable, retrying with Full strategy")
-				fallback := h.streamProxy.ProxyDownloadDecryptWithStrategyForStorage(w, r, targetURL, passwdInfo, size, proxy.StreamStrategyFull, compatStorageKey)
-				if fallback.Err == nil && !fallback.Retryable {
-					if h.strategySel != nil && !fallback.NoLearning {
-						h.strategySel.RecordSuccess(providerKey, proxy.StreamStrategyFull)
-					}
-					if h.sizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
-						metaSize := size
-						if fallback.ExpectedBytes > 0 {
-							metaSize = fallback.ExpectedBytes
-						}
-						h.sizeResolver.RecordPlaybackSuccess(r.Context(), fileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag)
-					}
-					return true, "", nil
-				}
-				if fallback.Err != nil {
-					return false, "range_unsatisfiable", fallback.Err
-				}
-				return false, "range_unsatisfiable", result.Err
-			}
-
-			if result.Err != nil {
-				return false, reason, result.Err
-			}
-			return false, reason, fmt.Errorf("strategy %s failed: %s", strategy, reason)
-		}
-
-		success, lastFailure, lastErr := trySingle(fileInfo.Size)
-	if success {
-		return
-	}
-
-	if h.sizeResolver != nil {
-		fresh := h.sizeResolver.ResolveSingleFresh(r.Context(), fileItem, authHeaders)
-		if fresh.Error == nil && fresh.Size > 0 {
-			if fileInfo.Size > 0 && fresh.Size != fileInfo.Size {
-				h.sizeResolver.RecordMetaConflict(providerKey)
-				atomic.AddUint64(&h.sizeConflictCount, 1)
-			}
-			fileInfo.Size = fresh.Size
-			success, lastFailure, lastErr = trySingle(fileInfo.Size)
-			if success {
-				return
-			}
-		}
-	}
-
-	if lastErr == nil && lastFailure != "range_unsatisfiable" && h.cfg != nil && h.cfg.AlistServer.PlayFirstFallback {
-		// WARNING: PlayFirstFallback is deprecated as it returns encrypted content to the user.
-		// It is kept ONLY for backward compatibility with existing configs that explicitly enable it.
-		// New installations default to false. Consider disabling this in your config.
-		log.Warn().Str("path", displayPath).Str("failure", lastFailure).Msg("PlayFirstFallback: proxying encrypted content as final fallback (consider disabling playFirstFallback in config)")
-		atomic.AddUint64(&h.finalPassthroughCount, 1)
-		if err := h.streamProxy.ProxyRequest(w, r, targetURL); err == nil {
-			return
-		} else {
-			lastErr = err
-		}
-	}
-
-	if lastFailure == "range_unsatisfiable" {
-		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-	if lastErr != nil {
-		log.Error().Err(lastErr).Str("path", displayPath).Str("failure", lastFailure).Msg("Failed to decrypt download")
-		RespondHTTPErrorWithStatus(w, "Decryption error: "+lastFailure, http.StatusBadGateway)
-	} else if !success {
-		log.Error().Str("path", displayPath).Str("failure", lastFailure).Msg("Decryption failed with no specific error")
-		RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
-	}
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter:        w,
+		Request:               r,
+		Config:                h.cfg,
+		Probe:                 h.probe,
+		StreamProxy:           h.streamProxy,
+		SizeResolver:          h.sizeResolver,
+		StrategySel:           h.strategySel,
+		PasswdInfo:            passwdInfo,
+		FileItem:              fileItem,
+		TargetURL:             targetURL,
+		ProviderKey:           ProviderKey(targetURL, displayPath),
+		Path:                  displayPath,
+		InitialSize:           fileInfo.Size,
+		OverridePath:          displayPath,
+		CompatKey:             buildRangeCompatStorageKey(passwdInfo, displayPath),
+		FailureLogMsg:         "Failed to decrypt download",
+		FinalPassthroughCount: &h.finalPassthroughCount,
+		SizeConflictCount:     &h.sizeConflictCount,
+		FirstFrameCount:       &h.firstFrameCount,
+		FirstFrameFallbacks:   &h.firstFrameFallbacks,
+		WarmupEnqueueCount:    &h.warmupEnqueueCount,
+	})
 }
 
 // HandleProxy handles catch-all proxy to Alist

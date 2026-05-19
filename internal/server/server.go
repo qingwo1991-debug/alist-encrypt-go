@@ -128,6 +128,7 @@ func (s *Server) setupRoutes() {
 	}
 	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
+	proxyHandler.SetProbeScheduler(probeScheduler)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
