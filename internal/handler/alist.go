@@ -767,6 +767,14 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 
 	// Check if filename encryption is needed
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(filePath)
+	if !found {
+		// Fallback: check for X-OpenEncrypt-Rule-* headers from openencrypt-android
+		if headerInfo := PasswdInfoFromOpenEncryptHeaders(r); headerInfo != nil {
+			passwdInfo = headerInfo
+			found = true
+			trace.Logf(r.Context(), "get", "Using encryption config from X-OpenEncrypt-Rule headers")
+		}
+	}
 	if found && passwdInfo.EncName {
 		// Check if it's a directory first
 		fileInfo, exists := h.fileDAO.Get(url.QueryEscape(filePath))

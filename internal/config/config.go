@@ -264,7 +264,7 @@ func DefaultConfig() *Config {
 			ProbeCooldownMinutes:        1440,
 			ProbeQueueSize:              1000,
 			ProbeMinSizeBytes:           100 * 1024 * 1024,
-			PlayFirstFallback:           true,
+			PlayFirstFallback:           false,
 			SizeUnknownStrict:           true,
 			ChunkedSeekMaxDiscardBytes:  8 * 1024 * 1024,
 			PasswdList: []PasswdInfo{
