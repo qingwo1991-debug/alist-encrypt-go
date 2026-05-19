@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -179,7 +180,10 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		time.Sleep(delay)
 	}
 
-	result := ps.resolver.ResolveSingle(context.Background(), item.file, item.authHeaders)
+	// Fallback to configured scan credentials if no user auth available
+	authHeaders := ps.ensureAuth(item.authHeaders)
+
+	result := ps.resolver.ResolveSingle(context.Background(), item.file, authHeaders)
 	if result.Error == nil && result.Size > 0 {
 		ps.fileDAO.SetFileSize(item.file.DisplayPath, result.Size, 24*time.Hour)
 	}
@@ -232,4 +236,33 @@ func splitProvider(providerKey string) (string, string) {
 		return parts[0], parts[1]
 	}
 	return providerKey, ""
+}
+
+// ensureAuth returns auth headers, falling back to configured scan credentials
+// if the provided headers have no Authorization or Cookie.
+func (ps *ProbeScheduler) ensureAuth(headers http.Header) http.Header {
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	// User-provided auth takes priority
+	if headers.Get("Authorization") != "" || headers.Get("Cookie") != "" {
+		return headers
+	}
+	if ps.cfg == nil {
+		return headers
+	}
+	// Try scan auth header first
+	if raw := strings.TrimSpace(ps.cfg.AlistServer.ScanAuthHeader); raw != "" {
+		headers.Set("Authorization", raw)
+		return headers
+	}
+	// Fall back to scan username/password (Basic auth)
+	username := ps.cfg.AlistServer.ScanUsername
+	password := ps.cfg.AlistServer.ScanPassword
+	if username != "" || password != "" {
+		token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		headers.Set("Authorization", "Basic "+token)
+		return headers
+	}
+	return headers
 }
