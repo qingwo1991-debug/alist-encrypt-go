@@ -68,7 +68,7 @@ func (h *ProxyHandler) executeStrategyHTTP(strategy StrategyType, displayPath, r
 
 	case StrategyHEADRequest:
 		// Execute HEAD request
-		headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+		headURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), urlPrefix+realPath)
 		size, err := h.executeHEADRequestHTTP(headURL, realPath, r)
 		if err != nil {
 			return nil, err
@@ -99,7 +99,7 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 	// Level 2.5: MySQL/meta resolver (if enabled)
 	if h.sizeResolver != nil {
 		trace.Logf(ctx, "fallback", "Cache miss, trying size resolver")
-		headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+		headURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), urlPrefix+realPath)
 		file := FileItem{
 			DisplayPath:   displayPath,
 			EncryptedPath: realPath,
@@ -124,7 +124,7 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 
 	// Level 3: HEAD request (slow, 10-50ms)
 	trace.Logf(ctx, "fallback", "Cache miss, trying HEAD request")
-	headURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+	headURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), urlPrefix+realPath)
 	size, err := h.executeHEADRequestHTTP(headURL, realPath, r)
 	if err == nil && size > 0 {
 		// Cache for 24 hours

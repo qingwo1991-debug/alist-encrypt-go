@@ -23,6 +23,13 @@ func BuildTargetURLWithQuery(baseURL, path, query string) string {
 	return url
 }
 
+// BuildTargetURLStripped constructs the target URL WITHOUT query parameters.
+// Use this when the path has been modified (e.g. filename encryption) and the
+// original query parameters (like ?sign=xxx) are invalid for the new path.
+func BuildTargetURLStripped(baseURL, path string) string {
+	return BuildTargetURLWithQuery(baseURL, path, "")
+}
+
 // JoinPath safely joins path segments, handling slashes
 func JoinPath(base string, paths ...string) string {
 	result := strings.TrimSuffix(base, "/")
