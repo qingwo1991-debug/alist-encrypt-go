@@ -954,7 +954,11 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	if strategy == StreamStrategyFull {
+	// Preserve range start for Full strategy fallback: when Range is unsupported,
+	// we download the full file but seek in the cipher + discard upstream bytes.
+	fullRangeStart := int64(0)
+	if strategy == StreamStrategyFull && activeRange != nil {
+		fullRangeStart = activeRange.Start
 		activeRange = nil
 	}
 
@@ -989,8 +993,14 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
+	// For Full strategy with seek: build a synthetic range for correct 206 headers.
+	fullSeekRange := activeRange
+	if strategy == StreamStrategyFull && fullRangeStart > 0 {
+		fullSeekRange = &httputil.Range{Start: fullRangeStart, End: fileSize - 1}
+	}
+
 	statusCode := http.StatusOK
-	if activeRange != nil {
+	if fullSeekRange != nil {
 		statusCode = http.StatusPartialContent
 	}
 
@@ -998,10 +1008,10 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	httputil.CopyResponseHeaders(w, resp, "Content-Length", "Content-Range", "Accept-Ranges")
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	if activeRange != nil {
-		w.Header().Set("Content-Range", activeRange.ContentRangeHeader(fileSize))
-		w.Header().Set("Content-Length", strconv.FormatInt(activeRange.ContentLength(), 10))
-		result.ExpectedBytes = activeRange.ContentLength()
+	if fullSeekRange != nil {
+		w.Header().Set("Content-Range", fullSeekRange.ContentRangeHeader(fileSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(fullSeekRange.ContentLength(), 10))
+		result.ExpectedBytes = fullSeekRange.ContentLength()
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 		result.ExpectedBytes = fileSize
@@ -1025,6 +1035,19 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 			s.recordRangeSuccess(targetURL, compatStorageKey)
 		}
 		return result
+	}
+
+	// For Full strategy with a seek: position cipher and discard upstream bytes
+	// BEFORE creating the decrypt reader, to sync stream positions.
+	if strategy == StreamStrategyFull && fullRangeStart > 0 {
+		if err := flowEnc.SetPosition(fullRangeStart); err != nil {
+			result.Err = errors.NewDecryptionErrorWithCause("failed to set position for full seek", err)
+			return result
+		}
+		if err := discardBytes(resp.Body, fullRangeStart); err != nil {
+			result.Err = errors.NewProxyErrorWithCause("failed to discard bytes for full seek", err)
+			return result
+		}
 	}
 
 	readerToStream := flowEnc.DecryptReader(resp.Body)
