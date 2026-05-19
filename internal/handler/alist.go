@@ -912,7 +912,7 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 	if passwdInfo.EncName {
 		realPath = h.proxyHandler.convertDisplayToRealPath(displayPath, passwdInfo)
 	}
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/d"+realPath, r)
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/d"+realPath)
 	file := FileItem{
 		DisplayPath:      displayPath,
 		EncryptedPath:    realPath,

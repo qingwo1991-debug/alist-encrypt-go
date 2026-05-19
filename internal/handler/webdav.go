@@ -236,7 +236,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Convert display path to real encrypted path
 	realPath := h.convertToRealPath(davPath, passwdInfo)
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s", davPath, realPath)
 
@@ -441,7 +441,7 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 		log.Debug().Str("original", davPath).Str("encrypted", realPath).Msg("WebDAV PUT filename encrypted")
 	}
 
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
 		log.Error().Err(err).Str("path", davPath).Msg("WebDAV PUT encryption failed")
@@ -459,7 +459,7 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 
 	// Convert display path to real encrypted path
 	realPath := h.convertToRealPath(davPath, passwdInfo)
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 	proxyReq, err := httputil.NewRequest("DELETE", targetURL).
 		WithContext(r.Context()).
@@ -525,7 +525,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realSrcPath, r)
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realSrcPath)
 
 	body, _ := io.ReadAll(r.Body)
 	proxyReq, err := httputil.NewRequest(method, targetURL).
@@ -581,7 +581,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	}
 
 	// Step 1: Request Alist with the determined path
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+requestPath, r)
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+requestPath)
 
 	if h.negCache != nil && h.negCache.IsBlocked(requestPath) {
 		trace.Logf(r.Context(), "propfind", "Negative cache hit: %s", requestPath)
@@ -620,7 +620,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		if fileName != "" && fileName != "/" && fileName != "." {
 			// Convert to encrypted path and retry
 			realPath := h.convertToRealPath(davPath, passwdInfo)
-			retryURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/dav"+realPath, r)
+			retryURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 			trace.Logf(r.Context(), "propfind", "404 retry: %s -> %s", davPath, realPath)
 
