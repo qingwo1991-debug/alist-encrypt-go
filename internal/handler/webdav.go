@@ -542,7 +542,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		proxyReq.Header.Set("Destination", destination)
 	}
 
-	client := proxy.NewHTTPClient(h.cfg, 0)
+	client := proxy.NewHTTPClient(h.cfg, 30*time.Second)
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msgf("WebDAV %s failed", method)
@@ -599,7 +599,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	client := proxy.NewHTTPClient(h.cfg, 0)
+	client := proxy.NewHTTPClient(h.cfg, 30*time.Second)
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV PROPFIND failed")
