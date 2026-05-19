@@ -127,7 +127,7 @@ func GetPasswdOutward(password, encType string) string {
 	salt := "AES-CTR"
 	switch encType {
 	case "rc4md5":
-		salt = "RC4-MD5"
+		salt = "RC4" // Match Node.js alist-encrypt rc4Md5.js PBKDF2 salt
 	case "chacha20":
 		salt = "ChaCha20"
 	}
