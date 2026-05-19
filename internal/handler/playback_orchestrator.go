@@ -1,0 +1,259 @@
+package handler
+
+import (
+	"fmt"
+	"net/http"
+	"sync/atomic"
+
+	"github.com/rs/zerolog/log"
+
+	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/proxy"
+)
+
+type decryptPlaybackRequest struct {
+	ResponseWriter http.ResponseWriter
+	Request        *http.Request
+
+	Config        *config.Config
+	Probe         *ProbeScheduler
+	StreamProxy   *proxy.StreamProxy
+	SizeResolver  *FileSizeResolver
+	StrategySel   *StrategySelector
+	PasswdInfo    *config.PasswdInfo
+	FileItem      FileItem
+	TargetURL     string
+	ProviderKey   string
+	Path          string
+	InitialSize   int64
+	OverridePath  string
+	CompatKey     string
+	FailureLogMsg string
+
+	FinalPassthroughCount *uint64
+	SizeConflictCount     *uint64
+	FirstFrameCount       *uint64
+	FirstFrameFallbacks   *uint64
+	WarmupEnqueueCount    *uint64
+}
+
+func executeDecryptPlayback(req decryptPlaybackRequest) {
+	w := req.ResponseWriter
+	r := req.Request
+	fileSize := req.InitialSize
+
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+
+	if fileSize == 0 && req.SizeResolver != nil {
+		fresh := req.SizeResolver.ResolveSingleFresh(r.Context(), req.FileItem, authHeaders)
+		if fresh.Error == nil && fresh.Size > 0 {
+			fileSize = fresh.Size
+		}
+	}
+
+	if fileSize == 0 {
+		if req.Config == nil || req.Config.AlistServer.SizeUnknownStrict {
+			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
+			return
+		}
+		if err := req.StreamProxy.ProxyRequest(w, r, req.TargetURL); err != nil {
+			log.Error().Err(err).Str("path", req.Path).Msg(req.FailureLogMsg + " (size unknown passthrough)")
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+		}
+		return
+	}
+
+	strategy := req.StreamProxy.SelectOptimalStrategy(req.TargetURL, req.CompatKey, r.Method, r.Header.Get("Range"))
+	if override, ok := selectStrategyOverride(req.Config, req.OverridePath); ok {
+		strategy = override
+	}
+	firstFrameHint := proxy.IsFirstFrameRangeHint(r.Method, r.Header.Get("Range"))
+	if firstFrameHint && req.FirstFrameCount != nil {
+		atomic.AddUint64(req.FirstFrameCount, 1)
+	}
+
+	trySingle := func(size int64) (bool, string, error) {
+		result := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
+			w, r, req.TargetURL, req.PasswdInfo, size, strategy, req.CompatKey,
+		)
+		if result.Err == nil && !result.Retryable {
+			req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, strategy)
+			if req.StrategySel != nil && !result.NoLearning {
+				req.StrategySel.RecordSuccess(req.ProviderKey, strategy)
+			}
+			if req.SizeResolver != nil && r.Method == http.MethodGet && !result.NoLearning {
+				metaSize := size
+				if result.ExpectedBytes > 0 {
+					metaSize = result.ExpectedBytes
+				}
+				req.SizeResolver.RecordPlaybackSuccess(
+					r.Context(), req.FileItem, metaSize, result.StatusCode, result.ContentType, result.ETag,
+				)
+			}
+			maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, result.ExpectedBytes)
+			return true, "", nil
+		}
+
+		reason := result.FailureReason
+		if reason == "" && result.Err != nil {
+			reason = "stream_error"
+		}
+		if reason == "" {
+			reason = "unknown"
+		}
+
+		if req.StrategySel != nil && !result.NoLearning && result.Retryable && !result.ResponseStarted {
+			req.StrategySel.RecordFailure(req.ProviderKey, strategy, reason)
+		}
+
+		if reason == "range_unsupported" && !result.ResponseStarted && firstFrameHint && strategy == proxy.StreamStrategyRange {
+			if req.FirstFrameFallbacks != nil {
+				atomic.AddUint64(req.FirstFrameFallbacks, 1)
+			}
+			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
+				w, r, req.TargetURL, req.PasswdInfo, size, proxy.StreamStrategyChunked, req.CompatKey,
+			)
+			if fallback.Err == nil && !fallback.Retryable {
+				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, proxy.StreamStrategyChunked)
+				if req.StrategySel != nil && !fallback.NoLearning {
+					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyChunked)
+				}
+				if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
+					metaSize := size
+					if fallback.ExpectedBytes > 0 {
+						metaSize = fallback.ExpectedBytes
+					}
+					req.SizeResolver.RecordPlaybackSuccess(
+						r.Context(), req.FileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+					)
+				}
+				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+				return true, "", nil
+			}
+			if fallback.Err != nil {
+				return false, "range_unsupported", fallback.Err
+			}
+			return false, "range_unsupported", result.Err
+		}
+
+		if reason == "range_unsatisfiable" && !result.ResponseStarted {
+			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
+				w, r, req.TargetURL, req.PasswdInfo, size, proxy.StreamStrategyFull, req.CompatKey,
+			)
+			if fallback.Err == nil && !fallback.Retryable {
+				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, proxy.StreamStrategyFull)
+				if req.StrategySel != nil && !fallback.NoLearning {
+					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyFull)
+				}
+				if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
+					metaSize := size
+					if fallback.ExpectedBytes > 0 {
+						metaSize = fallback.ExpectedBytes
+					}
+					req.SizeResolver.RecordPlaybackSuccess(
+						r.Context(), req.FileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+					)
+				}
+				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+				return true, "", nil
+			}
+			if fallback.Err != nil {
+				return false, "range_unsatisfiable", fallback.Err
+			}
+			return false, "range_unsatisfiable", result.Err
+		}
+
+		if result.Err != nil {
+			return false, reason, result.Err
+		}
+		return false, reason, fmt.Errorf("strategy %s failed: %s", strategy, reason)
+	}
+
+	success, lastFailure, lastErr := trySingle(fileSize)
+	if success {
+		return
+	}
+
+	if req.SizeResolver != nil && shouldRetryFreshResolve(lastFailure, firstFrameHint) {
+		fresh := req.SizeResolver.ResolveSingleFresh(r.Context(), req.FileItem, authHeaders)
+		if fresh.Error == nil && fresh.Size > 0 {
+			if fileSize > 0 && fresh.Size != fileSize {
+				req.SizeResolver.RecordMetaConflict(req.ProviderKey)
+				if req.SizeConflictCount != nil {
+					atomic.AddUint64(req.SizeConflictCount, 1)
+				}
+			}
+			fileSize = fresh.Size
+			success, lastFailure, lastErr = trySingle(fileSize)
+			if success {
+				return
+			}
+		}
+	}
+
+	if lastFailure != "range_unsatisfiable" && req.Config != nil && req.Config.AlistServer.PlayFirstFallback {
+		log.Warn().
+			Str("path", req.Path).
+			Str("failure", lastFailure).
+			Msg("PlayFirstFallback: proxying encrypted content as final fallback (consider disabling playFirstFallback in config)")
+		if req.FinalPassthroughCount != nil {
+			atomic.AddUint64(req.FinalPassthroughCount, 1)
+		}
+		if err := req.StreamProxy.ProxyRequest(w, r, req.TargetURL); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+	}
+
+	if lastFailure == "range_unsatisfiable" {
+		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if lastErr != nil {
+		log.Error().Err(lastErr).Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
+		RespondHTTPErrorWithStatus(w, "Decryption error: "+lastFailure, http.StatusBadGateway)
+		return
+	}
+	log.Error().Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
+	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
+}
+
+func shouldRetryFreshResolve(failureReason string, firstFrameHint bool) bool {
+	switch failureReason {
+	case "range_unsatisfiable", "decrypt_validation_failed":
+		return true
+	case "", "unknown":
+		return !firstFrameHint
+	case "stream_error":
+		return !firstFrameHint
+	case "range_unsupported", "range_invalid", "chunked_seek_too_large":
+		return false
+	case "upstream_4xx", "upstream_5xx":
+		return false
+	case "timeout", "network_error", "client_disconnect":
+		return false
+	default:
+		return !firstFrameHint
+	}
+}
+
+func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.Header, firstFrameHint bool, size int64, expectedBytes int64) {
+	if !firstFrameHint || req.Probe == nil || req.Request == nil || req.Request.Method != http.MethodGet {
+		return
+	}
+	reportedSize := size
+	if expectedBytes > reportedSize {
+		reportedSize = expectedBytes
+	}
+	req.Probe.EnqueueWithSize(req.FileItem, authHeaders, reportedSize)
+	if req.WarmupEnqueueCount != nil {
+		atomic.AddUint64(req.WarmupEnqueueCount, 1)
+	}
+}

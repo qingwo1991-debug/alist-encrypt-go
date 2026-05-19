@@ -85,6 +85,10 @@ type AlistServer struct {
 	PlayFirstFallback           bool                     `json:"playFirstFallback"`
 	SizeUnknownStrict           bool                     `json:"sizeUnknownStrict"`
 	ChunkedSeekMaxDiscardBytes  int64                    `json:"chunkedSeekMaxDiscardBytes"`
+	EnableSniff                 bool                     `json:"enableSniff"`
+	CircuitBreakerThreshold     int                      `json:"circuitBreakerThreshold"`
+	CircuitBreakerCooldownSecs  int                      `json:"circuitBreakerCooldownSecs"`
+	RetryMaxAttempts            int                      `json:"retryMaxAttempts"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -267,6 +271,10 @@ func DefaultConfig() *Config {
 			PlayFirstFallback:           false,
 			SizeUnknownStrict:           true,
 			ChunkedSeekMaxDiscardBytes:  8 * 1024 * 1024,
+			EnableSniff:                true,
+			CircuitBreakerThreshold:    5,
+			CircuitBreakerCooldownSecs: 30,
+			RetryMaxAttempts:           3,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",

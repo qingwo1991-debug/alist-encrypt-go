@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -35,6 +36,9 @@ type ProbeScheduler struct {
 	providerMu    sync.Mutex
 	providerSem   map[string]chan struct{}
 	minSizeBytes  int64
+	enqueuedTotal uint64
+	droppedTotal  uint64
+	cooldownSkips uint64
 }
 
 type probeItem struct {
@@ -116,14 +120,39 @@ func (ps *ProbeScheduler) EnqueueWithSize(file FileItem, authHeaders http.Header
 
 	key := ProviderKey(file.TargetURL, file.DisplayPath)
 	if ps.isCoolingDown(key) {
+		atomic.AddUint64(&ps.cooldownSkips, 1)
 		return
 	}
 
 	select {
 	case ps.queue <- probeItem{file: file, authHeaders: authHeaders}:
 		ps.markSeen(key)
+		atomic.AddUint64(&ps.enqueuedTotal, 1)
 	default:
+		atomic.AddUint64(&ps.droppedTotal, 1)
 		return
+	}
+}
+
+func (ps *ProbeScheduler) Stats() map[string]interface{} {
+	if ps == nil {
+		return map[string]interface{}{}
+	}
+	queueLen := 0
+	queueCap := 0
+	if ps.queue != nil {
+		queueLen = len(ps.queue)
+		queueCap = cap(ps.queue)
+	}
+	return map[string]interface{}{
+		"enabled":        ps.enabled,
+		"workers":        ps.workers,
+		"provider_limit": ps.providerLimit,
+		"queue_len":      queueLen,
+		"queue_cap":      queueCap,
+		"enqueued_total": atomic.LoadUint64(&ps.enqueuedTotal),
+		"dropped_total":  atomic.LoadUint64(&ps.droppedTotal),
+		"cooldown_skips": atomic.LoadUint64(&ps.cooldownSkips),
 	}
 }
 

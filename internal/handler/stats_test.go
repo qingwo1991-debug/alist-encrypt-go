@@ -8,6 +8,9 @@ func TestGetStreamStats(t *testing.T) {
 			"final_passthrough_count": uint64(3),
 			"size_conflict_count":     2,
 			"strategy_fallback_count": float64(5),
+			"first_frame_count":       uint64(7),
+			"first_frame_fallbacks":   1,
+			"warmup_enqueue_count":    float64(4),
 		},
 	}
 
@@ -21,11 +24,20 @@ func TestGetStreamStats(t *testing.T) {
 	if got["strategy_fallback_count"] != 5 {
 		t.Fatalf("strategy_fallback_count=%d, want 5", got["strategy_fallback_count"])
 	}
+	if got["first_frame_count"] != 7 {
+		t.Fatalf("first_frame_count=%d, want 7", got["first_frame_count"])
+	}
+	if got["first_frame_fallbacks"] != 1 {
+		t.Fatalf("first_frame_fallbacks=%d, want 1", got["first_frame_fallbacks"])
+	}
+	if got["warmup_enqueue_count"] != 4 {
+		t.Fatalf("warmup_enqueue_count=%d, want 4", got["warmup_enqueue_count"])
+	}
 }
 
 func TestGetStreamStatsMissingStream(t *testing.T) {
 	got := getStreamStats(map[string]interface{}{})
-	if got["final_passthrough_count"] != 0 || got["size_conflict_count"] != 0 || got["strategy_fallback_count"] != 0 {
+	if got["final_passthrough_count"] != 0 || got["size_conflict_count"] != 0 || got["strategy_fallback_count"] != 0 || got["first_frame_count"] != 0 || got["first_frame_fallbacks"] != 0 || got["warmup_enqueue_count"] != 0 {
 		t.Fatalf("unexpected non-zero stats: %#v", got)
 	}
 }
@@ -45,5 +57,19 @@ func TestGetSelectorStats(t *testing.T) {
 	}
 	if got["provider_strategy"] == nil {
 		t.Fatalf("missing provider_strategy: %#v", got)
+	}
+}
+
+func TestGetProbeSchedulerStats(t *testing.T) {
+	want := map[string]interface{}{
+		"enabled":        true,
+		"enqueued_total": uint64(3),
+	}
+	stats := map[string]interface{}{
+		"probe_scheduler": want,
+	}
+	got := getProbeSchedulerStats(stats)
+	if got["enqueued_total"] != uint64(3) {
+		t.Fatalf("unexpected probe stats: %#v", got)
 	}
 }

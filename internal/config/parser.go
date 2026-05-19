@@ -69,6 +69,18 @@ func getBoolFieldWithDefault(m map[string]interface{}, key string, defaultValue 
 	return defaultValue
 }
 
+func getIntFieldWithDefault(m map[string]interface{}, key string, defaultValue int) int {
+	if v := getIntField(m, key); v != 0 || hasField(m, key) {
+		return v
+	}
+	return defaultValue
+}
+
+func hasField(m map[string]interface{}, key string) bool {
+	_, ok := m[key]
+	return ok
+}
+
 func getStringArrayField(m map[string]interface{}, key string) []string {
 	// Handle as array
 	if arr, ok := m[key].([]interface{}); ok {
@@ -149,6 +161,10 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		PlayFirstFallback:           getBoolFieldWithDefault(raw, "playFirstFallback", false),
 		SizeUnknownStrict:           getBoolFieldWithDefault(raw, "sizeUnknownStrict", true),
 		ChunkedSeekMaxDiscardBytes:  getInt64Field(raw, "chunkedSeekMaxDiscardBytes"),
+		EnableSniff:                 getBoolFieldWithDefault(raw, "enableSniff", true),
+		CircuitBreakerThreshold:     getIntFieldWithDefault(raw, "circuitBreakerThreshold", 5),
+		CircuitBreakerCooldownSecs:  getIntFieldWithDefault(raw, "circuitBreakerCooldownSecs", 30),
+		RetryMaxAttempts:            getIntFieldWithDefault(raw, "retryMaxAttempts", 3),
 	}
 
 	if passwdListRaw, ok := raw["passwdList"]; ok {
