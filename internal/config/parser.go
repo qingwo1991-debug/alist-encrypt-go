@@ -146,7 +146,7 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		ProbeCooldownMinutes:        getIntField(raw, "probeCooldownMinutes"),
 		ProbeQueueSize:              getIntField(raw, "probeQueueSize"),
 		ProbeMinSizeBytes:           getInt64Field(raw, "probeMinSizeBytes"),
-		PlayFirstFallback:           getBoolFieldWithDefault(raw, "playFirstFallback", true),
+		PlayFirstFallback:           getBoolFieldWithDefault(raw, "playFirstFallback", false),
 		SizeUnknownStrict:           getBoolFieldWithDefault(raw, "sizeUnknownStrict", true),
 		ChunkedSeekMaxDiscardBytes:  getInt64Field(raw, "chunkedSeekMaxDiscardBytes"),
 	}

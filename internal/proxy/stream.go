@@ -98,6 +98,24 @@ const (
 	StreamStrategyFull    StreamStrategy = "full"
 )
 
+// SelectOptimalStrategy picks the single best strategy based on cached range
+// compatibility knowledge, avoiding the wasteful retry loop on known-incompatible
+// providers. Only on cold start (unknown compatibility) does it default to Range.
+func (s *StreamProxy) SelectOptimalStrategy(targetURL, storageKey string, hasRangeHeader bool) StreamStrategy {
+	// Client-requested range: always honor it if provider supports Range
+	if hasRangeHeader {
+		if s.shouldSkipRange(targetURL, storageKey) {
+			return StreamStrategyFull
+		}
+		return StreamStrategyRange
+	}
+	// Full download: skip Range if provider is known-incompatible
+	if s.shouldSkipRange(targetURL, storageKey) {
+		return StreamStrategyFull
+	}
+	return StreamStrategyRange
+}
+
 // StreamOutcome describes the streaming result for strategy selection.
 type StreamOutcome struct {
 	Err             error

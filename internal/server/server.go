@@ -107,6 +107,10 @@ func (s *Server) setupRoutes() {
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO, s.mysqlStore)
 	strategyStore := handler.StrategyStore(handler.NewMemoryStrategyStore())
 	var metaStore handler.FileMetaStore
+
+	// Initialize range compatibility store: MySQL > file > memory
+	rangeStore := s.initRangeCompatStore()
+
 	if s.mysqlStore != nil {
 		strategyStore = handler.NewMySQLStrategyStore(s.mysqlStore)
 		metaStore = handler.NewMySQLFileMetaStore(s.mysqlStore)
@@ -114,6 +118,8 @@ func (s *Server) setupRoutes() {
 		if err := migrateStrategyStore(s.cfg, strategyStore); err != nil {
 			log.Warn().Err(err).Msg("Failed to migrate strategy store JSON")
 		}
+	} else if rangeStore != nil {
+		s.streamProxy.SetRangeCompatStore(rangeStore)
 	}
 	strategySelector, err := handler.NewStrategySelector(s.cfg, strategyStore)
 	if err != nil {
@@ -212,9 +218,11 @@ func (s *Server) setupRoutes() {
 		davGroup.Handle("UNLOCK", "/*path", ginWrap(webdavHandler.Handle))
 	}
 
-	// /d/* and /p/* - File download with decryption
+	// /d/* and /p/* - File download with decryption (GET + HEAD)
 	r.GET("/d/*path", ginWrap(proxyHandler.HandleDownload))
+	r.HEAD("/d/*path", ginWrap(proxyHandler.HandleDownload))
 	r.GET("/p/*path", ginWrap(proxyHandler.HandleDownload))
+	r.HEAD("/p/*path", ginWrap(proxyHandler.HandleDownload))
 
 	// /api/fs/* - Alist API interception
 	r.POST("/api/fs/get", ginWrap(alistHandler.HandleFsGet))
@@ -425,4 +433,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	return lastErr
+}
+
+// initRangeCompatStore creates a persistent range compatibility store.
+// Priority: MySQL > JSON file > memory.
+func (s *Server) initRangeCompatStore() proxy.RangeCompatStore {
+	// Use file-based store for persistence across restarts
+	dataDir := s.cfg.DataDir
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	filePath := filepath.Join(dataDir, "range_compat.json")
+	store, err := proxy.NewFileRangeCompatStore(filePath)
+	if err != nil {
+		log.Warn().Err(err).Str("path", filePath).Msg("Failed to create file range compat store, falling back to memory")
+		return nil
+	}
+	log.Info().Str("path", filePath).Msg("Using file-based range compatibility store")
+	return store
 }

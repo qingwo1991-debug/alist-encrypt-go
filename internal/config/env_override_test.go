@@ -4,7 +4,7 @@ import "testing"
 
 func TestApplyEnvOverridesDBDisableCleanup(t *testing.T) {
 	t.Setenv("DB_DISABLE_CLEANUP", "true")
-	t.Setenv("PLAY_FIRST_FALLBACK", "false")
+	t.Setenv("PLAY_FIRST_FALLBACK", "true")
 
 	cfg := DefaultConfig()
 	cfg.applyEnvOverrides()
@@ -12,8 +12,8 @@ func TestApplyEnvOverridesDBDisableCleanup(t *testing.T) {
 	if cfg.Database == nil || !cfg.Database.DisableCleanup {
 		t.Fatalf("expected Database.DisableCleanup=true from env override")
 	}
-	if cfg.AlistServer.PlayFirstFallback {
-		t.Fatalf("expected PlayFirstFallback=false from env override")
+	if !cfg.AlistServer.PlayFirstFallback {
+		t.Fatalf("expected PlayFirstFallback=true from env override (overriding default false)")
 	}
 }
 

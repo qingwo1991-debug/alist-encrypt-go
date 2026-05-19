@@ -8,8 +8,8 @@ func TestParseAlistServerFromMapPlayFirstFallbackDefault(t *testing.T) {
 	}
 
 	server := ParseAlistServerFromMap(raw)
-	if !server.PlayFirstFallback {
-		t.Fatalf("PlayFirstFallback should default to true when missing")
+	if server.PlayFirstFallback {
+		t.Fatalf("PlayFirstFallback should default to false when missing")
 	}
 }
 
