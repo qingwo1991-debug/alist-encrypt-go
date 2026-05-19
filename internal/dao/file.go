@@ -352,55 +352,80 @@ func (d *PasswdDAO) MatchDir(dirPath string) bool {
 }
 
 func (d *PasswdDAO) findByPathInternal(urlPath string) (*config.PasswdInfo, bool) {
+	var bestMatch *config.PasswdInfo
+	var bestLen int
 	for i := range d.cfg.AlistServer.PasswdList {
 		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
 		if !passwdInfo.Enable {
 			continue
 		}
-
-		// Check encPath patterns
 		if encryption.PathExec(passwdInfo.EncPath, urlPath) {
-			return passwdInfo, true
+			// Prefer the most specific (longest base path) match
+			matchLen := longestEncPathLen(passwdInfo.EncPath)
+			if bestMatch == nil || matchLen > bestLen {
+				bestMatch = passwdInfo
+				bestLen = matchLen
+			}
 		}
+	}
+	if bestMatch != nil {
+		return bestMatch, true
 	}
 	return nil, false
 }
 
-// PathFindPasswd finds password config matching URL path with encPath patterns
-// Returns a potentially modified PasswdInfo (for folder password decoding)
+func longestEncPathLen(encPaths []string) int {
+	maxLen := 0
+	for _, p := range encPaths {
+		p = strings.TrimSuffix(p, "/*")
+		p = strings.TrimSuffix(p, "*")
+		if len(p) > maxLen {
+			maxLen = len(p)
+		}
+	}
+	return maxLen
+}
+
+// PathFindPasswd finds password config matching URL path with encPath patterns.
+// Returns the most specific (longest base path) match with folder password decoding.
 func (d *PasswdDAO) PathFindPasswd(urlPath string) (*config.PasswdInfo, bool) {
 	all := d.GetAll()
 
+	var bestMatch *config.PasswdInfo
+	var bestLen int
 	for _, passwdInfo := range all {
 		if !passwdInfo.Enable {
 			continue
 		}
-
-		// Check encPath patterns
 		if encryption.PathExec(passwdInfo.EncPath, urlPath) {
-			// Check if any folder in the path contains encoded password
-			newPasswdInfo := *passwdInfo // Copy
-			folders := strings.Split(urlPath, "/")
-
-			for _, folderName := range folders {
-				if folderName == "" {
-					continue
-				}
-				decoded, _ := url.QueryUnescape(folderName)
-				folderEncType, folderPasswd, ok := encryption.DecodeFolderName(
-					passwdInfo.Password,
-					passwdInfo.EncType,
-					decoded,
-				)
-				if ok {
-					newPasswdInfo.EncType = folderEncType
-					newPasswdInfo.Password = folderPasswd
-					return &newPasswdInfo, true
-				}
+			matchLen := longestEncPathLen(passwdInfo.EncPath)
+			if bestMatch == nil || matchLen > bestLen {
+				bestMatch = passwdInfo
+				bestLen = matchLen
 			}
-
-			return &newPasswdInfo, true
 		}
+	}
+
+	if bestMatch != nil {
+		newPasswdInfo := *bestMatch // Copy
+		folders := strings.Split(urlPath, "/")
+		for _, folderName := range folders {
+			if folderName == "" {
+				continue
+			}
+			decoded, _ := url.QueryUnescape(folderName)
+			folderEncType, folderPasswd, ok := encryption.DecodeFolderName(
+				bestMatch.Password,
+				bestMatch.EncType,
+				decoded,
+			)
+			if ok {
+				newPasswdInfo.EncType = folderEncType
+				newPasswdInfo.Password = folderPasswd
+				return &newPasswdInfo, true
+			}
+		}
+		return &newPasswdInfo, true
 	}
 
 	return nil, false
