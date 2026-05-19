@@ -316,8 +316,11 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	trace.Logf(r.Context(), "download", "File size: %d, strategy: %s", fileInfo.Size, usedStrategy)
 
-	// Build target URL with ENCRYPTED path
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), urlPrefix+realPath, r)
+	// Build target URL with ENCRYPTED path.
+	// IMPORTANT: strip query params because the original request's ?sign=xxx
+	// was computed for the display path, not the encrypted path. Including it
+	// would cause alist to reject the request with 401.
+	targetURL := httputil.BuildTargetURLWithQuery(h.cfg.GetAlistURL(), urlPrefix+realPath, "")
 
 	trace.Logf(r.Context(), "decrypt", "Decrypting with fileSize=%d", fileInfo.Size)
 	fileItem := FileItem{
