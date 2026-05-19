@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -525,4 +527,45 @@ func (h *APIHandler) SaveProxyRoutingConfig(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	RespondSuccessMsg(w, "save ok")
+}
+
+// HandleCheckFilePath validates a local file path exists and counts files.
+func HandleCheckFilePath(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FolderPath string `json:"folderPath"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondAPIError(w, 500, "Invalid request")
+		return
+	}
+	if req.FolderPath == "" {
+		RespondAPIError(w, 500, "folderPath is required")
+		return
+	}
+	info, err := os.Stat(req.FolderPath)
+	if err != nil {
+		RespondAPIError(w, 500, "Path does not exist: "+err.Error())
+		return
+	}
+	if !info.IsDir() {
+		RespondAPIError(w, 500, "Path is not a directory")
+		return
+	}
+	var fileCount int
+	var totalBytes int64
+	filepath.WalkDir(req.FolderPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, e := d.Info(); e == nil {
+			fileCount++
+			totalBytes += info.Size()
+		}
+		return nil
+	})
+	RespondSuccess(w, map[string]interface{}{
+		"fileCount":  fileCount,
+		"totalBytes": totalBytes,
+		"exists":     true,
+	})
 }
