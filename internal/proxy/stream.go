@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -891,6 +892,20 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		readerToStream = io.LimitReader(flowEnc.DecryptReader(resp.Body), activeRange.ContentLength())
 	}
 
+	// Sniff first bytes of decrypted output to detect wrong password/fileSize.
+	// If the decrypted data is high-entropy (random), the key is likely wrong.
+	if sniffBytes, ok := sniffDecrypted(readerToStream); !ok {
+		resp.Body.Close()
+		return &StreamOutcome{
+			Err:           errors.NewDecryptionError("decryption validation failed: output appears encrypted (wrong password or file size?)"),
+			Retryable:     false,
+			FailureReason: "decrypt_validation_failed",
+			NoLearning:    true,
+		}
+	} else {
+		readerToStream = sniffBytes
+	}
+
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true
 
@@ -1187,4 +1202,42 @@ func resolveFileSize(cachedSize int64, resp *http.Response) int64 {
 	}
 
 	return 0
+}
+
+// sniffDecrypted reads the first N bytes of decrypted output and checks
+// if it looks like valid plaintext (not random encrypted garbage).
+// Returns a reader that prepends the consumed bytes on success.
+func sniffDecrypted(r io.Reader) (io.Reader, bool) {
+	const sniffLen = 512
+	buf := make([]byte, sniffLen)
+	n, err := io.ReadFull(r, buf)
+	if err != nil && n == 0 {
+		// Empty response, let it through
+		return io.MultiReader(bytes.NewReader(buf[:n]), r), true
+	}
+	sample := buf[:n]
+
+	// Count unique byte values and zero bytes.
+	// Encrypted data: ~200+ unique bytes in 512 samples, few zeros.
+	// Valid plaintext: 30-120 unique bytes, many zero bytes (headers, structures).
+	seen := make(map[byte]bool, 256)
+	zeros := 0
+	for _, b := range sample {
+		seen[b] = true
+		if b == 0 {
+			zeros++
+		}
+	}
+	unique := len(seen)
+
+	// Heuristic: encrypted data has high entropy (many unique bytes, few zeros).
+	// Valid decrypted data has lower entropy (fewer unique bytes, more zeros).
+	if unique > 200 && zeros < 10 {
+		log.Warn().Int("unique_bytes", unique).Int("zeros", zeros).
+			Int("sample_len", n).Msg("Decrypted data looks encrypted — wrong password or file size?")
+		return nil, false
+	}
+
+	// Prepend the consumed bytes
+	return io.MultiReader(bytes.NewReader(sample), r), true
 }
