@@ -196,6 +196,10 @@ func (s *Server) setupRoutes() {
 			protected.Any("/refreshProxyDomainDictionary", ginWrap(apiHandler.RefreshProxyDomainDictionary))
 			protected.Any("/getProxyRoutingConfig", ginWrap(apiHandler.GetProxyRoutingConfig))
 			protected.Any("/saveProxyRoutingConfig", ginWrap(apiHandler.SaveProxyRoutingConfig))
+			// Local file encrypt/decrypt with progress tracking
+			protected.Any("/encryptFile", ginWrap(handler.HandleEncryptFile))
+			protected.Any("/encryptStatus/*taskId", ginWrap(handler.HandleEncryptTaskStatus))
+			protected.Any("/encryptTasks", ginWrap(handler.HandleEncryptTaskList))
 		}
 	}
 
