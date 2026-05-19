@@ -84,7 +84,8 @@ type StreamProxy struct {
 	compatStore      RangeCompatStore
 	redirectRewriter RedirectRewriter
 	rangeStats       *rangeLearningStats
-	cbGate           *backoff.Gate // circuit breaker for upstream failures
+	cbGate           *backoff.Gate    // circuit breaker for upstream failures
+	retrier          *backoff.Retrier // retry with jitter for transient network errors
 }
 
 // RedirectRewriter can rewrite upstream redirect locations for decrypt streams.
@@ -142,7 +143,8 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 		cfg:         cfg,
 		compatStore: NewMemoryRangeCompatStore(),
 		rangeStats:  newRangeLearningStats(),
-		cbGate:      backoff.NewGate(5, 30*time.Second), // 5 failures → 30s cooldown
+		cbGate:      backoff.NewGate(5, 30*time.Second),
+		retrier:     backoff.DefaultRetrier(),
 	}
 }
 
@@ -511,10 +513,27 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 		return errors.NewInternalWithCause("failed to create request", err)
 	}
 
-	resp, err := s.client.Do(req)
-	if err != nil {
+	// Retry transient network errors with jittered exponential backoff
+	var resp *http.Response
+	var doErr error
+	_ = s.retrier.Do(r.Context(), func() error {
+		resp, doErr = s.client.Do(req)
+		if doErr != nil {
+			if backoff.IsTransient(doErr) {
+				return doErr
+			}
+			return nil
+		}
+		if backoff.IsTransientStatus(resp.StatusCode) {
+			resp.Body.Close()
+			doErr = fmt.Errorf("upstream status %d", resp.StatusCode)
+			return doErr
+		}
+		return nil
+	})
+	if doErr != nil {
 		s.cbGate.RecordFailure()
-		return errors.NewProxyErrorWithCause("failed to proxy request", err)
+		return errors.NewProxyErrorWithCause("failed to proxy request", doErr)
 	}
 	defer resp.Body.Close()
 
@@ -577,10 +596,27 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	}
 	applyStrategyHeaders(req, strategy)
 
-	resp, err := s.client.Do(req)
-	if err != nil {
-		reason, retryable := classifyStreamError(err)
-		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", err), FailureReason: reason, Retryable: retryable}
+	// Retry transient network errors with jittered exponential backoff
+	var resp *http.Response
+	var doErr error
+	_ = s.retrier.Do(r.Context(), func() error {
+		resp, doErr = s.client.Do(req)
+		if doErr != nil {
+			if backoff.IsTransient(doErr) {
+				return doErr
+			}
+			return nil
+		}
+		if backoff.IsTransientStatus(resp.StatusCode) {
+			resp.Body.Close()
+			doErr = fmt.Errorf("upstream status %d", resp.StatusCode)
+			return doErr
+		}
+		return nil
+	})
+	if doErr != nil {
+		reason, retryable := classifyStreamError(doErr)
+		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", doErr), FailureReason: reason, Retryable: retryable}
 	}
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		defer resp.Body.Close()
