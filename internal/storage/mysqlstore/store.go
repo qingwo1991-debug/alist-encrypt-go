@@ -97,7 +97,9 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		rangeCompatBuffer: newRangeCompatBuffer(),
 	}
 
-	if err := store.ensureSchema(context.Background()); err != nil {
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer schemaCancel()
+	if err := store.ensureSchema(schemaCtx); err != nil {
 		return nil, err
 	}
 	if !store.disableCleanup {
