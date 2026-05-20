@@ -46,6 +46,15 @@ export const saveAlistConfigReq = (subForm) => {
   })
 }
 
+export const validateScanConfigReq = (subForm, extraConfig = {}) => {
+  return axiosReq({
+    url: '/enc-api/validateScanConfig',
+    data: subForm,
+    method: 'post',
+    ...extraConfig
+  })
+}
+
 // 获取webdav配置信息
 export const getWebdavConfigReq = (subForm) => {
   return axiosReq({
@@ -169,5 +178,13 @@ export const saveProxyRoutingConfigReq = (subForm) => {
     url: '/enc-api/saveProxyRoutingConfig',
     data: subForm,
     method: 'post'
+  })
+}
+
+export const getStatsReq = (extraConfig = {}) => {
+  return axiosReq({
+    url: '/enc-api/getStats',
+    method: 'post',
+    ...extraConfig
   })
 }

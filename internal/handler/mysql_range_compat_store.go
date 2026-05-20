@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/proxy"
@@ -10,14 +11,16 @@ import (
 )
 
 type MySQLRangeCompatStore struct {
-	store *mysqlstore.Store
+	store      *mysqlstore.Store
+	mu         sync.Mutex
+	lastStates map[string]proxy.RangeCompatState
 }
 
 func NewMySQLRangeCompatStore(store *mysqlstore.Store) *MySQLRangeCompatStore {
 	if store == nil {
 		return nil
 	}
-	return &MySQLRangeCompatStore{store: store}
+	return &MySQLRangeCompatStore{store: store, lastStates: make(map[string]proxy.RangeCompatState)}
 }
 
 func (s *MySQLRangeCompatStore) Get(key string) (proxy.RangeCompatState, bool, error) {
@@ -49,6 +52,14 @@ func (s *MySQLRangeCompatStore) Upsert(key string, state proxy.RangeCompatState)
 		return nil
 	}
 
+	s.mu.Lock()
+	if last, ok := s.lastStates[key]; ok && rangeCompatStateEqual(last, state) {
+		s.mu.Unlock()
+		return nil
+	}
+	s.lastStates[key] = state
+	s.mu.Unlock()
+
 	record := mysqlstore.RangeCompatRecord{
 		KeyHash:              mysqlstore.RangeCompatKeyHash(providerHost, storageKey),
 		ProviderHost:         providerHost,
@@ -75,6 +86,15 @@ func (s *MySQLRangeCompatStore) Stats() map[string]interface{} {
 		"mode":    "mysql",
 		"entries": entries,
 	}
+}
+
+func rangeCompatStateEqual(a, b proxy.RangeCompatState) bool {
+	return a.Incompatible == b.Incompatible &&
+		a.ConsecutiveFailures == b.ConsecutiveFailures &&
+		a.ConsecutiveSuccesses == b.ConsecutiveSuccesses &&
+		a.NextProbeAt.Equal(b.NextProbeAt) &&
+		a.LastReason == b.LastReason &&
+		a.LastCheckedAt.Equal(b.LastCheckedAt)
 }
 
 func splitRangeCompatKey(key string) (string, string) {

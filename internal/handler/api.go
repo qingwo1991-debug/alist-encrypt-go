@@ -2,8 +2,10 @@ package handler
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/proxydict"
 	"github.com/alist-encrypt-go/internal/restart"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
@@ -204,9 +207,103 @@ func (h *APIHandler) SaveAlistConfig(w http.ResponseWriter, r *http.Request) {
 	RespondSuccessMsg(w, "save ok")
 }
 
+// ValidateScanConfig verifies that the configured scan credentials can access Alist WebDAV.
+func (h *APIHandler) ValidateScanConfig(w http.ResponseWriter, r *http.Request) {
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		RespondAPIError(w, 500, "Invalid request: "+err.Error())
+		return
+	}
+
+	server := config.ParseAlistServerFromMap(raw)
+	authHeader, authMode := buildScanValidationAuth(server)
+	if authHeader == "" {
+		RespondSuccess(w, map[string]interface{}{
+			"ok":         false,
+			"auth_mode":  "none",
+			"target_url": buildAlistURLForServer(server) + "/dav/",
+			"message":    "未配置扫描账号，请填写 scanUsername/scanPassword 或 scanAuthHeader",
+		})
+		return
+	}
+
+	tempCfg := *h.cfg
+	tempCfg.AlistServer = server
+	targetURL := tempCfg.GetAlistURL() + "/dav/"
+
+	req, err := http.NewRequestWithContext(r.Context(), "PROPFIND", targetURL, nil)
+	if err != nil {
+		RespondAPIError(w, 500, "build request failed: "+err.Error())
+		return
+	}
+	req.Header.Set("Depth", "0")
+	req.Header.Set("Authorization", authHeader)
+
+	client := proxy.NewHTTPClient(&tempCfg, getAlistRequestTimeout(&tempCfg))
+	resp, err := client.Do(req)
+	if err != nil {
+		RespondSuccess(w, map[string]interface{}{
+			"ok":         false,
+			"auth_mode":  authMode,
+			"target_url": targetURL,
+			"message":    "请求失败: " + err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	statusCode := resp.StatusCode
+	ok := statusCode == http.StatusOK || statusCode == http.StatusNoContent || statusCode == http.StatusMultiStatus
+	message := "连接成功"
+	switch statusCode {
+	case http.StatusUnauthorized:
+		message = "认证失败，账号或授权头无效"
+	case http.StatusForbidden:
+		message = "认证通过但权限不足"
+	case http.StatusNotFound:
+		message = "后端未暴露 /dav 路由或路径不可用"
+	case http.StatusMethodNotAllowed:
+		message = "后端不支持 PROPFIND，请检查 WebDAV 是否开启"
+	case http.StatusMultiStatus:
+		message = "连接成功，WebDAV PROPFIND 可用"
+	}
+
+	RespondSuccess(w, map[string]interface{}{
+		"ok":            ok,
+		"auth_mode":     authMode,
+		"target_url":    targetURL,
+		"status_code":   statusCode,
+		"message":       message,
+		"response_hint": strings.TrimSpace(string(bodyPreview)),
+	})
+}
+
 // GetWebdavConfig returns WebDAV server configurations
 func (h *APIHandler) GetWebdavConfig(w http.ResponseWriter, r *http.Request) {
 	RespondSuccess(w, h.cfg.WebDAVServer)
+}
+
+func buildScanValidationAuth(server config.AlistServer) (string, string) {
+	if raw := strings.TrimSpace(server.ScanAuthHeader); raw != "" {
+		return extractAuthorizationValue(raw), "header"
+	}
+	if server.ScanUsername == "" && server.ScanPassword == "" {
+		return "", "none"
+	}
+	token := base64.StdEncoding.EncodeToString([]byte(server.ScanUsername + ":" + server.ScanPassword))
+	return "Basic " + token, "basic"
+}
+
+func buildAlistURLForServer(server config.AlistServer) string {
+	scheme := "http"
+	if server.HTTPS {
+		scheme = "https"
+	}
+	if server.ServerPort == 80 || server.ServerPort == 443 {
+		return scheme + "://" + server.ServerHost
+	}
+	return scheme + "://" + server.ServerHost + ":" + strconv.Itoa(server.ServerPort)
 }
 
 // SaveWebdavConfig adds a new WebDAV server configuration

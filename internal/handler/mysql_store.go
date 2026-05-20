@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/proxy"
@@ -10,14 +11,16 @@ import (
 )
 
 type MySQLStrategyStore struct {
-	store *mysqlstore.Store
+	store      *mysqlstore.Store
+	mu         sync.RWMutex
+	lastStates map[string]*ProviderStrategyState
 }
 
 func NewMySQLStrategyStore(store *mysqlstore.Store) *MySQLStrategyStore {
 	if store == nil {
 		return nil
 	}
-	return &MySQLStrategyStore{store: store}
+	return &MySQLStrategyStore{store: store, lastStates: make(map[string]*ProviderStrategyState)}
 }
 
 func (s *MySQLStrategyStore) Get(provider string) (*ProviderStrategyState, bool) {
@@ -90,6 +93,15 @@ func (s *MySQLStrategyStore) Set(provider string, state *ProviderStrategyState) 
 		return nil
 	}
 	provider = normalizeStrategyProviderKey(provider)
+
+	s.mu.Lock()
+	if last, ok := s.lastStates[provider]; ok && strategyStateEqual(last, state) {
+		s.mu.Unlock()
+		return nil
+	}
+	s.lastStates[provider] = cloneStrategyState(state)
+	s.mu.Unlock()
+
 	providerHost, originalPath := mysqlstore.SplitProviderKey(provider)
 
 	stringFailures := make(map[string]int)
@@ -116,49 +128,58 @@ func (s *MySQLStrategyStore) Set(provider string, state *ProviderStrategyState) 
 	return s.store.UpsertStrategy(context.Background(), record)
 }
 
-func (s *MySQLStrategyStore) List() map[string]*ProviderStrategyState {
-	records, err := s.store.ListStrategies(context.Background())
-	if err != nil {
-		return map[string]*ProviderStrategyState{}
+func strategyStateEqual(a, b *ProviderStrategyState) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
+	if a.Preferred != b.Preferred || a.SuccessStreak != b.SuccessStreak || a.CooldownUntil != b.CooldownUntil || a.LastDowngrade != b.LastDowngrade || a.LastFailure != b.LastFailure || a.LastStrategy != b.LastStrategy || a.TotalFailures != b.TotalFailures || a.TotalSuccesses != b.TotalSuccesses {
+		return false
+	}
+	if len(a.Failures) != len(b.Failures) {
+		return false
+	}
+	for key, value := range a.Failures {
+		if b.Failures[key] != value {
+			return false
+		}
+	}
+	return true
+}
 
-	out := make(map[string]*ProviderStrategyState, len(records))
-	for _, record := range records {
-		provider := normalizeStrategyProviderKey(record.ProviderHost)
-		failures := make(map[proxy.StreamStrategy]int)
-		for key, value := range mysqlstore.DecodeFailures(record.FailuresJSON) {
-			failures[proxy.StreamStrategy(key)] = value
-		}
-		existing, ok := out[provider]
-		candidate := &ProviderStrategyState{
-			Provider:       provider,
-			Preferred:      proxy.StreamStrategy(record.Preferred),
-			Failures:       failures,
-			SuccessStreak:  record.SuccessStreak,
-			CooldownUntil:  record.CooldownUntil,
-			LastDowngrade:  record.LastDowngrade,
-			LastUpdate:     record.UpdatedAt,
-			LastFailure:    record.LastFailure,
-			LastStrategy:   proxy.StreamStrategy(record.LastStrategy),
-			TotalFailures:  record.TotalFailures,
-			TotalSuccesses: record.TotalSuccesses,
-		}
-		if !ok || candidate.LastUpdate.After(existing.LastUpdate) {
-			out[provider] = candidate
-		}
+func cloneStrategyState(src *ProviderStrategyState) *ProviderStrategyState {
+	if src == nil {
+		return nil
 	}
-	return out
+	failures := make(map[proxy.StreamStrategy]int, len(src.Failures))
+	for key, value := range src.Failures {
+		failures[key] = value
+	}
+	return &ProviderStrategyState{
+		Provider:       src.Provider,
+		Preferred:      src.Preferred,
+		Failures:       failures,
+		SuccessStreak:  src.SuccessStreak,
+		CooldownUntil:  src.CooldownUntil,
+		LastDowngrade:  src.LastDowngrade,
+		LastUpdate:     src.LastUpdate,
+		LastFailure:    src.LastFailure,
+		LastStrategy:   src.LastStrategy,
+		TotalFailures:  src.TotalFailures,
+		TotalSuccesses: src.TotalSuccesses,
+	}
 }
 
 type MySQLFileMetaStore struct {
-	store *mysqlstore.Store
+	store     *mysqlstore.Store
+	mu        sync.Mutex
+	lastMetas map[string]FileMeta
 }
 
 func NewMySQLFileMetaStore(store *mysqlstore.Store) *MySQLFileMetaStore {
 	if store == nil {
 		return nil
 	}
-	return &MySQLFileMetaStore{store: store}
+	return &MySQLFileMetaStore{store: store, lastMetas: make(map[string]FileMeta)}
 }
 
 func (s *MySQLFileMetaStore) Get(ctx context.Context, providerKey, originalPath string) (FileMeta, bool, error) {
@@ -191,6 +212,15 @@ func (s *MySQLFileMetaStore) Upsert(ctx context.Context, meta FileMeta) error {
 		return nil
 	}
 
+	key := meta.ProviderKey + "::" + meta.OriginalPath
+	s.mu.Lock()
+	if last, ok := s.lastMetas[key]; ok && fileMetaEqual(last, meta) {
+		s.mu.Unlock()
+		return nil
+	}
+	s.lastMetas[key] = meta
+	s.mu.Unlock()
+
 	providerHost, _ := mysqlstore.SplitProviderKey(meta.ProviderKey)
 	record := mysqlstore.FileMetaRecord{
 		KeyHash:      mysqlstore.KeyHash(providerHost, meta.OriginalPath),
@@ -207,9 +237,23 @@ func (s *MySQLFileMetaStore) Upsert(ctx context.Context, meta FileMeta) error {
 	return s.store.UpsertFileMeta(ctx, record)
 }
 
+func fileMetaEqual(a, b FileMeta) bool {
+	return a.Size == b.Size && a.ETag == b.ETag && a.ContentType == b.ContentType && a.StatusCode == b.StatusCode
+}
+
 func (s *MySQLFileMetaStore) Cleanup(ctx context.Context, cutoff time.Time) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
 	return s.store.CleanupFileMeta(ctx, cutoff)
+}
+
+func (s *MySQLStrategyStore) List() map[string]*ProviderStrategyState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]*ProviderStrategyState)
+	for k, v := range s.lastStates {
+		out[k] = cloneProviderState(v)
+	}
+	return out
 }
