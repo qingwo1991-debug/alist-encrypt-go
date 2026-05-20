@@ -254,6 +254,12 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// Look up file info using DISPLAY path (davPath), not realPath
 	// PROPFIND caches entries by display path after decrypting filenames
 	fileSize, usedStrategy := h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
+	if fileSize == 0 {
+		if probed := h.fetchWebDAVFileSize(r, davPath, realPath); probed > 0 {
+			fileSize = probed
+			trace.Logf(r.Context(), "webdav-get", "Resolved size via PROPFIND fallback: %d", fileSize)
+		}
+	}
 
 	trace.Logf(r.Context(), "webdav-get", "File size: %d, strategy: %s", fileSize, usedStrategy)
 	fileItem := FileItem{
@@ -287,6 +293,53 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
 	})
+}
+
+func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPath string) int64 {
+	if h == nil || h.cfg == nil {
+		return 0
+	}
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+	req, err := httputil.NewRequest("PROPFIND", targetURL).
+		WithContext(r.Context()).
+		WithHeader("Depth", "0").
+		CopyHeadersExcept(r, "Host", "Content-Length", "Content-Type", "Accept-Encoding").
+		Build()
+	if err != nil {
+		return 0
+	}
+	client := proxy.NewHTTPClient(h.cfg, 10*time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
+		return 0
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0
+	}
+	entries := h.parsePropfindEntries(body)
+	for _, entry := range entries {
+		if !entry.IsDir && entry.Size > 0 {
+			h.fileDAO.SetFileSize(displayPath, entry.Size, 24*time.Hour)
+			if realPath != "" && realPath != displayPath {
+				h.fileDAO.SetFileSize(realPath, entry.Size, 24*time.Hour)
+			}
+			if h.metaStore != nil {
+				providerKey := ProviderKey(h.cfg.GetAlistURL(), displayPath)
+				_ = h.metaStore.Upsert(r.Context(), FileMeta{
+					ProviderKey:  providerKey,
+					OriginalPath: displayPath,
+					Size:         entry.Size,
+				})
+			}
+			return entry.Size
+		}
+	}
+	return 0
 }
 
 // handlePut handles PUT requests with encryption and filename encryption
