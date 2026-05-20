@@ -749,6 +749,15 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 
 // HandleFsGet intercepts /api/fs/get to modify raw_url and handle filename encryption
 func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
+	h.handleFsGetOrLink(w, r, "/api/fs/get")
+}
+
+// HandleFsLink intercepts /api/fs/link for newer OpenList clients.
+func (h *AlistHandler) HandleFsLink(w http.ResponseWriter, r *http.Request) {
+	h.handleFsGetOrLink(w, r, "/api/fs/link")
+}
+
+func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, apiPath string) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
@@ -763,7 +772,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 
 	filePath, _ := reqData["path"].(string)
 	originalPath := filePath
-	trace.Logf(r.Context(), "get", "Processing path: %s", filePath)
+	trace.Logf(r.Context(), "get", "Processing %s path: %s", apiPath, filePath)
 
 	// Check if filename encryption is needed
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(filePath)
@@ -801,8 +810,8 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 
 	// Forward to Alist
 	trace.Logf(r.Context(), "get", "Alist URL: %s", h.cfg.GetAlistURL())
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/get", nil)
-	trace.Logf(r.Context(), "get", "Target: %s", targetURL)
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), apiPath, nil)
+	trace.Logf(r.Context(), "get", "Target for %s: %s", apiPath, targetURL)
 	proxyReq, err := httputil.NewRequest("POST", targetURL).
 		WithContext(r.Context()).
 		WithBody(modifiedBody).
@@ -816,7 +825,7 @@ func (h *AlistHandler) HandleFsGet(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to proxy fs/get")
+		log.Error().Err(err).Str("api_path", apiPath).Msg("Failed to proxy fs/get-or-link")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
