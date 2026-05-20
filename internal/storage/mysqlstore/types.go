@@ -70,3 +70,46 @@ type RangeCompatRecord struct {
 	LastAccessed         time.Time
 	Active               bool
 }
+
+type DirSnapshotRecord struct {
+	KeyHash       string
+	ScopeKey      string
+	ProviderHost  string
+	DisplayPath   string
+	AuthScopeHash string
+	RuleVersion   string
+	ItemCount     int
+	Stale         bool
+	SyncState     string
+	LastSyncAt    time.Time
+	LastSuccessAt time.Time
+	NextRefreshAt time.Time
+	LastError     string
+	SourceMode    string
+	PayloadJSON   string
+	UpdatedAt     time.Time
+	LastAccessed  time.Time
+	Active        bool
+}
+
+type DirSyncStatusRecord struct {
+	Name                string
+	JobID               string
+	JobType             string
+	Status              string
+	Mode                string
+	ScanConfigured      bool
+	TotalDirsEstimate   int
+	TotalDirsDiscovered int
+	DirsScanned         int
+	DirsSucceeded       int
+	DirsFailed          int
+	DirsSkipped         int
+	ItemsSynced         int
+	StartedAt           time.Time
+	UpdatedAt           time.Time
+	FinishedAt          time.Time
+	NextRunAt           time.Time
+	LastError           string
+	LastSuccessAt       time.Time
+}
