@@ -19,7 +19,7 @@ const Version = "1.0.0"
 // PasswdInfo represents encryption configuration for a path
 type PasswdInfo struct {
 	Password  string   `json:"password"`
-	EncType   string   `json:"encType"`   // "aesctr" or "rc4md5"
+	EncType   string   `json:"encType"`   // "aesctr", "rc4md5", or "chacha20"
 	Describe  string   `json:"describe"`  // Description
 	Enable    bool     `json:"enable"`    // Enable encryption
 	EncName   bool     `json:"encName"`   // Enable filename encryption

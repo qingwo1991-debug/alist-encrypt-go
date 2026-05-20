@@ -61,6 +61,48 @@
       <el-form-item prop="streamBufferKb" label="缓冲区KB">
         <el-input v-model="alistConfigForm.streamBufferKb" style="max-width: 260px" placeholder="512" />
       </el-form-item>
+      <el-divider content-position="left">扫描预取配置</el-divider>
+      <el-form-item prop="scanUsername" label="扫描账号">
+        <el-input v-model="alistConfigForm.scanUsername" style="max-width: 260px" placeholder="scanner" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">用于启动扫描、后台探测和 WebDAV 预热</span>
+      </el-form-item>
+      <el-form-item prop="scanPassword" label="扫描密码">
+        <el-input v-model="alistConfigForm.scanPassword" style="max-width: 260px" type="password" show-password placeholder="password" />
+      </el-form-item>
+      <el-form-item prop="scanAuthHeader" label="授权头">
+        <el-input
+          v-model="alistConfigForm.scanAuthHeader"
+          style="max-width: 520px"
+          placeholder="Bearer xxx 或 Basic xxxxxx"
+        />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">填写后优先于扫描账号密码</span>
+      </el-form-item>
+      <el-form-item label="配置校验">
+        <el-button type="primary" plain @click="validateScanConfig">校验扫描账号</el-button>
+        <span v-if="scanValidationResult" :style="{ marginLeft: '12px', color: scanValidationResult.ok ? '#67c23a' : '#f56c6c' }">
+          {{ scanValidationResult.message }}
+          <template v-if="scanValidationResult.status_code"> (HTTP {{ scanValidationResult.status_code }})</template>
+        </span>
+      </el-form-item>
+      <el-form-item v-if="scanValidationResult" label="校验详情">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div>目标地址: {{ scanValidationResult.target_url || '-' }}</div>
+          <div>认证方式: {{ scanValidationResult.auth_mode || '-' }}</div>
+          <div>响应摘要: {{ scanValidationResult.response_hint || '-' }}</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="后台预取">
+        <el-button type="info" plain @click="refreshProbeStats">刷新实时数据</el-button>
+        <span v-if="probeStats.updatedAt" color="gray" style="font-size: 12px; margin-left: 12px">最近刷新: {{ probeStats.updatedAt }}</span>
+      </el-form-item>
+      <el-form-item label="预取队列">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div>队列长度: {{ probeStats.queueLen }} / {{ probeStats.queueCap }}</div>
+          <div>累计入队: {{ probeStats.enqueuedTotal }}，累计丢弃: {{ probeStats.droppedTotal }}</div>
+          <div>冷却跳过: {{ probeStats.cooldownSkips }}，工作协程: {{ probeStats.workers }}，单网盘并发: {{ probeStats.providerLimit }}</div>
+          <div>首帧预热累计: {{ probeStats.warmupEnqueueCount }}</div>
+        </div>
+      </el-form-item>
       <el-divider content-position="left">代理分流配置</el-divider>
       <el-form-item label="代理模式">
         <el-radio-group v-model="proxyRoutingForm.mode" size="small">
@@ -186,7 +228,7 @@
   </div>
 </template>
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, reactive, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useConfigStore } from '@/store/config'
@@ -194,6 +236,7 @@ import { useBasicStore } from '@/store/basic'
 import {
   getAlistConfigReq,
   saveAlistConfigReq,
+  validateScanConfigReq,
   encodeFoldNameReq,
   decodeFoldNameReq,
   getSchemeConfigReq,
@@ -201,7 +244,8 @@ import {
   getProxyDomainDictionaryReq,
   refreshProxyDomainDictionaryReq,
   getProxyRoutingConfigReq,
-  saveProxyRoutingConfigReq
+  saveProxyRoutingConfigReq,
+  getStatsReq
 } from '@/api/user'
 
 import { Check, Delete, Edit, Message, Search, Star, CirclePlus, Folder } from '@element-plus/icons-vue'
@@ -247,6 +291,9 @@ const alistConfigForm = reactive({
   enableParallelDecrypt: false,
   parallelDecryptConcurrency: 4,
   streamBufferKb: 512,
+  scanUsername: '',
+  scanPassword: '',
+  scanAuthHeader: '',
   passwdList: [
     {
       id: Math.random(),
@@ -262,6 +309,19 @@ const alistConfigForm = reactive({
 })
 const refSearchForm = ref()
 const providerOptions = ref([])
+const scanValidationResult = ref(null)
+const statsRefreshTimer = ref(null)
+const probeStats = reactive({
+  queueLen: 0,
+  queueCap: 0,
+  enqueuedTotal: 0,
+  droppedTotal: 0,
+  cooldownSkips: 0,
+  workers: 0,
+  providerLimit: 0,
+  warmupEnqueueCount: 0,
+  updatedAt: ''
+})
 
 const proxyRoutingForm = reactive({
   mode: 'direct',
@@ -409,6 +469,32 @@ const saveProxyRouting = async () => {
   const res = await saveProxyRoutingConfigReq(payload)
   ElMessage.success(res.msg || '保存成功')
 }
+
+const validateScanConfig = async () => {
+  const res = await validateScanConfigReq(alistConfigForm)
+  scanValidationResult.value = res.data
+  if (res.data?.ok) {
+    ElMessage.success(res.data.message || '扫描账号可用')
+  } else {
+    ElMessage.warning(res.data?.message || '扫描账号不可用')
+  }
+}
+
+const refreshProbeStats = async () => {
+  const res = await getStatsReq({ reqLoading: false })
+  const scheduler = res?.data?.probe_scheduler || {}
+  const stream = res?.data?.stream || {}
+  probeStats.queueLen = scheduler.queue_len || 0
+  probeStats.queueCap = scheduler.queue_cap || 0
+  probeStats.enqueuedTotal = scheduler.enqueued_total || 0
+  probeStats.droppedTotal = scheduler.dropped_total || 0
+  probeStats.cooldownSkips = scheduler.cooldown_skips || 0
+  probeStats.workers = scheduler.workers || 0
+  probeStats.providerLimit = scheduler.provider_limit || 0
+  probeStats.warmupEnqueueCount = stream.warmup_enqueue_count || 0
+  probeStats.updatedAt = new Date().toLocaleTimeString()
+}
+
 onMounted(async () => {
   const res = await getAlistConfigReq()
   for (const passwdInfo of res.data.passwdList) {
@@ -431,5 +517,16 @@ onMounted(async () => {
   }
   await loadProxyDictionary()
   await loadProxyRouting()
+  await refreshProbeStats()
+  statsRefreshTimer.value = window.setInterval(() => {
+    refreshProbeStats().catch(() => {})
+  }, 10000)
+})
+
+onUnmounted(() => {
+  if (statsRefreshTimer.value) {
+    window.clearInterval(statsRefreshTimer.value)
+    statsRefreshTimer.value = null
+  }
 })
 </script>

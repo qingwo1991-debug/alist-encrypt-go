@@ -134,6 +134,8 @@ DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&par
 
 仅设置其中一个不会启用 MySQL，将自动使用内存模式。
 
+> MySQL 仅用于持久化缓存（range 兼容性、策略状态、文件元数据）。重复访问相同文件时，项目会避免多次写入同一条 MySQL 记录，减轻数据库压力。
+
 ## 验证与调优
 
 - 分片上传与策略观测验证：`bash tools/verify_chunk_upload.sh`

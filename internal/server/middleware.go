@@ -55,7 +55,7 @@ func CORSMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token, Depth, Destination, Overwrite, File-Path, Authorizetoken, AUTHORIZETOKEN")
 		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
 
-		if c.Request.Method == "OPTIONS" {
+		if c.Request.Method == "OPTIONS" && !strings.HasPrefix(c.Request.URL.Path, "/dav") {
 			c.AbortWithStatus(http.StatusOK)
 			return
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"io"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -35,17 +36,24 @@ type FlowEnc struct {
 	fileSize int64
 }
 
+const cacheEntryTTL = 30 * time.Minute
+
+type cacheEntry[V any] struct {
+	value    V
+	expireAt time.Time
+}
+
 // passwdOutwardCache caches PBKDF2-derived keys to avoid repeated computation
 // Key format: "password:encType"
 var (
-	passwdOutwardCache   = make(map[string]string)
+	passwdOutwardCache   = make(map[string]*cacheEntry[string])
 	passwdOutwardCacheMu sync.RWMutex
 )
 
 // mixBase64Cache caches MixBase64 instances to avoid repeated KSA computation
 // Key format: passwdOutward string
 var (
-	mixBase64Cache   = make(map[string]*MixBase64)
+	mixBase64Cache   = make(map[string]*cacheEntry[*MixBase64])
 	mixBase64CacheMu sync.RWMutex
 )
 
@@ -115,11 +123,11 @@ func GetPasswdOutward(password, encType string) string {
 	encType = normalizeEncType(encType)
 	cacheKey := password + ":" + encType
 
-	// Try read from cache first
+	// Try read from cache first (TTL check)
 	passwdOutwardCacheMu.RLock()
-	if cached, ok := passwdOutwardCache[cacheKey]; ok {
+	if entry, ok := passwdOutwardCache[cacheKey]; ok && time.Now().Before(entry.expireAt) {
 		passwdOutwardCacheMu.RUnlock()
-		return cached
+		return entry.value
 	}
 	passwdOutwardCacheMu.RUnlock()
 
@@ -134,9 +142,12 @@ func GetPasswdOutward(password, encType string) string {
 	key := pbkdf2.Key([]byte(password), []byte(salt), 1000, 16, sha256.New)
 	result := hex.EncodeToString(key)
 
-	// Store in cache
+	// Store in cache with TTL
 	passwdOutwardCacheMu.Lock()
-	passwdOutwardCache[cacheKey] = result
+	passwdOutwardCache[cacheKey] = &cacheEntry[string]{
+		value:    result,
+		expireAt: time.Now().Add(cacheEntryTTL),
+	}
 	passwdOutwardCacheMu.Unlock()
 
 	return result
@@ -156,20 +167,23 @@ func normalizeEncType(encType string) string {
 // GetCachedMixBase64 returns a cached MixBase64 instance for the given passwdOutward
 // This avoids repeated KSA computation which involves SHA256 and S-box shuffling
 func GetCachedMixBase64(passwdOutward string) *MixBase64 {
-	// Try read from cache first
+	// Try read from cache first (TTL check)
 	mixBase64CacheMu.RLock()
-	if cached, ok := mixBase64Cache[passwdOutward]; ok {
+	if entry, ok := mixBase64Cache[passwdOutward]; ok && time.Now().Before(entry.expireAt) {
 		mixBase64CacheMu.RUnlock()
-		return cached
+		return entry.value
 	}
 	mixBase64CacheMu.RUnlock()
 
 	// Create new instance
 	mix64 := NewMixBase64(passwdOutward)
 
-	// Store in cache
+	// Store in cache with TTL
 	mixBase64CacheMu.Lock()
-	mixBase64Cache[passwdOutward] = mix64
+	mixBase64Cache[passwdOutward] = &cacheEntry[*MixBase64]{
+		value:    mix64,
+		expireAt: time.Now().Add(cacheEntryTTL),
+	}
 	mixBase64CacheMu.Unlock()
 
 	return mix64

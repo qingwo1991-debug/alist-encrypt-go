@@ -182,6 +182,7 @@ func (s *Server) setupRoutes() {
 			protected.Any("/updateUsername", ginWrap(apiHandler.UpdateUsername))
 			protected.Any("/getAlistConfig", ginWrap(apiHandler.GetAlistConfig))
 			protected.Any("/saveAlistConfig", ginWrap(apiHandler.SaveAlistConfig))
+			protected.Any("/validateScanConfig", ginWrap(apiHandler.ValidateScanConfig))
 			protected.Any("/getWebdavonfig", ginWrap(apiHandler.GetWebdavConfig)) // Typo matches original
 			protected.Any("/getWebdavConfig", ginWrap(apiHandler.GetWebdavConfig))
 			protected.Any("/saveWebdavConfig", ginWrap(apiHandler.SaveWebdavConfig))
