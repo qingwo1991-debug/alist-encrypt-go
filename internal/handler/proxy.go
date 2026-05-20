@@ -196,6 +196,7 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 			log.Error().Err(err).Str("key", key).Msg("Failed to proxy redirect (passthrough)")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		}
+		return
 	}
 	if info.FileSize == 0 {
 		// When decryption is explicitly requested (decode=1), we must not
