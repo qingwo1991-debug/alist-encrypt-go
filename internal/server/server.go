@@ -144,6 +144,11 @@ func (s *Server) setupRoutes() {
 	if s.cfg != nil && s.cfg.AlistServer.EnableStartupProbe {
 		prefixes := s.passwdDAO.GetEncPathPrefixes()
 		go func(paths []string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().Interface("panic", r).Msg("Startup probe scheduler panicked")
+				}
+			}()
 			if len(paths) == 0 {
 				return
 			}

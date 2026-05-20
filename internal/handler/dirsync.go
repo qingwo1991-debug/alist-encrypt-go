@@ -32,7 +32,14 @@ func (h *AlistHandler) ensureDirSyncLoop() {
 		return
 	}
 	h.dirSyncStart.Do(func() {
-		go h.runDirSyncScheduler()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().Interface("panic", r).Msg("Directory sync scheduler panicked")
+				}
+			}()
+			h.runDirSyncScheduler()
+		}()
 	})
 }
 
