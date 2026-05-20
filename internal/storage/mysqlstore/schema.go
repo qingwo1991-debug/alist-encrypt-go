@@ -11,6 +11,8 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 	strategyTable := TableName("strategy")
 	fileMetaTable := TableName("file_meta")
 	rangeCompatTable := TableName("range_compat")
+	dirSnapshotTable := TableName("dir_snapshot")
+	dirSyncStatusTable := TableName("dir_sync_status")
 
 	strategySQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   key_hash CHAR(32) NOT NULL,
@@ -61,6 +63,51 @@ func (s *Store) ensureSchema(ctx context.Context) error {
   PRIMARY KEY (key_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`, rangeCompatTable)
 
+	dirSnapshotSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+  key_hash CHAR(32) NOT NULL,
+  scope_key VARCHAR(512) NOT NULL,
+  provider_host VARCHAR(255) NOT NULL,
+  display_path TEXT NOT NULL,
+  auth_scope_hash VARCHAR(64) NOT NULL,
+  rule_version VARCHAR(64) NOT NULL,
+  item_count INT NOT NULL DEFAULT 0,
+  stale TINYINT NOT NULL DEFAULT 0,
+  sync_state VARCHAR(32) NOT NULL DEFAULT 'fresh',
+  last_sync_at DATETIME NULL,
+  last_success_at DATETIME NULL,
+  next_refresh_at DATETIME NULL,
+  last_error TEXT NULL,
+  source_mode VARCHAR(32) NOT NULL DEFAULT 'request_fill',
+  payload_json MEDIUMTEXT NOT NULL,
+  last_accessed DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  is_active TINYINT NOT NULL DEFAULT 1,
+  PRIMARY KEY (key_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`, dirSnapshotTable)
+
+	dirSyncStatusSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+  name VARCHAR(64) NOT NULL,
+  job_id VARCHAR(64) NOT NULL,
+  job_type VARCHAR(32) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  mode VARCHAR(32) NOT NULL,
+  scan_configured TINYINT NOT NULL DEFAULT 0,
+  total_dirs_estimate INT NOT NULL DEFAULT 0,
+  total_dirs_discovered INT NOT NULL DEFAULT 0,
+  dirs_scanned INT NOT NULL DEFAULT 0,
+  dirs_succeeded INT NOT NULL DEFAULT 0,
+  dirs_failed INT NOT NULL DEFAULT 0,
+  dirs_skipped INT NOT NULL DEFAULT 0,
+  items_synced INT NOT NULL DEFAULT 0,
+  started_at DATETIME NULL,
+  updated_at DATETIME NOT NULL,
+  finished_at DATETIME NULL,
+  next_run_at DATETIME NULL,
+  last_error TEXT NULL,
+  last_success_at DATETIME NULL,
+  PRIMARY KEY (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`, dirSyncStatusTable)
+
 	if _, err := s.db.ExecContext(ctx, strategySQL); err != nil {
 		return err
 	}
@@ -68,6 +115,12 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, rangeCompatSQL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, dirSnapshotSQL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, dirSyncStatusSQL); err != nil {
 		return err
 	}
 	return nil

@@ -130,6 +130,13 @@ func (s *Server) setupRoutes() {
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	proxyHandler.SetProbeScheduler(probeScheduler)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
+	var dirSyncStore handler.DirSyncStore
+	if s.mysqlStore != nil {
+		dirSyncStore = handler.NewMySQLDirSyncStore(s.mysqlStore)
+	} else {
+		dirSyncStore = handler.NewBoltDirSyncStore(s.store)
+	}
+	alistHandler.SetDirSyncStore(dirSyncStore)
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
@@ -241,6 +248,9 @@ func (s *Server) setupRoutes() {
 	r.POST("/api/fs/rename", ginWrap(alistHandler.HandleFsRename))
 	r.POST("/api/fs/move", ginWrap(alistHandler.HandleFsMove))
 	r.POST("/api/fs/copy", ginWrap(alistHandler.HandleFsCopy))
+	r.GET("/api/encrypt/dir-sync/overview", ginWrap(alistHandler.HandleDirSyncOverview))
+	r.POST("/api/encrypt/dir-sync/run", ginWrap(alistHandler.HandleDirSyncRun))
+	r.GET("/api/encrypt/dir-sync/page", ginWrap(alistHandler.HandleDirSyncPage))
 
 	// Catch-all - Proxy to Alist with version injection
 	r.NoRoute(ginWrap(proxyHandler.HandleProxy))

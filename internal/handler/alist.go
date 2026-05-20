@@ -9,8 +9,11 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
@@ -30,6 +33,9 @@ type AlistHandler struct {
 	proxyHandler *ProxyHandler
 	metaStore    FileMetaStore
 	probe        *ProbeScheduler
+	dirSyncStore DirSyncStore
+	dirSyncStart sync.Once
+	dirSyncGroup singleflight.Group
 }
 
 // NewAlistHandler creates a new Alist handler
@@ -45,6 +51,10 @@ func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		metaStore:    metaStore,
 		probe:        probe,
 	}
+}
+
+func (h *AlistHandler) SetDirSyncStore(store DirSyncStore) {
+	h.dirSyncStore = store
 }
 
 // decryptResult holds the result of parallel filename decryption
@@ -550,201 +560,39 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 
 	dirPath, _ := reqData["path"].(string)
 	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
-	allowDecrypt := h.passwdDAO.MatchDir(dirPath)
-	var dirPasswd *config.PasswdInfo
-	if allowDecrypt {
-		if passwdInfo, ok := h.passwdDAO.FindByDir(dirPath); ok {
-			dirPasswd = passwdInfo
+	h.ensureDirSyncLoop()
+	authHash := authScopeHash(h.requestAuthHeaders(r))
+	scopeKey := buildDirScopeKey(dirPath, authHash)
+	if h.dirSyncStore != nil {
+		if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
+			h.serveSnapshot(w, snap, "snapshot")
+			if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+				h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
+			}
+			return
+		}
+		if h.scanConfigured() {
+			scanScopeKey := buildDirScopeKey(dirPath, dirSyncScopeScan)
+			if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scanScopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
+				h.serveSnapshot(w, snap, "background_scan")
+				if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+					h.refreshDirSnapshotAsync(dirPath, body, h.scanAuthHeaders(), scanScopeKey, dirSyncModeScan)
+				}
+				return
+			}
 		}
 	}
-	if dirPasswd == nil {
-		allowDecrypt = false
-	}
 
-	// Forward to Alist
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/list", nil)
-	proxyReq, err := httputil.NewRequest("POST", targetURL).
-		WithContext(r.Context()).
-		WithBody(body).
-		CopyHeaders(r).
-		Build()
-	if err != nil {
-		RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-
-	resp, err := h.httpClient.Do(proxyReq)
+	statusCode, _, payload, itemCount, err := h.liveFsListResponse(r, body, dirPath, true)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/list")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		RespondHTTPErrorWithStatus(w, "Failed to read response", http.StatusBadGateway)
-		return
+	if h.dirSyncStore != nil && statusCode >= 200 && statusCode < 300 {
+		h.persistSnapshot(r.Context(), dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
 	}
-
-	var respData map[string]interface{}
-	if err := json.Unmarshal(respBody, &respData); err != nil {
-		RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
-		return
-	}
-
-	// Process file list - decrypt filenames if needed
-	if code, ok := respData["code"].(float64); ok && code == 200 {
-		if data, ok := respData["data"].(map[string]interface{}); ok {
-			if content, ok := data["content"].([]interface{}); ok {
-				coverNameMap := make(map[string]string)
-				var omitNames []string
-
-				// Collect files that need decryption
-				type decryptTask struct {
-					index      int
-					name       string
-					passwdInfo *config.PasswdInfo
-				}
-				var tasks []decryptTask
-
-				for i, item := range content {
-					if fileData, ok := item.(map[string]interface{}); ok {
-						name, _ := fileData["name"].(string)
-						isDir, _ := fileData["is_dir"].(bool)
-
-						if name == "" {
-							continue
-						}
-
-						// Get file path
-						filePath := path.Join(dirPath, name)
-						fileData["path"] = filePath
-
-						// Cache file info
-						h.fileDAO.SetFromAlistResponse(filePath, fileData)
-
-						if !isDir && allowDecrypt {
-							if sizeVal, ok := fileData["size"].(float64); ok {
-								size := int64(sizeVal)
-								if size > 0 {
-									h.upsertMetaFromListing(r.Context(), filePath, size)
-								}
-								h.enqueueProbeFromList(r, filePath, size)
-							}
-						}
-
-						// Skip directories for filename decryption
-						if isDir || !allowDecrypt {
-							continue
-						}
-
-						// Use directory password info for fast path
-						if dirPasswd != nil && dirPasswd.EncName {
-							tasks = append(tasks, decryptTask{
-								index:      i,
-								name:       name,
-								passwdInfo: dirPasswd,
-							})
-						}
-
-						// Handle cover images (type 5 = image)
-						if fileType, ok := fileData["type"].(float64); ok && fileType == 5 {
-							baseName := strings.Split(name, ".")[0]
-							coverNameMap[baseName] = name
-						}
-					}
-				}
-
-				// Parallel filename decryption using goroutines
-				if len(tasks) > 0 {
-					applyResult := func(result decryptResult) {
-						if fileData, ok := content[result.index].(map[string]interface{}); ok {
-							encName := fileData["name"].(string)
-							fileData["name"] = result.showName
-							normalizeDecryptedListItem(fileData, result.showName)
-							content[result.index] = fileData
-							trace.Logf(r.Context(), "decrypt", "Decrypt filename: %s -> %s", encName, result.showName)
-
-							// Save mapping: display path -> encrypted path
-							displayPath := path.Join(dirPath, result.showName)
-							encryptedPath := path.Join(dirPath, encName)
-							h.fileDAO.SetEncPathMapping(displayPath, encryptedPath)
-						}
-					}
-
-					useParallel := h.parallelDecryptEnabled() && len(tasks) >= parallelDecryptThreshold
-					if useParallel {
-						results := make(chan decryptResult, len(tasks))
-						semaphore := make(chan struct{}, h.parallelDecryptLimit())
-
-						for _, task := range tasks {
-							semaphore <- struct{}{} // Acquire
-							go func(t decryptTask) {
-								defer func() { <-semaphore }() // Release
-								showName := h.convertShowName(t.passwdInfo, t.name)
-								results <- decryptResult{index: t.index, showName: showName}
-							}(task)
-						}
-
-						// Collect results
-						for range tasks {
-							applyResult(<-results)
-						}
-						close(results)
-					} else {
-						for _, task := range tasks {
-							showName := h.convertShowName(task.passwdInfo, task.name)
-							applyResult(decryptResult{index: task.index, showName: showName})
-						}
-					}
-				}
-
-				// Associate video files with cover images
-				for i, item := range content {
-					if fileData, ok := item.(map[string]interface{}); ok {
-						name, _ := fileData["name"].(string)
-						isDir, _ := fileData["is_dir"].(bool)
-						fileType, _ := fileData["type"].(float64)
-
-						if isDir {
-							continue
-						}
-
-						baseName := strings.Split(name, ".")[0]
-						if coverName, exists := coverNameMap[baseName]; exists && fileType == 2 {
-							omitNames = append(omitNames, coverName)
-							fileData["thumb"] = "/d" + dirPath + "/" + coverName
-							content[i] = fileData
-						}
-					}
-				}
-
-				// Filter out cover files
-				if len(omitNames) > 0 {
-					var filtered []interface{}
-					for _, item := range content {
-						if fileData, ok := item.(map[string]interface{}); ok {
-							name, _ := fileData["name"].(string)
-							shouldOmit := false
-							for _, omit := range omitNames {
-								if name == omit {
-									shouldOmit = true
-									break
-								}
-							}
-							if !shouldOmit {
-								filtered = append(filtered, item)
-							}
-						}
-					}
-					data["content"] = filtered
-				}
-			}
-		}
-	}
-
-	RespondJSON(w, resp.StatusCode, respData)
+	RespondRaw(w, statusCode, "application/json", payload)
 }
 
 // HandleFsGet intercepts /api/fs/get to modify raw_url and handle filename encryption
