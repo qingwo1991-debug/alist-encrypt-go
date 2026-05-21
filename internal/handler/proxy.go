@@ -403,7 +403,7 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	httputil.CopyResponseHeaders(w, resp)
 
 	// Handle redirects
-	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")
 		if location != "" {
 			parsedLoc, err := url.Parse(location)
@@ -466,6 +466,10 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+
+			w.Header().Set("Location", rewriteUpstreamLocation(r, h.cfg.GetAlistURL(), location))
+			w.WriteHeader(resp.StatusCode)
+			return
 		}
 	}
 
