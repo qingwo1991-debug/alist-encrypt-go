@@ -1022,8 +1022,12 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	result.ETag = resp.Header.Get("ETag")
 
 	if req.Method == http.MethodGet && statusCode == http.StatusOK && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
-		allowLoose := s.cfg != nil && s.cfg.AlistServer.AllowLooseDecode
-		if showName := decodeNameFromRequest(passwdInfo, req.URL.Path, allowLoose); showName != "" {
+		showName := displayNameFromContext(req.Context())
+		if showName == "" {
+			allowLoose := s.cfg != nil && s.cfg.AlistServer.AllowLooseDecode
+			showName = decodeNameFromRequest(passwdInfo, req.URL.Path, allowLoose)
+		}
+		if showName != "" {
 			rewriteContentDisposition(w, showName)
 		}
 	}

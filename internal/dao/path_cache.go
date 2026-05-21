@@ -9,14 +9,15 @@ import (
 // PathEntry stores all path-related information in one place
 // Both encryptedPath and displayPath point to the same entry
 type PathEntry struct {
-	EncryptedPath string // Primary key (encrypted/real path)
-	DisplayPath   string // Secondary index (decrypted/display path)
-	Name          string // Display filename
-	Size          int64  // File size
-	IsDir         bool   // Is directory
-	RawURL        string // Cached upstream direct URL
-	Sign          string // Cached upstream sign
-	ExpiresAt     int64  // Unix nano timestamp for expiration
+	EncryptedPath     string // Primary key (encrypted/real path)
+	DisplayPath       string // Secondary index (decrypted/display path)
+	Name              string // Display filename
+	Size              int64  // File size
+	IsDir             bool   // Is directory
+	RawURL            string // Cached upstream direct URL
+	Sign              string // Cached upstream sign
+	ExpiresAt         int64  // Unix nano timestamp for TTL expiration
+	UpstreamFetchedAt int64  // Unix nano timestamp when upstream metadata was last fetched
 }
 
 // IsExpired checks if the entry has expired
