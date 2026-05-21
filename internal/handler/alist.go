@@ -161,6 +161,22 @@ func resolveSearchRootPath(reqData fsSearchRequest) string {
 	return "/"
 }
 
+func (h *AlistHandler) isEncryptedDirRoot(dirPath string) bool {
+	if h == nil || h.passwdDAO == nil {
+		return false
+	}
+	dirPath = strings.TrimSpace(dirPath)
+	if dirPath == "" {
+		return false
+	}
+	for _, prefix := range h.passwdDAO.GetEncPathPrefixes() {
+		if strings.TrimRight(prefix, "/") == strings.TrimRight(dirPath, "/") {
+			return true
+		}
+	}
+	return false
+}
+
 func extractSearchRootFromPattern(pattern string) string {
 	pattern = strings.TrimSpace(pattern)
 	if pattern == "" {
@@ -638,22 +654,24 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if found && passwdInfo.EncName {
-		// Check if it's a directory first
-		fileInfo, exists := h.fileDAO.Get(url.QueryEscape(filePath))
-		if !exists || !fileInfo.IsDir {
-			// First try to get cached encrypted path
-			if encPath, ok := h.fileDAO.GetEncPath(filePath); ok {
-				filePath = encPath
-				reqData["path"] = filePath
-				trace.Logf(r.Context(), "get", "Using cached enc path: %s -> %s", originalPath, filePath)
-			} else {
-				// Fallback: re-encrypt (for backwards compatibility)
-				converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-				fileName := path.Base(filePath)
-				realName := converter.ToRealName(fileName)
-				filePath = path.Dir(filePath) + "/" + realName
-				reqData["path"] = filePath
-				trace.Logf(r.Context(), "get", "Fallback enc: %s -> %s", originalPath, filePath)
+		if !h.isEncryptedDirRoot(filePath) {
+			// Check if it's a directory first
+			fileInfo, exists := h.fileDAO.Get(url.QueryEscape(filePath))
+			if !exists || !fileInfo.IsDir {
+				// First try to get cached encrypted path
+				if encPath, ok := h.fileDAO.GetEncPath(filePath); ok {
+					filePath = encPath
+					reqData["path"] = filePath
+					trace.Logf(r.Context(), "get", "Using cached enc path: %s -> %s", originalPath, filePath)
+				} else {
+					// Fallback: re-encrypt (for backwards compatibility)
+					converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
+					fileName := path.Base(filePath)
+					realName := converter.ToRealName(fileName)
+					filePath = path.Dir(filePath) + "/" + realName
+					reqData["path"] = filePath
+					trace.Logf(r.Context(), "get", "Fallback enc: %s -> %s", originalPath, filePath)
+				}
 			}
 		}
 	}
