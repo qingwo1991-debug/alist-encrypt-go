@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -256,7 +258,13 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target")
 	}
 	if targetURL == "" {
-		targetURL = httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+		// Fetch raw_url from alist /api/fs/get (PROPFIND XML doesn't include it).
+		if fetched := h.fetchRawURLFromAlist(r, davPath, realPath); fetched != "" {
+			targetURL = fetched
+			trace.Logf(r.Context(), "webdav-get", "Fetched raw_url from alist fs/get")
+		} else {
+			targetURL = httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+		}
 	}
 
 	// Look up file info using DISPLAY path (davPath), not realPath
@@ -330,6 +338,48 @@ func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPa
 		}
 	}
 	return 0
+}
+
+// fetchRawURLFromAlist calls alist /api/fs/get to get the signed raw_url,
+// caches it, and returns it. PROPFIND XML doesn't include raw_url.
+func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realPath string) string {
+	if h == nil || h.cfg == nil {
+		return ""
+	}
+	fsGetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/api/fs/get")
+	body, _ := json.Marshal(map[string]string{"path": realPath})
+	req, err := http.NewRequest(http.MethodPost, fsGetURL, bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := proxy.NewHTTPClient(h.cfg, 10*time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			RawURL string `json:"raw_url"`
+			Size   int64  `json:"size"`
+			Name   string `json:"name"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(respBody, &result) != nil || result.Code != 200 || result.Data.RawURL == "" {
+		return ""
+	}
+	// Cache the result
+	h.fileDAO.Set(&dao.FileInfo{
+		Path:              displayPath,
+		Size:              result.Data.Size,
+		RawURL:            result.Data.RawURL,
+		UpstreamFetchedAt: time.Now(),
+	})
+	trace.Logf(r.Context(), "webdav-get", "Cached raw_url from fs/get: size=%d", result.Data.Size)
+	return result.Data.RawURL
 }
 
 // handlePut handles PUT requests with encryption and filename encryption
