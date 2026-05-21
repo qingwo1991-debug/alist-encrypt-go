@@ -535,6 +535,7 @@ func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, bo
 		WithContext(srcReq.Context()).
 		WithBody(body).
 		CopyHeadersExcept(srcReq, "Content-Length", "Authorization", "Authorizetoken", "X-User-Token").
+		WithForwardedHeaders(srcReq).
 		WithHeader("Content-Type", "application/json").
 		Build()
 	if err != nil {
@@ -565,20 +566,24 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	scopeKey := buildDirScopeKey(dirPath, authHash)
 	if h.dirSyncStore != nil {
 		if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
-			h.serveSnapshot(w, snap, "snapshot")
-			if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
-				h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
+			if isSuccessfulListPayload(snap.PayloadJSON) {
+				h.serveSnapshot(w, snap, "snapshot")
+				if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+					h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
+				}
+				return
 			}
-			return
 		}
 		if h.scanConfigured() {
 			scanScopeKey := buildDirScopeKey(dirPath, dirSyncScopeScan)
 			if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scanScopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
-				h.serveSnapshot(w, snap, "background_scan")
-				if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
-					h.refreshDirSnapshotAsync(dirPath, body, h.scanAuthHeaders(), scanScopeKey, dirSyncModeScan)
+				if isSuccessfulListPayload(snap.PayloadJSON) {
+					h.serveSnapshot(w, snap, "background_scan")
+					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+						h.refreshDirSnapshotAsync(dirPath, body, h.scanAuthHeaders(), scanScopeKey, dirSyncModeScan)
+					}
+					return
 				}
-				return
 			}
 		}
 	}
@@ -589,7 +594,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
-	if h.dirSyncStore != nil && statusCode >= 200 && statusCode < 300 {
+	if h.dirSyncStore != nil && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) {
 		h.persistSnapshot(r.Context(), dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
 	}
 	RespondRaw(w, statusCode, "application/json", payload)
@@ -664,6 +669,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 		WithContext(r.Context()).
 		WithBody(modifiedBody).
 		CopyHeadersExcept(r, "Content-Length").
+		WithForwardedHeaders(r).
 		WithHeader("Content-Type", "application/json").
 		Build()
 	if err != nil {

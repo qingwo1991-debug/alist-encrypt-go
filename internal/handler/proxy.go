@@ -383,6 +383,7 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		WithContext(r.Context()).
 		WithBodyReader(r.Body).
 		CopyHeaders(r).
+		WithForwardedHeaders(r).
 		Build()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create proxy request")
@@ -400,10 +401,10 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	contentType := resp.Header.Get("Content-Type")
-	httputil.CopyResponseHeaders(w, resp)
 
 	// Handle redirects
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		httputil.CopyResponseHeaders(w, resp)
 		location := resp.Header.Get("Location")
 		if location != "" {
 			parsedLoc, err := url.Parse(location)
@@ -473,21 +474,22 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.WriteHeader(resp.StatusCode)
-
-	// Inject version for HTML
-	if strings.Contains(contentType, "text/html") {
-		const maxHTMLSize = 10 * 1024 * 1024
-		limitedReader := io.LimitReader(resp.Body, maxHTMLSize)
-		body, err := io.ReadAll(limitedReader)
+	if shouldRewriteTextResponse(contentType) {
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to read response body")
+			log.Error().Err(err).Msg("Failed to read textual proxy response body")
+			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 			return
 		}
-		modified := strings.Replace(string(body), "</head>", "<!-- alist-encrypt-go --></head>", 1)
-		w.Write([]byte(modified))
+		body = rewriteUpstreamTextBody(r, h.cfg.GetAlistURL(), body)
+		httputil.CopyResponseHeaders(w, resp, "Content-Length")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
 		return
 	}
+
+	httputil.CopyResponseHeaders(w, resp)
+	w.WriteHeader(resp.StatusCode)
 
 	buf := proxy.GetBuffer()
 	defer proxy.PutBuffer(buf)

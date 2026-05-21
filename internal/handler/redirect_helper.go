@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"net/http"
 	"net/url"
 	"strings"
@@ -111,4 +112,53 @@ func rewriteUpstreamLocation(r *http.Request, upstreamBaseURL, location string) 
 		rewritten += "#" + parsedLoc.Fragment
 	}
 	return origin + rewritten
+}
+
+func shouldRewriteTextResponse(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	switch {
+	case strings.Contains(contentType, "text/html"),
+		strings.Contains(contentType, "text/plain"),
+		strings.Contains(contentType, "text/css"),
+		strings.Contains(contentType, "text/javascript"),
+		strings.Contains(contentType, "application/json"),
+		strings.Contains(contentType, "application/javascript"),
+		strings.Contains(contentType, "application/x-javascript"),
+		strings.Contains(contentType, "application/xml"),
+		strings.Contains(contentType, "text/xml"),
+		strings.Contains(contentType, "application/ld+json"):
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteUpstreamTextBody(r *http.Request, upstreamBaseURL string, body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	origin := requestOrigin(r)
+	if origin == "" {
+		return body
+	}
+	parsedUpstream, err := url.Parse(strings.TrimSpace(upstreamBaseURL))
+	if err != nil || parsedUpstream.Host == "" {
+		return body
+	}
+
+	upstreamHost := parsedUpstream.Host
+	replacements := []string{
+		"http://" + upstreamHost,
+		"https://" + upstreamHost,
+	}
+
+	out := body
+	for _, from := range replacements {
+		if from == origin {
+			continue
+		}
+		out = bytes.ReplaceAll(out, []byte(from), []byte(origin))
+		out = bytes.ReplaceAll(out, []byte(strings.ReplaceAll(from, "/", "\\/")), []byte(strings.ReplaceAll(origin, "/", "\\/")))
+	}
+	return out
 }
