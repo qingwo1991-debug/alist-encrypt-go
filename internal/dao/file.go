@@ -52,10 +52,12 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	// Check unified path cache first
 	if entry, ok := d.pathCache.Get(path); ok {
 		return &FileInfo{
-			Path:  entry.DisplayPath,
-			Name:  entry.Name,
-			Size:  entry.Size,
-			IsDir: entry.IsDir,
+			Path:   entry.DisplayPath,
+			Name:   entry.Name,
+			Size:   entry.Size,
+			IsDir:  entry.IsDir,
+			RawURL: entry.RawURL,
+			Sign:   entry.Sign,
 		}, true
 	}
 
@@ -80,6 +82,8 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		Name:          info.Name,
 		Size:          info.Size,
 		IsDir:         info.IsDir,
+		RawURL:        info.RawURL,
+		Sign:          info.Sign,
 	}
 	d.pathCache.Set(entry, 24*time.Hour)
 

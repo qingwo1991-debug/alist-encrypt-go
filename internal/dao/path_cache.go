@@ -14,6 +14,8 @@ type PathEntry struct {
 	Name          string // Display filename
 	Size          int64  // File size
 	IsDir         bool   // Is directory
+	RawURL        string // Cached upstream direct URL
+	Sign          string // Cached upstream sign
 	ExpiresAt     int64  // Unix nano timestamp for expiration
 }
 
