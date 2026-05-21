@@ -37,10 +37,16 @@ type FileSizeEntry struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// FileMetaStoreWriter is a minimal interface for writing file metadata to external stores like MySQL.
+type FileMetaStoreWriter interface {
+	UpsertFileMeta(path string, size int64, rawURL, sign string, upstreamFetchedAt time.Time) error
+}
+
 // FileDAO handles file information caching
 type FileDAO struct {
-	store     *storage.Store
-	pathCache *PathCache // Unified high-performance cache
+	store          *storage.Store
+	pathCache      *PathCache // Unified high-performance cache
+	fileMetaWriter FileMetaStoreWriter
 }
 
 // NewFileDAO creates a new file DAO
@@ -54,6 +60,11 @@ func NewFileDAO(store *storage.Store) *FileDAO {
 	go dao.cleanupPathCache()
 
 	return dao
+}
+
+// SetFileMetaWriter injects an external store for persisting file metadata (e.g. MySQL).
+func (d *FileDAO) SetFileMetaWriter(w FileMetaStoreWriter) {
+	d.fileMetaWriter = w
 }
 
 // Get retrieves file info from cache or store
@@ -102,6 +113,11 @@ func (d *FileDAO) Set(info *FileInfo) error {
 	}
 	d.pathCache.Set(entry, 24*time.Hour)
 
+	// Persist: prefer MySQL if available, else BoltDB.
+	if d.fileMetaWriter != nil {
+		_ = d.fileMetaWriter.UpsertFileMeta(info.Path, info.Size, info.RawURL, info.Sign, now)
+		return nil
+	}
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
 }
 
@@ -202,7 +218,7 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 	}
 
 	cfg := config.Get()
-	if cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
+	if d.fileMetaWriter == nil && cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
 		persistEntry := FileSizeEntry{Path: path, Size: size, UpdatedAt: time.Now()}
 		_ = d.store.SetJSON(storage.BucketFileSize, path, persistEntry)
 	}

@@ -41,6 +41,13 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config) (*Server, error) {
+	// Try MySQL first.
+	mysqlStore, mysqlErr := mysqlstore.NewStore(cfg)
+	if mysqlErr != nil {
+		log.Warn().Err(mysqlErr).Msg("MySQL unavailable, falling back to BoltDB")
+	}
+
+	// BoltDB is always created for users/passwd/config (minimal, always needed).
 	store, err := storage.NewStore(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create store: %w", err)
@@ -57,13 +64,12 @@ func New(cfg *config.Config) (*Server, error) {
 		userDAO:     dao.NewUserDAO(store),
 		fileDAO:     dao.NewFileDAO(store),
 		passwdDAO:   dao.NewPasswdDAO(store),
+		mysqlStore:  mysqlStore,
 	}
 
-	mysqlStore, err := mysqlstore.NewStore(cfg)
-	if err != nil {
-		log.Warn().Err(err).Msg("Failed to initialize MySQL store, using memory-only mode")
-	} else {
-		s.mysqlStore = mysqlStore
+	// If MySQL is available, hook it into FileDAO for file metadata persistence.
+	if mysqlStore != nil {
+		s.fileDAO.SetFileMetaWriter(handler.NewMySQLFileMetaWriter(mysqlStore))
 	}
 
 	// Ensure default admin user exists
@@ -205,6 +211,7 @@ func (s *Server) setupRoutes() {
 			protected.Any("/getSchemeConfig", ginWrap(apiHandler.GetSchemeConfig))
 			protected.Any("/saveSchemeConfig", ginWrap(apiHandler.SaveSchemeConfig))
 			protected.Any("/exportFileMeta", ginWrap(apiHandler.ExportFileMeta))
+			protected.Any("/cleanupLegacyBoltDB", ginWrap(apiHandler.CleanupLegacyBoltDB))
 			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
 			protected.Any("/getProxyDomainDictionary", ginWrap(apiHandler.GetProxyDomainDictionary))
 			protected.Any("/refreshProxyDomainDictionary", ginWrap(apiHandler.RefreshProxyDomainDictionary))

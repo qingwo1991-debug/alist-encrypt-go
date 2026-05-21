@@ -113,6 +113,11 @@
           <div>过期触发: {{ prefetchStats.staleTriggers }}，上次更新: {{ prefetchStats.lastAt || '-' }}</div>
         </div>
       </el-form-item>
+      <el-form-item label="旧数据清理">
+        <el-button type="danger" plain @click="cleanupLegacyBoltDB">清理旧 BoltDB 数据</el-button>
+        <span v-if="cleanupMsg" :style="{ marginLeft: '12px', color: cleanupOk ? '#67c23a' : '#f56c6c' }">{{ cleanupMsg }}</span>
+        <span color="gray" style="font-size: 12px; margin-left: 12px">仅在配置 MySQL 后可用，清理后无法找回</span>
+      </el-form-item>
       <el-divider content-position="left">代理分流配置</el-divider>
       <el-form-item label="代理模式">
         <el-radio-group v-model="proxyRoutingForm.mode" size="small">
@@ -255,7 +260,8 @@ import {
   refreshProxyDomainDictionaryReq,
   getProxyRoutingConfigReq,
   saveProxyRoutingConfigReq,
-  getStatsReq
+  getStatsReq,
+  cleanupLegacyBoltDBReq
 } from '@/api/user'
 
 import { Check, Delete, Edit, Message, Search, Star, CirclePlus, Folder } from '@element-plus/icons-vue'
@@ -333,6 +339,9 @@ const probeStats = reactive({
   warmupEnqueueCount: 0,
   updatedAt: ''
 })
+
+const cleanupMsg = ref('')
+const cleanupOk = ref(false)
 
 const prefetchStats = reactive({
   total: 0,
@@ -487,6 +496,19 @@ const saveProxyRouting = async () => {
   }
   const res = await saveProxyRoutingConfigReq(payload)
   ElMessage.success(res.msg || '保存成功')
+}
+
+const cleanupLegacyBoltDB = async () => {
+  cleanupMsg.value = ''
+  cleanupOk.value = false
+  try {
+    const res = await cleanupLegacyBoltDBReq()
+    cleanupMsg.value = res.msg || res.data?.msg || '操作完成'
+    cleanupOk.value = !!(res.code === 0 || res.code === 200)
+  } catch (err) {
+    cleanupMsg.value = err?.msg || err?.message || '请求失败'
+    cleanupOk.value = false
+  }
 }
 
 const validateScanConfig = async () => {
