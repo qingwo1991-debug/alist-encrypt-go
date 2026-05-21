@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/rs/zerolog/log"
@@ -204,6 +205,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			Msg("PlayFirstFallback: proxying encrypted content as final fallback (consider disabling playFirstFallback in config)")
 		if req.FinalPassthroughCount != nil {
 			atomic.AddUint64(req.FinalPassthroughCount, 1)
+		}
+		// Strip WebDAV-specific headers before sending to CDN (raw_url target).
+		// WebDAV players send headers like Depth, Translate that confuse CDNs.
+		if r.Method == http.MethodGet && strings.HasPrefix(req.TargetURL, "https://") {
+			proxy.StripWebDAVHeaders(r)
 		}
 		if err := req.StreamProxy.ProxyRequest(w, r, req.TargetURL); err == nil {
 			return

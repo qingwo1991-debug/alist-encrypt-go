@@ -846,6 +846,9 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 		}
 	}
 	applyStrategyHeaders(req, strategy)
+	// Strip WebDAV-specific headers for CDN requests (raw_url targets).
+	// WebDAV players send Depth, Translate etc. that confuse cloud CDNs.
+	s.StripForeignHeaders(req)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		reason, retryable := classifyStreamError(err)
@@ -1447,4 +1450,27 @@ func shouldSniffDecryptedContent(method, contentType string, startOffset int64) 
 		return false
 	}
 	return true
+}
+
+// StripForeignHeaders removes WebDAV-specific headers that confuse CDN targets.
+func (s *StreamProxy) StripForeignHeaders(req *http.Request) {
+	if req == nil || req.URL == nil {
+		return
+	}
+	if req.URL.Scheme != "https" {
+		return
+	}
+	StripWebDAVHeaders(req)
+}
+
+// StripWebDAVHeaders removes WebDAV-specific request headers that confuse CDNs.
+func StripWebDAVHeaders(r *http.Request) {
+	webdavHeaders := []string{
+		"Depth", "Translate", "Destination", "If", "If-Match",
+		"If-None-Match", "If-Modified-Since", "If-Unmodified-Since",
+		"Lock-Token", "Overwrite", "Timeout",
+	}
+	for _, h := range webdavHeaders {
+		r.Header.Del(h)
+	}
 }
