@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"path"
 	"strconv"
@@ -498,7 +499,7 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 	}
 	maxDepth := h.cfg.AlistServer.ScanMaxDepth
 	if maxDepth <= 0 {
-		maxDepth = 2
+		maxDepth = math.MaxInt // unlimited (consistent with WebDAV deepScan)
 	}
 	queue := make([]scanNode, 0, len(roots))
 	seen := map[string]struct{}{}
