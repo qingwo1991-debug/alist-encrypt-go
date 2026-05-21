@@ -44,6 +44,9 @@ func (s *Store) ensureSchema(ctx context.Context) error {
   last_accessed DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
   is_active TINYINT NOT NULL DEFAULT 1,
+  upstream_fetched_at DATETIME NULL,
+  raw_url VARCHAR(2048) NULL,
+  sign VARCHAR(512) NULL,
   PRIMARY KEY (key_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`, fileMetaTable)
 
@@ -123,6 +126,23 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, dirSyncStatusSQL); err != nil {
 		return err
 	}
+	return s.migrateSchema(ctx)
+}
+
+func (s *Store) migrateSchema(ctx context.Context) error {
+	migrations := []string{
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN upstream_fetched_at DATETIME NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN raw_url VARCHAR(2048) NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN sign VARCHAR(512) NULL", TableName("file_meta")),
+	}
+	for _, m := range migrations {
+		if _, err := s.db.ExecContext(ctx, m); err != nil {
+			if strings.Contains(err.Error(), "Duplicate column") || strings.Contains(err.Error(), "1060") {
+				continue
+			}
+			return err
+		}
+	}
 	return nil
 }
 
@@ -186,18 +206,21 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 		return nil
 	}
 	query := fmt.Sprintf(`INSERT INTO %s
-  (key_hash, provider_host, original_path, size, etag, content_type, status_code, last_accessed, updated_at, is_active)
+  (key_hash, provider_host, original_path, size, etag, content_type, status_code, raw_url, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
   VALUES %s
   ON DUPLICATE KEY UPDATE
     size=VALUES(size),
     etag=VALUES(etag),
     content_type=VALUES(content_type),
     status_code=VALUES(status_code),
+    raw_url=VALUES(raw_url),
+    sign=VALUES(sign),
     last_accessed=VALUES(last_accessed),
     updated_at=VALUES(updated_at),
-    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(10, len(records)))
+    upstream_fetched_at=VALUES(upstream_fetched_at),
+    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(13, len(records)))
 
-	args := make([]interface{}, 0, len(records)*10)
+	args := make([]interface{}, 0, len(records)*13)
 	now := time.Now()
 	for _, record := range records {
 		lastAccessed := record.LastAccessed
@@ -208,6 +231,10 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 		if updatedAt.IsZero() {
 			updatedAt = now
 		}
+		upstreamFetchedAt := record.UpstreamFetchedAt
+		if upstreamFetchedAt.IsZero() {
+			upstreamFetchedAt = now
+		}
 		args = append(args,
 			record.KeyHash,
 			record.ProviderHost,
@@ -216,8 +243,11 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 			record.ETag,
 			record.ContentType,
 			record.StatusCode,
+			record.RawURL,
+			record.Sign,
 			lastAccessed,
 			updatedAt,
+			upstreamFetchedAt,
 			boolToInt(record.Active),
 		)
 	}

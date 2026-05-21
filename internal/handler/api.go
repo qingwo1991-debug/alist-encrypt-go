@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -519,6 +520,30 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 		"next_since_rfc3339": nextSinceRFC3339,
 		"next_cursor":        nextCursor,
 	})
+}
+
+// CleanupLegacyBoltDB removes the legacy BoltDB file after MySQL has been configured.
+func (h *APIHandler) CleanupLegacyBoltDB(w http.ResponseWriter, r *http.Request) {
+	if h.mysqlStore == nil {
+		RespondAPIError(w, 400, "MySQL 未连接，请先配置 MySQL 后再试")
+		return
+	}
+	dbPath := filepath.Join(h.cfg.DataDir, "alist-encrypt.db")
+	info, err := os.Stat(dbPath)
+	if os.IsNotExist(err) {
+		RespondSuccessMsg(w, "没有旧数据需要清理")
+		return
+	}
+	if err != nil {
+		RespondAPIError(w, 500, "检查旧数据文件失败: "+err.Error())
+		return
+	}
+	sizeKB := info.Size() / 1024
+	if err := os.Remove(dbPath); err != nil {
+		RespondAPIError(w, 500, "清理失败: "+err.Error())
+		return
+	}
+	RespondSuccessMsg(w, fmt.Sprintf("已清理旧数据（%d KB），清理后无法找回", sizeKB))
 }
 
 // GetProxyDomainDictionary returns cached proxy provider dictionary.

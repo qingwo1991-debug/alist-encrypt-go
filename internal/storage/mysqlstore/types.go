@@ -44,16 +44,19 @@ type StrategyRecord struct {
 }
 
 type FileMetaRecord struct {
-	KeyHash      string
-	ProviderHost string
-	OriginalPath string
-	Size         int64
-	ETag         string
-	ContentType  string
-	UpdatedAt    time.Time
-	LastAccessed time.Time
-	StatusCode   int
-	Active       bool
+	KeyHash           string
+	ProviderHost      string
+	OriginalPath      string
+	Size              int64
+	ETag              string
+	ContentType       string
+	RawURL            string
+	Sign              string
+	UpdatedAt         time.Time
+	LastAccessed      time.Time
+	UpstreamFetchedAt time.Time
+	StatusCode        int
+	Active            bool
 }
 
 type RangeCompatRecord struct {
