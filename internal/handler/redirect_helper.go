@@ -120,10 +120,7 @@ func shouldRewriteTextResponse(contentType string) bool {
 	case strings.Contains(contentType, "text/html"),
 		strings.Contains(contentType, "text/plain"),
 		strings.Contains(contentType, "text/css"),
-		strings.Contains(contentType, "text/javascript"),
 		strings.Contains(contentType, "application/json"),
-		strings.Contains(contentType, "application/javascript"),
-		strings.Contains(contentType, "application/x-javascript"),
 		strings.Contains(contentType, "application/xml"),
 		strings.Contains(contentType, "text/xml"),
 		strings.Contains(contentType, "application/ld+json"):
