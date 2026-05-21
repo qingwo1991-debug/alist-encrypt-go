@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"io"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -285,13 +288,45 @@ func (ps *ProbeScheduler) ensureAuth(headers http.Header) http.Header {
 		headers.Set("Authorization", raw)
 		return headers
 	}
-	// Fall back to scan username/password (Basic auth)
+	// Try JWT login with scan credentials (alist /api/fs/list needs token, not Basic auth)
 	username := ps.cfg.AlistServer.ScanUsername
 	password := ps.cfg.AlistServer.ScanPassword
-	if username != "" || password != "" {
+	if username != "" && password != "" {
+		if token := fetchAlistJWT(ps.cfg.GetAlistURL(), username, password); token != "" {
+			headers.Set("Authorization", token)
+			return headers
+		}
+		// Fallback to Basic auth
 		token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 		headers.Set("Authorization", "Basic "+token)
 		return headers
 	}
 	return headers
+}
+
+func fetchAlistJWT(alistURL, username, password string) string {
+	loginURL := alistURL + "/api/auth/login"
+	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	req, err := http.NewRequest(http.MethodPost, loginURL, bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(respBody, &result) != nil || result.Code != 200 || result.Data.Token == "" {
+		return ""
+	}
+	return result.Data.Token
 }
