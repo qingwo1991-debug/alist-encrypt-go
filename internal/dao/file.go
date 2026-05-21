@@ -12,13 +12,22 @@ import (
 
 // FileInfo represents cached file information
 type FileInfo struct {
-	Path     string    `json:"path"`
-	Name     string    `json:"name"`
-	Size     int64     `json:"size"`
-	IsDir    bool      `json:"is_dir"`
-	Modified time.Time `json:"modified"`
-	RawURL   string    `json:"raw_url"`
-	Sign     string    `json:"sign"`
+	Path              string    `json:"path"`
+	Name              string    `json:"name"`
+	Size              int64     `json:"size"`
+	IsDir             bool      `json:"is_dir"`
+	Modified          time.Time `json:"modified"`
+	RawURL            string    `json:"raw_url"`
+	Sign              string    `json:"sign"`
+	UpstreamFetchedAt time.Time `json:"upstream_fetched_at"`
+}
+
+// UpstreamStaleness returns how long ago the upstream metadata was fetched.
+func (fi *FileInfo) UpstreamStaleness() time.Duration {
+	if fi.UpstreamFetchedAt.IsZero() {
+		return time.Hour * 24 * 365 // treat missing timestamp as very stale
+	}
+	return time.Since(fi.UpstreamFetchedAt)
 }
 
 // FileSizeEntry represents a persistent file size mapping
@@ -51,14 +60,18 @@ func NewFileDAO(store *storage.Store) *FileDAO {
 func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	// Check unified path cache first
 	if entry, ok := d.pathCache.Get(path); ok {
-		return &FileInfo{
+		fi := &FileInfo{
 			Path:   entry.DisplayPath,
 			Name:   entry.Name,
 			Size:   entry.Size,
 			IsDir:  entry.IsDir,
 			RawURL: entry.RawURL,
 			Sign:   entry.Sign,
-		}, true
+		}
+		if entry.UpstreamFetchedAt > 0 {
+			fi.UpstreamFetchedAt = time.Unix(0, entry.UpstreamFetchedAt)
+		}
+		return fi, true
 	}
 
 	// Check persistent store
@@ -76,14 +89,16 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 // Set stores file info
 func (d *FileDAO) Set(info *FileInfo) error {
 	// Store in unified path cache
+	now := time.Now()
 	entry := &PathEntry{
-		EncryptedPath: info.Path,
-		DisplayPath:   info.Path,
-		Name:          info.Name,
-		Size:          info.Size,
-		IsDir:         info.IsDir,
-		RawURL:        info.RawURL,
-		Sign:          info.Sign,
+		EncryptedPath:     info.Path,
+		DisplayPath:       info.Path,
+		Name:              info.Name,
+		Size:              info.Size,
+		IsDir:             info.IsDir,
+		RawURL:            info.RawURL,
+		Sign:              info.Sign,
+		UpstreamFetchedAt: now.UnixNano(),
 	}
 	d.pathCache.Set(entry, 24*time.Hour)
 

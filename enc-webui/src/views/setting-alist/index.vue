@@ -51,6 +51,10 @@
         <el-input v-model="alistConfigForm.rangeProbeTimeoutSeconds" style="max-width: 260px" placeholder="8" />
         <span color="gray" style="font-size: 12px; margin-left: 12px">秒（2-60）</span>
       </el-form-item>
+      <el-form-item prop="upstreamStalenessMinutes" label="元数据刷新">
+        <el-input v-model="alistConfigForm.upstreamStalenessMinutes" style="max-width: 260px" placeholder="30" />
+        <span color="gray" style="font-size: 12px; margin-left: 12px">分钟（0=默认30）超过后自动重新获取 raw_url</span>
+      </el-form-item>
       <el-form-item prop="enableParallelDecrypt" label="并行解密">
         <el-switch v-model="alistConfigForm.enableParallelDecrypt" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
         <span color="gray" style="font-size: 12px; margin-left: 12px">大文件分片并行解密</span>
@@ -101,6 +105,12 @@
           <div>累计入队: {{ probeStats.enqueuedTotal }}，累计丢弃: {{ probeStats.droppedTotal }}</div>
           <div>冷却跳过: {{ probeStats.cooldownSkips }}，工作协程: {{ probeStats.workers }}，单网盘并发: {{ probeStats.providerLimit }}</div>
           <div>首帧预热累计: {{ probeStats.warmupEnqueueCount }}</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="元数据预热">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div>累计触发: {{ prefetchStats.total }}，成功: {{ prefetchStats.success }}，跳过: {{ prefetchStats.skipped }}</div>
+          <div>过期触发: {{ prefetchStats.staleTriggers }}，上次更新: {{ prefetchStats.lastAt || '-' }}</div>
         </div>
       </el-form-item>
       <el-divider content-position="left">代理分流配置</el-divider>
@@ -288,6 +298,7 @@ const alistConfigForm = reactive({
   rangeSuccessToRecover: 3,
   rangeReprobeMinutes: 30,
   rangeProbeTimeoutSeconds: 8,
+  upstreamStalenessMinutes: 30,
   enableParallelDecrypt: false,
   parallelDecryptConcurrency: 4,
   streamBufferKb: 512,
@@ -321,6 +332,14 @@ const probeStats = reactive({
   providerLimit: 0,
   warmupEnqueueCount: 0,
   updatedAt: ''
+})
+
+const prefetchStats = reactive({
+  total: 0,
+  success: 0,
+  skipped: 0,
+  staleTriggers: 0,
+  lastAt: ''
 })
 
 const proxyRoutingForm = reactive({
@@ -484,6 +503,7 @@ const refreshProbeStats = async () => {
   const res = await getStatsReq({ reqLoading: false })
   const scheduler = res?.data?.probe_scheduler || {}
   const stream = res?.data?.stream || {}
+  const proxyPrefetch = res?.data?.proxy?.prefetch || {}
   probeStats.queueLen = scheduler.queue_len || 0
   probeStats.queueCap = scheduler.queue_cap || 0
   probeStats.enqueuedTotal = scheduler.enqueued_total || 0
@@ -493,6 +513,12 @@ const refreshProbeStats = async () => {
   probeStats.providerLimit = scheduler.provider_limit || 0
   probeStats.warmupEnqueueCount = stream.warmup_enqueue_count || 0
   probeStats.updatedAt = new Date().toLocaleTimeString()
+
+  prefetchStats.total = proxyPrefetch.total || 0
+  prefetchStats.success = proxyPrefetch.success || 0
+  prefetchStats.skipped = proxyPrefetch.skipped || 0
+  prefetchStats.staleTriggers = proxyPrefetch.stale_triggers || 0
+  prefetchStats.lastAt = proxyPrefetch.last_at || ''
 }
 
 onMounted(async () => {

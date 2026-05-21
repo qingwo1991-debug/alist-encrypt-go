@@ -84,6 +84,7 @@ type AlistServer struct {
 	ProbeMinSizeBytes           int64                    `json:"probeMinSizeBytes"`
 	PlayFirstFallback           bool                     `json:"playFirstFallback"`
 	SizeUnknownStrict           bool                     `json:"sizeUnknownStrict"`
+	UpstreamStalenessMinutes    int                      `json:"upstreamStalenessMinutes"` // 0 = use default (30 min)
 	ChunkedSeekMaxDiscardBytes  int64                    `json:"chunkedSeekMaxDiscardBytes"`
 	EnableSniff                 bool                     `json:"enableSniff"`
 	CircuitBreakerThreshold     int                      `json:"circuitBreakerThreshold"`

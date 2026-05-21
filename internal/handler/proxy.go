@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +45,11 @@ type ProxyHandler struct {
 	firstFrameCount       uint64
 	firstFrameFallbacks   uint64
 	warmupEnqueueCount    uint64
+	prefetchTotal         uint64
+	prefetchSuccess       uint64
+	prefetchSkipped       uint64
+	prefetchStaleTriggers uint64
+	prefetchLastAt        int64 // Unix nano
 }
 
 const maxRedirectEntries = 10000
@@ -96,6 +103,22 @@ func (h *ProxyHandler) Stats() map[string]interface{} {
 			}
 			return nil
 		}(),
+		"prefetch": h.prefetchStats(),
+	}
+}
+
+func (h *ProxyHandler) prefetchStats() map[string]interface{} {
+	lastAt := atomic.LoadInt64(&h.prefetchLastAt)
+	lastAtStr := ""
+	if lastAt > 0 {
+		lastAtStr = time.Unix(0, lastAt).Format(time.RFC3339)
+	}
+	return map[string]interface{}{
+		"total":          atomic.LoadUint64(&h.prefetchTotal),
+		"success":        atomic.LoadUint64(&h.prefetchSuccess),
+		"skipped":        atomic.LoadUint64(&h.prefetchSkipped),
+		"stale_triggers": atomic.LoadUint64(&h.prefetchStaleTriggers),
+		"last_at":        lastAtStr,
 	}
 }
 
@@ -292,6 +315,7 @@ func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *
 func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	displayPath := strings.TrimPrefix(r.URL.Path, "/d")
 	displayPath = strings.TrimPrefix(displayPath, "/p")
+	r = r.WithContext(proxy.WithDisplayName(r.Context(), path.Base(displayPath)))
 
 	trace.Logf(r.Context(), "download", "Processing: display=%s", displayPath)
 
@@ -327,6 +351,15 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	urlPrefix := "/d"
 	if strings.HasPrefix(r.URL.Path, "/p") {
 		urlPrefix = "/p"
+	}
+
+	// Fetch fresh upstream metadata if cache is cold or stale.
+	cachedInfo, hasCache := h.fileDAO.Get(displayPath)
+	stale := hasCache && cachedInfo != nil && cachedInfo.Size > 0 && strings.TrimSpace(cachedInfo.RawURL) != "" &&
+		cachedInfo.UpstreamStaleness() > h.upstreamStalenessThreshold()
+	if !hasCache || cachedInfo == nil ||
+		cachedInfo.Size <= 0 || strings.TrimSpace(cachedInfo.RawURL) == "" || stale {
+		h.prefetchDownloadMetadata(r, displayPath, realPath, stale)
 	}
 
 	// Look up file info by DISPLAY path (how PROPFIND/fs/list cached it)
@@ -378,6 +411,94 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
 	})
+}
+
+const (
+	metadataPrefetchTimeout       = 5 * time.Second
+	maxMetadataBodySize           = 64 * 1024 // 64KB limit for fs/get response
+	defaultUpstreamStalenessMins  = 30        // default threshold for refreshing upstream metadata
+)
+
+func (h *ProxyHandler) prefetchDownloadMetadata(r *http.Request, displayPath, realPath string, stale bool) {
+	atomic.AddUint64(&h.prefetchTotal, 1)
+	if stale {
+		atomic.AddUint64(&h.prefetchStaleTriggers, 1)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), metadataPrefetchTimeout)
+	defer cancel()
+
+	reqBody, err := json.Marshal(map[string]string{"path": realPath})
+	if err != nil {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: marshal failed: %v", err)
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/get", nil)
+	proxyReq, err := httputil.NewRequest(http.MethodPost, targetURL).
+		WithContext(ctx).
+		WithBody(reqBody).
+		CopyHeadersExcept(r, "Content-Length").
+		WithForwardedHeaders(r).
+		WithHeader("Content-Type", "application/json").
+		Build()
+	if err != nil {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: build request failed: %v", err)
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	resp, err := h.client.Do(proxyReq)
+	if err != nil {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: upstream request failed: %v", err)
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: upstream returned status %d", resp.StatusCode)
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataBodySize))
+	if err != nil {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: read response failed: %v", err)
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: invalid JSON response")
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	if err := h.fileDAO.SetFromAlistResponse(displayPath, data); err != nil {
+		trace.Logf(r.Context(), "download", "Skip metadata warmup: cache update failed: %v", err)
+		atomic.AddUint64(&h.prefetchSkipped, 1)
+		return
+	}
+
+	atomic.StoreInt64(&h.prefetchLastAt, time.Now().UnixNano())
+	atomic.AddUint64(&h.prefetchSuccess, 1)
+	trace.Logf(r.Context(), "download", "Metadata warmup cached size/raw_url for %s", displayPath)
+}
+
+func (h *ProxyHandler) upstreamStalenessThreshold() time.Duration {
+	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
+		return time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	}
+	return defaultUpstreamStalenessMins * time.Minute
 }
 
 // HandleProxy handles catch-all proxy to Alist
