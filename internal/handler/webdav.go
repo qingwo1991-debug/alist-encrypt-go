@@ -128,6 +128,13 @@ func (h *WebDAVHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
 }
 
+func (h *WebDAVHandler) upstreamStalenessThreshold() time.Duration {
+	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
+		return time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	}
+	return 30 * time.Minute
+}
+
 func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
 	if len(paths) == 0 {
 		return
@@ -251,7 +258,9 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Prefer cached raw_url (signed direct URL) — same as HTTP HandleDownload.
 	targetURL := ""
-	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" {
+	staleThreshold := h.upstreamStalenessThreshold()
+	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" &&
+		cachedInfo.UpstreamStaleness() < staleThreshold {
 		targetURL = cachedInfo.RawURL
 		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target")
 	}
@@ -341,7 +350,11 @@ func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPa
 // fetchRawURLFromAlist calls alist /api/fs/get to get the signed raw_url,
 // caches it, and returns it. PROPFIND XML doesn't include raw_url.
 func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realPath string) string {
-	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, h.fileDAO)
+	stalenessThreshold := 30 * time.Minute
+	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
+		stalenessThreshold = time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	}
+	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, h.fileDAO, stalenessThreshold)
 }
 
 // handlePut handles PUT requests with encryption and filename encryption
