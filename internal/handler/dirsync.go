@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -142,6 +143,28 @@ func (h *AlistHandler) markSnapshotServingMode(payload []byte, stale bool, synci
 		return payload
 	}
 	return encoded
+}
+
+func payloadResponseCode(payload []byte) int {
+	if len(payload) == 0 {
+		return 0
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 0
+	}
+	switch code := body["code"].(type) {
+	case float64:
+		return int(code)
+	case int:
+		return code
+	default:
+		return 0
+	}
+}
+
+func isSuccessfulListPayload(payload []byte) bool {
+	return payloadResponseCode(payload) == 200
 }
 
 func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string) {
@@ -391,11 +414,14 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 				h.updateSnapshotSyncing(context.Background(), scopeKey, false, liveErr.Error())
 				return nil, liveErr
 			}
-			if status >= 200 && status < 300 {
+			if status >= 200 && status < 300 && isSuccessfulListPayload(payload) {
 				h.persistSnapshot(context.Background(), dirPath, scopeKey, authScopeHash(headers), payload, itemCount, sourceMode, "")
 				return nil, nil
 			}
 			errText := "upstream list refresh failed"
+			if code := payloadResponseCode(payload); code != 0 {
+				errText = "upstream list returned code " + strconv.Itoa(code)
+			}
 			h.updateSnapshotSyncing(context.Background(), scopeKey, false, errText)
 			return nil, nil
 		})
@@ -492,10 +518,12 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 		req.Header.Set("Content-Type", "application/json")
 		respStatus, respData, payload, itemCount, err := h.liveFsListResponse(req, reqBody, node.path, false)
 		status.DirsScanned++
-		if err != nil || respStatus < 200 || respStatus >= 300 {
+		if err != nil || respStatus < 200 || respStatus >= 300 || !isSuccessfulListPayload(payload) {
 			status.DirsFailed++
 			if err != nil {
 				status.LastError = err.Error()
+			} else if code := payloadResponseCode(payload); code != 0 {
+				status.LastError = "upstream list returned code " + strconv.Itoa(code)
 			}
 			status.UpdatedAt = time.Now()
 			_ = h.dirSyncStore.UpsertStatus(context.Background(), status)

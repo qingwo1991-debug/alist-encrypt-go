@@ -64,6 +64,28 @@ func (b *RequestBuilder) CopyHeaders(src *http.Request) *RequestBuilder {
 	return b
 }
 
+// WithForwardedHeaders sets reverse-proxy forwarding headers for upstream apps
+// that derive absolute URLs from the incoming request.
+func (b *RequestBuilder) WithForwardedHeaders(src *http.Request) *RequestBuilder {
+	if src == nil {
+		return b
+	}
+	proto := "http"
+	if src.TLS != nil {
+		proto = "https"
+	} else if forwardedProto := src.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
+		proto = forwardedProto
+	}
+	if src.Host != "" {
+		b.headers.Set("X-Forwarded-Host", src.Host)
+	}
+	b.headers.Set("X-Forwarded-Proto", proto)
+	if src.RemoteAddr != "" {
+		b.headers.Set("X-Forwarded-For", src.RemoteAddr)
+	}
+	return b
+}
+
 // CopyHeadersExcept copies headers from source request, excluding specified headers
 func (b *RequestBuilder) CopyHeadersExcept(src *http.Request, skip ...string) *RequestBuilder {
 	for _, h := range skip {
