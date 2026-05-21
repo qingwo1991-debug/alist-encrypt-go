@@ -1473,4 +1473,11 @@ func StripWebDAVHeaders(r *http.Request) {
 	for _, h := range webdavHeaders {
 		r.Header.Del(h)
 	}
+	// Old encrypt proxy also stripped these for CDN compatibility:
+	// - Authorization: CDNs don't understand alist/WebDAV auth tokens
+	// - Referer: Aliyun CDN returns 403 with certain referrers
+	// - Host: prevent host header mismatch with CDN
+	r.Header.Del("Authorization")
+	r.Header.Del("Referer")
+	r.Header.Del("Host")
 }
