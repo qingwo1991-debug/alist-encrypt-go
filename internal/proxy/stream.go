@@ -1253,7 +1253,9 @@ func sanitizeRedirectHeaders(req *http.Request, originalURL *url.URL, targetURL 
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
 	}
-	req.Header.Del("Host")
+	// Always strip WebDAV-specific and other foreign headers on redirect.
+	// CDNs reject requests with unusual headers from WebDAV players.
+	StripWebDAVHeaders(req)
 	req.Header.Del("Referer")
 	req.Host = ""
 }
@@ -1457,9 +1459,7 @@ func (s *StreamProxy) StripForeignHeaders(req *http.Request) {
 	if req == nil || req.URL == nil {
 		return
 	}
-	if req.URL.Scheme != "https" {
-		return
-	}
+	// Strip regardless of scheme — alist ignores these headers, CDNs reject them.
 	StripWebDAVHeaders(req)
 }
 
