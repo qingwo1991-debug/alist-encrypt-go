@@ -231,13 +231,18 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		ps.fileDAO.SetFileSize(item.file.DisplayPath, result.Size, 24*time.Hour)
 	}
 	// Pre-fetch raw_url so WebDAV first-play is zero-latency.
+	// Check staleness: don't re-fetch if raw_url is still fresh.
+	stalenessThreshold := 30 * time.Minute
+	if ps.cfg != nil && ps.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
+		stalenessThreshold = time.Duration(ps.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	}
 	if ps.rawURLFetcher != nil {
 		_ = ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath)
 	}
 	if ps.rawURLFetcher == nil && ps.cfg != nil {
 		// Fallback: use built-in raw_url fetcher via alist fs/get
 		alistURL := ps.cfg.GetAlistURL()
-		_ = fetchRawURL(context.Background(), alistURL, item.file.DisplayPath, item.file.EncryptedPath, ps.fileDAO)
+		_ = fetchRawURL(context.Background(), alistURL, item.file.DisplayPath, item.file.EncryptedPath, ps.fileDAO, stalenessThreshold)
 	}
 	if ps.stream != nil {
 		ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, item.authHeaders, item.file.CompatStorageKey)
@@ -353,10 +358,18 @@ func fetchAlistJWT(alistURL, username, password string) string {
 
 // fetchRawURL calls alist /api/fs/get to get the signed raw_url and caches it.
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
-func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, fileDAO *dao.FileDAO) string {
+// staleThreshold: if cached raw_url is fresher than this, skip the fetch.
+func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, fileDAO *dao.FileDAO, staleThreshold time.Duration) string {
 	if alistURL == "" || fileDAO == nil {
 		return ""
 	}
+	// Check if cached raw_url is still fresh.
+	if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
+		strings.TrimSpace(cached.RawURL) != "" &&
+		cached.UpstreamStaleness() < staleThreshold {
+		return cached.RawURL
+	}
+
 	body, _ := json.Marshal(map[string]string{"path": realPath})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, alistURL+"/api/fs/get", bytes.NewReader(body))
 	if err != nil {
