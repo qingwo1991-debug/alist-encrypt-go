@@ -247,10 +247,17 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Convert display path to real encrypted path
 	realPath := h.convertToRealPath(davPath, passwdInfo)
-	// Use /d prefix (not /dav) for file downloads — upstream alist serves files via /d/, /dav/ returns 302.
-	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/d"+realPath)
-
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s", davPath, realPath)
+
+	// Prefer cached raw_url (signed direct URL) — same as HTTP HandleDownload.
+	targetURL := ""
+	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" {
+		targetURL = cachedInfo.RawURL
+		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target")
+	}
+	if targetURL == "" {
+		targetURL = httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+	}
 
 	// Look up file info using DISPLAY path (davPath), not realPath
 	// PROPFIND caches entries by display path after decrypting filenames
