@@ -247,7 +247,8 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Convert display path to real encrypted path
 	realPath := h.convertToRealPath(davPath, passwdInfo)
-	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+	// Use /d prefix (not /dav) for file downloads — upstream alist serves files via /d/, /dav/ returns 302.
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/d"+realPath)
 
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s", davPath, realPath)
 
@@ -299,10 +300,9 @@ func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPa
 	if h == nil || h.cfg == nil {
 		return 0
 	}
-	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
-	req, err := httputil.NewRequest("PROPFIND", targetURL).
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/d"+realPath)
+	req, err := httputil.NewRequest("HEAD", targetURL).
 		WithContext(r.Context()).
-		WithHeader("Depth", "0").
 		CopyHeadersExcept(r, "Host", "Content-Length", "Content-Type", "Accept-Encoding").
 		Build()
 	if err != nil {
@@ -314,29 +314,12 @@ func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPa
 		return 0
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMultiStatus && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0
-	}
-	entries := h.parsePropfindEntries(body)
-	for _, entry := range entries {
-		if !entry.IsDir && entry.Size > 0 {
-			h.fileDAO.SetFileSize(displayPath, entry.Size, 24*time.Hour)
-			if realPath != "" && realPath != displayPath {
-				h.fileDAO.SetFileSize(realPath, entry.Size, 24*time.Hour)
-			}
-			if h.metaStore != nil {
-				providerKey := ProviderKey(h.cfg.GetAlistURL(), displayPath)
-				_ = h.metaStore.Upsert(r.Context(), FileMeta{
-					ProviderKey:  providerKey,
-					OriginalPath: displayPath,
-					Size:         entry.Size,
-				})
-			}
-			return entry.Size
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if size, err := strconv.ParseInt(cl, 10, 64); err == nil && size > 0 {
+			return size
 		}
 	}
 	return 0
