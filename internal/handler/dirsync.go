@@ -79,7 +79,13 @@ func (h *AlistHandler) scanAuthHeaders() http.Header {
 	}
 	username := strings.TrimSpace(h.cfg.AlistServer.ScanUsername)
 	password := strings.TrimSpace(h.cfg.AlistServer.ScanPassword)
-	if username != "" || password != "" {
+	if username != "" && password != "" {
+		// Try JWT token first — alist /api/fs/list needs token, not Basic auth.
+		if token := h.fetchAlistJWT(username, password); token != "" {
+			headers.Set("Authorization", token)
+			return headers
+		}
+		// Fallback to Basic auth (works for WebDAV but not /api/fs/list).
 		req, _ := http.NewRequest(http.MethodGet, "http://local/", nil)
 		req.SetBasicAuth(username, password)
 		if auth := req.Header.Get("Authorization"); auth != "" {
@@ -87,6 +93,10 @@ func (h *AlistHandler) scanAuthHeaders() http.Header {
 		}
 	}
 	return headers
+}
+
+func (h *AlistHandler) fetchAlistJWT(username, password string) string {
+	return fetchAlistJWT(h.cfg.GetAlistURL(), username, password)
 }
 
 func authScopeHash(headers http.Header) string {
