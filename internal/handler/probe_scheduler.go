@@ -42,11 +42,22 @@ type ProbeScheduler struct {
 	enqueuedTotal uint64
 	droppedTotal  uint64
 	cooldownSkips uint64
+
+	// rawURLFetcher caches signed CDN URLs for pre-warmed files.
+	rawURLFetcher RawURLFetcher
 }
+
+// RawURLFetcher fetches the signed raw_url for a display path from alist fs/get.
+type RawURLFetcher func(displayPath, realPath string) string
 
 type probeItem struct {
 	file        FileItem
 	authHeaders http.Header
+}
+
+// SetRawURLFetcher sets the raw_url pre-fetch callback for probe scheduler.
+func (ps *ProbeScheduler) SetRawURLFetcher(f RawURLFetcher) {
+	ps.rawURLFetcher = f
 }
 
 func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy) *ProbeScheduler {
@@ -219,6 +230,15 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 	if result.Error == nil && result.Size > 0 {
 		ps.fileDAO.SetFileSize(item.file.DisplayPath, result.Size, 24*time.Hour)
 	}
+	// Pre-fetch raw_url so WebDAV first-play is zero-latency.
+	if ps.rawURLFetcher != nil {
+		_ = ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath)
+	}
+	if ps.rawURLFetcher == nil && ps.cfg != nil {
+		// Fallback: use built-in raw_url fetcher via alist fs/get
+		alistURL := ps.cfg.GetAlistURL()
+		_ = fetchRawURL(context.Background(), alistURL, item.file.DisplayPath, item.file.EncryptedPath, ps.fileDAO)
+	}
 	if ps.stream != nil {
 		ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, item.authHeaders, item.file.CompatStorageKey)
 	}
@@ -329,4 +349,42 @@ func fetchAlistJWT(alistURL, username, password string) string {
 		return ""
 	}
 	return result.Data.Token
+}
+
+// fetchRawURL calls alist /api/fs/get to get the signed raw_url and caches it.
+// Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
+func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, fileDAO *dao.FileDAO) string {
+	if alistURL == "" || fileDAO == nil {
+		return ""
+	}
+	body, _ := json.Marshal(map[string]string{"path": realPath})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, alistURL+"/api/fs/get", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			RawURL string `json:"raw_url"`
+			Size   int64  `json:"size"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(respBody, &result) != nil || result.Code != 200 || result.Data.RawURL == "" {
+		return ""
+	}
+	fileDAO.Set(&dao.FileInfo{
+		Path:              displayPath,
+		Size:              result.Data.Size,
+		RawURL:            result.Data.RawURL,
+		UpstreamFetchedAt: time.Now(),
+	})
+	return result.Data.RawURL
 }
