@@ -1,9 +1,10 @@
 import 'dart:developer';
+import 'dart:io';
 
 import 'package:openlist_mobile/contant/native_bridge.dart';
 import 'package:openlist_mobile/generated_api.dart';
-import 'package:openlist_mobile/utils/intent_utils.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
+import 'package:openlist_mobile/utils/intent_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -38,6 +39,7 @@ class WebScreenState extends State<WebScreen> {
   bool _canGoBack = false;
   bool _serverReady = false;
   String _startupStatus = '';
+  String _loadError = '';
   int _retryCount = 0;
 
   onClickNavigationBar() {
@@ -45,37 +47,66 @@ class WebScreenState extends State<WebScreen> {
     _webViewController?.reload();
   }
 
+  Future<bool> _probeServerReady() async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    final probes = <Uri>[
+      Uri.parse('$_url/ping'),
+      Uri.parse(_url),
+    ];
+    try {
+      for (final probe in probes) {
+        try {
+          final request = await client.getUrl(probe);
+          final response = await request.close();
+          await response.drain<void>();
+          if (response.statusCode >= 200 && response.statusCode < 500) {
+            return true;
+          }
+        } catch (_) {}
+      }
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<void> _waitForServer() async {
     _retryCount = 0;
     while (!_serverReady && mounted) {
       final running = await Android().isRunning();
       if (running) {
-        // Try a quick HTTP probe to confirm the server is actually accepting connections
-        try {
-          _startupStatus = '正在连接服务...';
-          if (mounted) setState(() {});
-          await Future.delayed(const Duration(seconds: 1));
-        } catch (_) {}
-        if (mounted) {
-          setState(() {
-            _serverReady = true;
-            _startupStatus = '';
-          });
-          _webViewController?.reload();
+        _startupStatus = '服务已启动，正在加载页面资源...';
+        if (mounted) setState(() {});
+        final ready = await _probeServerReady();
+        if (ready) {
+          if (mounted) {
+            setState(() {
+              _serverReady = true;
+              _startupStatus = '';
+              _loadError = '';
+            });
+            _webViewController?.loadUrl(
+              urlRequest: URLRequest(url: WebUri(_url)),
+            );
+          }
+          return;
         }
-        return;
-      }
-      _retryCount++;
-      final delay = (_retryCount < 10) ? 2000 : 5000;
-      if (_retryCount <= 3) {
-        _startupStatus = '正在启动 OpenList 服务...';
-      } else if (_retryCount <= 30) {
-        _startupStatus = '服务初始化中（${_retryCount}s）...';
       } else {
-        _startupStatus = '服务启动较慢（${(_retryCount * 2 / 60).toStringAsFixed(1)}分钟），请耐心等待...';
+        _retryCount++;
+        final delay = (_retryCount < 10) ? 2000 : 5000;
+        if (_retryCount <= 3) {
+          _startupStatus = '正在启动 OpenList 服务...';
+        } else if (_retryCount <= 30) {
+          _startupStatus = '服务初始化中（${_retryCount}s）...';
+        } else {
+          _startupStatus =
+              '服务启动较慢（${(_retryCount * 2 / 60).toStringAsFixed(1)}分钟），请耐心等待...';
+        }
+        if (mounted) setState(() {});
+        await Future.delayed(Duration(milliseconds: delay));
+        continue;
       }
-      if (mounted) setState(() {});
-      await Future.delayed(Duration(milliseconds: delay));
+      await Future.delayed(const Duration(seconds: 1));
     }
   }
 
@@ -87,14 +118,13 @@ class WebScreenState extends State<WebScreen> {
       setState(() {
         _url = nextUrl;
       });
-      if (_webViewController != null) {
+      if (_webViewController != null && _serverReady) {
         await _webViewController!.loadUrl(
           urlRequest: URLRequest(url: WebUri(nextUrl)),
         );
       }
     });
 
-    // Start background server readiness check
     _waitForServer();
     super.initState();
   }
@@ -124,13 +154,15 @@ class WebScreenState extends State<WebScreen> {
                 child: Row(
                   children: [
                     const SizedBox(
-                      width: 16, height: 16,
+                      width: 16,
+                      height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(_startupStatus,
-                        style: const TextStyle(fontSize: 13, color: Colors.deepOrange)),
+                          style: const TextStyle(
+                              fontSize: 13, color: Colors.deepOrange)),
                     ),
                   ],
                 ),
@@ -141,125 +173,176 @@ class WebScreenState extends State<WebScreen> {
               valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
             ),
             Expanded(
-              child: InAppWebView(
-                initialSettings: settings,
-                initialUrlRequest: URLRequest(url: WebUri(_url)),
-                onWebViewCreated: (InAppWebViewController controller) {
-                  _webViewController = controller;
-                },
-                onLoadStart: (InAppWebViewController controller, Uri? url) {
-                  log("onLoadStart $url");
-                  setState(() {
-                    _progress = 0;
-                  });
-                },
-                shouldOverrideUrlLoading: (controller, navigationAction) async {
-                  log("shouldOverrideUrlLoading ${navigationAction.request.url}");
+              child: Stack(
+                children: [
+                  InAppWebView(
+                    initialSettings: settings,
+                    initialUrlRequest: URLRequest(url: WebUri(_url)),
+                    onWebViewCreated: (InAppWebViewController controller) {
+                      _webViewController = controller;
+                    },
+                    onLoadStart: (InAppWebViewController controller, Uri? url) {
+                      log("onLoadStart $url");
+                      setState(() {
+                        _progress = 0;
+                        _loadError = '';
+                      });
+                    },
+                    shouldOverrideUrlLoading:
+                        (controller, navigationAction) async {
+                      log(
+                          "shouldOverrideUrlLoading ${navigationAction.request.url}");
 
-                  var uri = navigationAction.request.url!;
-                  if (![
-                    "http",
-                    "https",
-                    "file",
-                    "chrome",
-                    "data",
-                    "javascript",
-                    "about"
-                  ].contains(uri.scheme)) {
-                    log("shouldOverrideUrlLoading ${uri.toString()}");
-                    final silentMode =
-                        await NativeBridge.appConfig.isSilentJumpAppEnabled();
-                    if (silentMode) {
-                      NativeCommon().startActivityFromUri(uri.toString());
-                    } else {
+                      var uri = navigationAction.request.url!;
+                      if (![
+                        "http",
+                        "https",
+                        "file",
+                        "chrome",
+                        "data",
+                        "javascript",
+                        "about"
+                      ].contains(uri.scheme)) {
+                        log("shouldOverrideUrlLoading ${uri.toString()}");
+                        final silentMode = await NativeBridge
+                            .appConfig
+                            .isSilentJumpAppEnabled();
+                        if (silentMode) {
+                          NativeCommon().startActivityFromUri(uri.toString());
+                        } else {
+                          Get.showSnackbar(GetSnackBar(
+                              message: S.current.jumpToOtherApp,
+                              duration: const Duration(seconds: 5),
+                              mainButton: TextButton(
+                                onPressed: () {
+                                  NativeCommon()
+                                      .startActivityFromUri(uri.toString());
+                                },
+                                child: Text(S.current.goTo),
+                              )));
+                        }
+
+                        return NavigationActionPolicy.CANCEL;
+                      }
+
+                      return NavigationActionPolicy.ALLOW;
+                    },
+                    onReceivedError: (controller, request, error) async {
+                      if (mounted) {
+                        setState(() {
+                          _loadError =
+                              '页面加载失败: ${error.type} ${error.description}'
+                                  .trim();
+                        });
+                      }
+                      if (!await Android().isRunning()) {
+                        _serverReady = false;
+                        _waitForServer();
+                      }
+                    },
+                    onReceivedHttpError:
+                        (controller, request, errorResponse) async {
+                      if (mounted) {
+                        setState(() {
+                          _loadError =
+                              '页面加载失败: HTTP ${errorResponse.statusCode} ${request.url}';
+                        });
+                      }
+                    },
+                    onConsoleMessage: (controller, consoleMessage) {
+                      log(
+                          "console ${consoleMessage.messageLevel}: ${consoleMessage.message}");
+                    },
+                    onDownloadStartRequest: (controller, url) async {
                       Get.showSnackbar(GetSnackBar(
-                          message: S.current.jumpToOtherApp,
-                          duration: const Duration(seconds: 5),
-                          mainButton: TextButton(
-                            onPressed: () {
-                              NativeCommon()
-                                  .startActivityFromUri(uri.toString());
+                        title: S.of(context).downloadThisFile,
+                        message: url.suggestedFilename ??
+                            url.contentDisposition ??
+                            url.toString(),
+                        duration: const Duration(seconds: 5),
+                        mainButton: Column(children: [
+                          TextButton(
+                            onPressed: () async {
+                              Get.closeCurrentSnackbar();
+                              DownloadManager.downloadFileInBackground(
+                                url: url.url.toString(),
+                                filename: url.suggestedFilename,
+                              );
                             },
-                            child: Text(S.current.goTo),
-                          )));
-                    }
-
-                    return NavigationActionPolicy.CANCEL;
-                  }
-
-                  return NavigationActionPolicy.ALLOW;
-                },
-                onReceivedError: (controller, request, error) async {
-                  if (!await Android().isRunning()) {
-                    // Server is not running yet, keep waiting
-                    _serverReady = false;
-                    _waitForServer();
-                  }
-                },
-                onDownloadStartRequest: (controller, url) async {
-                  Get.showSnackbar(GetSnackBar(
-                    title: S.of(context).downloadThisFile,
-                    message: url.suggestedFilename ??
-                        url.contentDisposition ??
-                        url.toString(),
-                    duration: const Duration(seconds: 5),
-                    mainButton: Column(children: [
-                      TextButton(
-                        onPressed: () async {
+                            child: Text(S.of(context).directDownload),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              IntentUtils.getUrlIntent(url.url.toString())
+                                  .launchChooser(
+                                      S.of(context).selectAppToOpen);
+                            },
+                            child: Text(S.of(context).selectAppToOpen),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              IntentUtils.getUrlIntent(url.url.toString())
+                                  .launch();
+                            },
+                            child: Text(S.of(context).browserDownload),
+                          ),
+                        ]),
+                        onTap: (_) {
+                          Clipboard.setData(
+                              ClipboardData(text: url.url.toString()));
                           Get.closeCurrentSnackbar();
-                          // 使用内置下载管理器后台下载
-                          DownloadManager.downloadFileInBackground(
-                            url: url.url.toString(),
-                            filename: url.suggestedFilename,
-                          );
+                          Get.showSnackbar(GetSnackBar(
+                            message: S.of(context).copiedToClipboard,
+                            duration: const Duration(seconds: 1),
+                          ));
                         },
-                        child: Text(S.of(context).directDownload),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          IntentUtils.getUrlIntent(url.url.toString())
-                              .launchChooser(S.of(context).selectAppToOpen);
-                        },
-                        child: Text(S.of(context).selectAppToOpen),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          IntentUtils.getUrlIntent(url.url.toString()).launch();
-                        },
-                        child: Text(S.of(context).browserDownload),
-                      ),
-                    ]),
-                    onTap: (_) {
-                      Clipboard.setData(
-                          ClipboardData(text: url.url.toString()));
-                      Get.closeCurrentSnackbar();
-                      Get.showSnackbar(GetSnackBar(
-                        message: S.of(context).copiedToClipboard,
-                        duration: const Duration(seconds: 1),
                       ));
                     },
-                  ));
-                },
-                onLoadStop:
-                    (InAppWebViewController controller, Uri? url) async {
-                  setState(() {
-                    _progress = 0;
-                  });
-                },
-                onProgressChanged:
-                    (InAppWebViewController controller, int progress) {
-                  setState(() {
-                    _progress = progress / 100;
-                    if (_progress == 1) _progress = 0;
-                  });
-                  controller.canGoBack().then((value) => setState(() {
-                        _canGoBack = value;
-                      }));
-                },
-                onUpdateVisitedHistory: (InAppWebViewController controller,
-                    WebUri? url, bool? isReload) {
-                  _url = url.toString();
-                },
+                    onLoadStop:
+                        (InAppWebViewController controller, Uri? url) async {
+                      setState(() {
+                        _progress = 0;
+                        _loadError = '';
+                      });
+                    },
+                    onProgressChanged:
+                        (InAppWebViewController controller, int progress) {
+                      setState(() {
+                        _progress = progress / 100;
+                        if (_progress == 1) _progress = 0;
+                      });
+                      controller.canGoBack().then((value) => setState(() {
+                            _canGoBack = value;
+                          }));
+                    },
+                    onUpdateVisitedHistory: (InAppWebViewController controller,
+                        WebUri? url, bool? isReload) {
+                      _url = url.toString();
+                    },
+                  ),
+                  if (_loadError.isNotEmpty)
+                    Align(
+                      alignment: Alignment.topCenter,
+                      child: Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 10, horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.red.shade50,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.red.shade200),
+                        ),
+                        child: Text(
+                          _loadError,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.red.shade700,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ]),

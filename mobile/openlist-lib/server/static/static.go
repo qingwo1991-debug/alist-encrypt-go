@@ -37,13 +37,16 @@ var static fs.FS
 func initStatic() {
 	utils.Log.Debug("Initializing static file system...")
 	if conf.Conf.DistDir == "" {
-		dist, err := fs.Sub(public.Public, "dist")
-		if err != nil {
-			utils.Log.Fatalf("failed to read dist dir: %v", err)
+		for _, candidate := range []string{"dist/enc", "dist"} {
+			dist, err := fs.Sub(public.Public, candidate)
+			if err != nil {
+				continue
+			}
+			static = dist
+			utils.Log.Debugf("Using embedded dist directory: %s", candidate)
+			return
 		}
-		static = dist
-		utils.Log.Debug("Using embedded dist directory")
-		return
+		utils.Log.Fatalf("failed to read embedded dist dir")
 	}
 	static = os.DirFS(conf.Conf.DistDir)
 	utils.Log.Infof("Using custom dist directory: %s", conf.Conf.DistDir)
@@ -98,9 +101,9 @@ func initIndex(siteConfig SiteConfig) {
 		manifestPath = siteConfig.BasePath + "/manifest.json"
 	}
 	replaceMap := map[string]string{
-		"cdn: undefined":                    fmt.Sprintf("cdn: '%s'", siteConfig.Cdn),
-		"base_path: undefined":              fmt.Sprintf("base_path: '%s'", siteConfig.BasePath),
-		`href="/manifest.json"`:             fmt.Sprintf(`href="%s"`, manifestPath),
+		"cdn: undefined":        fmt.Sprintf("cdn: '%s'", siteConfig.Cdn),
+		"base_path: undefined":  fmt.Sprintf("base_path: '%s'", siteConfig.BasePath),
+		`href="/manifest.json"`: fmt.Sprintf(`href="%s"`, manifestPath),
 	}
 	conf.RawIndexHtml = replaceStrings(conf.RawIndexHtml, replaceMap)
 	UpdateIndex()
@@ -134,10 +137,10 @@ func UpdateIndex() {
 func ManifestJSON(c *gin.Context) {
 	// Get site configuration to ensure consistent base path handling
 	siteConfig := getSiteConfig()
-	
+
 	// Get site title from settings
 	siteTitle := setting.GetStr(conf.SiteTitle)
-	
+
 	// Get logo from settings, use the first line (light theme logo)
 	logoSetting := setting.GetStr(conf.Logo)
 	logoUrl := strings.Split(logoSetting, "\n")[0]
@@ -167,7 +170,7 @@ func ManifestJSON(c *gin.Context) {
 
 	c.Header("Content-Type", "application/json")
 	c.Header("Cache-Control", "public, max-age=3600") // cache for 1 hour
-	
+
 	if err := json.NewEncoder(c.Writer).Encode(manifest); err != nil {
 		utils.Log.Errorf("Failed to encode manifest.json: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate manifest"})
@@ -181,7 +184,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	initStatic()
 	initIndex(siteConfig)
 	folders := []string{"assets", "images", "streamer", "static"}
-	
+
 	if conf.Conf.Cdn == "" {
 		utils.Log.Debug("Setting up static file serving...")
 		r.Use(func(c *gin.Context) {
@@ -194,7 +197,11 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		for _, folder := range folders {
 			sub, err := fs.Sub(static, folder)
 			if err != nil {
-				utils.Log.Fatalf("can't find folder: %s", folder)
+				if errors.Is(err, fs.ErrNotExist) {
+					utils.Log.Debugf("Skipping missing static folder: %s", folder)
+					continue
+				}
+				utils.Log.Fatalf("can't access folder %s: %v", folder, err)
 			}
 			utils.Log.Debugf("Setting up route for folder: %s", folder)
 			r.StaticFS(fmt.Sprintf("/%s/", folder), http.FS(sub))

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
@@ -88,6 +90,105 @@ func TestHandleFsListSnapshotPreservesItemPaths(t *testing.T) {
 	}
 	if got, _ := resp.Data.Content[0]["path"].(string); got != "/user_storage/encrypt/season1" {
 		t.Fatalf("path=%q, want preserved path", got)
+	}
+}
+
+func TestHandleFsListRejectsInvalidBackgroundSnapshot(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: "",
+		EncPath:   []string{"/backup_storage/*"},
+	}
+
+	upstreamHits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		writeJSONResponse(w, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{
+						"name":   "正确目录",
+						"path":   "/backup_storage/正确目录",
+						"is_dir": true,
+						"size":   float64(0),
+						"type":   float64(1),
+					},
+				},
+				"total": float64(1),
+			},
+		})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	handler.dirSyncStart.Do(func() {})
+	cfg := config.Get()
+	originalScanAuth := cfg.AlistServer.ScanAuthHeader
+	cfg.AlistServer.ScanAuthHeader = "Bearer scan-token"
+	t.Cleanup(func() {
+		cfg.AlistServer.ScanAuthHeader = originalScanAuth
+	})
+
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create snapshot store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	dirStore := NewBoltDirSyncStore(store)
+	handler.SetDirSyncStore(dirStore)
+
+	scanScopeKey := buildDirScopeKey("/backup_storage", dirSyncScopeScan)
+	err = dirStore.UpsertSnapshot(context.Background(), DirListSnapshot{
+		ScopeKey:      scanScopeKey,
+		DisplayPath:   "/backup_storage",
+		AuthScopeHash: dirSyncScopeScan,
+		SourceMode:    dirSyncModeScan,
+		SyncState:     "fresh",
+		NextRefreshAt: time.Now().Add(2 * time.Minute),
+		PayloadJSON:   []byte(`{"code":200,"message":"success","data":{"content":[{"name":"错误目录","path":"/doubao_cloud/错误目录","is_dir":true,"size":0,"type":1}],"total":1}}`),
+	})
+	if err != nil {
+		t.Fatalf("seed scan snapshot: %v", err)
+	}
+
+	reqBody := `{"path":"/backup_storage","page":1,"per_page":1000,"refresh":false}`
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/list", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.HandleFsList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits=%d, want 1", upstreamHits)
+	}
+
+	var resp struct {
+		CacheHit bool `json:"cache_hit"`
+		Data     struct {
+			Content []map[string]interface{} `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.CacheHit {
+		t.Fatalf("expected live upstream response, got cache hit: %s", rec.Body.String())
+	}
+	if len(resp.Data.Content) != 1 {
+		t.Fatalf("content len=%d, want 1", len(resp.Data.Content))
+	}
+	if got, _ := resp.Data.Content[0]["path"].(string); got != "/backup_storage/正确目录" {
+		t.Fatalf("path=%q, want live upstream path", got)
 	}
 }
 
