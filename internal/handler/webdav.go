@@ -825,11 +825,13 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 		displayName := entry.Name
 		encryptedPath := entry.Path
 
-		if passwdInfo, found := h.passwdDAO.FindByPath(entry.Path); found && passwdInfo != nil && passwdInfo.EncName {
-			allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
-			if decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, entry.Name, passwdInfo.EncSuffix, allowLoose); decryptedName != "" && decryptedName != entry.Name {
-				displayName = decryptedName
-				displayPath = path.Join(path.Dir(entry.Path), decryptedName)
+		if h.passwdDAO != nil {
+			if passwdInfo, found := h.passwdDAO.FindByPath(entry.Path); found && passwdInfo != nil && passwdInfo.EncName {
+				allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+				if decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, entry.Name, passwdInfo.EncSuffix, allowLoose); decryptedName != "" && decryptedName != entry.Name {
+					displayName = decryptedName
+					displayPath = path.Join(path.Dir(entry.Path), decryptedName)
+				}
 			}
 		}
 
