@@ -57,7 +57,8 @@ class MyApp extends StatelessWidget {
         Locale? appLocale = languageController.locale;
         
         return GetMaterialApp(
-          title: S.of(context).appName,
+          title: 'OpenList Encrypt',
+          onGenerateTitle: (context) => S.of(context).appName,
           themeMode: ThemeMode.system,
           theme: ThemeData(
             useMaterial3: true,
