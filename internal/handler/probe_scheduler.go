@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -165,6 +166,7 @@ type ProbeInvalidation struct {
 
 type ProbeWarmSnapshot struct {
 	DisplayPath       string `json:"display_path"`
+	FileName          string `json:"file_name"`
 	Source            string `json:"source"`
 	State             string `json:"state"`
 	FinishedAt        string `json:"finished_at"`
@@ -653,8 +655,15 @@ func (ps *ProbeScheduler) snapshotWarmStates() []ProbeWarmSnapshot {
 	now := time.Now()
 	for displayPath, warm := range ps.successfulWarm {
 		state := probeWarmStateStatus(warm, threshold, now)
+		fileName := path.Base(displayPath)
+		if ps.fileDAO != nil {
+			if entry, ok := ps.fileDAO.Get(displayPath); ok && entry != nil && strings.TrimSpace(entry.Name) != "" {
+				fileName = entry.Name
+			}
+		}
 		out = append(out, ProbeWarmSnapshot{
 			DisplayPath:       displayPath,
+			FileName:          fileName,
 			Source:            warm.Source,
 			State:             state,
 			FinishedAt:        formatTimeValue(warm.FinishedAt),

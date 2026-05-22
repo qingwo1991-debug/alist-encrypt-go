@@ -178,31 +178,6 @@ func isSuccessfulListPayload(payload []byte) bool {
 	return payloadResponseCode(payload) == 200
 }
 
-func sanitizeListResponsePaths(resp map[string]interface{}) {
-	data, _ := resp["data"].(map[string]interface{})
-	content, _ := data["content"].([]interface{})
-	for _, item := range content {
-		fileData, _ := item.(map[string]interface{})
-		if fileData == nil {
-			continue
-		}
-		delete(fileData, "path")
-	}
-}
-
-func sanitizeListPayloadPaths(payload []byte) []byte {
-	var body map[string]interface{}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return payload
-	}
-	sanitizeListResponsePaths(body)
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return payload
-	}
-	return encoded
-}
-
 func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string) {
 	if snap == nil {
 		RespondHTTPErrorWithStatus(w, "snapshot not found", http.StatusNotFound)
@@ -211,8 +186,7 @@ func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapsho
 	now := time.Now()
 	stale := snap.Stale || (!snap.NextRefreshAt.IsZero() && now.After(snap.NextRefreshAt))
 	syncing := snap.SyncState == "syncing"
-	payload := sanitizeListPayloadPaths(snap.PayloadJSON)
-	RespondRaw(w, http.StatusOK, "application/json", h.markSnapshotServingMode(payload, stale, syncing, cacheMode, snap))
+	RespondRaw(w, http.StatusOK, "application/json", h.markSnapshotServingMode(snap.PayloadJSON, stale, syncing, cacheMode, snap))
 }
 
 func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, authHash string, payload []byte, itemCount int, sourceMode string, lastErr string) {
@@ -428,7 +402,6 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 		}
 	}
 
-	sanitizeListResponsePaths(respData)
 	encoded, err := json.Marshal(respData)
 	if err != nil {
 		return resp.StatusCode, respData, respBody, itemCount, nil

@@ -821,9 +821,21 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 	persistToStore := len(entries) <= propfindPersistentWriteThreshold
 
 	for _, entry := range entries {
+		displayPath := entry.Path
+		displayName := entry.Name
+		encryptedPath := entry.Path
+
+		if passwdInfo, found := h.passwdDAO.FindByPath(entry.Path); found && passwdInfo != nil && passwdInfo.EncName {
+			allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+			if decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, entry.Name, passwdInfo.EncSuffix, allowLoose); decryptedName != "" && decryptedName != entry.Name {
+				displayName = decryptedName
+				displayPath = path.Join(path.Dir(entry.Path), decryptedName)
+			}
+		}
+
 		info := &dao.FileInfo{
-			Path:  entry.Path,
-			Name:  entry.Name,
+			Path:  displayPath,
+			Name:  displayName,
 			Size:  entry.Size,
 			IsDir: entry.IsDir,
 		}
@@ -831,13 +843,16 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 		if persistToStore {
 			_ = h.fileDAO.Set(info)
 		} else {
-			h.fileDAO.SetEncPathMappingWithInfo(entry.Path, entry.Path, entry.Name, entry.Size, entry.IsDir)
+			h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, displayName, entry.Size, entry.IsDir)
+		}
+		if displayPath != encryptedPath {
+			h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, displayName, entry.Size, entry.IsDir)
 		}
 		if !info.IsDir {
 			if info.Size > 0 {
-				h.upsertMetaFromListing(ctx, entry.Path, info.Size)
+				h.upsertMetaFromListing(ctx, displayPath, info.Size)
 			}
-			h.enqueueProbeFromPropfind(ctx, entry.Path, info.Size)
+			h.enqueueProbeFromPropfind(ctx, displayPath, info.Size)
 		}
 	}
 	return entries

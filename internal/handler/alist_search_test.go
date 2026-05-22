@@ -17,6 +17,80 @@ import (
 	"github.com/alist-encrypt-go/internal/storage"
 )
 
+func TestHandleFsListSnapshotPreservesItemPaths(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: "",
+		EncPath:   []string{"/user_storage/encrypt/*"},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResponse(w, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{
+						"name":   "season1",
+						"path":   "/user_storage/encrypt/season1",
+						"is_dir": true,
+						"size":   float64(0),
+						"type":   float64(1),
+					},
+				},
+				"total": float64(1),
+			},
+		})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create snapshot store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler.SetDirSyncStore(NewBoltDirSyncStore(store))
+
+	reqBody := `{"path":"/user_storage/encrypt","page":1,"per_page":1000}`
+	req1 := httptest.NewRequest(http.MethodPost, "/api/fs/list", strings.NewReader(reqBody))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	handler.HandleFsList(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/fs/list", strings.NewReader(reqBody))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	handler.HandleFsList(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			Content []map[string]interface{} `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal snapshot response: %v", err)
+	}
+	if len(resp.Data.Content) != 1 {
+		t.Fatalf("content len=%d, want 1", len(resp.Data.Content))
+	}
+	if got, _ := resp.Data.Content[0]["path"].(string); got != "/user_storage/encrypt/season1" {
+		t.Fatalf("path=%q, want preserved path", got)
+	}
+}
+
 func newTestAlistHandler(t *testing.T, serverURL string, passwd *config.PasswdInfo) (*AlistHandler, *dao.FileDAO) {
 	t.Helper()
 
