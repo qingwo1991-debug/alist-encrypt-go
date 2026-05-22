@@ -210,7 +210,7 @@ jobs:
   build-mobile:
     runs-on: ubuntu-latest
     needs: [test, version, build-mobile-aar]
-    if: github.event_name != 'pull_request' && hashFiles('mobile/pubspec.yaml') != ''
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
 
