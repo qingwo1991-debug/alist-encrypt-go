@@ -22,6 +22,10 @@ if [ -f ./pkg/buffer/type.go ]; then
     mkdir -p ./.codex-backup/pkg/buffer
     cp ./pkg/buffer/type.go ./.codex-backup/pkg/buffer/type.go
 fi
+if [ -f ./drivers/wps/util.go ]; then
+    mkdir -p ./.codex-backup/drivers/wps
+    cp ./drivers/wps/util.go ./.codex-backup/drivers/wps/util.go
+fi
 
 # Clean up any previous source
 rm -rf ./src
@@ -64,6 +68,10 @@ if [ -f ./src/go.mod ]; then
     if [ -f ./.codex-backup/pkg/buffer/type.go ]; then
         mkdir -p ./pkg/buffer
         cp ./.codex-backup/pkg/buffer/type.go ./pkg/buffer/type.go
+    fi
+    if [ -f ./.codex-backup/drivers/wps/util.go ]; then
+        mkdir -p ./drivers/wps
+        cp ./.codex-backup/drivers/wps/util.go ./drivers/wps/util.go
     fi
     
     # Copy openlistlib from source if exists, then merge our custom code
