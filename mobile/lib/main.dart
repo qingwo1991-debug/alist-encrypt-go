@@ -5,7 +5,6 @@ import 'package:openlist_mobile/generated/l10n.dart';
 import 'package:openlist_mobile/pages/openlist/openlist.dart';
 import 'package:openlist_mobile/pages/app_update_dialog.dart';
 import 'package:openlist_mobile/pages/settings/settings.dart';
-import 'package:openlist_mobile/pages/web/web.dart';
 import 'package:openlist_mobile/pages/download_manager_page.dart';
 import 'package:openlist_mobile/pages/encrypt/encrypt_config_page.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
@@ -93,8 +92,6 @@ class MyHomePage extends StatelessWidget {
   const MyHomePage({super.key, required this.title});
 
   final String title;
-  static const webPageIndex = 0;
-  static const encryptPageIndex = 2; // 加密配置页面索引
 
   @override
   Widget build(BuildContext context) {
@@ -106,7 +103,6 @@ class MyHomePage extends StatelessWidget {
             lazy: true,
             index: controller.selectedIndex.value,
             children: [
-              WebScreen(key: webGlobalKey),
               const OpenListScreen(),
               const EncryptConfigPage(), // 加密配置页面
               const DownloadManagerPage(),
@@ -116,10 +112,6 @@ class MyHomePage extends StatelessWidget {
         ),
         bottomNavigationBar: Obx(() => NavigationBar(
                 destinations: [
-                  NavigationDestination(
-                    icon: const Icon(Icons.preview),
-                    label: S.current.webPage,
-                  ),
                   NavigationDestination(
                     icon: SvgPicture.asset(
                       "assets/openlist.svg",
@@ -146,12 +138,6 @@ class MyHomePage extends StatelessWidget {
                 ],
                 selectedIndex: controller.selectedIndex.value,
                 onDestinationSelected: (int index) {
-                  // Web
-                  if (controller.selectedIndex.value == webPageIndex &&
-                      index == webPageIndex) {
-                    webGlobalKey.currentState?.onClickNavigationBar();
-                  }
-
                   controller.setPageIndex(index);
                 })));
   }
@@ -167,7 +153,7 @@ class MyHomePage extends StatelessWidget {
 }
 
 class _MainController extends GetxController {
-  final selectedIndex = 1.obs;
+  final selectedIndex = 0.obs;
   static const _backendBootTimeoutSeconds = 20;
   static const _proxyBootTimeoutSeconds = 10;
 
@@ -228,11 +214,6 @@ class _MainController extends GetxController {
 
   @override
   void onInit() async {
-    final webPage = await NativeBridge.appConfig.isAutoOpenWebPageEnabled();
-    if (webPage) {
-      setPageIndex(MyHomePage.webPageIndex);
-    }
-
     try {
       await _startLocalServers();
     } catch (e) {

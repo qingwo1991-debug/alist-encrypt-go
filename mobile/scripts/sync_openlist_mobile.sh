@@ -18,13 +18,18 @@ echo "Working in: $MOBILE_DIR"
 rm -rf "$BACKUP_DIR"
 
 PRESERVE_FILES=(
+    "android/app/build.gradle"
     "android/app/src/main/AndroidManifest.xml"
+    "android/app/src/main/java/com/openlist/pigeon/GeneratedApi.java"
+    "android/app/openlist-local.keystore"
     "lib/main.dart"
     "lib/pages/download_manager_page.dart"
     "lib/pages/settings/settings.dart"
+    "lib/generated_api.dart"
     "lib/utils/download_manager.dart"
     "lib/utils/download_test.dart"
     "lib/pages/web/web.dart"
+    "pigeons/pigeon.dart"
 )
 
 for rel in "${PRESERVE_FILES[@]}"; do

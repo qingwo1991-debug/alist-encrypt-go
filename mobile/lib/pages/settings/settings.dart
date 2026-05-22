@@ -101,17 +101,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               controller.startAtBoot = value;
             },
           ),
-          // AutoStartWebPage
-          SwitchPreference(
-            title: S.of(context).autoStartWebPage,
-            subtitle: S.of(context).autoStartWebPageDesc,
-            icon: const Icon(Icons.open_in_browser),
-            value: controller._autoStartWebPage.value,
-            onChanged: (value) {
-              controller.autoStartWebPage = value;
-            },
-          ),
-
           BasicPreference(
             title: S.of(context).dataDirectory,
             subtitle: controller._dataDir.value,
@@ -301,15 +290,6 @@ class _SettingsController extends GetxController {
 
   get startAtBoot => _autoStart.value;
 
-  final _autoStartWebPage = false.obs;
-
-  set autoStartWebPage(value) => {
-        _autoStartWebPage.value = value,
-        NativeBridge.appConfig.setAutoOpenWebPageEnabled(value)
-      };
-
-  get autoStartWebPage => _autoStartWebPage.value;
-
   final _silentJumpApp = false.obs;
 
   get silentJumpApp => _silentJumpApp.value;
@@ -353,7 +333,6 @@ class _SettingsController extends GetxController {
     cfg.isAutoCheckUpdateEnabled().then((value) => autoUpdate = value);
     cfg.isWakeLockEnabled().then((value) => wakeLock = value);
     cfg.isStartAtBootEnabled().then((value) => startAtBoot = value);
-    cfg.isAutoOpenWebPageEnabled().then((value) => autoStartWebPage = value);
     cfg.isSilentJumpAppEnabled().then((value) => silentJumpApp = value);
 
     _dataDir.value = await cfg.getDataDir();

@@ -970,7 +970,7 @@ public class GeneratedApi {
                 ArrayList<Object> wrapped = new ArrayList<Object>();
                 ArrayList<Object> args = (ArrayList<Object>) message;
                 String hostArg = (String) args.get(0);
-                Long portArg = (Long) args.get(1);
+                Long portArg = ((Number) args.get(1)).longValue();
                 Boolean httpsArg = (Boolean) args.get(2);
                 try {
                   api.setEncryptAlistHost(hostArg, portArg, httpsArg);
@@ -994,7 +994,7 @@ public class GeneratedApi {
               (message, reply) -> {
                 ArrayList<Object> wrapped = new ArrayList<Object>();
                 ArrayList<Object> args = (ArrayList<Object>) message;
-                Long portArg = (Long) args.get(0);
+                Long portArg = ((Number) args.get(0)).longValue();
                 try {
                   api.setEncryptProxyPort(portArg);
                   wrapped.add(0, null);
@@ -1063,7 +1063,7 @@ public class GeneratedApi {
                 ArrayList<Object> args = (ArrayList<Object>) message;
                 Boolean enableArg = (Boolean) args.get(0);
                 String baseUrlArg = (String) args.get(1);
-                Long intervalSecondsArg = (Long) args.get(2);
+                Long intervalSecondsArg = ((Number) args.get(2)).longValue();
                 Boolean authEnabledArg = (Boolean) args.get(3);
                 String usernameArg = (String) args.get(4);
                 String passwordArg = (String) args.get(5);
@@ -1095,10 +1095,10 @@ public class GeneratedApi {
               (message, reply) -> {
                 ArrayList<Object> wrapped = new ArrayList<Object>();
                 ArrayList<Object> args = (ArrayList<Object>) message;
-                Long upstreamTimeoutSecondsArg = (Long) args.get(0);
-                Long probeTimeoutSecondsArg = (Long) args.get(1);
-                Long probeBudgetSecondsArg = (Long) args.get(2);
-                Long upstreamBackoffSecondsArg = (Long) args.get(3);
+                Long upstreamTimeoutSecondsArg = ((Number) args.get(0)).longValue();
+                Long probeTimeoutSecondsArg = ((Number) args.get(1)).longValue();
+                Long probeBudgetSecondsArg = ((Number) args.get(2)).longValue();
+                Long upstreamBackoffSecondsArg = ((Number) args.get(3)).longValue();
                 Boolean enableLocalBypassArg = (Boolean) args.get(4);
                 try {
                   api.setEncryptNetworkPolicy(
@@ -1177,7 +1177,7 @@ public class GeneratedApi {
               (message, reply) -> {
                 ArrayList<Object> wrapped = new ArrayList<Object>();
                 ArrayList<Object> args = (ArrayList<Object>) message;
-                Long indexArg = (Long) args.get(0);
+                Long indexArg = ((Number) args.get(0)).longValue();
                 String pathArg = (String) args.get(1);
                 String passwordArg = (String) args.get(2);
                 String encTypeArg = (String) args.get(3);
@@ -1206,7 +1206,7 @@ public class GeneratedApi {
               (message, reply) -> {
                 ArrayList<Object> wrapped = new ArrayList<Object>();
                 ArrayList<Object> args = (ArrayList<Object>) message;
-                Long indexArg = (Long) args.get(0);
+                Long indexArg = ((Number) args.get(0)).longValue();
                 try {
                   api.removeEncryptPath(indexArg);
                   wrapped.add(0, null);
