@@ -1,0 +1,60 @@
+name: Auto Check Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Run daily at midnight UTC
+  workflow_dispatch:
+
+jobs:
+  check_upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check Upstream and Sync
+        run: |
+          GIT_REPO="https://github.com/OpenListTeam/OpenList.git"
+          
+          # Check if upstream repository exists and is accessible
+          if ! git ls-remote --exit-code $GIT_REPO &> /dev/null; then
+            echo "Warning: Upstream repository $GIT_REPO is not accessible or was deleted."
+            echo "Gracefully exiting to prevent broken builds."
+            exit 0
+          fi
+          
+          # Fetch the latest tag from upstream
+          LATEST_TAG=$(git -c 'versionsort.suffix=-' ls-remote --exit-code --refs --sort='version:refname' --tags $GIT_REPO | tail -n 1 | cut -d'/' -f3)
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Warning: Could not find any tags in upstream repository."
+            exit 0
+          fi
+          
+          echo "Latest upstream tag: $LATEST_TAG"
+          
+          # Read locally stored version
+          LOCAL_VERSION_FILE="openlist_upstream_version.txt"
+          if [ -f "$LOCAL_VERSION_FILE" ]; then
+            LOCAL_TAG=$(cat "$LOCAL_VERSION_FILE")
+          else
+            LOCAL_TAG="none"
+          fi
+          echo "Local stored tag: $LOCAL_TAG"
+          
+          if [ "$LATEST_TAG" == "$LOCAL_TAG" ]; then
+            echo "No new updates found in upstream. Exiting."
+            exit 0
+          fi
+          
+          echo "New update found! Updating local version tracking file."
+          echo "$LATEST_TAG" > "$LOCAL_VERSION_FILE"
+          
+          # Commit the change. This will trigger the 'release.yaml' workflow on push to main.
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$LOCAL_VERSION_FILE"
+          git commit -m "chore: Auto sync upstream to version $LATEST_TAG"
+          git push

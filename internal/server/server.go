@@ -22,7 +22,6 @@ import (
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
-	"github.com/alist-encrypt-go/web"
 )
 
 // Server represents the HTTP/2 server
@@ -100,14 +99,7 @@ func (s *Server) setupRoutes() {
 	r.GET("/health", HealthHandler)
 	r.GET("/ready", ReadyHandler)
 
-	// Serve static files (WebUI)
-	r.StaticFS("/public", web.GetFileSystem())
-	r.StaticFS("/static", web.GetFileSystem())
-
-	// Redirect /index to admin page
-	r.GET("/index", func(c *gin.Context) {
-		c.Redirect(http.StatusFound, "/public/index.html")
-	})
+	s.setupWebUIRoutes(r)
 
 	// Create handlers
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO, s.mysqlStore)
@@ -195,6 +187,7 @@ func (s *Server) setupRoutes() {
 		protected := encAPI.Group("")
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret))
 		{
+			protected.Any("/getBuildInfo", ginWrap(apiHandler.GetBuildInfo))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
 			protected.Any("/updatePasswd", ginWrap(apiHandler.UpdatePasswd))
 			protected.Any("/updateUsername", ginWrap(apiHandler.UpdateUsername))

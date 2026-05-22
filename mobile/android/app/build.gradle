@@ -1,0 +1,201 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "kotlin-parcelize"
+    // kapt 已移除 - 如需 Room 等注解处理，请使用 KSP
+    // id "com.google.devtools.ksp" version "1.9.22-1.0.17"
+    id "dev.flutter.flutter-gradle-plugin"
+    id "org.jetbrains.kotlin.plugin.serialization" version "1.9.22"
+}
+
+def pro = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        pro.load(reader)
+    }
+}
+
+static def releaseTime() {
+    return new Date().format("yyMMddHH", TimeZone.getTimeZone("GMT+8"))
+}
+
+def openlistVersionFile = rootProject.file("../openlist_version")
+def openlistVersion = openlistVersionFile.exists() ? openlistVersionFile.readLines()[0] : "1.0.0"
+
+// Flutter 通过 --build-name/--build-number 传入的版本号
+// 优先使用 Flutter 传入的版本号，否则使用环境变量，最后使用默认值
+def flutterVersionName = project.findProperty('flutter.versionName')
+    ?: project.findProperty('flutterVersionName')
+    ?: pro.getProperty('flutter.versionName')
+    ?: pro.getProperty('flutterVersionName')
+def flutterVersionCode = project.findProperty('flutter.versionCode')
+    ?: project.findProperty('flutterVersionCode')
+    ?: pro.getProperty('flutter.versionCode')
+    ?: pro.getProperty('flutterVersionCode')
+
+def providedVersionName = flutterVersionName ?: System.getenv('BUILD_VERSION_NAME')
+def providedVersionCode = flutterVersionCode ?: System.getenv('BUILD_VERSION_CODE')
+
+// Use provided version if available, otherwise use a default app version
+// DO NOT use openlistVersion as fallback - it's the library version, not the app version
+def versionNameValue = providedVersionName ?: "1.0.0"
+
+// 获取 git commit 数量，如果失败则使用默认值
+def gitCommits = 1
+try {
+    def result = 'git rev-list HEAD --count'.execute().text.trim()
+    if (result && !result.isEmpty()) {
+        gitCommits = Integer.parseInt(result)
+    }
+} catch (Exception e) {
+    println "Warning: Could not get git commit count: ${e.message}"
+    gitCommits = 1
+}
+
+android {
+    namespace "com.openlist.mobile"
+    compileSdk = 35
+    ndkVersion = "25.2.9519653"  // 与 CI 中安装的版本保持一致
+
+    signingConfigs {
+        release {
+            if (pro["KEY_PATH"] != null && pro["KEY_PASSWORD"] != null && 
+                pro["ALIAS_NAME"] != null && pro["ALIAS_PASSWORD"] != null) {
+                storeFile file(pro["KEY_PATH"])
+                storePassword pro["KEY_PASSWORD"]
+                keyAlias pro["ALIAS_NAME"]
+                keyPassword pro["ALIAS_PASSWORD"]
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.openlist.encrypt"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
+        minSdk 21
+        targetSdk flutter.targetSdkVersion
+        def resolvedVersionCode = providedVersionCode ?: gitCommits
+        versionCode resolvedVersionCode.toInteger()
+        versionName versionNameValue
+
+        
+        buildConfigField("String", "OPENLIST_VERSION", "\"${openlistVersion}\"")
+    }
+
+
+    buildFeatures {
+        buildConfig true
+    }
+
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }
+
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['libs']
+            java.srcDirs = ['src/main/java', 'src/main/kotlin']
+        }
+    }
+
+    splits {
+        abi {
+            enable true  // 改为始终启用,而不是根据任务名判断
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+            universalApk false  // 改为false避免生成通用APK
+        }
+    }
+
+//    kotlin {
+//        jvmToolchain  = 17
+//    }
+
+    buildTypes {
+        release {
+            // 使用 debug 签名以便在没有密钥的情况下也能生成可安装的 Release 包
+            signingConfig signingConfigs.debug
+            
+            if (pro["KEY_PATH"] != null && pro["KEY_PASSWORD"] != null &&
+                pro["ALIAS_NAME"] != null && pro["ALIAS_PASSWORD"] != null) {
+                signingConfig signingConfigs.release
+            }
+        }
+
+        debug {
+            ndk {
+                //noinspection ChromeOsAbiSupport
+//                abiFilters "arm64-v8a"
+//                abiFilters "x86"
+            }
+        }
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.forEach { output ->
+            def versionName = output.versionName.orNull ?: "1.0.0"
+            def abi = ""
+            // 简化ABI过滤器检查逻辑
+            if (output.filters != null && !output.filters.isEmpty()) {
+                for (filter in output.filters) {
+                    if (filter.filterType.name() == "ABI") {
+                        abi = "_${filter.identifier}"
+                        break
+                    }
+                }
+            }
+            output.outputFileName.set("OpenList-Encrypt-${versionName}${abi}.apk")
+        }
+    }
+}
+
+
+flutter {
+    source '../..'
+}
+////获取flutter的sdk路径
+//def flutterRoot = localProperties.getProperty('flutter.sdk')
+//if (flutterRoot == null) {
+//    throw new Exception("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
+//}
+dependencies {
+    implementation fileTree(include: ['*.jar', '*.aar'], dir: 'libs')
+
+//    compileOnly files("$flutterRoot/bin/cache/artifacts/engine/android-arm/flutter.jar")
+    implementation project(":utils")
+    //noinspection GradleDependency
+    implementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.0.0'
+
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    implementation 'com.louiscad.splitties:splitties-systemservices:3.0.0'
+
+    implementation 'com.github.cioccarellia:ksprefs:2.4.0'
+
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+
+    // Core library desugaring for flutter_local_notifications
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+
+    // WorkManager for background tasks
+    implementation 'androidx.work:work-runtime-ktx:2.9.0'
+
+    // Room
+//    implementation("androidx.room:room-runtime:$room_version")
+//    implementation("androidx.room:room-ktx:$room_version")
+//    ksp("androidx.room:room-compiler:$room_version")
+//    androidTestImplementation("androidx.room:room-testing:$room_version")
+
+}

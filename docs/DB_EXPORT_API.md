@@ -9,6 +9,7 @@
 | 接口 | 方法 | 说明 | 是否鉴权 |
 |---|---|---|---|
 | `/enc-api/login` | `POST` | 登录，获取 token | 否 |
+| `/enc-api/getBuildInfo` | `GET`/`POST` | 获取当前发行物能力信息（是否内嵌 WebUI） | 是 |
 | `/enc-api/exportFileMeta` | `GET`/`POST` | 导出 MySQL 中的文件元数据（分页/增量） | 是 |
 | `/enc-api/getStats` | `GET`/`POST` | 查看运行状态（可用于核对探测/缓存是否生效） | 是 |
 
@@ -45,7 +46,7 @@ curl -X POST "http://127.0.0.1:5344/enc-api/login" \
   "data": {
     "userInfo": {
       "username": "admin",
-      "headImgUrl": "/public/logo.svg"
+      "headImgUrl": "/public/logo.png"
     },
     "jwtToken": "7f6d8d55-b08d-4f36-a6f8-5a2cb8e5f4f1"
   }
@@ -76,6 +77,35 @@ curl -X POST "http://127.0.0.1:5344/enc-api/login" \
   "msg": "user unlogin"
 }
 ```
+
+### 2.3 构建能力探测
+
+`GET /enc-api/getBuildInfo`
+
+用途：
+
+- 判断当前服务是否内嵌 Web 管理页
+- 区分独立后端发行物与 APK/嵌入式发行物
+
+响应示例：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "version": "1.0.0",
+    "embedded_web_ui": true,
+    "management_mode": "embedded_web",
+    "default_head_img": "/public/logo.png"
+  }
+}
+```
+
+字段说明：
+
+- `embedded_web_ui`: `true` 表示当前构建提供 `/public` 和 `/index` 管理页
+- `management_mode`: `embedded_web` 或 `external_app`
+- `default_head_img`: 推荐使用的默认头像资源路径
 
 ## 3. 导出元数据（核心接口）
 

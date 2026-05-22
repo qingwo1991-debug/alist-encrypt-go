@@ -272,10 +272,10 @@ func DefaultConfig() *Config {
 			PlayFirstFallback:           false,
 			SizeUnknownStrict:           true,
 			ChunkedSeekMaxDiscardBytes:  8 * 1024 * 1024,
-			EnableSniff:                true,
-			CircuitBreakerThreshold:    5,
-			CircuitBreakerCooldownSecs: 30,
-			RetryMaxAttempts:           3,
+			EnableSniff:                 true,
+			CircuitBreakerThreshold:     5,
+			CircuitBreakerCooldownSecs:  30,
+			RetryMaxAttempts:            3,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -338,62 +338,74 @@ func DefaultConfig() *Config {
 // Load loads configuration from file
 func Load() *Config {
 	cfgOnce.Do(func() {
-		cfg = DefaultConfig()
-
-		// Find config file
-		confDir := filepath.Join(getWorkDir(), "conf")
-		configPath := filepath.Join(confDir, "config.json")
-
-		// Ensure conf directory exists
-		if err := os.MkdirAll(confDir, 0755); err != nil {
-			log.Warn().Err(err).Msg("Failed to create conf directory")
-		}
-
-		// Try to load config file
-		if data, err := os.ReadFile(configPath); err == nil {
-			if migrated, migratedData := migrateLegacyRangeCompatTTL(data); migrated {
-				data = migratedData
-				if err := os.WriteFile(configPath, migratedData, 0644); err != nil {
-					log.Warn().Err(err).Msg("Failed to persist migrated range compat config")
-				} else {
-					log.Info().Str("path", configPath).Msg("Migrated legacy rangeCompatTtlMinutes to rangeReprobeMinutes")
-				}
-			}
-			if err := json.Unmarshal(data, cfg); err != nil {
-				log.Error().Err(err).Msg("Failed to parse config file")
-			} else {
-				log.Info().Str("path", configPath).Msg("Config loaded")
-			}
-		} else {
-			// Create default config file
-			log.Info().Msg("Config file not found, creating default")
-			cfg.Save()
-		}
-
-		cfg.applyEnvOverrides()
-		cfg.normalizeAlistServerTuning()
-		cfg.normalizeProxyConfig()
-
-		cfg.configPath = configPath
-
-		// Apply port to scheme if not set
-		if cfg.Scheme == nil {
-			cfg.Scheme = &SchemeConfig{
-				Address:   "0.0.0.0",
-				HTTPPort:  cfg.Port,
-				HTTPSPort: -1,
-			}
-		} else if cfg.Scheme.HTTPPort == 0 {
-			cfg.Scheme.HTTPPort = cfg.Port
-		}
-
-		// Normalize/migrate historical encPath expansion pollution and persist once.
-		if cfg.normalizeEncPaths() {
-			if err := cfg.Save(); err != nil {
-				log.Warn().Err(err).Msg("Failed to persist normalized encPath rules")
-			}
-		}
+		cfg = loadConfigAt(filepath.Join(getWorkDir(), "conf", "config.json"))
 	})
+	return cfg
+}
+
+// LoadFromBaseDir loads a fresh configuration rooted at the given base directory.
+// It does not touch the package singleton and is suitable for embedded/mobile use.
+func LoadFromBaseDir(baseDir string) *Config {
+	if strings.TrimSpace(baseDir) == "" {
+		baseDir = getWorkDir()
+	}
+	return loadConfigAt(filepath.Join(baseDir, "conf", "config.json"))
+}
+
+func loadConfigAt(configPath string) *Config {
+	cfg := DefaultConfig()
+
+	confDir := filepath.Dir(configPath)
+	baseDir := filepath.Dir(confDir)
+
+	if err := os.MkdirAll(confDir, 0755); err != nil {
+		log.Warn().Err(err).Msg("Failed to create conf directory")
+	}
+
+	if data, err := os.ReadFile(configPath); err == nil {
+		if migrated, migratedData := migrateLegacyRangeCompatTTL(data); migrated {
+			data = migratedData
+			if err := os.WriteFile(configPath, migratedData, 0644); err != nil {
+				log.Warn().Err(err).Msg("Failed to persist migrated range compat config")
+			} else {
+				log.Info().Str("path", configPath).Msg("Migrated legacy rangeCompatTtlMinutes to rangeReprobeMinutes")
+			}
+		}
+		if err := json.Unmarshal(data, cfg); err != nil {
+			log.Error().Err(err).Msg("Failed to parse config file")
+		} else {
+			log.Info().Str("path", configPath).Msg("Config loaded")
+		}
+	} else {
+		log.Info().Msg("Config file not found, creating default")
+		cfg.Save()
+	}
+
+	cfg.applyEnvOverrides()
+	cfg.normalizeAlistServerTuning()
+	cfg.normalizeProxyConfig()
+	cfg.configPath = configPath
+
+	if cfg.DataDir == "" || cfg.DataDir == "./data" {
+		cfg.DataDir = filepath.Join(baseDir, "data")
+	}
+
+	if cfg.Scheme == nil {
+		cfg.Scheme = &SchemeConfig{
+			Address:   "0.0.0.0",
+			HTTPPort:  cfg.Port,
+			HTTPSPort: -1,
+		}
+	} else if cfg.Scheme.HTTPPort == 0 {
+		cfg.Scheme.HTTPPort = cfg.Port
+	}
+
+	if cfg.normalizeEncPaths() {
+		if err := cfg.Save(); err != nil {
+			log.Warn().Err(err).Msg("Failed to persist normalized encPath rules")
+		}
+	}
+
 	return cfg
 }
 

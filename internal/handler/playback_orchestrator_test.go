@@ -31,7 +31,7 @@ func TestExecuteDecryptPlaybackFirstFrameFallsBackToChunked(t *testing.T) {
 	flow.Encrypt(ciphertext)
 
 	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("Content-Length", "4096")
@@ -126,7 +126,7 @@ func TestExecuteDecryptPlaybackEnqueuesWarmupAfterFirstFrameSuccess(t *testing.T
 	}
 	flow.Encrypt(ciphertext)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("Content-Length", "4096")
 		w.WriteHeader(http.StatusOK)
@@ -152,21 +152,21 @@ func TestExecuteDecryptPlaybackEnqueuesWarmupAfterFirstFrameSuccess(t *testing.T
 	}
 
 	executeDecryptPlayback(decryptPlaybackRequest{
-		ResponseWriter: rr,
-		Request:        req,
-		Config:         cfg,
-		Probe:          ps,
-		StreamProxy:    sp,
-		PasswdInfo:     passwd,
-		FileItem:       fileItem,
-		TargetURL:      srv.URL,
-		ProviderKey:    ProviderKey(srv.URL, "/demo.mp4"),
-		Path:           "/demo.mp4",
-		InitialSize:    fileSize,
-		OverridePath:   "/demo.mp4",
-		CompatKey:      "/encrypt",
+		ResponseWriter:   rr,
+		Request:          req,
+		Config:           cfg,
+		Probe:            ps,
+		StreamProxy:      sp,
+		PasswdInfo:       passwd,
+		FileItem:         fileItem,
+		TargetURL:        srv.URL,
+		ProviderKey:      ProviderKey(srv.URL, "/demo.mp4"),
+		Path:             "/demo.mp4",
+		InitialSize:      fileSize,
+		OverridePath:     "/demo.mp4",
+		CompatKey:        "/encrypt",
 		ConsumerScenario: consumerScenarioHTTP,
-		FailureLogMsg:  "test playback failed",
+		FailureLogMsg:    "test playback failed",
 	})
 
 	if rr.Code != http.StatusPartialContent {
@@ -224,7 +224,7 @@ func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *te
 	}
 	flow.Encrypt(ciphertext)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", "1024")
 		w.WriteHeader(http.StatusOK)

@@ -1,0 +1,259 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (optional, e.g., v1.2.3)'
+        required: false
+        default: ''
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Free Disk Space
+        run: |
+          echo "Freeing up disk space..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/lib/android/sdk/ndk
+          sudo rm -rf /usr/local/lib/android/sdk/system-images
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            VERSION="ci-$(date +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+          else
+            VERSION="v$(date +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+          # 提取纯版本号 (去掉v前缀)
+          VERSION_NAME="${VERSION#v}"
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_OUTPUT
+
+          # 生成 build number (基于时间戳 YYMMDDHH，避免超过Android限制2100000000)
+          BUILD_NUMBER=$(date +%y%m%d%H)
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+
+          echo "Version: $VERSION"
+          echo "Version Name: $VERSION_NAME"
+          echo "Build Number: $BUILD_NUMBER"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Cache Android Keystore
+        uses: actions/cache@v3
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+
+      - name: Build and Setup WebUI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Initialize OpenList Frontend
+          echo "Initializing OpenList Frontend..."
+          cd openlist-lib/scripts
+          chmod +x init_web.sh
+          ./init_web.sh
+          cd ../..
+
+          echo "OpenList Web installed to public/dist:"
+          ls -la openlist-lib/public/dist
+
+          # 2. Build Encrypt WebUI (Our Frontend)
+          echo "Building Encrypt WebUI..."
+          npm install -g pnpm@7.9.0
+          cd enc-webui
+          pnpm install
+          npm run build
+
+          # 3. Move Encrypt WebUI to subdirectory
+          mkdir -p ../openlist-lib/public/dist/enc
+          cp -r dist/* ../openlist-lib/public/dist/enc/
+          echo "Encrypt WebUI built and copied to public/dist/enc:"
+          ls -la ../openlist-lib/public/dist/enc/
+
+          # Clean up node modules to save space
+          rm -rf node_modules
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: openlist-lib/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
+
+      - name: Build Go bindings for Android
+        run: |
+          cd openlist-lib
+          export PATH=$PATH:$(go env GOPATH)/bin
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
+
+          echo "Currently in openlist-lib. Checking struct:"
+          ls -la
+
+          echo "Building Android AAR..."
+          gomobile bind -v \
+            -target=android/arm64,android/arm \
+            -androidapi=21 \
+            -ldflags="-s -w" \
+            -o ../android/app/libs/openlistlib.aar \
+            ./openlistlib 2>&1 || {
+              echo "Error: gomobile bind failed!"
+              exit 1
+            }
+
+          if [ -f ../android/app/libs/openlistlib.aar ]; then
+            echo "AAR file created successfully:"
+            ls -la ../android/app/libs/
+          else
+            echo "Error: AAR file was not created!"
+            exit 1
+          fi
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: |
+          flutter pub run intl_utils:generate || true
+
+          echo "Generating Pigeon code..."
+          dart run pigeon \
+            --input pigeons/pigeon.dart \
+            --dart_out lib/generated_api.dart \
+            --java_out android/app/src/main/java/com/openlist/pigeon/GeneratedApi.java \
+            --java_package "com.openlist.pigeon" || echo "Pigeon generation skipped or failed"
+
+      - name: Configure Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "Decoding keystore..."
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release.jks
+
+          echo "Creating local.properties..."
+          echo "KEY_PATH=release.jks" > android/local.properties
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> android/local.properties
+          echo "ALIAS_NAME=${{ secrets.KEY_ALIAS }}" >> android/local.properties
+          echo "ALIAS_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> android/local.properties
+
+          echo "Keystore and properties configured."
+
+      - name: Build Release APK
+        run: |
+          echo "Starting Flutter release build..."
+          flutter build apk --release \
+            --build-name=${{ steps.version.outputs.VERSION_NAME }} \
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee flutter_build_release.log || true
+
+          echo "Checking release build outputs:"
+          find build/app/outputs/flutter-apk -name "*.apk" || true
+
+      - name: Build Split APKs
+        run: |
+          flutter build apk --split-per-abi \
+            --build-name=${{ steps.version.outputs.VERSION_NAME }} \
+            --build-number=${{ steps.version.outputs.BUILD_NUMBER }} 2>&1 | tee flutter_build_split.log || true
+
+          echo "Checking split build outputs:"
+          find build/app/outputs/flutter-apk -name "*.apk" || true
+
+      - name: Rename APKs
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          cd build/app/outputs/flutter-apk/
+
+          if [ -f app-release.apk ]; then
+            mv app-release.apk OpenList-Encrypt-${VERSION}.apk
+          fi
+
+          if [ -f app-arm64-v8a-release.apk ]; then
+            mv app-arm64-v8a-release.apk OpenList-Encrypt-${VERSION}-arm64-v8a.apk
+          fi
+
+          if [ -f app-armeabi-v7a-release.apk ]; then
+            mv app-armeabi-v7a-release.apk OpenList-Encrypt-${VERSION}-armeabi-v7a.apk
+          fi
+
+          if [ -f app-x86_64-release.apk ]; then
+            mv app-x86_64-release.apk OpenList-Encrypt-${VERSION}-x86_64.apk
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name != 'pull_request'
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: OpenList-Encrypt ${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            build/app/outputs/flutter-apk/OpenList-Encrypt-*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks
+          path: build/app/outputs/flutter-apk/OpenList-Encrypt-*.apk
+          if-no-files-found: warn

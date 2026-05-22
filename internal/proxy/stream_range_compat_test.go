@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,13 +18,17 @@ func TestRangeCompatDowngradeAfterConsecutivePseudoRangeFailures(t *testing.T) {
 	sp := NewStreamProxy(cfg)
 
 	hits := 0
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
 		hits++
-		w.Header().Set("Content-Length", "10")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(strings.Repeat("x", 10)))
-	}))
-	defer ts.Close()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Length": []string{"10"},
+			},
+			Body:    io.NopCloser(strings.NewReader(strings.Repeat("x", 10))),
+			Request: r,
+		}, nil
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/d/test.bin", nil)
 	req.Header.Set("Range", "bytes=0-0")
@@ -33,18 +38,18 @@ func TestRangeCompatDowngradeAfterConsecutivePseudoRangeFailures(t *testing.T) {
 		Enable:   true,
 	}
 
-	result1 := sp.ProxyDownloadDecryptWithStrategyForStorage(httptest.NewRecorder(), req, ts.URL, passwd, 10, StreamStrategyRange, "/encrypt")
+	result1 := sp.ProxyDownloadDecryptWithStrategyForStorage(httptest.NewRecorder(), req, "http://upstream.local/file", passwd, 10, StreamStrategyRange, "/encrypt")
 	if result1.FailureReason != "range_unsupported" || !result1.Retryable {
 		t.Fatalf("first failure reason=%q retryable=%v", result1.FailureReason, result1.Retryable)
 	}
 
-	result2 := sp.ProxyDownloadDecryptWithStrategyForStorage(httptest.NewRecorder(), req, ts.URL, passwd, 10, StreamStrategyRange, "/encrypt")
+	result2 := sp.ProxyDownloadDecryptWithStrategyForStorage(httptest.NewRecorder(), req, "http://upstream.local/file", passwd, 10, StreamStrategyRange, "/encrypt")
 	if result2.FailureReason != "range_unsupported" || !result2.Retryable {
 		t.Fatalf("second failure reason=%q retryable=%v", result2.FailureReason, result2.Retryable)
 	}
 
 	before := hits
-	result3 := sp.ProxyDownloadDecryptWithStrategyForStorage(httptest.NewRecorder(), req, ts.URL, passwd, 10, StreamStrategyRange, "/encrypt")
+	result3 := sp.ProxyDownloadDecryptWithStrategyForStorage(httptest.NewRecorder(), req, "http://upstream.local/file", passwd, 10, StreamStrategyRange, "/encrypt")
 	if result3.FailureReason != "range_unsupported" || !result3.Retryable {
 		t.Fatalf("third failure reason=%q retryable=%v", result3.FailureReason, result3.Retryable)
 	}
@@ -57,12 +62,16 @@ func TestPassthroughStatusNoLearning(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("not found"))
-	}))
-	defer ts.Close()
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header: http.Header{
+				"Content-Type": []string{"text/plain"},
+			},
+			Body:    io.NopCloser(strings.NewReader("not found")),
+			Request: r,
+		}, nil
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/d/missing.bin", nil)
 	rr := httptest.NewRecorder()
@@ -72,7 +81,7 @@ func TestPassthroughStatusNoLearning(t *testing.T) {
 		Enable:   true,
 	}
 
-	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, ts.URL, passwd, 123, StreamStrategyRange, "/encrypt")
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/missing", passwd, 123, StreamStrategyRange, "/encrypt")
 	if result.Err != nil {
 		t.Fatalf("unexpected err: %v", result.Err)
 	}

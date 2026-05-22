@@ -68,7 +68,7 @@ func TestHandleRedirectDecryptsUsingUnifiedPlaybackFlow(t *testing.T) {
 	}
 	flow.Encrypt(ciphertext)
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Fatalf("Authorization header should be stripped, got %q", got)
 		}

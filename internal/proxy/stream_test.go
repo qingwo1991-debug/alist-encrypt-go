@@ -264,17 +264,21 @@ func TestRangeSeekSkipsSniffForMidstreamBinaryPayload(t *testing.T) {
 	rangeEnd := int64(1535)
 	expected := plain[rangeStart : rangeEnd+1]
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
 		if got := r.Header.Get("Range"); got != "bytes=1024-1535" {
 			t.Fatalf("upstream Range=%q", got)
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Range", "bytes 1024-1535/2048")
-		w.Header().Set("Content-Length", "512")
-		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(ciphertext[rangeStart : rangeEnd+1])
-	}))
-	defer ts.Close()
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/octet-stream")
+		headers.Set("Content-Range", "bytes 1024-1535/2048")
+		headers.Set("Content-Length", "512")
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     headers,
+			Body:       io.NopCloser(bytes.NewReader(ciphertext[rangeStart : rangeEnd+1])),
+			Request:    r,
+		}, nil
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/d/test.bin", nil)
 	req.Header.Set("Range", "bytes=1024-1535")
@@ -285,7 +289,7 @@ func TestRangeSeekSkipsSniffForMidstreamBinaryPayload(t *testing.T) {
 		Enable:   true,
 	}
 
-	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, ts.URL, passwd, fileSize, StreamStrategyRange, "/encrypt/test.bin")
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/file", passwd, fileSize, StreamStrategyRange, "/encrypt/test.bin")
 	if result.Err != nil {
 		t.Fatalf("unexpected stream error: %v", result.Err)
 	}
@@ -313,13 +317,17 @@ func TestMediaContentTypeSkipsSniffAtStart(t *testing.T) {
 	}
 	flow.Encrypt(ciphertext)
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "video/mp2t")
-		w.Header().Set("Content-Length", "1024")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(ciphertext)
-	}))
-	defer ts.Close()
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		headers := make(http.Header)
+		headers.Set("Content-Type", "video/mp2t")
+		headers.Set("Content-Length", "1024")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     headers,
+			Body:       io.NopCloser(bytes.NewReader(ciphertext)),
+			Request:    r,
+		}, nil
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/d/test.ts", nil)
 	rr := httptest.NewRecorder()
@@ -329,7 +337,7 @@ func TestMediaContentTypeSkipsSniffAtStart(t *testing.T) {
 		Enable:   true,
 	}
 
-	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, ts.URL, passwd, fileSize, StreamStrategyFull, "/encrypt/test.ts")
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/file", passwd, fileSize, StreamStrategyFull, "/encrypt/test.ts")
 	if result.Err != nil {
 		t.Fatalf("unexpected stream error: %v", result.Err)
 	}

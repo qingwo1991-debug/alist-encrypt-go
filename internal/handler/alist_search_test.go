@@ -136,7 +136,7 @@ func TestHandleFsSearchRecursiveDecryptsDisplayNames(t *testing.T) {
 		t.Fatalf("unexpected upstream /api/fs/search fallback: %s", r.URL.String())
 	})
 
-	srv := httptest.NewServer(mux)
+	srv := newSocketTestServer(t, mux)
 	defer srv.Close()
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
@@ -237,7 +237,7 @@ func TestHandleFsSearchScopeZeroDoesNotRecurse(t *testing.T) {
 		}
 	})
 
-	srv := httptest.NewServer(mux)
+	srv := newSocketTestServer(t, mux)
 	defer srv.Close()
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
@@ -304,7 +304,7 @@ func TestHandleFsSearchRootSearchesEncryptedRoots(t *testing.T) {
 		})
 	})
 
-	srv := httptest.NewServer(mux)
+	srv := newSocketTestServer(t, mux)
 	defer srv.Close()
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
@@ -368,7 +368,7 @@ func TestResolveRemoveNameAvoidsDoubleEncryption(t *testing.T) {
 		})
 	})
 
-	srv := httptest.NewServer(mux)
+	srv := newSocketTestServer(t, mux)
 	defer srv.Close()
 
 	handler, fileDAO := newTestAlistHandler(t, srv.URL, passwd)
@@ -439,7 +439,7 @@ func TestResolveRemoveNameStripsOriginalPrefix(t *testing.T) {
 		})
 	})
 
-	srv := httptest.NewServer(mux)
+	srv := newSocketTestServer(t, mux)
 	defer srv.Close()
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
@@ -509,7 +509,7 @@ func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
 		})
 	})
 
-	srv := httptest.NewServer(mux)
+	srv := newSocketTestServer(t, mux)
 	defer srv.Close()
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)

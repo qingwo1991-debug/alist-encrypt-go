@@ -30,7 +30,7 @@ func TestStartupProbeDeepScanUsesScanAuthHeader(t *testing.T) {
 		authByURL = map[string]string{}
 	)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		calls = append(calls, r.URL.Path)
 		authByURL[r.URL.Path] = r.Header.Get("Authorization")
@@ -80,7 +80,7 @@ func TestStartupProbeDeepScanRespectsMaxDepth(t *testing.T) {
 		calls []string
 	)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		calls = append(calls, r.URL.Path)
 		mu.Unlock()
@@ -128,7 +128,7 @@ func TestStartupProbeDeepScanRespectsMaxDepth(t *testing.T) {
 func TestStartupProbeBuildsBasicAuthFromScanCredentials(t *testing.T) {
 	var gotAuth string
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusMultiStatus)
@@ -153,7 +153,7 @@ func TestStartupProbeBuildsBasicAuthFromScanCredentials(t *testing.T) {
 func TestFetchRawURLFromAlistUsesRequestAuthorization(t *testing.T) {
 	var gotAuth string
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		if r.URL.Path != "/api/fs/get" {
 			t.Fatalf("path=%q, want /api/fs/get", r.URL.Path)
