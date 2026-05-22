@@ -13,6 +13,16 @@ echo "OpenList - ${TAG_NAME}"
 
 cd "$OPENLIST_LIB_DIR"
 
+# Backup local compatibility patches before syncing upstream sources.
+if [ -f ./internal/model/file.go ]; then
+    mkdir -p ./.codex-backup/internal/model
+    cp ./internal/model/file.go ./.codex-backup/internal/model/file.go
+fi
+if [ -f ./pkg/buffer/type.go ]; then
+    mkdir -p ./.codex-backup/pkg/buffer
+    cp ./pkg/buffer/type.go ./.codex-backup/pkg/buffer/type.go
+fi
+
 # Clean up any previous source
 rm -rf ./src
 
@@ -45,6 +55,16 @@ if [ -f ./src/go.mod ]; then
             echo "Warning: $dir not found in source"
         fi
     done
+
+    # Restore local compatibility patches that are still required by our gomobile path.
+    if [ -f ./.codex-backup/internal/model/file.go ]; then
+        mkdir -p ./internal/model
+        cp ./.codex-backup/internal/model/file.go ./internal/model/file.go
+    fi
+    if [ -f ./.codex-backup/pkg/buffer/type.go ]; then
+        mkdir -p ./pkg/buffer
+        cp ./.codex-backup/pkg/buffer/type.go ./pkg/buffer/type.go
+    fi
     
     # Copy openlistlib from source if exists, then merge our custom code
     if [ -d ./src/openlistlib ]; then
@@ -112,3 +132,5 @@ echo "Initialization complete!"
 echo ""
 echo "Directory structure:"
 ls -la
+
+rm -rf ./.codex-backup
