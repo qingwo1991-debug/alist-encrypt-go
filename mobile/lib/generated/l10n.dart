@@ -114,6 +114,11 @@ class S {
     return Intl.message('下载APK', name: 'downloadApk', desc: '', args: []);
   }
 
+  /// `更新检查失败`
+  String get updateFailed {
+    return Intl.message('更新检查失败', name: 'updateFailed', desc: '', args: []);
+  }
+
   /// `关于`
   String get about {
     return Intl.message('关于', name: 'about', desc: '', args: []);

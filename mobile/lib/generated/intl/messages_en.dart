@@ -566,6 +566,7 @@ class MessageLookup extends MessageLookupByLibrary {
     ),
     "tryToOpenFile": m45,
     "uiSettings": MessageLookupByLibrary.simpleMessage("UI"),
+    "updateFailed": MessageLookupByLibrary.simpleMessage("Update check failed"),
     "userCancelledDownload": MessageLookupByLibrary.simpleMessage(
       "User cancelled download",
     ),
