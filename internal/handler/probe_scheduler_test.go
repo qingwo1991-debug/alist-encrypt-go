@@ -125,6 +125,42 @@ func TestInvalidateWarmDoesNotCreateSyntheticWarmState(t *testing.T) {
 	}
 }
 
+func TestSnapshotWarmStatesUsesCachedDisplayName(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	fileDAO := dao.NewFileDAO(store)
+	_ = fileDAO.Set(&dao.FileInfo{
+		Path:  "/移动云盘156/encrypt/demo.mp4",
+		Name:  "demo.mp4",
+		Size:  123,
+		IsDir: false,
+	})
+
+	ps := &ProbeScheduler{
+		cfg:     config.DefaultConfig(),
+		fileDAO: fileDAO,
+		successfulWarm: map[string]probeWarmState{
+			"/移动云盘156/encrypt/demo.mp4": {
+				Source:     probeSourcePropfind,
+				FinishedAt: time.Now(),
+				State:      warmStateReady,
+			},
+		},
+	}
+
+	states := ps.snapshotWarmStates()
+	if len(states) != 1 {
+		t.Fatalf("states len=%d, want 1", len(states))
+	}
+	if states[0].FileName != "demo.mp4" {
+		t.Fatalf("file_name=%q, want %q", states[0].FileName, "demo.mp4")
+	}
+}
+
 func TestFetchRawURLUsesAuthHeaders(t *testing.T) {
 	store, err := storage.NewStore(t.TempDir())
 	if err != nil {

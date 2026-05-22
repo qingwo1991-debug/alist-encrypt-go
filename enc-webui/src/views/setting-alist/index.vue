@@ -254,7 +254,8 @@
                 <div v-if="logPanels.warm" class="log-panel__body">
                   <div v-if="paginatedCurrentWarmStates.length === 0" class="empty-log">暂无活跃预热状态</div>
                   <div v-for="item in paginatedCurrentWarmStates" :key="`${item.display_path}-${item.finished_at}`" class="record-item">
-                    <div><strong>{{ item.display_path }}</strong> <span class="record-tag">[{{ item.source || '-' }} / {{ item.state || '-' }}]</span></div>
+                    <div><strong>{{ item.file_name || item.display_path }}</strong> <span class="record-tag">[{{ item.source || '-' }} / {{ item.state || '-' }}]</span></div>
+                    <div>路径: {{ item.display_path }}</div>
                     <div>完成时间: {{ item.finished_at || '-' }}</div>
                     <div>命中数: {{ item.consumer_hit_count || 0 }}，上次命中: {{ item.last_consumer_hit_at || '-' }}</div>
                   </div>
@@ -956,6 +957,8 @@ onUnmounted(() => {
 
 .section-body {
   padding: 18px 8px 12px;
+  display: grid;
+  gap: 18px;
 }
 
 .helper-text {
@@ -1089,6 +1092,15 @@ onUnmounted(() => {
 
 :deep(.el-form-item) {
   margin-bottom: 18px;
+  align-items: flex-start;
+}
+
+:deep(.el-form-item__content) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  line-height: 1.7;
 }
 
 :deep(.el-form-item__label) {
