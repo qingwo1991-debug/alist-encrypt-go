@@ -195,3 +195,10 @@ export const cleanupLegacyBoltDBReq = () => {
     method: 'post'
   })
 }
+
+export const runDirSyncReq = () => {
+  return axiosReq({
+    url: '/api/encrypt/dir-sync/run',
+    method: 'post'
+  })
+}

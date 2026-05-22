@@ -110,6 +110,7 @@
               </el-form-item>
               <el-form-item label="配置校验">
                 <el-button type="primary" plain @click="validateScanConfig">校验扫描账号</el-button>
+                <el-button type="warning" plain :loading="scanTriggering" @click="triggerDirSyncScan">立即预热扫描</el-button>
                 <span v-if="scanValidationResult" :style="{ marginLeft: '12px', color: scanValidationResult.ok ? '#67c23a' : '#f56c6c' }">
                   {{ scanValidationResult.message }}
                   <template v-if="scanValidationResult.status_code"> (HTTP {{ scanValidationResult.status_code }})</template>
@@ -473,7 +474,8 @@ import {
   getProxyRoutingConfigReq,
   saveProxyRoutingConfigReq,
   getStatsReq,
-  cleanupLegacyBoltDBReq
+  cleanupLegacyBoltDBReq,
+  runDirSyncReq
 } from '@/api/user'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -486,6 +488,8 @@ const providerOptions = ref([])
 const scanValidationResult = ref(null)
 const cleanupMsg = ref('')
 const cleanupOk = ref(false)
+const refreshingProbeStats = ref(false)
+const scanTriggering = ref(false)
 const refSearchForm = ref()
 
 const { setLanguage } = useConfigStore()
@@ -806,8 +810,10 @@ const validateScanConfig = async () => {
   }
 }
 
-const refreshProbeStats = async () => {
-  const res = await getStatsReq({ reqLoading: false })
+const refreshProbeStats = async (silent = true) => {
+  refreshingProbeStats.value = !silent
+  try {
+    const res = await getStatsReq({ reqLoading: false })
   const scheduler = res?.data?.probe_scheduler || {}
   const stream = res?.data?.stream || {}
   const proxyPrefetch = res?.data?.proxy?.prefetch || {}
@@ -851,6 +857,30 @@ const refreshProbeStats = async () => {
   prefetchStats.skipped = proxyPrefetch.skipped || 0
   prefetchStats.staleTriggers = proxyPrefetch.stale_triggers || 0
   prefetchStats.lastAt = proxyPrefetch.last_at || ''
+    if (!silent) {
+      ElMessage.success('实时数据已刷新')
+    }
+  } catch (err) {
+    if (!silent) {
+      ElMessage.error(err?.msg || err?.message || '实时数据刷新失败')
+    }
+    throw err
+  } finally {
+    refreshingProbeStats.value = false
+  }
+}
+
+const triggerDirSyncScan = async () => {
+  scanTriggering.value = true
+  try {
+    const res = await runDirSyncReq()
+    ElMessage.success(res.msg || '已触发后台预热扫描')
+    await refreshProbeStats(true)
+  } catch (err) {
+    ElMessage.error(err?.msg || err?.message || '触发预热扫描失败')
+  } finally {
+    scanTriggering.value = false
+  }
 }
 
 onMounted(async () => {
@@ -874,9 +904,9 @@ onMounted(async () => {
   }
   await loadProxyDictionary()
   await loadProxyRouting()
-  await refreshProbeStats()
+  await refreshProbeStats(true)
   statsRefreshTimer.value = window.setInterval(() => {
-    refreshProbeStats().catch(() => {})
+    refreshProbeStats(true).catch(() => {})
   }, 10000)
 })
 

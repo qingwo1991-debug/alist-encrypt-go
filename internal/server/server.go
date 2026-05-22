@@ -135,6 +135,7 @@ func (s *Server) setupRoutes() {
 		dirSyncStore = handler.NewBoltDirSyncStore(s.store)
 	}
 	alistHandler.SetDirSyncStore(dirSyncStore)
+	alistHandler.StartDirSyncLoop()
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
