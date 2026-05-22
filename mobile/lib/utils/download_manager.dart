@@ -322,14 +322,11 @@ class DownloadManager {
       Directory? baseDir;
       
       if (Platform.isAndroid) {
-        // Android: 优先使用公共下载目录
-        baseDir = Directory('/storage/emulated/0/Download');
-        if (!await baseDir.exists()) {
-          // 如果公共下载目录不存在，使用外部存储目录
-          baseDir = await getExternalStorageDirectory();
-          if (baseDir != null) {
-            baseDir = Directory('${baseDir.path}/Download');
-          }
+        // Android: use app-scoped external files directory to avoid legacy
+        // broad storage permissions and keep behavior compatible on Android 11+.
+        baseDir = await getExternalStorageDirectory();
+        if (baseDir != null) {
+          baseDir = Directory('${baseDir.path}/OpenListDownloads');
         }
       } else {
         // 其他平台（如Windows、macOS、Linux）

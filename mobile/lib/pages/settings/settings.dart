@@ -47,33 +47,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         body: Obx(
       () => ListView(
         children: [
-          // SizedBox(height: MediaQuery.of(context).padding.top),
           Visibility(
-            visible: !controller._managerStorageGranted.value ||
-                !controller._notificationGranted.value ||
-                !controller._storageGranted.value,
+            visible: !controller._notificationGranted.value,
             child: DividerPreference(title: S.of(context).importantSettings),
           ),
-          Visibility(
-            visible: !controller._managerStorageGranted.value,
-            child: BasicPreference(
-              title: S.of(context).grantManagerStoragePermission,
-              subtitle: S.of(context).grantStoragePermissionDesc,
-              onTap: () {
-                Permission.manageExternalStorage.request();
-              },
-            ),
-          ),
-          Visibility(
-              visible: !controller._storageGranted.value,
-              child: BasicPreference(
-                title: S.of(context).grantStoragePermission,
-                subtitle: S.of(context).grantStoragePermissionDesc,
-                onTap: () {
-                  Permission.storage.request();
-                },
-              )),
-
           Visibility(
               visible: !controller._notificationGranted.value,
               child: BasicPreference(
@@ -268,9 +245,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 class _SettingsController extends GetxController {
   final _dataDir = "".obs;
   final _autoUpdate = true.obs;
-  final _managerStorageGranted = true.obs;
   final _notificationGranted = true.obs;
-  final _storageGranted = true.obs;
 
   setDataDir(String value) async {
     NativeBridge.appConfig.setDataDir(value);
@@ -362,17 +337,7 @@ class _SettingsController extends GetxController {
     _dataDir.value = await cfg.getDataDir();
 
     final sdk = await NativeBridge.common.getDeviceSdkInt();
-    // A11
-    if (sdk >= 30) {
-      _managerStorageGranted.value =
-          await Permission.manageExternalStorage.isGranted;
-    } else {
-      _managerStorageGranted.value = true;
-      _storageGranted.value = await Permission.storage.isGranted;
-    }
-
-    // A12
-    if (sdk >= 32) {
+    if (sdk >= 33) {
       _notificationGranted.value = await Permission.notification.isGranted;
     } else {
       _notificationGranted.value = true;
