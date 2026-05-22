@@ -357,7 +357,14 @@ func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realP
 	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
 		stalenessThreshold = time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
 	}
-	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, h.fileDAO, stalenessThreshold).RawURL
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, stalenessThreshold).RawURL
 }
 
 // handlePut handles PUT requests with encryption and filename encryption

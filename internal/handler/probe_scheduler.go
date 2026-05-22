@@ -81,7 +81,7 @@ type ProbeScheduler struct {
 }
 
 // RawURLFetcher fetches the signed raw_url for a display path from alist fs/get.
-type RawURLFetcher func(displayPath, realPath string) string
+type RawURLFetcher func(displayPath, realPath string, authHeaders http.Header) string
 
 type probeItem struct {
 	file        FileItem
@@ -440,7 +440,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		stalenessThreshold = time.Duration(ps.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
 	}
 	if ps.rawURLFetcher != nil {
-		if rawURL := ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath); rawURL != "" {
+		if rawURL := ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath, authHeaders); rawURL != "" {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 		}
@@ -448,7 +448,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 	if ps.rawURLFetcher == nil && ps.cfg != nil {
 		// Fallback: use built-in raw_url fetcher via alist fs/get
 		alistURL := ps.cfg.GetAlistURL()
-		rawURLResult := fetchRawURL(context.Background(), alistURL, item.file.DisplayPath, item.file.EncryptedPath, ps.fileDAO, stalenessThreshold)
+		rawURLResult := fetchRawURL(context.Background(), alistURL, item.file.DisplayPath, item.file.EncryptedPath, authHeaders, ps.fileDAO, stalenessThreshold)
 		if rawURLResult.RawURL != "" {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
@@ -460,7 +460,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		}
 	}
 	if ps.stream != nil {
-		ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, item.authHeaders, item.file.CompatStorageKey)
+		ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, authHeaders, item.file.CompatStorageKey)
 		resultState.rangeProbed = true
 		atomic.AddUint64(&ps.filesRangeProbed, 1)
 	}
@@ -874,15 +874,17 @@ func (ps *ProbeScheduler) InvalidateWarm(displayPath, reason string) {
 	ps.ensureRecordState()
 	ps.recordMu.Lock()
 	defer ps.recordMu.Unlock()
-	warm := ps.successfulWarm[displayPath]
-	warm.State = warmStateInvalid
-	ps.successfulWarm[displayPath] = warm
-	ps.applyWarmStateToRecordsLocked(displayPath, warm, time.Now())
+	now := time.Now()
+	if warm, ok := ps.successfulWarm[displayPath]; ok {
+		warm.State = warmStateInvalid
+		ps.successfulWarm[displayPath] = warm
+		ps.applyWarmStateToRecordsLocked(displayPath, warm, now)
+	}
 	atomic.AddUint64(&ps.invalidationsTotal, 1)
 	event := ProbeInvalidation{
 		DisplayPath: displayPath,
 		Reason:      strings.TrimSpace(reason),
-		At:          time.Now().Format(time.RFC3339),
+		At:          now.Format(time.RFC3339),
 	}
 	ps.recentInvalidations[ps.invalidationCursor] = event
 	ps.invalidationCursor = (ps.invalidationCursor + 1) % len(ps.recentInvalidations)
@@ -1035,7 +1037,7 @@ func fetchAlistJWT(alistURL, username, password string) string {
 // fetchRawURL calls alist /api/fs/get to get the signed raw_url and caches it.
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
 // staleThreshold: if cached raw_url is fresher than this, skip the fetch.
-func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, fileDAO *dao.FileDAO, staleThreshold time.Duration) rawURLFetchResult {
+func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO, staleThreshold time.Duration) rawURLFetchResult {
 	if alistURL == "" || fileDAO == nil {
 		return rawURLFetchResult{}
 	}
@@ -1052,6 +1054,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, fi
 		return rawURLFetchResult{}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	copyAuthHeaders(req, authHeaders)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {

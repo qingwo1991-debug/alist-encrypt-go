@@ -150,6 +150,37 @@ func TestStartupProbeBuildsBasicAuthFromScanCredentials(t *testing.T) {
 	}
 }
 
+func TestFetchRawURLFromAlistUsesRequestAuthorization(t *testing.T) {
+	var gotAuth string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if r.URL.Path != "/api/fs/get" {
+			t.Fatalf("path=%q, want /api/fs/get", r.URL.Path)
+		}
+		if gotAuth != "Bearer request-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":401}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"https://cdn.example/file","size":4096}}`))
+	}))
+	defer srv.Close()
+
+	h := newProbeTestHandler(t, srv.URL)
+	req := httptest.NewRequest(http.MethodGet, "/dav/encrypt/movie.mp4", nil)
+	req.Header.Set("Authorization", "Bearer request-token")
+
+	rawURL := h.fetchRawURLFromAlist(req, "/encrypt/movie.mp4", "/enc/movie.bin")
+	if rawURL != "https://cdn.example/file" {
+		t.Fatalf("rawURL=%q", rawURL)
+	}
+	if gotAuth != "Bearer request-token" {
+		t.Fatalf("authorization=%q", gotAuth)
+	}
+}
+
 func TestExtractAuthorizationValue(t *testing.T) {
 	tests := []struct {
 		raw  string
