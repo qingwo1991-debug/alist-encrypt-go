@@ -45,6 +45,10 @@ func (h *AlistHandler) ensureDirSyncLoop() {
 	})
 }
 
+func (h *AlistHandler) StartDirSyncLoop() {
+	h.ensureDirSyncLoop()
+}
+
 func (h *AlistHandler) scanConfigured() bool {
 	if h == nil || h.cfg == nil {
 		return false
@@ -419,7 +423,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 		_, err, _ := h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
 			req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(body))
 			req.Header = headers.Clone()
-			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, body, dirPath, false)
+			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, body, dirPath, true)
 			if liveErr != nil {
 				h.updateSnapshotSyncing(context.Background(), scopeKey, false, liveErr.Error())
 				return nil, liveErr
@@ -526,7 +530,7 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(reqBody))
 		req.Header = headers
 		req.Header.Set("Content-Type", "application/json")
-		respStatus, respData, payload, itemCount, err := h.liveFsListResponse(req, reqBody, node.path, false)
+		respStatus, respData, payload, itemCount, err := h.liveFsListResponse(req, reqBody, node.path, true)
 		status.DirsScanned++
 		if err != nil || respStatus < 200 || respStatus >= 300 || !isSuccessfulListPayload(payload) {
 			status.DirsFailed++
