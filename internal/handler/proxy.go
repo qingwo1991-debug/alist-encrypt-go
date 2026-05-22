@@ -509,23 +509,41 @@ const (
 	defaultUpstreamStalenessMins  = 30        // default threshold for refreshing upstream metadata
 )
 
+type metadataPrefetchResult struct {
+	useful bool
+}
+
 func (h *ProxyHandler) prefetchDownloadMetadata(r *http.Request, displayPath, realPath string, stale bool) {
 	atomic.AddUint64(&h.prefetchTotal, 1)
 	if stale {
 		atomic.AddUint64(&h.prefetchStaleTriggers, 1)
 	}
 
+	result := h.prefetchDownloadMetadataViaAPI(r, displayPath, realPath, "/api/fs/get")
+	if !result.useful {
+		trace.Logf(r.Context(), "download", "fs/get metadata not useful, retrying with fs/link")
+		result = h.prefetchDownloadMetadataViaAPI(r, displayPath, realPath, "/api/fs/link")
+	}
+	if result.useful {
+		atomic.StoreInt64(&h.prefetchLastAt, time.Now().UnixNano())
+		atomic.AddUint64(&h.prefetchSuccess, 1)
+		trace.Logf(r.Context(), "download", "Metadata warmup cached useful size/raw_url for %s", displayPath)
+		return
+	}
+	atomic.AddUint64(&h.prefetchSkipped, 1)
+}
+
+func (h *ProxyHandler) prefetchDownloadMetadataViaAPI(r *http.Request, displayPath, realPath, apiPath string) metadataPrefetchResult {
 	ctx, cancel := context.WithTimeout(r.Context(), metadataPrefetchTimeout)
 	defer cancel()
 
 	reqBody, err := json.Marshal(map[string]string{"path": realPath})
 	if err != nil {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: marshal failed: %v", err)
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: marshal failed: %v", apiPath, err)
+		return metadataPrefetchResult{}
 	}
 
-	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/get", nil)
+	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), apiPath, nil)
 	proxyReq, err := httputil.NewRequest(http.MethodPost, targetURL).
 		WithContext(ctx).
 		WithBody(reqBody).
@@ -534,54 +552,60 @@ func (h *ProxyHandler) prefetchDownloadMetadata(r *http.Request, displayPath, re
 		WithHeader("Content-Type", "application/json").
 		Build()
 	if err != nil {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: build request failed: %v", err)
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: build request failed: %v", apiPath, err)
+		return metadataPrefetchResult{}
 	}
 
 	resp, err := h.client.Do(proxyReq)
 	if err != nil {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: upstream request failed: %v", err)
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: upstream request failed: %v", apiPath, err)
+		return metadataPrefetchResult{}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: upstream returned status %d", resp.StatusCode)
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: upstream returned status %d", apiPath, resp.StatusCode)
+		return metadataPrefetchResult{}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataBodySize))
 	if err != nil {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: read response failed: %v", err)
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: read response failed: %v", apiPath, err)
+		return metadataPrefetchResult{}
 	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: invalid JSON response")
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: invalid JSON response", apiPath)
+		return metadataPrefetchResult{}
 	}
 
 	data, ok := payload["data"].(map[string]interface{})
 	if !ok {
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		return metadataPrefetchResult{}
 	}
 
 	if err := h.fileDAO.SetFromAlistResponse(displayPath, data); err != nil {
-		trace.Logf(r.Context(), "download", "Skip metadata warmup: cache update failed: %v", err)
-		atomic.AddUint64(&h.prefetchSkipped, 1)
-		return
+		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: cache update failed: %v", apiPath, err)
+		return metadataPrefetchResult{}
 	}
 
-	atomic.StoreInt64(&h.prefetchLastAt, time.Now().UnixNano())
-	atomic.AddUint64(&h.prefetchSuccess, 1)
-	trace.Logf(r.Context(), "download", "Metadata warmup cached size/raw_url for %s", displayPath)
+	result := metadataPrefetchResult{}
+	if rawURL, ok := data["raw_url"].(string); ok && strings.TrimSpace(rawURL) != "" {
+		result.useful = true
+	}
+	if !result.useful {
+		switch size := data["size"].(type) {
+		case float64:
+			result.useful = int64(size) > 0
+		case int64:
+			result.useful = size > 0
+		case int:
+			result.useful = size > 0
+		}
+	}
+	trace.Logf(r.Context(), "download", "%s metadata warmup cached (useful=%v) for %s", apiPath, result.useful, displayPath)
+	return result
 }
 
 func (h *ProxyHandler) upstreamStalenessThreshold() time.Duration {
