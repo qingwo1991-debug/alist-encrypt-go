@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -176,6 +177,81 @@ func payloadResponseCode(payload []byte) int {
 	default:
 		return 0
 	}
+}
+
+func normalizeDirPath(dirPath string) string {
+	dirPath = strings.TrimSpace(dirPath)
+	if dirPath == "" {
+		return "/"
+	}
+	cleaned := path.Clean(dirPath)
+	if cleaned == "." {
+		return "/"
+	}
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+	return cleaned
+}
+
+func listItemBelongsToDir(dirPath, childPath, name string) bool {
+	dirPath = normalizeDirPath(dirPath)
+	childPath = normalizeDirPath(childPath)
+	if dirPath == "/" {
+		trimmed := strings.TrimPrefix(childPath, "/")
+		if trimmed == "" {
+			return false
+		}
+		if strings.Contains(trimmed, "/") {
+			return false
+		}
+		return name == "" || path.Base(childPath) == name
+	}
+	if childPath == dirPath {
+		return name == "" || path.Base(childPath) == name
+	}
+	if !strings.HasPrefix(childPath, dirPath+"/") {
+		return false
+	}
+	return name == "" || path.Base(childPath) == name
+}
+
+func validateSnapshotForDir(dirPath string, snap *DirListSnapshot) (bool, string) {
+	if snap == nil {
+		return false, "snapshot missing"
+	}
+	expected := normalizeDirPath(dirPath)
+	if got := normalizeDirPath(snap.DisplayPath); got != expected {
+		return false, fmt.Sprintf("snapshot display path mismatch: got=%s want=%s", got, expected)
+	}
+	if len(snap.PayloadJSON) == 0 {
+		return false, "snapshot payload empty"
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(snap.PayloadJSON, &body); err != nil {
+		return false, "snapshot payload invalid json"
+	}
+	data, _ := body["data"].(map[string]interface{})
+	content, _ := data["content"].([]interface{})
+	for _, item := range content {
+		fileData, _ := item.(map[string]interface{})
+		if fileData == nil {
+			continue
+		}
+		name, _ := fileData["name"].(string)
+		childPath, hasPath := fileData["path"].(string)
+		if hasPath && strings.TrimSpace(childPath) != "" {
+			if !listItemBelongsToDir(expected, childPath, name) {
+				return false, fmt.Sprintf("item path %s not under %s", childPath, expected)
+			}
+			continue
+		}
+		if snap.SourceMode == dirSyncModeScan {
+			return false, "background snapshot item missing path"
+		}
+	}
+	return true, ""
 }
 
 func isSuccessfulListPayload(payload []byte) bool {

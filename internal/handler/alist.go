@@ -583,22 +583,40 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	if h.dirSyncStore != nil {
 		if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
 			if isSuccessfulListPayload(snap.PayloadJSON) {
-				h.serveSnapshot(w, snap, "snapshot")
-				if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
-					h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
+				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
+					h.serveSnapshot(w, snap, "snapshot")
+					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
+					}
+					return
+				} else {
+					log.Warn().
+						Str("path", dirPath).
+						Str("scope_key", scopeKey).
+						Str("cache_mode", "snapshot").
+						Str("reason", reason).
+						Msg("Rejecting invalid dir snapshot")
 				}
-				return
 			}
 		}
 		if h.scanConfigured() {
 			scanScopeKey := buildDirScopeKey(dirPath, dirSyncScopeScan)
 			if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scanScopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
 				if isSuccessfulListPayload(snap.PayloadJSON) {
-					h.serveSnapshot(w, snap, "background_scan")
-					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
-						h.refreshDirSnapshotAsync(dirPath, body, h.scanAuthHeaders(), scanScopeKey, dirSyncModeScan)
+					if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
+						h.serveSnapshot(w, snap, "background_scan")
+						if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+							h.refreshDirSnapshotAsync(dirPath, body, h.scanAuthHeaders(), scanScopeKey, dirSyncModeScan)
+						}
+						return
+					} else {
+						log.Warn().
+							Str("path", dirPath).
+							Str("scope_key", scanScopeKey).
+							Str("cache_mode", "background_scan").
+							Str("reason", reason).
+							Msg("Rejecting invalid background dir snapshot")
 					}
-					return
 				}
 			}
 		}
