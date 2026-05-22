@@ -196,9 +196,9 @@ jobs:
       - name: Initialize mobile Go binding
         working-directory: mobile/openlist-lib/scripts
         run: |
-          ./init_openlist.sh
-          ./init_gomobile.sh
-          ./gobind.sh
+          bash ./init_openlist.sh
+          bash ./init_gomobile.sh
+          bash ./gobind.sh
 
       - name: Upload Android library artifacts
         uses: actions/upload-artifact@v4
