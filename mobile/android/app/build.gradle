@@ -20,6 +20,10 @@ static def releaseTime() {
     return new Date().format("yyMMddHH", TimeZone.getTimeZone("GMT+8"))
 }
 
+static def releaseVersionName() {
+    return new Date().format("yyyyMMdd.HHmm", TimeZone.getTimeZone("GMT+8"))
+}
+
 def openlistVersionFile = rootProject.file("../openlist_version")
 def openlistVersion = openlistVersionFile.exists() ? openlistVersionFile.readLines()[0] : "1.0.0"
 
@@ -37,9 +41,8 @@ def flutterVersionCode = project.findProperty('flutter.versionCode')
 def providedVersionName = flutterVersionName ?: System.getenv('BUILD_VERSION_NAME')
 def providedVersionCode = flutterVersionCode ?: System.getenv('BUILD_VERSION_CODE')
 
-// Use provided version if available, otherwise use a default app version
-// DO NOT use openlistVersion as fallback - it's the library version, not the app version
-def versionNameValue = providedVersionName ?: "1.0.0"
+// Use provided version if available, otherwise use a timestamp-based version.
+def versionNameValue = providedVersionName ?: releaseVersionName()
 
 // 获取 git commit 数量，如果失败则使用默认值
 def gitCommits = 1
@@ -53,12 +56,25 @@ try {
     gitCommits = 1
 }
 
+def repoLocalKeystore = rootProject.file("app/openlist-local.keystore")
+def repoLocalKeystorePassword = "openlistlocal"
+def repoLocalKeyAlias = "openlistlocal"
+def repoLocalKeyPassword = "openlistlocal"
+
 android {
     namespace "com.openlist.mobile"
     compileSdk = 35
     ndkVersion = "25.2.9519653"  // 与 CI 中安装的版本保持一致
 
     signingConfigs {
+        local {
+            if (repoLocalKeystore.exists()) {
+                storeFile repoLocalKeystore
+                storePassword repoLocalKeystorePassword
+                keyAlias repoLocalKeyAlias
+                keyPassword repoLocalKeyPassword
+            }
+        }
         release {
             if (pro["KEY_PATH"] != null && pro["KEY_PASSWORD"] != null && 
                 pro["ALIAS_NAME"] != null && pro["ALIAS_PASSWORD"] != null) {
@@ -76,7 +92,7 @@ android {
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
         minSdk 21
         targetSdk flutter.targetSdkVersion
-        def resolvedVersionCode = providedVersionCode ?: gitCommits
+        def resolvedVersionCode = providedVersionCode ?: releaseTime()
         versionCode resolvedVersionCode.toInteger()
         versionName versionNameValue
 
@@ -123,8 +139,8 @@ android {
 
     buildTypes {
         release {
-            // 使用 debug 签名以便在没有密钥的情况下也能生成可安装的 Release 包
-            signingConfig signingConfigs.debug
+            // 默认使用仓库内固定 keystore，确保后续 APK 可直接覆盖安装
+            signingConfig repoLocalKeystore.exists() ? signingConfigs.local : signingConfigs.debug
             
             if (pro["KEY_PATH"] != null && pro["KEY_PASSWORD"] != null &&
                 pro["ALIAS_NAME"] != null && pro["ALIAS_PASSWORD"] != null) {

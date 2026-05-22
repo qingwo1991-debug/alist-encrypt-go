@@ -16,6 +16,25 @@ flutter pub get
 flutter build apk --release --split-per-abi
 ```
 
+Before the first release build, generate the local reusable signing keystore:
+
+```bash
+cd mobile/android/app
+keytool -genkeypair -v \
+  -keystore openlist-local.keystore \
+  -storepass openlistlocal \
+  -keypass openlistlocal \
+  -alias openlistlocal \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 36500 \
+  -dname "CN=OpenList Encrypt, OU=Mobile, O=OpenList Encrypt, L=Shanghai, ST=Shanghai, C=CN"
+```
+
+If `android/app/openlist-local.keystore` exists, release builds will use it by
+default so new APKs can overwrite previous installs. If you provide your own
+signing values in `local.properties`, those take precedence.
+
 ## Syncing App Layer From OpenList-Mobile
 
 To update the Flutter/Android app layer from the local upstream checkout while
