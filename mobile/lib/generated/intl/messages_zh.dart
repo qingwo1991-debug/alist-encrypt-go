@@ -431,6 +431,7 @@ class MessageLookup extends MessageLookupByLibrary {
     "troubleshootingDesc": MessageLookupByLibrary.simpleMessage("常见问题与解决方案"),
     "tryToOpenFile": m45,
     "uiSettings": MessageLookupByLibrary.simpleMessage("界面"),
+    "updateFailed": MessageLookupByLibrary.simpleMessage("更新检查失败"),
     "userCancelledDownload": MessageLookupByLibrary.simpleMessage("用户取消下载"),
     "userCancelledDownloadError": MessageLookupByLibrary.simpleMessage(
       "用户取消下载",

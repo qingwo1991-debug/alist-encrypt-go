@@ -1,5 +1,3 @@
-import 'dart:ffi';
-
 import 'package:openlist_mobile/contant/native_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,11 +22,10 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
   String _version = "";
   int _versionCode = 0;
 
-  Future<Void?> updateVer() async {
+  Future<void> updateVer() async {
     _openlistVersion = await Android().getOpenListVersion();
     _version = await NativeBridge.common.getVersionName();
     _versionCode = await NativeBridge.common.getVersionCode();
-    return null;
   }
 
   @override
