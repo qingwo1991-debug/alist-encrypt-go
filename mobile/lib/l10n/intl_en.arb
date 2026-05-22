@@ -486,7 +486,7 @@
   "getDownloadPathFailed": "Failed to get",
   "openDownloadTestPage": "Do you want to open download test page?",
   "description": "Description:",
-  "downloadInstructions": "• Files will be downloaded to system download directory\\n• Download progress will show notifications\\n• You can choose to open file after download completes\\n• If filename exists, a number will be added automatically\\n• Please check download manager via bottom navigation bar to view files",
+  "downloadInstructions": "• Files will be downloaded to the directory you choose in Settings\\n• Download progress will show notifications\\n• You can choose to open file after download completes\\n• If filename exists, a number will be added automatically\\n• Please check download manager via bottom navigation bar to view files",
   "selectDownloadMethod": "Select download method",
   "batchDownloadComplete": "Batch download complete",
   "imageDownloadSuccess": "Image download success",

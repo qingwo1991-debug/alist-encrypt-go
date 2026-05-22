@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:get/get.dart' as getx;
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'notification_manager.dart';
 import '../generated/l10n.dart';
 
@@ -79,6 +80,7 @@ class DownloadTask {
 }
 
 class DownloadManager {
+  static const String _downloadDirPrefKey = 'download_directory_path';
   static final Dio _dio = Dio();
   static final Map<String, DownloadTask> _activeTasks = {};
   static final List<DownloadTask> _completedTasks = [];
@@ -319,6 +321,14 @@ class DownloadManager {
   /// 获取OpenList专用下载目录
   static Future<Directory?> _getOpenListDownloadDirectory() async {
     try {
+      final configuredPath = await getConfiguredDownloadDirectoryPath();
+      if (configuredPath != null && configuredPath.isNotEmpty) {
+        final configuredDir = Directory(configuredPath);
+        if (await configuredDir.exists()) {
+          return configuredDir;
+        }
+      }
+
       Directory? baseDir;
       
       if (Platform.isAndroid) {
@@ -359,6 +369,25 @@ class DownloadManager {
       log('获取下载目录失败: $e');
       return null;
     }
+  }
+
+  static Future<String?> getConfiguredDownloadDirectoryPath() async {
+    final prefs = await SharedPreferences.getInstance();
+    final path = prefs.getString(_downloadDirPrefKey);
+    if (path == null || path.trim().isEmpty) {
+      return null;
+    }
+    return path;
+  }
+
+  static Future<void> setConfiguredDownloadDirectoryPath(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    final normalized = path.trim();
+    if (normalized.isEmpty) {
+      await prefs.remove(_downloadDirPrefKey);
+      return;
+    }
+    await prefs.setString(_downloadDirPrefKey, normalized);
   }
 
   /// 从URL中提取文件名
@@ -617,7 +646,9 @@ class DownloadManager {
     try {
       Directory? downloadDir = await _getOpenListDownloadDirectory();
       if (downloadDir != null && await downloadDir.exists()) {
-        await downloadDir.delete(recursive: true);
+        for (final entity in downloadDir.listSync()) {
+          await entity.delete(recursive: true);
+        }
         log('已清理下载目录');
         return true;
       }

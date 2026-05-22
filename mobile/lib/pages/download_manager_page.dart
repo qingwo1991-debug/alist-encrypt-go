@@ -748,18 +748,15 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   Future<void> _openDownloadDirectory() async {
     if (_downloadPath != null) {
       try {
-        await openFileManager(
-          androidConfig: AndroidConfig(
-            folderType: FolderType.download,
-          ),
-          iosConfig: IosConfig(
-            subFolderPath: _downloadPath!,
-          ),
-        );
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).downloadDirectoryOpened,
-          duration: const Duration(seconds: 2),
-        ));
+        final result = await OpenFilex.open(_downloadPath!);
+        if (result.type == ResultType.done) {
+          Get.showSnackbar(GetSnackBar(
+            message: S.of(context).downloadDirectoryOpened,
+            duration: const Duration(seconds: 2),
+          ));
+          return;
+        }
+        _showFileLocation(_downloadPath!);
       } catch (e) {
         print('打开下载目录失败: $e');
         Get.showSnackbar(GetSnackBar(

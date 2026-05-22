@@ -486,7 +486,7 @@
   "getDownloadPathFailed": "获取失败",
   "openDownloadTestPage": "是否要打开下载测试页面？",
   "description": "说明：",
-  "downloadInstructions": "• 文件将下载到系统下载目录\\n• 下载过程会显示进度通知\\n• 下载完成后可以选择打开文件\\n• 如果文件名重复会自动添加序号\\n• 请通过底部导航栏的\\\"下载管理\\\"查看下载文件",
+  "downloadInstructions": "• 文件将下载到你在设置中选择的目录\\n• 下载过程会显示进度通知\\n• 下载完成后可以选择打开文件\\n• 如果文件名重复会自动添加序号\\n• 请通过底部导航栏的\\\"下载管理\\\"查看下载文件",
   "selectDownloadMethod": "选择下载方式",
   "batchDownloadComplete": "批量下载完成",
   "imageDownloadSuccess": "图片下载成功",
