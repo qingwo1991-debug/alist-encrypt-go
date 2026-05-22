@@ -185,3 +185,62 @@ func TestExecuteDecryptPlaybackEnqueuesWarmupAfterFirstFrameSuccess(t *testing.T
 		t.Fatalf("authorization=%q", got)
 	}
 }
+
+func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.PlayFirstFallback = true
+	sp := proxy.NewStreamProxy(cfg)
+
+	fileSize := int64(1024)
+	plain := bytes.Repeat([]byte("Z"), int(fileSize))
+	ciphertext := append([]byte(nil), plain...)
+	flow, err := encryption.NewFlowEnc("correct-password", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to build flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(ciphertext)
+	}))
+	defer srv.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/d/broken.bin", nil)
+	rr := httptest.NewRecorder()
+
+	passwd := &config.PasswdInfo{
+		Password: "wrong-password",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter: rr,
+		Request:        req,
+		Config:         cfg,
+		StreamProxy:    sp,
+		PasswdInfo:     passwd,
+		FileItem: FileItem{
+			DisplayPath: "/broken.bin",
+			TargetURL:   srv.URL,
+			FileName:    "broken.bin",
+		},
+		TargetURL:     srv.URL,
+		ProviderKey:   ProviderKey(srv.URL, "/broken.bin"),
+		Path:          "/broken.bin",
+		InitialSize:   fileSize,
+		OverridePath:  "/broken.bin",
+		CompatKey:     "/encrypt",
+		FailureLogMsg: "test playback failed",
+	})
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want %d", rr.Code, http.StatusBadGateway)
+	}
+	if bytes.Equal(rr.Body.Bytes(), ciphertext) {
+		t.Fatal("should not passthrough encrypted content on decrypt failure")
+	}
+}

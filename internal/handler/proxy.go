@@ -55,12 +55,14 @@ type ProxyHandler struct {
 const maxRedirectEntries = 10000
 
 type redirectInfo struct {
-	URL       string
-	FileSize  int64
-	Password  string
-	EncType   string
-	EncName   bool
-	ExpiresAt time.Time
+	URL         string
+	FileSize    int64
+	Password    string
+	EncType     string
+	EncName     bool
+	DisplayPath string
+	CompatKey   string
+	ExpiresAt   time.Time
 }
 
 // Stats returns proxy handler statistics
@@ -193,28 +195,17 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 
 	info := value.(*redirectInfo)
 
-	lastURL := r.URL.Query().Get("lastUrl")
-	if lastURL != "" {
-		if decoded, err := url.QueryUnescape(lastURL); err == nil {
-			if parsed, err := url.Parse(decoded); err == nil {
-				if parsed.Path != "" {
-					r.URL.Path = parsed.Path
-				}
-			}
-		}
-	}
-
 	decodeParam := r.URL.Query().Get("decode")
 	decryptEnabled := decodeParam != "0"
 
 	if strings.Contains(info.URL, "baidupcs.com") {
 		r.Header.Set("User-Agent", "pan.baidu.com")
 	}
-	r.Header.Del("Referer")
-	r.Header.Del("Authorization")
-	r.Header.Del("Host")
-	r.Host = ""
 	if !decryptEnabled {
+		r.Header.Del("Referer")
+		r.Header.Del("Authorization")
+		r.Header.Del("Host")
+		r.Host = ""
 		if err := h.streamProxy.ProxyRequest(w, r, info.URL); err != nil {
 			log.Error().Err(err).Str("key", key).Msg("Failed to proxy redirect (passthrough)")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -236,25 +227,72 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		EncName:  info.EncName,
 		Enable:   true,
 	}
+	proxy.StripWebDAVHeaders(r)
+	r.Host = ""
 
-	if err := h.streamProxy.ProxyDownloadDecrypt(w, r, info.URL, passwdInfo, info.FileSize); err != nil {
-		log.Error().Err(err).Str("key", key).Msg("Failed to proxy redirect")
-		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+	displayPath := info.DisplayPath
+	if displayPath == "" {
+		displayPath = resolveRedirectDisplayPath(r)
 	}
+	if displayPath != "" {
+		r = r.WithContext(proxy.WithDisplayName(r.Context(), path.Base(displayPath)))
+	}
+	fileItem := FileItem{
+		DisplayPath:      displayPath,
+		EncryptedPath:    displayPath,
+		TargetURL:        info.URL,
+		FileName:         path.Base(displayPath),
+		CompatStorageKey: info.CompatKey,
+	}
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter:        w,
+		Request:               r,
+		Config:                h.cfg,
+		Probe:                 h.probe,
+		StreamProxy:           h.streamProxy,
+		SizeResolver:          h.sizeResolver,
+		StrategySel:           h.strategySel,
+		PasswdInfo:            passwdInfo,
+		FileItem:              fileItem,
+		TargetURL:             info.URL,
+		ProviderKey:           ProviderKey(info.URL, displayPath),
+		Path:                  displayPath,
+		InitialSize:           info.FileSize,
+		OverridePath:          displayPath,
+		CompatKey:             redirectCompatKey(info, passwdInfo, displayPath),
+		FailureLogMsg:         "Failed to proxy redirect",
+		FinalPassthroughCount: &h.finalPassthroughCount,
+		SizeConflictCount:     &h.sizeConflictCount,
+		FirstFrameCount:       &h.firstFrameCount,
+		FirstFrameFallbacks:   &h.firstFrameFallbacks,
+		WarmupEnqueueCount:    &h.warmupEnqueueCount,
+	})
 }
 
 // RegisterRedirect registers a URL for redirect decryption and returns the key
-func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, password, encType string, encName bool) string {
+func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, passwdInfo *config.PasswdInfo, displayPath string) string {
+	password := ""
+	encType := ""
+	encName := false
+	compatKey := "/"
+	if passwdInfo != nil {
+		password = passwdInfo.Password
+		encType = passwdInfo.EncType
+		encName = passwdInfo.EncName
+		compatKey = buildRangeCompatStorageKey(passwdInfo, displayPath)
+	}
 	hash := md5.Sum([]byte(fmt.Sprintf("%s:%d:%d", url, fileSize, time.Now().UnixNano())))
 	key := hex.EncodeToString(hash[:])
 
 	h.redirectMap.Store(key, &redirectInfo{
-		URL:       url,
-		FileSize:  fileSize,
-		Password:  password,
-		EncType:   encType,
-		EncName:   encName,
-		ExpiresAt: time.Now().Add(72 * time.Hour),
+		URL:         url,
+		FileSize:    fileSize,
+		Password:    password,
+		EncType:     encType,
+		EncName:     encName,
+		DisplayPath: displayPath,
+		CompatKey:   compatKey,
+		ExpiresAt:   time.Now().Add(72 * time.Hour),
 	})
 
 	// LRU eviction
@@ -275,7 +313,11 @@ func (h *ProxyHandler) rewriteRedirectLocation(req *http.Request, location strin
 		return "", false
 	}
 
-	key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncName)
+	displayPath := ""
+	if req != nil && req.URL != nil {
+		displayPath = redirectDisplayPathFromURLPath(req.URL.Path)
+	}
+	key := h.RegisterRedirect(location, fileSize, passwdInfo, displayPath)
 	lastURL := ""
 	if req != nil && req.URL != nil {
 		if req.URL.RequestURI() != "" {
@@ -286,6 +328,50 @@ func (h *ProxyHandler) rewriteRedirectLocation(req *http.Request, location strin
 	}
 
 	return buildRedirectPath(key, lastURL, true), true
+}
+
+func redirectCompatKey(info *redirectInfo, passwdInfo *config.PasswdInfo, displayPath string) string {
+	if info != nil && strings.TrimSpace(info.CompatKey) != "" {
+		return info.CompatKey
+	}
+	return buildRangeCompatStorageKey(passwdInfo, displayPath)
+}
+
+func resolveRedirectDisplayPath(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if r.URL != nil {
+		if lastURL := r.URL.Query().Get("lastUrl"); lastURL != "" {
+			if decoded, err := url.QueryUnescape(lastURL); err == nil {
+				if parsed, err := url.Parse(decoded); err == nil && parsed.Path != "" {
+					if displayPath := redirectDisplayPathFromURLPath(parsed.Path); displayPath != "" {
+						return displayPath
+					}
+				}
+			}
+		}
+		if displayPath := redirectDisplayPathFromURLPath(r.URL.Path); displayPath != "" {
+			return displayPath
+		}
+	}
+	return ""
+}
+
+func redirectDisplayPathFromURLPath(rawPath string) string {
+	if rawPath == "" {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(rawPath, "/d/"):
+		return strings.TrimPrefix(rawPath, "/d")
+	case strings.HasPrefix(rawPath, "/p/"):
+		return strings.TrimPrefix(rawPath, "/p")
+	case strings.HasPrefix(rawPath, "/dav/"):
+		return strings.TrimPrefix(rawPath, "/dav")
+	default:
+		return ""
+	}
 }
 
 // convertDisplayToRealPath converts a display path to encrypted path for downloads
@@ -585,7 +671,7 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 
-					key := h.RegisterRedirect(location, fileSize, passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncName)
+					key := h.RegisterRedirect(location, fileSize, passwdInfo, displayPath)
 					lastURL := ""
 					if r.URL != nil {
 						lastURL = r.URL.RequestURI()

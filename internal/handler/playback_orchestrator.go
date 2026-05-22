@@ -197,24 +197,6 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 	}
 
-	if lastFailure != "range_unsatisfiable" && req.Config != nil && req.Config.AlistServer.PlayFirstFallback {
-		log.Warn().
-			Str("path", req.Path).
-			Str("failure", lastFailure).
-			Msg("PlayFirstFallback: proxying encrypted content as final fallback (consider disabling playFirstFallback in config)")
-		if req.FinalPassthroughCount != nil {
-			atomic.AddUint64(req.FinalPassthroughCount, 1)
-		}
-		// Strip WebDAV-specific headers before sending to CDN (raw_url target).
-		// WebDAV players send headers like Depth, Translate that confuse CDNs.
-		proxy.StripWebDAVHeaders(r)
-		if err := req.StreamProxy.ProxyRequest(w, r, req.TargetURL); err == nil {
-			return
-		} else {
-			lastErr = err
-		}
-	}
-
 	if lastFailure == "range_unsatisfiable" {
 		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return

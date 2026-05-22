@@ -749,7 +749,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				h.enqueueProbeFromList(r, originalPath, fileSize)
 
 				// Register redirect and update URL
-				key := h.proxyHandler.RegisterRedirect(rawURL, fileSize, passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncName)
+				key := h.proxyHandler.RegisterRedirect(rawURL, fileSize, passwdInfo, originalPath)
 				redirectPath := buildRedirectPath(key, originalPath, true)
 				data["raw_url"] = buildRedirectURL(r, redirectPath)
 			}
