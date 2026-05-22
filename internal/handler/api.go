@@ -1,30 +1,22 @@
 package handler
 
 import (
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/appservice"
 	"github.com/alist-encrypt-go/internal/auth"
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/internal/encryption"
-	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/proxydict"
 	"github.com/alist-encrypt-go/internal/restart"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
-	"github.com/rs/zerolog/log"
 )
 
 // APIHandler handles /enc-api/* routes
@@ -35,6 +27,7 @@ type APIHandler struct {
 	passwdDAO  *dao.PasswdDAO
 	mysqlStore *mysqlstore.Store
 	dictMgr    *proxydict.Manager
+	svc        *appservice.Service
 }
 
 var deprecatedRangeCompatTTLWarned uint32
@@ -45,13 +38,21 @@ func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.Pass
 	if expireHours <= 0 {
 		expireHours = 48
 	}
+	dictMgr := proxydict.NewManager(filepath.Join("conf", "proxy_domain_dict.json"), filepath.Join("configs", "proxy_domain_dict.seed.json"))
 	return &APIHandler{
 		cfg:        cfg,
 		jwtAuth:    auth.NewJWTAuth(cfg.JWTSecret, time.Duration(expireHours)*time.Hour),
 		userDAO:    userDAO,
 		passwdDAO:  passwdDAO,
 		mysqlStore: mysqlStore,
-		dictMgr:    proxydict.NewManager(filepath.Join("conf", "proxy_domain_dict.json"), filepath.Join("configs", "proxy_domain_dict.seed.json")),
+		dictMgr:    dictMgr,
+		svc: appservice.New(appservice.Deps{
+			Cfg:        cfg,
+			UserDAO:    userDAO,
+			PasswdDAO:  passwdDAO,
+			MySQLStore: mysqlStore,
+			DictMgr:    dictMgr,
+		}),
 	}
 }
 
@@ -66,23 +67,14 @@ func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.userDAO.Validate(req.Username, req.Password); err != nil {
+	userInfo, token, err := h.svc.Login(req.Username, req.Password)
+	if err != nil {
 		// Match Node.js error message exactly: "passwword error" (note the typo in original)
 		RespondAPIError(w, 500, "passwword error")
 		return
 	}
-
-	token, err := h.jwtAuth.GenerateToken(req.Username)
-	if err != nil {
-		RespondAPIError(w, 500, "token generate failed")
-		return
-	}
-
 	RespondSuccess(w, map[string]interface{}{
-		"userInfo": map[string]interface{}{
-			"username":   req.Username,
-			"headImgUrl": "/public/logo.svg",
-		},
+		"userInfo": userInfo,
 		"jwtToken": token,
 	})
 }
@@ -90,22 +82,13 @@ func (h *APIHandler) Login(w http.ResponseWriter, r *http.Request) {
 // GetUserInfo returns current user info
 func (h *APIHandler) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 	// Get actual username from database
-	user, err := h.userDAO.GetFirstUser()
-	username := "admin"
-	if err == nil && user != nil {
-		username = user.Username
-	}
+	data, _ := h.svc.UserInfo()
+	RespondSuccess(w, data)
+}
 
-	RespondSuccess(w, map[string]interface{}{
-		"codes": []int{16, 9, 10, 11, 12, 13, 15},
-		"userInfo": map[string]interface{}{
-			"username":   username,
-			"headImgUrl": "/public/logo.svg",
-		},
-		"menuList": []interface{}{},
-		"roles":    []string{"admin"},
-		"version":  config.Version,
-	})
+// GetBuildInfo returns lightweight capability metadata for platform-specific clients.
+func (h *APIHandler) GetBuildInfo(w http.ResponseWriter, r *http.Request) {
+	RespondSuccess(w, h.svc.BuildInfo())
 }
 
 // UpdatePasswd updates user password
@@ -121,21 +104,14 @@ func (h *APIHandler) UpdatePasswd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check minimum password length (original uses 7, message says 8)
-	if len(req.NewPassword) < 7 {
-		RespondAPIError(w, 500, "password too short, at less 8 digits")
-		return
-	}
-
-	if err := h.userDAO.Validate(req.Username, req.Password); err != nil {
+	if err := h.svc.UpdatePassword(req.Username, req.Password, req.NewPassword); err != nil {
+		if strings.Contains(err.Error(), "too short") {
+			RespondAPIError(w, 500, err.Error())
+			return
+		}
 		RespondAPIError(w, 500, "password error")
 		return
 	}
-
-	if err := h.userDAO.UpdatePassword(req.Username, req.NewPassword); err != nil {
-		RespondAPIError(w, 500, err.Error())
-		return
-	}
-
 	RespondSuccessMsg(w, "update success")
 }
 
@@ -151,33 +127,20 @@ func (h *APIHandler) UpdateUsername(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.NewUsername) < 3 {
-		RespondAPIError(w, 500, "username too short, at least 3 characters")
-		return
-	}
-
-	if err := h.userDAO.Validate(req.Username, req.Password); err != nil {
+	if err := h.svc.UpdateUsername(req.Username, req.Password, req.NewUsername); err != nil {
+		if strings.Contains(err.Error(), "too short") {
+			RespondAPIError(w, 500, err.Error())
+			return
+		}
 		RespondAPIError(w, 500, "password error")
 		return
 	}
-
-	// Delete old user and create new one with same password
-	if err := h.userDAO.Delete(req.Username); err != nil {
-		RespondAPIError(w, 500, err.Error())
-		return
-	}
-
-	if err := h.userDAO.Create(req.NewUsername, req.Password); err != nil {
-		RespondAPIError(w, 500, err.Error())
-		return
-	}
-
 	RespondSuccessMsg(w, "update success")
 }
 
 // GetAlistConfig returns Alist server configuration
 func (h *APIHandler) GetAlistConfig(w http.ResponseWriter, r *http.Request) {
-	RespondSuccess(w, h.cfg.AlistServer)
+	RespondSuccess(w, h.svc.GetAlistConfig())
 }
 
 // SaveAlistConfig saves Alist server configuration
@@ -187,24 +150,14 @@ func (h *APIHandler) SaveAlistConfig(w http.ResponseWriter, r *http.Request) {
 		RespondAPIError(w, 500, "Invalid request: "+err.Error())
 		return
 	}
-	if _, hasLegacy := raw["rangeCompatTtlMinutes"]; hasLegacy {
-		if atomic.CompareAndSwapUint32(&deprecatedRangeCompatTTLWarned, 0, 1) {
-			log.Warn().
-				Str("remote_addr", r.RemoteAddr).
-				Str("user_agent", r.UserAgent()).
-				Msg("Deprecated config key 'rangeCompatTtlMinutes' received from client; please upgrade to 'rangeReprobeMinutes'")
+	if err := h.svc.SaveAlistConfig(raw); err != nil {
+		if strings.Contains(err.Error(), "deprecated") {
+			RespondAPIError(w, 500, err.Error())
+			return
 		}
-		RespondAPIError(w, 500, "rangeCompatTtlMinutes is deprecated, use rangeReprobeMinutes")
-		return
-	}
-
-	server := config.ParseAlistServerFromMap(raw)
-
-	if err := h.cfg.UpdateAlistServer(server); err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
 	}
-
 	RespondSuccessMsg(w, "save ok")
 }
 
@@ -216,95 +169,37 @@ func (h *APIHandler) ValidateScanConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	server := config.ParseAlistServerFromMap(raw)
-	authHeader, authMode := buildScanValidationAuth(server)
-	if authHeader == "" {
-		RespondSuccess(w, map[string]interface{}{
-			"ok":         false,
-			"auth_mode":  "none",
-			"target_url": buildAlistURLForServer(server) + "/dav/",
-			"message":    "未配置扫描账号，请填写 scanUsername/scanPassword 或 scanAuthHeader",
-		})
-		return
-	}
-
-	tempCfg := *h.cfg
-	tempCfg.AlistServer = server
-	targetURL := tempCfg.GetAlistURL() + "/dav/"
-
-	req, err := http.NewRequestWithContext(r.Context(), "PROPFIND", targetURL, nil)
+	result, err := h.svc.ValidateScanConfig(raw, r.Context())
 	if err != nil {
-		RespondAPIError(w, 500, "build request failed: "+err.Error())
+		RespondAPIError(w, 500, err.Error())
 		return
 	}
-	req.Header.Set("Depth", "0")
-	req.Header.Set("Authorization", authHeader)
-
-	client := proxy.NewHTTPClient(&tempCfg, getAlistRequestTimeout(&tempCfg))
-	resp, err := client.Do(req)
-	if err != nil {
-		RespondSuccess(w, map[string]interface{}{
-			"ok":         false,
-			"auth_mode":  authMode,
-			"target_url": targetURL,
-			"message":    "请求失败: " + err.Error(),
-		})
-		return
-	}
-	defer resp.Body.Close()
-
-	bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	statusCode := resp.StatusCode
-	ok := statusCode == http.StatusOK || statusCode == http.StatusNoContent || statusCode == http.StatusMultiStatus
-	message := "连接成功"
-	switch statusCode {
-	case http.StatusUnauthorized:
-		message = "认证失败，账号或授权头无效"
-	case http.StatusForbidden:
-		message = "认证通过但权限不足"
-	case http.StatusNotFound:
-		message = "后端未暴露 /dav 路由或路径不可用"
-	case http.StatusMethodNotAllowed:
-		message = "后端不支持 PROPFIND，请检查 WebDAV 是否开启"
-	case http.StatusMultiStatus:
-		message = "连接成功，WebDAV PROPFIND 可用"
-	}
-
-	RespondSuccess(w, map[string]interface{}{
-		"ok":            ok,
-		"auth_mode":     authMode,
-		"target_url":    targetURL,
-		"status_code":   statusCode,
-		"message":       message,
-		"response_hint": strings.TrimSpace(string(bodyPreview)),
-	})
+	RespondSuccess(w, result)
 }
 
 // GetWebdavConfig returns WebDAV server configurations
 func (h *APIHandler) GetWebdavConfig(w http.ResponseWriter, r *http.Request) {
-	RespondSuccess(w, h.cfg.WebDAVServer)
+	RespondSuccess(w, h.svc.GetWebdavConfig())
 }
 
-func buildScanValidationAuth(server config.AlistServer) (string, string) {
-	if raw := strings.TrimSpace(server.ScanAuthHeader); raw != "" {
-		return extractAuthorizationValue(raw), "header"
+// GetProxyDomainDictionary returns cached proxy provider dictionary.
+func (h *APIHandler) GetProxyDomainDictionary(w http.ResponseWriter, r *http.Request) {
+	dict, err := h.svc.GetProxyDomainDictionary()
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
 	}
-	if server.ScanUsername == "" && server.ScanPassword == "" {
-		return "", "none"
-	}
-	token := base64.StdEncoding.EncodeToString([]byte(server.ScanUsername + ":" + server.ScanPassword))
-	return "Basic " + token, "basic"
+	RespondSuccess(w, dict)
 }
 
-func buildAlistURLForServer(server config.AlistServer) string {
-	scheme := "http"
-	if server.HTTPS {
-		scheme = "https"
+// RefreshProxyDomainDictionary rescans OpenList and refreshes dictionary.
+func (h *APIHandler) RefreshProxyDomainDictionary(w http.ResponseWriter, r *http.Request) {
+	dict, err := h.svc.RefreshProxyDomainDictionary()
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
 	}
-	if server.ServerPort == 80 || server.ServerPort == 443 {
-		return scheme + "://" + server.ServerHost
-	}
-	return scheme + "://" + server.ServerHost + ":" + strconv.Itoa(server.ServerPort)
+	RespondSuccess(w, dict)
 }
 
 // SaveWebdavConfig adds a new WebDAV server configuration
@@ -315,19 +210,12 @@ func (h *APIHandler) SaveWebdavConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	server := config.ParseWebDAVServerFromMap(raw)
-
-	// Generate ID
-	id := make([]byte, 16)
-	rand.Read(id)
-	server.ID = hex.EncodeToString(id)
-
-	if err := h.cfg.AddWebDAVServer(server); err != nil {
+	if err := h.svc.SaveWebdavConfig(raw); err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
 	}
 
-	RespondSuccess(w, h.cfg.WebDAVServer)
+	RespondSuccess(w, h.svc.GetWebdavConfig())
 }
 
 // UpdateWebdavConfig updates a WebDAV server configuration
@@ -338,14 +226,12 @@ func (h *APIHandler) UpdateWebdavConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	server := config.ParseWebDAVServerFromMap(raw)
-
-	if err := h.cfg.UpdateWebDAVServer(server); err != nil {
+	if err := h.svc.UpdateWebdavConfig(raw); err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
 	}
 
-	RespondSuccess(w, h.cfg.WebDAVServer)
+	RespondSuccess(w, h.svc.GetWebdavConfig())
 }
 
 // DelWebdavConfig deletes a WebDAV server configuration
@@ -358,12 +244,12 @@ func (h *APIHandler) DelWebdavConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.cfg.DeleteWebDAVServer(req.ID); err != nil {
+	if err := h.svc.DeleteWebdavConfig(req.ID); err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
 	}
 
-	RespondSuccess(w, h.cfg.WebDAVServer)
+	RespondSuccess(w, h.svc.GetWebdavConfig())
 }
 
 // EncodeFoldName encodes folder name with password
@@ -379,10 +265,7 @@ func (h *APIHandler) EncodeFoldName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	folderNameEnc := encryption.EncodeFolderName(req.Password, req.EncType, req.FolderPasswd, req.FolderEncType)
-	RespondSuccess(w, map[string]interface{}{
-		"folderNameEnc": folderNameEnc,
-	})
+	RespondSuccess(w, h.svc.EncodeFolderName(req.Password, req.EncType, req.FolderPasswd, req.FolderEncType))
 }
 
 // DecodeFoldName decodes folder name
@@ -397,21 +280,18 @@ func (h *APIHandler) DecodeFoldName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	folderEncType, folderPasswd, ok := encryption.DecodeFolderName(req.Password, req.EncType, req.FolderNameEnc)
-	if !ok {
+	data, err := h.svc.DecodeFolderName(req.Password, req.EncType, req.FolderNameEnc)
+	if err != nil {
 		RespondAPIError(w, 500, "folderName is error")
 		return
 	}
 
-	RespondSuccess(w, map[string]interface{}{
-		"folderEncType": folderEncType,
-		"folderPasswd":  folderPasswd,
-	})
+	RespondSuccess(w, data)
 }
 
 // GetSchemeConfig returns server scheme configuration
 func (h *APIHandler) GetSchemeConfig(w http.ResponseWriter, r *http.Request) {
-	RespondSuccess(w, h.cfg.Scheme)
+	RespondSuccess(w, h.svc.GetSchemeConfig())
 }
 
 // SaveSchemeConfig saves scheme configuration
@@ -423,7 +303,7 @@ func (h *APIHandler) SaveSchemeConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	needRestart, err := h.cfg.UpdateScheme(scheme)
+	needRestart, err := h.svc.SaveSchemeConfig(scheme)
 	if err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
@@ -490,7 +370,7 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 		Offset:       offset,
 	}
 
-	records, err := h.mysqlStore.ListFileMeta(r.Context(), filter)
+	records, err := h.svc.ExportFileMeta(r.Context(), filter)
 	if err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
@@ -524,114 +404,17 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 
 // CleanupLegacyBoltDB removes the legacy BoltDB file after MySQL has been configured.
 func (h *APIHandler) CleanupLegacyBoltDB(w http.ResponseWriter, r *http.Request) {
-	if h.mysqlStore == nil {
-		RespondAPIError(w, 400, "MySQL 未连接，请先配置 MySQL 后再试")
-		return
-	}
-	dbPath := filepath.Join(h.cfg.DataDir, "alist-encrypt.db")
-	info, err := os.Stat(dbPath)
-	if os.IsNotExist(err) {
-		RespondSuccessMsg(w, "没有旧数据需要清理")
-		return
-	}
-	if err != nil {
-		RespondAPIError(w, 500, "检查旧数据文件失败: "+err.Error())
-		return
-	}
-	sizeKB := info.Size() / 1024
-	if err := os.Remove(dbPath); err != nil {
-		RespondAPIError(w, 500, "清理失败: "+err.Error())
-		return
-	}
-	RespondSuccessMsg(w, fmt.Sprintf("已清理旧数据（%d KB），清理后无法找回", sizeKB))
-}
-
-// GetProxyDomainDictionary returns cached proxy provider dictionary.
-func (h *APIHandler) GetProxyDomainDictionary(w http.ResponseWriter, r *http.Request) {
-	if h.dictMgr == nil {
-		RespondAPIError(w, 500, "proxy dictionary not initialized")
-		return
-	}
-	dict, err := h.dictMgr.LoadOrRefresh()
+	msg, err := h.svc.CleanupLegacyBoltDB()
 	if err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
 	}
-	RespondSuccess(w, dict)
-}
-
-// RefreshProxyDomainDictionary rescans OpenList and refreshes dictionary.
-func (h *APIHandler) RefreshProxyDomainDictionary(w http.ResponseWriter, r *http.Request) {
-	if h.dictMgr == nil {
-		RespondAPIError(w, 500, "proxy dictionary not initialized")
-		return
-	}
-	dict, err := h.dictMgr.Refresh()
-	if err != nil {
-		RespondAPIError(w, 500, err.Error())
-		return
-	}
-	RespondSuccess(w, dict)
+	RespondSuccessMsg(w, msg)
 }
 
 // GetProxyRoutingConfig returns current proxy configuration.
 func (h *APIHandler) GetProxyRoutingConfig(w http.ResponseWriter, r *http.Request) {
-	RespondSuccess(w, h.cfg.Proxy)
-}
-
-func (h *APIHandler) buildRulesFromSelection(proxyCfg *config.ProxyConfig) {
-	if proxyCfg == nil || len(proxyCfg.SelectedProviderIDs) == 0 || h.dictMgr == nil {
-		return
-	}
-	dict, err := h.dictMgr.LoadOrRefresh()
-	if err != nil || dict == nil {
-		return
-	}
-	selected := make(map[string]struct{}, len(proxyCfg.SelectedProviderIDs))
-	for _, id := range proxyCfg.SelectedProviderIDs {
-		item := strings.ToLower(strings.TrimSpace(id))
-		if item != "" {
-			selected[item] = struct{}{}
-		}
-	}
-	domainSet := make(map[string]struct{})
-	priority := 100
-	rules := make([]config.ProxyRule, 0, 128)
-	for _, provider := range dict.Providers {
-		if _, ok := selected[strings.ToLower(provider.ID)]; !ok {
-			continue
-		}
-		for _, domain := range provider.Domains {
-			domain = strings.ToLower(strings.TrimSpace(domain))
-			if domain == "" {
-				continue
-			}
-			if _, ok := domainSet[domain]; ok {
-				continue
-			}
-			domainSet[domain] = struct{}{}
-			rules = append(rules, config.ProxyRule{
-				ID:         provider.ID + "-" + domain,
-				ProviderID: provider.ID,
-				MatchType:  "domain_suffix",
-				Pattern:    domain,
-				Action:     "proxy",
-				Enabled:    true,
-				Priority:   priority,
-			})
-			priority++
-		}
-	}
-	if len(rules) > 0 {
-		proxyCfg.Rules = rules
-	}
-	if len(domainSet) > 0 {
-		domains := make([]string, 0, len(domainSet))
-		for domain := range domainSet {
-			domains = append(domains, domain)
-		}
-		proxyCfg.SelectedDomains = domains
-	}
+	RespondSuccess(w, h.svc.GetProxyRoutingConfig())
 }
 
 // SaveProxyRoutingConfig saves current proxy config.
@@ -641,10 +424,7 @@ func (h *APIHandler) SaveProxyRoutingConfig(w http.ResponseWriter, r *http.Reque
 		RespondAPIError(w, 500, "Invalid request: "+err.Error())
 		return
 	}
-	if proxyCfg.Mode == "rules" && len(proxyCfg.Rules) == 0 && len(proxyCfg.SelectedProviderIDs) > 0 {
-		h.buildRulesFromSelection(&proxyCfg)
-	}
-	if err := h.cfg.UpdateProxy(proxyCfg); err != nil {
+	if err := h.svc.SaveProxyRoutingConfig(proxyCfg); err != nil {
 		RespondAPIError(w, 500, err.Error())
 		return
 	}

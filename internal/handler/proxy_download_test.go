@@ -43,7 +43,7 @@ func TestHandleDownloadFallsBackToFsLinkMetadataWhenFsGetIsNotUseful(t *testing.
 
 	var fsGetCalls, fsLinkCalls int
 	var backendURL string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/fs/get":
 			fsGetCalls++

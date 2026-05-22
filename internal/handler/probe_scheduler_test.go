@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -135,7 +134,7 @@ func TestFetchRawURLUsesAuthHeaders(t *testing.T) {
 	fileDAO := dao.NewFileDAO(store)
 
 	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		if gotAuth != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -177,7 +176,7 @@ func TestProbeSchedulerRunItemUsesEffectiveAuthForRawURLAndRangeProbe(t *testing
 		rangeProbeAuth string
 	)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		if r.Header.Get("Range") == "bytes=0-0" {
 			rangeProbeAuth = r.Header.Get("Authorization")
@@ -191,12 +190,12 @@ func TestProbeSchedulerRunItemUsesEffectiveAuthForRawURLAndRangeProbe(t *testing
 
 	sp := proxy.NewStreamProxy(cfg)
 	ps := &ProbeScheduler{
-		cfg:         cfg,
-		fileDAO:     fileDAO,
-		stream:      sp,
-		resolver:    NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		cfg:           cfg,
+		fileDAO:       fileDAO,
+		stream:        sp,
+		resolver:      NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		providerLimit: 1,
-		providerSem: make(map[string]chan struct{}),
+		providerSem:   make(map[string]chan struct{}),
 	}
 	ps.rawURLFetcher = func(displayPath, realPath string, authHeaders http.Header) string {
 		mu.Lock()

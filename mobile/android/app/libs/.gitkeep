@@ -1,0 +1,2 @@
+# 此目录用于存放 gomobile 构建生成的 AAR 文件
+# openlistlib.aar 文件会在 CI 构建时自动生成

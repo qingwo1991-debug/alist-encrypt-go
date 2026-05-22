@@ -27,8 +27,8 @@ func TestHandleFsLinkUsesEncryptedPathAndWrapsRawURL(t *testing.T) {
 	encryptedPath := "/enc/" + encryptedName
 
 	var seenPath string
-	var upstreamBase string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamBase := "http://proxy.local"
+	transport := rtFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/api/fs/link" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -38,7 +38,7 @@ func TestHandleFsLinkUsesEncryptedPathAndWrapsRawURL(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		seenPath, _ = req["path"].(string)
-		writeJSONResponse(w, map[string]interface{}{
+		return jsonResponse(200, map[string]interface{}{
 			"code":    200,
 			"message": "success",
 			"data": map[string]interface{}{
@@ -48,12 +48,11 @@ func TestHandleFsLinkUsesEncryptedPathAndWrapsRawURL(t *testing.T) {
 				"provider": "AliyundriveOpen",
 				"is_dir":   false,
 			},
-		})
-	}))
-	defer srv.Close()
-	upstreamBase = srv.URL
+		}), nil
+	})
 
-	handler, fileDAO := newTestAlistHandler(t, srv.URL, passwd)
+	handler, fileDAO := newTestAlistHandler(t, "http://proxy.local:80", passwd)
+	handler.httpClient = &http.Client{Transport: transport}
 	fileDAO.SetEncPathMapping(displayPath, encryptedPath)
 
 	reqBody, _ := json.Marshal(map[string]interface{}{"path": displayPath})
@@ -84,5 +83,14 @@ func TestHandleFsLinkUsesEncryptedPathAndWrapsRawURL(t *testing.T) {
 	rawURL, _ := data["raw_url"].(string)
 	if rawURL == "" || rawURL == upstreamBase+"/d/"+encryptedName {
 		t.Fatalf("expected raw_url to be wrapped by redirect, got %q", rawURL)
+	}
+}
+
+func jsonResponse(status int, payload map[string]interface{}) *http.Response {
+	body, _ := json.Marshal(payload)
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(body)),
 	}
 }

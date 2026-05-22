@@ -30,6 +30,13 @@
 - **H2C 热切换**: 管理界面切换 HTTP/2 无需手动重启
 - **Docker 就绪**: 多架构镜像（amd64/arm64），轻松容器化部署
 
+## 发行物模式
+
+- **独立后端模式（默认）**: 内嵌 Web 管理页，适用于 Docker、Windows exe、Linux 单文件部署。
+- **嵌入式模式（`noembedwebui`）**: 不内嵌 `/public` 管理页，适用于 Android APK / 外部管理端集成。
+- 两种模式共用同一套核心代理、加密、WebDAV、Range、策略与缓存逻辑。
+- 客户端可调用 `/enc-api/getBuildInfo` 判断当前构建是否带内嵌管理页。
+
 ## 快速开始
 
 ### Docker Compose（推荐）
@@ -123,6 +130,18 @@ go build -o alist-encrypt-go ./cmd/server
 ./alist-encrypt-go
 ```
 
+构建不带内嵌管理页的版本（供 APK / 外部管理端使用）：
+
+```bash
+go build -tags noembedwebui -o alist-encrypt-go ./cmd/server
+```
+
+说明：
+
+- 默认构建保留 `/public`、`/static`、`/index` 管理页路由。
+- `noembedwebui` 构建不会注册内嵌管理页路由，`/index` 会返回 404 JSON。
+- `noembedwebui` 构建仍保留 `/enc-api/*`、`/d/*`、`/dav/*`、`/api/fs/*` 等核心接口。
+
 ### 数据库配置（可选）
 
 启用 MySQL 持久化（Host 策略与文件元数据）时，必须同时设置以下两个环境变量：
@@ -208,6 +227,11 @@ DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&par
 - **配置 Alist**: 设置 Alist 服务器地址、加密密码、H2C 开关
 - **WebDAV 配置**: 配置 WebDAV 加密代理
 - **本地加解密**: 对本地文件夹进行加解密操作
+
+说明：
+
+- 仅默认独立后端构建提供内嵌 Web 管理页。
+- Android APK / 其他嵌入式发行物建议使用 `noembedwebui` 构建，并由各自客户端提供配置界面。
 
 ## 鸣谢
 

@@ -1,0 +1,55 @@
+name: Sync Upstream Versions
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync upstream version markers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p upstream_versions
+
+          update_version_file() {
+            local repo="$1"
+            local file="$2"
+            local latest_tag
+            latest_tag="$(git -c 'versionsort.suffix=-' ls-remote --exit-code --refs --sort='version:refname' --tags "https://github.com/${repo}.git" | tail -n 1 | cut -d/ -f3 || true)"
+            if [ -z "$latest_tag" ]; then
+              echo "Unable to resolve latest tag for ${repo}"
+              return 0
+            fi
+            printf '%s\n' "$latest_tag" > "$file"
+          }
+
+          update_version_file "OpenListTeam/OpenList" "upstream_versions/openlist.txt"
+          update_version_file "OpenListTeam/OpenList-Mobile" "upstream_versions/openlist_mobile.txt"
+          update_version_file "OpenListTeam/OpenList" "mobile/openlist_version"
+
+      - name: Commit updates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- upstream_versions; then
+            echo "No upstream version changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add upstream_versions
+          git commit -m "chore: sync upstream version markers"
+          git push
