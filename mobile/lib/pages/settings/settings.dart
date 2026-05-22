@@ -3,6 +3,7 @@ import 'package:openlist_mobile/contant/log_level.dart';
 import 'package:openlist_mobile/generated_api.dart';
 import 'package:openlist_mobile/pages/settings/preference_widgets.dart';
 import 'package:openlist_mobile/pages/settings/troubleshooting_page.dart';
+import 'package:openlist_mobile/utils/download_manager.dart';
 import 'package:openlist_mobile/utils/language_controller.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -134,6 +135,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
               }
             },
           ),
+          BasicPreference(
+            title: S.of(context).downloadDirectory,
+            subtitle: controller._downloadDir.value.isEmpty
+                ? S.of(context).downloadDirectoryPathUnknown
+                : controller._downloadDir.value,
+            leading: const Icon(Icons.download),
+            onTap: () async {
+              final path = await FilePicker.platform.getDirectoryPath();
+              if (path == null) {
+                return;
+              }
+              controller.setDownloadDir(path);
+            },
+          ),
           DividerPreference(title: S.of(context).uiSettings),
           SwitchPreference(
               icon: const Icon(Icons.pan_tool_alt_outlined),
@@ -244,6 +259,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
 class _SettingsController extends GetxController {
   final _dataDir = "".obs;
+  final _downloadDir = "".obs;
   final _autoUpdate = true.obs;
   final _notificationGranted = true.obs;
 
@@ -253,6 +269,12 @@ class _SettingsController extends GetxController {
   }
 
   get dataDir => _dataDir.value;
+
+  setDownloadDir(String value) async {
+    await DownloadManager.setConfiguredDownloadDirectoryPath(value);
+    _downloadDir.value =
+        await DownloadManager.getConfiguredDownloadDirectoryPath() ?? "";
+  }
 
   set autoUpdate(value) => {
         _autoUpdate.value = value,
@@ -335,6 +357,8 @@ class _SettingsController extends GetxController {
     cfg.isSilentJumpAppEnabled().then((value) => silentJumpApp = value);
 
     _dataDir.value = await cfg.getDataDir();
+    _downloadDir.value =
+        await DownloadManager.getConfiguredDownloadDirectoryPath() ?? "";
 
     final sdk = await NativeBridge.common.getDeviceSdkInt();
     if (sdk >= 33) {

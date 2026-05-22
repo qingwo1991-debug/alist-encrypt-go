@@ -307,7 +307,7 @@ class MessageLookup extends MessageLookupByLibrary {
       "Download Function Test",
     ),
     "downloadInstructions": MessageLookupByLibrary.simpleMessage(
-      "• Files will be downloaded to system download directory\\n• Download progress will show notifications\\n• You can choose to open file after download completes\\n• If filename exists, a number will be added automatically\\n• Please check download manager via bottom navigation bar to view files",
+      "• Files will be downloaded to the directory you choose in Settings\\n• Download progress will show notifications\\n• You can choose to open file after download completes\\n• If filename exists, a number will be added automatically\\n• Please check download manager via bottom navigation bar to view files",
     ),
     "downloadManager": MessageLookupByLibrary.simpleMessage("Download"),
     "downloadManagerWithCount": m17,

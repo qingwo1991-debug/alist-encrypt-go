@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -77,19 +76,14 @@ func initIndex(siteConfig SiteConfig) {
 		utils.Log.Info("Successfully fetched index.html from CDN")
 	} else {
 		utils.Log.Debug("Reading index.html from static files system...")
-		indexFile, err := static.Open("index.html")
+		index, err := fs.ReadFile(static, "index.html")
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				utils.Log.Fatalf("index.html not exist, you may forget to put dist of frontend to public/dist")
+				return
 			}
 			utils.Log.Fatalf("failed to read index.html: %v", err)
-		}
-		defer func() {
-			_ = indexFile.Close()
-		}()
-		index, err := io.ReadAll(indexFile)
-		if err != nil {
-			utils.Log.Fatalf("failed to read dist/index.html")
+			return
 		}
 		conf.RawIndexHtml = string(index)
 		utils.Log.Debug("Successfully read index.html from static files system")

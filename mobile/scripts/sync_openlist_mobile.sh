@@ -20,8 +20,10 @@ rm -rf "$BACKUP_DIR"
 PRESERVE_FILES=(
     "android/app/src/main/AndroidManifest.xml"
     "lib/main.dart"
+    "lib/pages/download_manager_page.dart"
     "lib/pages/settings/settings.dart"
     "lib/utils/download_manager.dart"
+    "lib/utils/download_test.dart"
     "lib/pages/web/web.dart"
 )
 

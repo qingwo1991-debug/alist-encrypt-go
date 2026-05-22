@@ -30,6 +30,10 @@ if [ -d ./drivers/wps ]; then
     mkdir -p ./.codex-backup/drivers
     cp -r ./drivers/wps ./.codex-backup/drivers/
 fi
+if [ -f ./server/static/static.go ]; then
+    mkdir -p ./.codex-backup/server/static
+    cp ./server/static/static.go ./.codex-backup/server/static/static.go
+fi
 
 # Clean up any previous source
 rm -rf ./src
@@ -80,6 +84,10 @@ if [ -f ./src/go.mod ]; then
     if [ -d ./.codex-backup/drivers/wps ]; then
         rm -rf ./drivers/wps
         cp -r ./.codex-backup/drivers/wps ./drivers/
+    fi
+    if [ -f ./.codex-backup/server/static/static.go ]; then
+        mkdir -p ./server/static
+        cp ./.codex-backup/server/static/static.go ./server/static/static.go
     fi
     
     # Copy openlistlib from source if exists, then merge our custom code
