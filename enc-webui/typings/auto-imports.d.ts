@@ -6,6 +6,7 @@ declare global {
   const bus: typeof import('../src/utils/bus.js')['default']
   const casHandleChange: typeof import('../src/hooks/use-element.js')['casHandleChange']
   const checkFilePathReq: typeof import('../src/api/user.js')['checkFilePathReq']
+  const cleanupLegacyBoltDBReq: typeof import('../src/api/user.js')['cleanupLegacyBoltDBReq']
   const cloneDeep: typeof import('../src/hooks/use-common.js')['cloneDeep']
   const closeElLoading: typeof import('../src/hooks/use-element.js')['closeElLoading']
   const commonUtil: typeof import('../src/utils/common-util.js')['default']

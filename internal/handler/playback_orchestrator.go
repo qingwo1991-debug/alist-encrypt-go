@@ -3,11 +3,13 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
@@ -18,6 +20,7 @@ type decryptPlaybackRequest struct {
 	Config        *config.Config
 	Probe         *ProbeScheduler
 	StreamProxy   *proxy.StreamProxy
+	FileDAO       *dao.FileDAO
 	SizeResolver  *FileSizeResolver
 	StrategySel   *StrategySelector
 	PasswdInfo    *config.PasswdInfo
@@ -28,6 +31,7 @@ type decryptPlaybackRequest struct {
 	InitialSize   int64
 	OverridePath  string
 	CompatKey     string
+	ConsumerScenario string
 	FailureLogMsg string
 
 	FinalPassthroughCount *uint64
@@ -96,6 +100,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					r.Context(), req.FileItem, metaSize, result.StatusCode, result.ContentType, result.ETag,
 				)
 			}
+			if req.Probe != nil {
+				req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
+			}
 			maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, result.ExpectedBytes)
 			return true, "", nil
 		}
@@ -133,6 +140,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 						r.Context(), req.FileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
 					)
 				}
+				if req.Probe != nil {
+					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
+				}
 				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
 				return true, "", nil
 			}
@@ -159,6 +169,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					req.SizeResolver.RecordPlaybackSuccess(
 						r.Context(), req.FileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
 					)
+				}
+				if req.Probe != nil {
+					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
 				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
 				return true, "", nil
@@ -198,14 +211,17 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	}
 
 	if lastFailure == "range_unsatisfiable" {
+		invalidatePlaybackState(req, lastFailure)
 		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 	if lastErr != nil {
+		invalidatePlaybackState(req, lastFailure)
 		log.Error().Err(lastErr).Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
 		RespondHTTPErrorWithStatus(w, "Decryption error: "+lastFailure, http.StatusBadGateway)
 		return
 	}
+	invalidatePlaybackState(req, lastFailure)
 	log.Error().Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
 	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
 }
@@ -237,8 +253,28 @@ func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.H
 	if expectedBytes > reportedSize {
 		reportedSize = expectedBytes
 	}
-	req.Probe.EnqueueWithSize(req.FileItem, authHeaders, reportedSize)
+	req.Probe.EnqueueWithSource(req.FileItem, authHeaders, reportedSize, probeSourceFirstFrame)
 	if req.WarmupEnqueueCount != nil {
 		atomic.AddUint64(req.WarmupEnqueueCount, 1)
+	}
+}
+
+func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	if req.Probe != nil {
+		req.Probe.InvalidateWarm(req.FileItem.DisplayPath, reason)
+	}
+	if req.FileDAO == nil {
+		return
+	}
+	switch reason {
+	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout", "network_error", "stream_error":
+		req.FileDAO.InvalidateDisplayPath(req.FileItem.DisplayPath)
+	}
+	if reason == "upstream_4xx" && req.FileItem.DisplayPath != "" {
+		req.FileDAO.DeleteEncPathMapping(req.FileItem.DisplayPath)
 	}
 }

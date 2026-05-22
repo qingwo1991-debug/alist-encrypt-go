@@ -808,7 +808,7 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		authHeaders.Set("Cookie", cookie)
 	}
-	h.probe.EnqueueWithSize(file, authHeaders, reportedSize)
+	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, probeSourceFSList)
 }
 
 // HandleFsPut handles /api/fs/put for encrypted uploads with filename encryption
@@ -950,7 +950,11 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 			for _, name := range reqData.Names {
 				displayPath := path.Join(reqData.Dir, name)
 				h.fileDAO.DeleteEncPathMapping(displayPath)
+				h.fileDAO.InvalidateDisplayPath(displayPath)
 				h.fileDAO.Delete(url.QueryEscape(displayPath))
+				if h.probe != nil {
+					h.probe.InvalidateWarm(displayPath, "fs_remove")
+				}
 				log.Debug().Str("path", displayPath).Msg("Cleared cache for deleted file")
 			}
 		}
@@ -1038,7 +1042,11 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 		if code, ok := respData["code"].(float64); ok && code == 200 {
 			// Delete old path mapping
 			h.fileDAO.DeleteEncPathMapping(reqData.Path)
+			h.fileDAO.InvalidateDisplayPath(reqData.Path)
 			h.fileDAO.Delete(url.QueryEscape(reqData.Path))
+			if h.probe != nil {
+				h.probe.InvalidateWarm(reqData.Path, "fs_rename_source")
+			}
 
 			// Add new path mapping if filename encryption is enabled
 			if found && passwdInfo.EncName {
@@ -1141,7 +1149,11 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 				// For move operations, delete the source cache entry
 				if isMove {
 					h.fileDAO.DeleteEncPathMapping(srcDisplayPath)
+					h.fileDAO.InvalidateDisplayPath(srcDisplayPath)
 					h.fileDAO.Delete(url.QueryEscape(srcDisplayPath))
+					if h.probe != nil {
+						h.probe.InvalidateWarm(srcDisplayPath, "fs_move_source")
+					}
 				}
 
 				// Add destination path mapping if filename encryption is enabled

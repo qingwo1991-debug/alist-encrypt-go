@@ -101,6 +101,11 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 func (d *FileDAO) Set(info *FileInfo) error {
 	// Store in unified path cache
 	now := time.Now()
+	upstreamFetchedAt := info.UpstreamFetchedAt
+	if upstreamFetchedAt.IsZero() {
+		upstreamFetchedAt = now
+	}
+	info.UpstreamFetchedAt = upstreamFetchedAt
 	entry := &PathEntry{
 		EncryptedPath:     info.Path,
 		DisplayPath:       info.Path,
@@ -109,13 +114,13 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
 		Sign:              info.Sign,
-		UpstreamFetchedAt: now.UnixNano(),
+		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
 	}
 	d.pathCache.Set(entry, 24*time.Hour)
 
 	// Persist: prefer MySQL if available, else BoltDB.
 	if d.fileMetaWriter != nil {
-		_ = d.fileMetaWriter.UpsertFileMeta(info.Path, info.Size, info.RawURL, info.Sign, now)
+		_ = d.fileMetaWriter.UpsertFileMeta(info.Path, info.Size, info.RawURL, info.Sign, upstreamFetchedAt)
 		return nil
 	}
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
@@ -232,6 +237,37 @@ func (d *FileDAO) DeleteFileSize(path string) {
 		d.pathCache.Set(entry, 24*time.Hour)
 	}
 	_ = d.store.Delete(storage.BucketFileSize, path)
+}
+
+// InvalidateDisplayPath clears volatile upstream metadata for a display path
+// while preserving any encrypted-path mapping that may still be valid.
+func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
+	displayPath = strings.TrimSpace(displayPath)
+	if displayPath == "" {
+		return
+	}
+	d.DeleteFileSize(displayPath)
+	_ = d.store.Delete(storage.BucketFileInfo, displayPath)
+	if entry, ok := d.pathCache.Get(displayPath); ok && entry != nil {
+		entry.Size = 0
+		entry.RawURL = ""
+		entry.Sign = ""
+		entry.UpstreamFetchedAt = 0
+		d.pathCache.Set(entry, 24*time.Hour)
+		if entry.EncryptedPath != "" && entry.EncryptedPath != displayPath {
+			d.DeleteFileSize(entry.EncryptedPath)
+		}
+	}
+	if entry, ok := d.pathCache.GetByDispPath(displayPath); ok && entry != nil {
+		entry.Size = 0
+		entry.RawURL = ""
+		entry.Sign = ""
+		entry.UpstreamFetchedAt = 0
+		d.pathCache.Set(entry, 24*time.Hour)
+		if entry.EncryptedPath != "" && entry.EncryptedPath != displayPath {
+			d.DeleteFileSize(entry.EncryptedPath)
+		}
+	}
 }
 
 // FileSizeCacheStats returns file size cache statistics

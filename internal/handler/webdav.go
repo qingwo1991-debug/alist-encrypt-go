@@ -140,6 +140,7 @@ func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
 		return
 	}
 	ctx = h.withProbeAuthContext(ctx)
+	ctx = withProbeSource(ctx, probeSourceStartupScan)
 	if h.cfg != nil && h.cfg.AlistServer.StartupProbeDeepScan {
 		h.deepScan(ctx, paths)
 		return
@@ -299,6 +300,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		Config:                h.cfg,
 		Probe:                 h.probe,
 		StreamProxy:           h.streamProxy,
+		FileDAO:               h.fileDAO,
 		SizeResolver:          h.sizeResolver,
 		StrategySel:           h.strategySel,
 		PasswdInfo:            passwdInfo,
@@ -309,6 +311,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		InitialSize:           fileSize,
 		OverridePath:          davPath,
 		CompatKey:             buildRangeCompatStorageKey(passwdInfo, davPath),
+		ConsumerScenario:      consumerScenarioWebDAV,
 		FailureLogMsg:         "WebDAV GET decryption failed",
 		FinalPassthroughCount: &h.finalPassthroughCount,
 		SizeConflictCount:     &h.sizeConflictCount,
@@ -354,7 +357,7 @@ func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realP
 	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
 		stalenessThreshold = time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
 	}
-	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, h.fileDAO, stalenessThreshold)
+	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, h.fileDAO, stalenessThreshold).RawURL
 }
 
 // handlePut handles PUT requests with encryption and filename encryption
@@ -872,7 +875,7 @@ func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPat
 			authHeaders.Set("Authorization", value)
 		}
 	}
-	h.probe.EnqueueWithSize(file, authHeaders, reportedSize)
+	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, probeSourceFromContext(ctx, probeSourcePropfind))
 }
 
 func (h *WebDAVHandler) withProbeAuthContext(ctx context.Context) context.Context {

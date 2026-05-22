@@ -165,6 +165,7 @@ func TestExecuteDecryptPlaybackEnqueuesWarmupAfterFirstFrameSuccess(t *testing.T
 		InitialSize:    fileSize,
 		OverridePath:   "/demo.mp4",
 		CompatKey:      "/encrypt",
+		ConsumerScenario: consumerScenarioHTTP,
 		FailureLogMsg:  "test playback failed",
 	})
 
@@ -181,15 +182,38 @@ func TestExecuteDecryptPlaybackEnqueuesWarmupAfterFirstFrameSuccess(t *testing.T
 	if item.file.CompatStorageKey != "/encrypt" {
 		t.Fatalf("compat key=%q", item.file.CompatStorageKey)
 	}
+	if item.source != probeSourceFirstFrame {
+		t.Fatalf("source=%q, want %q", item.source, probeSourceFirstFrame)
+	}
 	if got := item.authHeaders.Get("Authorization"); got != "Bearer test-token" {
 		t.Fatalf("authorization=%q", got)
+	}
+
+	ps.recordTerminal(fileItem, probeSourceFirstFrame, probeStatusSuccess, fileSize, probeExecutionResult{resolvedSize: fileSize})
+	ps.RecordConsumerHit(fileItem, consumerScenarioHTTP)
+	stats := ps.Stats()
+	if got := stats["consumer_hit_total"]; got != uint64(1) {
+		t.Fatalf("consumer_hit_total=%v, want 1", got)
+	}
+	bySource, _ := stats["consumer_hits_by_source"].(map[string]uint64)
+	if bySource[probeSourceFirstFrame] != 1 {
+		t.Fatalf("consumer_hits_by_source=%#v", bySource)
 	}
 }
 
 func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AlistServer.PlayFirstFallback = true
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
 	sp := proxy.NewStreamProxy(cfg)
+	ps := &ProbeScheduler{
+		cfg: cfg,
+	}
 
 	fileSize := int64(1024)
 	plain := bytes.Repeat([]byte("Z"), int(fileSize))
@@ -216,17 +240,29 @@ func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *te
 		EncType:  "aesctr",
 		Enable:   true,
 	}
+	fileDAO.SetEncPathMapping("/broken.bin", "/enc/broken.bin")
+	fileDAO.Set(&dao.FileInfo{
+		Path:              "/broken.bin",
+		Name:              "broken.bin",
+		Size:              fileSize,
+		RawURL:            srv.URL,
+		UpstreamFetchedAt: time.Now(),
+	})
+	ps.recordTerminal(FileItem{DisplayPath: "/broken.bin", FileName: "broken.bin"}, probeSourceFirstFrame, probeStatusSuccess, fileSize, probeExecutionResult{resolvedSize: fileSize})
 
 	executeDecryptPlayback(decryptPlaybackRequest{
 		ResponseWriter: rr,
 		Request:        req,
 		Config:         cfg,
+		Probe:          ps,
 		StreamProxy:    sp,
+		FileDAO:        fileDAO,
 		PasswdInfo:     passwd,
 		FileItem: FileItem{
-			DisplayPath: "/broken.bin",
-			TargetURL:   srv.URL,
-			FileName:    "broken.bin",
+			DisplayPath:   "/broken.bin",
+			EncryptedPath: "/enc/broken.bin",
+			TargetURL:     srv.URL,
+			FileName:      "broken.bin",
 		},
 		TargetURL:     srv.URL,
 		ProviderKey:   ProviderKey(srv.URL, "/broken.bin"),
@@ -242,5 +278,15 @@ func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *te
 	}
 	if bytes.Equal(rr.Body.Bytes(), ciphertext) {
 		t.Fatal("should not passthrough encrypted content on decrypt failure")
+	}
+	if _, ok := fileDAO.Get("/broken.bin"); !ok {
+		t.Fatal("expected display-path mapping to remain present after invalidation")
+	} else if info, _ := fileDAO.Get("/broken.bin"); info.RawURL != "" || info.Size != 0 {
+		t.Fatalf("expected raw_url and size cleared after invalidation, got raw_url=%q size=%d", info.RawURL, info.Size)
+	}
+	stats := ps.Stats()
+	warmStateCounts, _ := stats["warm_state_counts"].(map[string]uint64)
+	if warmStateCounts[warmStateInvalid] != 1 {
+		t.Fatalf("invalid warm count=%d, want 1", warmStateCounts[warmStateInvalid])
 	}
 }

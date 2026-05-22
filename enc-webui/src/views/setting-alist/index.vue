@@ -103,7 +103,7 @@
         <div style="font-size: 12px; line-height: 1.8; color: #666">
           <div>队列长度: {{ probeStats.queueLen }} / {{ probeStats.queueCap }}</div>
           <div>累计入队: {{ probeStats.enqueuedTotal }}，累计丢弃: {{ probeStats.droppedTotal }}</div>
-          <div>冷却跳过: {{ probeStats.cooldownSkips }}，工作协程: {{ probeStats.workers }}，单网盘并发: {{ probeStats.providerLimit }}</div>
+          <div>冷却跳过: {{ probeStats.cooldownSkips }}，工作协程: {{ probeStats.workers }}，运行中: {{ probeStats.runningCount }}，单网盘并发: {{ probeStats.providerLimit }}</div>
           <div>首帧预热累计: {{ probeStats.warmupEnqueueCount }}</div>
         </div>
       </el-form-item>
@@ -111,6 +111,94 @@
         <div style="font-size: 12px; line-height: 1.8; color: #666">
           <div>累计触发: {{ prefetchStats.total }}，成功: {{ prefetchStats.success }}，跳过: {{ prefetchStats.skipped }}</div>
           <div>过期触发: {{ prefetchStats.staleTriggers }}，上次更新: {{ prefetchStats.lastAt || '-' }}</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="文件级预热">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div>发现文件: {{ probeStats.filesDiscoveredTotal }}，入队文件: {{ probeStats.filesQueuedTotal }}，成功: {{ probeStats.filesSucceededTotal }}，失败: {{ probeStats.filesFailedTotal }}，跳过: {{ probeStats.filesSkippedTotal }}</div>
+          <div>raw_url 命中: {{ probeStats.filesRawURLFetched }}，Range 探测: {{ probeStats.filesRangeProbed }}，元数据落库: {{ probeStats.filesMetaPersisted }}</div>
+          <div>真实命中: {{ probeStats.consumerHitTotal }}，命中率: {{ probeConsumerHitRate }}</div>
+          <div>最近成功: {{ probeStats.lastSuccessAt || '-' }}，最近失败: {{ probeStats.lastFailureAt || '-' }}，最近完成: {{ probeStats.lastRecordFinishedAt || '-' }}</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="来源统计">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div v-if="sourceSummary.length">{{ sourceSummary.join('，') }}</div>
+          <div v-else>-</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="状态统计">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div v-if="statusSummary.length">{{ statusSummary.join('，') }}</div>
+          <div v-else>-</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="失败原因">
+        <div style="font-size: 12px; line-height: 1.8; color: #666; max-width: 760px">
+          <div v-if="failureSummary.length">{{ failureSummary.join('，') }}</div>
+          <div v-else>-</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="命中来源">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div v-if="consumerSourceSummary.length">{{ consumerSourceSummary.join('，') }}</div>
+          <div v-else>-</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="命中场景">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div v-if="consumerScenarioSummary.length">{{ consumerScenarioSummary.join('，') }}</div>
+          <div v-else>-</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="预热状态">
+        <div style="font-size: 12px; line-height: 1.8; color: #666">
+          <div v-if="warmStateSummary.length">{{ warmStateSummary.join('，') }}</div>
+          <div v-else>-</div>
+          <div>失效事件累计: {{ probeStats.invalidationsTotal || 0 }}</div>
+        </div>
+      </el-form-item>
+      <el-form-item label="最近预热文件">
+        <div style="width: 100%; max-width: 960px; font-size: 12px; color: #666">
+          <div v-if="probeStats.recentRecords.length === 0">暂无预热记录</div>
+          <div v-for="record in probeStats.recentRecords" :key="`${record.display_path}-${record.finished_at}-${record.status}`" style="padding: 6px 0; border-bottom: 1px dashed #e5e7eb">
+            <div><strong>{{ record.file_name || record.display_path }}</strong> <span style="margin-left: 8px">[{{ record.source }} / {{ record.status }} / {{ record.warm_state || '-' }}]</span></div>
+            <div>路径: {{ record.display_path }}</div>
+            <div>大小: {{ record.reported_size || 0 }} -> {{ record.resolved_size || 0 }}，来源: {{ record.size_source || '-' }}，认证: {{ record.used_auth_mode || '-' }}，优先级: {{ record.priority || '-' }}</div>
+            <div>raw_url: {{ record.raw_url_fetched ? 'yes' : 'no' }}，range: {{ record.range_probed ? 'yes' : 'no' }}，meta: {{ record.meta_persisted ? 'yes' : 'no' }}，排队: {{ record.queue_wait_ms || 0 }}ms</div>
+            <div>命中数: {{ record.consumer_hit_count || 0 }}，上次命中: {{ record.last_consumer_hit_at || '-' }}，失效: {{ record.invalidated ? 'yes' : 'no' }}</div>
+            <div>开始: {{ record.started_at || '-' }}，结束: {{ record.finished_at || '-' }}，耗时: {{ record.duration_ms || 0 }}ms<span v-if="record.failure_reason">，失败: {{ record.failure_reason }}</span></div>
+          </div>
+        </div>
+      </el-form-item>
+      <el-form-item label="最近命中文件">
+        <div style="width: 100%; max-width: 960px; font-size: 12px; color: #666">
+          <div v-if="probeStats.recentConsumerHits.length === 0">暂无命中记录</div>
+          <div v-for="hit in probeStats.recentConsumerHits" :key="`${hit.display_path}-${hit.hit_at}-${hit.scenario}`" style="padding: 6px 0; border-bottom: 1px dashed #e5e7eb">
+            <div><strong>{{ hit.file_name || hit.display_path }}</strong> <span style="margin-left: 8px">[{{ hit.source }} -> {{ hit.scenario }}]</span></div>
+            <div>路径: {{ hit.display_path }}</div>
+            <div>命中时间: {{ hit.hit_at || '-' }}</div>
+          </div>
+        </div>
+      </el-form-item>
+      <el-form-item label="当前预热文件">
+        <div style="width: 100%; max-width: 960px; font-size: 12px; color: #666">
+          <div v-if="probeStats.currentWarmStates.length === 0">暂无活跃预热状态</div>
+          <div v-for="item in probeStats.currentWarmStates" :key="`${item.display_path}-${item.finished_at}`" style="padding: 6px 0; border-bottom: 1px dashed #e5e7eb">
+            <div><strong>{{ item.display_path }}</strong> <span style="margin-left: 8px">[{{ item.source || '-' }} / {{ item.state || '-' }}]</span></div>
+            <div>完成时间: {{ item.finished_at || '-' }}</div>
+            <div>命中数: {{ item.consumer_hit_count || 0 }}，上次命中: {{ item.last_consumer_hit_at || '-' }}</div>
+          </div>
+        </div>
+      </el-form-item>
+      <el-form-item label="最近失效事件">
+        <div style="width: 100%; max-width: 960px; font-size: 12px; color: #666">
+          <div v-if="probeStats.recentInvalidations.length === 0">暂无失效记录</div>
+          <div v-for="item in probeStats.recentInvalidations" :key="`${item.display_path}-${item.at}-${item.reason}`" style="padding: 6px 0; border-bottom: 1px dashed #e5e7eb">
+            <div><strong>{{ item.display_path }}</strong></div>
+            <div>原因: {{ item.reason || '-' }}</div>
+            <div>时间: {{ item.at || '-' }}</div>
+          </div>
         </div>
       </el-form-item>
       <el-form-item label="旧数据清理">
@@ -335,9 +423,34 @@ const probeStats = reactive({
   droppedTotal: 0,
   cooldownSkips: 0,
   workers: 0,
+  runningCount: 0,
   providerLimit: 0,
   warmupEnqueueCount: 0,
-  updatedAt: ''
+  updatedAt: '',
+  filesDiscoveredTotal: 0,
+  filesQueuedTotal: 0,
+  filesSucceededTotal: 0,
+  filesFailedTotal: 0,
+  filesSkippedTotal: 0,
+  filesRawURLFetched: 0,
+  filesRangeProbed: 0,
+  filesMetaPersisted: 0,
+  consumerHitTotal: 0,
+  consumerHitRate: 0,
+  lastSuccessAt: '',
+  lastFailureAt: '',
+  lastRecordFinishedAt: '',
+  sourceCounts: {},
+  statusCounts: {},
+  failureReasons: {},
+  recentRecords: [],
+  consumerHitsBySource: {},
+  consumerHitsByScenario: {},
+  recentConsumerHits: [],
+  invalidationsTotal: 0,
+  warmStateCounts: {},
+  currentWarmStates: [],
+  recentInvalidations: []
 })
 
 const cleanupMsg = ref('')
@@ -380,6 +493,20 @@ const collectSelectedDomains = () => {
 const selectedDomainPreview = computed(() => {
   return collectSelectedDomains().join(', ')
 })
+
+const summaryEntries = (sourceMap) => {
+  return Object.entries(sourceMap || {})
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([key, value]) => `${key}: ${value}`)
+}
+
+const sourceSummary = computed(() => summaryEntries(probeStats.sourceCounts))
+const statusSummary = computed(() => summaryEntries(probeStats.statusCounts))
+const failureSummary = computed(() => summaryEntries(probeStats.failureReasons).slice(0, 8))
+const consumerSourceSummary = computed(() => summaryEntries(probeStats.consumerHitsBySource))
+const consumerScenarioSummary = computed(() => summaryEntries(probeStats.consumerHitsByScenario))
+const warmStateSummary = computed(() => summaryEntries(probeStats.warmStateCounts))
+const probeConsumerHitRate = computed(() => `${((probeStats.consumerHitRate || 0) * 100).toFixed(1)}%`)
 // 添加密码配置
 const addPasswd = () => {
   alistConfigForm.passwdList.push({
@@ -532,8 +659,33 @@ const refreshProbeStats = async () => {
   probeStats.droppedTotal = scheduler.dropped_total || 0
   probeStats.cooldownSkips = scheduler.cooldown_skips || 0
   probeStats.workers = scheduler.workers || 0
+  probeStats.runningCount = scheduler.running_count || 0
   probeStats.providerLimit = scheduler.provider_limit || 0
   probeStats.warmupEnqueueCount = stream.warmup_enqueue_count || 0
+  probeStats.filesDiscoveredTotal = scheduler.files_discovered_total || 0
+  probeStats.filesQueuedTotal = scheduler.files_queued_total || 0
+  probeStats.filesSucceededTotal = scheduler.files_succeeded_total || 0
+  probeStats.filesFailedTotal = scheduler.files_failed_total || 0
+  probeStats.filesSkippedTotal = scheduler.files_skipped_total || 0
+  probeStats.filesRawURLFetched = scheduler.files_raw_url_fetched || 0
+  probeStats.filesRangeProbed = scheduler.files_range_probed || 0
+  probeStats.filesMetaPersisted = scheduler.files_meta_persisted || 0
+  probeStats.consumerHitTotal = scheduler.consumer_hit_total || 0
+  probeStats.consumerHitRate = scheduler.consumer_hit_rate || 0
+  probeStats.lastSuccessAt = scheduler.last_success_at || ''
+  probeStats.lastFailureAt = scheduler.last_failure_at || ''
+  probeStats.lastRecordFinishedAt = scheduler.last_record_finished_at || ''
+  probeStats.sourceCounts = scheduler.source_counts || {}
+  probeStats.statusCounts = scheduler.status_counts || {}
+  probeStats.failureReasons = scheduler.failure_reasons || {}
+  probeStats.recentRecords = scheduler.recent_records || []
+  probeStats.consumerHitsBySource = scheduler.consumer_hits_by_source || {}
+  probeStats.consumerHitsByScenario = scheduler.consumer_hits_by_scenario || {}
+  probeStats.recentConsumerHits = scheduler.recent_consumer_hits || []
+  probeStats.invalidationsTotal = scheduler.invalidations_total || 0
+  probeStats.warmStateCounts = scheduler.warm_state_counts || {}
+  probeStats.currentWarmStates = scheduler.current_warm_states || []
+  probeStats.recentInvalidations = scheduler.recent_invalidations || []
   probeStats.updatedAt = new Date().toLocaleTimeString()
 
   prefetchStats.total = proxyPrefetch.total || 0

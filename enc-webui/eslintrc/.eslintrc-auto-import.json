@@ -5,6 +5,7 @@
     "bus": true,
     "casHandleChange": true,
     "checkFilePathReq": true,
+    "cleanupLegacyBoltDBReq": true,
     "cloneDeep": true,
     "closeElLoading": true,
     "commonUtil": true,
