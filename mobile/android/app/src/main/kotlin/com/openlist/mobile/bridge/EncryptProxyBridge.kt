@@ -169,6 +169,16 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
             throw e
         }
     }
+
+    override fun setEncryptAdvancedConfigJson(configJson: String) {
+        Log.d(TAG, "setEncryptAdvancedConfigJson")
+        try {
+            Openlistlib.setEncryptAdvancedConfigJson(configJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set advanced config json", e)
+            throw e
+        }
+    }
     
     override fun addEncryptPath(path: String, password: String, encType: String, encName: Boolean, encSuffix: String) {
         Log.d(TAG, "addEncryptPath: path=$path, encType=$encType, encName=$encName, encSuffix=$encSuffix")
