@@ -60,6 +60,11 @@ def repoLocalKeystore = rootProject.file("app/openlist-local.keystore")
 def repoLocalKeystorePassword = "openlistlocal"
 def repoLocalKeyAlias = "openlistlocal"
 def repoLocalKeyPassword = "openlistlocal"
+def goBindingAars = fileTree(dir: 'libs', include: ['*.aar'])
+
+if (goBindingAars.isEmpty()) {
+    throw new GradleException("Missing Go mobile AAR in android/app/libs. Run mobile/openlist-lib/scripts/gobind.sh before building the APK.")
+}
 
 android {
     namespace "com.openlist.mobile"
