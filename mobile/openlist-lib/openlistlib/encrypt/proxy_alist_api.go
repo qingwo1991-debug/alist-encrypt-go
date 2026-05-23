@@ -625,14 +625,19 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 	encPath := p.findEncryptPath(filePath)
 	if encPath != nil && encPath.EncName {
 		if !p.isEncryptDirRoot(filePath) {
-			// 尝试将显示名转换为真实加密名（ConvertRealName 会处理 orig_ 前缀）
 			fileName := path.Base(filePath)
 			if fileName != "/" && fileName != "." {
-				realName := convertRealNameByRule(encPath, filePath)
-				filePath = path.Join(path.Dir(filePath), realName)
-				reqData["path"] = filePath
-				body, _ = json.Marshal(reqData)
-				convertedPathForGet = filePath != originalPath
+				candidates := buildRealPathCandidates(encPath, originalPath)
+				for _, candidate := range candidates {
+					if candidate == originalPath {
+						continue
+					}
+					filePath = candidate
+					reqData["path"] = filePath
+					body, _ = json.Marshal(reqData)
+					convertedPathForGet = filePath != originalPath
+					break
+				}
 			}
 		}
 	}
