@@ -199,6 +199,7 @@ jobs:
         working-directory: mobile/openlist-lib/scripts
         run: |
           bash ./init_openlist.sh
+          bash ./init_web.sh
           bash ./init_gomobile.sh
           bash ./gobind.sh
 
