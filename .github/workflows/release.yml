@@ -271,19 +271,30 @@ jobs:
       - name: List release artifacts
         run: find release-artifacts -type f | sort
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.version.outputs.version }}
-          name: Alist-Encrypt-Go ${{ needs.version.outputs.version }}
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-          files: |
-            release-artifacts/**/*.exe
-            release-artifacts/**/alist-encrypt-go-*
+      - name: Create or update GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.version }}
+          RELEASE_NAME: Alist-Encrypt-Go ${{ needs.version.outputs.version }}
+          TARGET_COMMITISH: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t release_files < <(find release-artifacts -type f \( -name "*.exe" -o -name "alist-encrypt-go-*" \) | sort)
+          if [ "${#release_files[@]}" -eq 0 ]; then
+            echo "No release files found"
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${release_files[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${release_files[@]}" \
+              --title "$RELEASE_NAME" \
+              --target "$TARGET_COMMITISH" \
+              --generate-notes=false \
+              --notes ""
+          fi
 
   release-mobile:
     runs-on: ubuntu-latest
@@ -300,15 +311,26 @@ jobs:
           path: release-mobile
 
       - name: Create or update GitHub Release with APK
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.version.outputs.version }}
-          name: OpenList Encrypt ${{ needs.version.outputs.version }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: false
-          draft: false
-          prerelease: false
-          files: |
-            release-mobile/**/*.apk
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.version }}
+          RELEASE_NAME: OpenList Encrypt ${{ needs.version.outputs.version }}
+          TARGET_COMMITISH: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t apk_files < <(find release-mobile -type f -name "*.apk" | sort)
+          if [ "${#apk_files[@]}" -eq 0 ]; then
+            echo "No APK files found"
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${apk_files[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${apk_files[@]}" \
+              --title "$RELEASE_NAME" \
+              --target "$TARGET_COMMITISH" \
+              --generate-notes=false \
+              --notes ""
+          fi
