@@ -1721,7 +1721,15 @@ func (p *ProxyServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // handleRoot 处理根路径
 func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	log.Debugf("[%s] Handling root request: %s", internal.TagProxy, r.URL.Path)
-	// 直接代理到 OpenList (Alist)
+	if shouldRedirectToAlistEntry(r) {
+		target := p.getAlistURL() + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+	// 其他未显式注册的路径继续代理到 OpenList (Alist)
 	p.handleProxy(w, r)
 }
 
@@ -4574,6 +4582,21 @@ func requestOriginFromProxyRequest(r *http.Request) string {
 		return ""
 	}
 	return proto + "://" + host
+}
+
+func shouldRedirectToAlistEntry(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	switch strings.TrimSpace(r.URL.Path) {
+	case "", "/", "/index", "/public/index.html":
+		return true
+	default:
+		return false
+	}
 }
 
 func rewriteProxyRedirectLocation(r *http.Request, upstreamBaseURL, location string) string {
