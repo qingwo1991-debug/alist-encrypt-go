@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # Build version information
 builtAt="${OPENLIST_BUILT_AT:-$(date +'%F %T %z')}"
 gitAuthor="${OPENLIST_GIT_AUTHOR:-The OpenList Projects Contributors <noreply@openlist.team>}"
@@ -61,7 +63,7 @@ if ! ls *.go >/dev/null 2>&1; then
     ls -la
 fi
 
-if [ "$1" == "debug" ]; then
+if [ "${1:-}" == "debug" ]; then
   gomobile bind -ldflags "$ldflags" -v -androidapi 21 -target="android/arm64"
 else
   gomobile bind -ldflags "$ldflags" -v -androidapi 21
