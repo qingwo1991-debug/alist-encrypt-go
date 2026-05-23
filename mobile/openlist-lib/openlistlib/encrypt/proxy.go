@@ -4520,11 +4520,14 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	log.Debugf("Proxy response status: %d", resp.StatusCode)
 
+	var locationHeader string
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")
 		if location != "" {
 			if rewritten := rewriteProxyRedirectLocation(r, p.getAlistURL(), location); rewritten != "" {
-				w.Header().Set("Location", rewritten)
+				locationHeader = rewritten
+			} else {
+				locationHeader = location
 			}
 		}
 	}
@@ -4537,6 +4540,9 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+	if locationHeader != "" {
+		w.Header().Set("Location", locationHeader)
 	}
 
 	w.WriteHeader(resp.StatusCode)
