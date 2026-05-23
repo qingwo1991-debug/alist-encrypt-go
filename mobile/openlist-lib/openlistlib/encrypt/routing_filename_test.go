@@ -33,6 +33,28 @@ func TestBuildRealPathCandidatesWithExternalSuffixSamples(t *testing.T) {
 	}
 }
 
+func TestBuildRealPathCandidatesPrefersCachedRealName(t *testing.T) {
+	ep := &EncryptPath{
+		Path:      "/enc/*",
+		Password:  "123456",
+		EncType:   EncTypeAESCTR,
+		EncName:   true,
+		EncSuffix: ".bin",
+		Enable:    true,
+	}
+
+	showPath := "/enc/MFCW-019.mp4"
+	CacheNameMapping("/enc", "MFCW-019.mp4", "GUigmo3YcGdyIf03s")
+
+	candidates := buildRealPathCandidates(ep, showPath)
+	if len(candidates) < 2 {
+		t.Fatalf("expected multiple candidates, got %v", candidates)
+	}
+	if candidates[1] != "/enc/GUigmo3YcGdyIf03s" {
+		t.Fatalf("expected cached real name candidate first, got %v", candidates)
+	}
+}
+
 func TestFSRemoveNotFoundParser(t *testing.T) {
 	if !fsRemoveNotFound(404, []byte(`{"code":404,"message":"not found"}`)) {
 		t.Fatalf("expected not found for 404")
