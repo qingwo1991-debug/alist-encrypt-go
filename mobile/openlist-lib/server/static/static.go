@@ -33,19 +33,36 @@ type Manifest struct {
 
 var static fs.FS
 
+const encryptPlaceholderMarker = "OpenList Encrypt Proxy is running."
+
+func pickEmbeddedDist(publicFS fs.FS) (fs.FS, string, error) {
+	for _, candidate := range []string{"dist", "dist/enc"} {
+		dist, err := fs.Sub(publicFS, candidate)
+		if err != nil {
+			continue
+		}
+		index, err := fs.ReadFile(dist, "index.html")
+		if err != nil {
+			continue
+		}
+		if candidate == "dist" && strings.Contains(string(index), encryptPlaceholderMarker) {
+			continue
+		}
+		return dist, candidate, nil
+	}
+	return nil, "", fmt.Errorf("failed to read embedded dist dir")
+}
+
 func initStatic() {
 	utils.Log.Debug("Initializing static file system...")
 	if conf.Conf.DistDir == "" {
-		for _, candidate := range []string{"dist/enc", "dist"} {
-			dist, err := fs.Sub(public.Public, candidate)
-			if err != nil {
-				continue
-			}
-			static = dist
-			utils.Log.Debugf("Using embedded dist directory: %s", candidate)
-			return
+		dist, candidate, err := pickEmbeddedDist(public.Public)
+		if err != nil {
+			utils.Log.Fatalf("failed to read embedded dist dir")
 		}
-		utils.Log.Fatalf("failed to read embedded dist dir")
+		static = dist
+		utils.Log.Debugf("Using embedded dist directory: %s", candidate)
+		return
 	}
 	static = os.DirFS(conf.Conf.DistDir)
 	utils.Log.Infof("Using custom dist directory: %s", conf.Conf.DistDir)
