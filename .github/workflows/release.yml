@@ -274,6 +274,7 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.version.outputs.version }}
           RELEASE_NAME: Alist-Encrypt-Go ${{ needs.version.outputs.version }}
           TARGET_COMMITISH: ${{ github.sha }}
@@ -313,6 +314,7 @@ jobs:
       - name: Create or update GitHub Release with APK
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.version.outputs.version }}
           RELEASE_NAME: OpenList Encrypt ${{ needs.version.outputs.version }}
           TARGET_COMMITISH: ${{ github.sha }}
