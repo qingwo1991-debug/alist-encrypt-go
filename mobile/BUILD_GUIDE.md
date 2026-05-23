@@ -13,6 +13,7 @@
 ```bash
 cd mobile/openlist-lib/scripts
 ./init_openlist.sh
+./init_web.sh
 ./init_gomobile.sh
 ./gobind.sh
 ```
@@ -32,4 +33,3 @@ flutter build apk --release --split-per-abi
 - `OpenList-Encrypt-<version>_arm64-v8a.apk`
 - `OpenList-Encrypt-<version>_armeabi-v7a.apk`
 - `OpenList-Encrypt-<version>_x86_64.apk`
-
