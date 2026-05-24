@@ -192,6 +192,95 @@ func TestHandleFsListRejectsInvalidBackgroundSnapshot(t *testing.T) {
 	}
 }
 
+func TestHandleFsListRejectsRequestSnapshotWithoutPathsForNonRootDir(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: "",
+		EncPath:   []string{"/移动云盘156/encrypt/*"},
+	}
+
+	upstreamHits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		writeJSONResponse(w, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"content": []interface{}{
+					map[string]interface{}{
+						"name":   "正确目录",
+						"path":   "/移动云盘156/正确目录",
+						"is_dir": true,
+						"size":   float64(0),
+						"type":   float64(1),
+					},
+				},
+				"total": float64(1),
+			},
+		})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create snapshot store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	dirStore := NewBoltDirSyncStore(store)
+	handler.SetDirSyncStore(dirStore)
+
+	reqBody := `{"path":"/移动云盘156","page":1,"per_page":1000,"refresh":false}`
+	authHash := authScopeHash(handler.requestAuthHeaders(httptest.NewRequest(http.MethodPost, "/api/fs/list", nil)))
+	scopeKey := buildDirScopeKey("/移动云盘156", authHash)
+	err = dirStore.UpsertSnapshot(context.Background(), DirListSnapshot{
+		ScopeKey:      scopeKey,
+		DisplayPath:   "/移动云盘156",
+		AuthScopeHash: authHash,
+		SourceMode:    dirSyncModeReq,
+		SyncState:     "fresh",
+		NextRefreshAt: time.Now().Add(2 * time.Minute),
+		PayloadJSON:   []byte(`{"code":200,"message":"success","data":{"content":[{"name":"移动云盘156","is_dir":true,"size":0,"type":1}],"total":1}}`),
+	})
+	if err != nil {
+		t.Fatalf("seed request snapshot: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/list", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.HandleFsList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits=%d, want 1", upstreamHits)
+	}
+
+	var resp struct {
+		CacheHit bool `json:"cache_hit"`
+		Data     struct {
+			Content []map[string]interface{} `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.CacheHit {
+		t.Fatalf("expected live upstream response, got cache hit: %s", rec.Body.String())
+	}
+	if got, _ := resp.Data.Content[0]["path"].(string); got != "/移动云盘156/正确目录" {
+		t.Fatalf("path=%q, want live upstream path", got)
+	}
+}
+
 func newTestAlistHandler(t *testing.T, serverURL string, passwd *config.PasswdInfo) (*AlistHandler, *dao.FileDAO) {
 	t.Helper()
 

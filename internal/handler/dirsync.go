@@ -247,6 +247,9 @@ func validateSnapshotForDir(dirPath string, snap *DirListSnapshot) (bool, string
 			}
 			continue
 		}
+		if expected != "/" {
+			return false, "snapshot item missing path for non-root dir"
+		}
 		if snap.SourceMode == dirSyncModeScan {
 			return false, "background snapshot item missing path"
 		}

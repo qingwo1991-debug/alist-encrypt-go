@@ -334,6 +334,76 @@ func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
 	}
 }
 
+func TestHandlePropfindDirectoryDoesNotConvertToEncryptedFilePath(t *testing.T) {
+	cfg := config.Get()
+	original := cfg.AlistServer
+	t.Cleanup(func() {
+		cfg.AlistServer = original
+	})
+
+	passwd := config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		EncName:  true,
+		Enable:   true,
+		EncPath:  []string{"/encrypt/*"},
+	}
+	cfg.AlistServer.PasswdList = []config.PasswdInfo{passwd}
+
+	var gotPaths []string
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		if r.URL.Path != "/dav/encrypt/" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(buildProbeMultistatus([]probeResponse{
+			{href: "/dav/encrypt/", isDir: true},
+		})))
+	}))
+	defer backend.Close()
+
+	h := newProbeTestHandler(t, backend.URL)
+	req := httptest.NewRequest("PROPFIND", "/dav/encrypt/", nil)
+	rec := httptest.NewRecorder()
+
+	h.handlePropfind(rec, req, "/encrypt/")
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(gotPaths) != 1 || gotPaths[0] != "/dav/encrypt/" {
+		t.Fatalf("gotPaths=%v", gotPaths)
+	}
+}
+
+func TestHandlePropfindDirectory404DoesNotPopulateNegativeCache(t *testing.T) {
+	cfg := config.Get()
+	original := cfg.AlistServer
+	t.Cleanup(func() {
+		cfg.AlistServer = original
+	})
+
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	h := newProbeTestHandler(t, backend.URL)
+	h.negCache = newNegativePathCache(time.Minute)
+	req := httptest.NewRequest("PROPFIND", "/dav/encrypt/", nil)
+	rec := httptest.NewRecorder()
+
+	h.handlePropfind(rec, req, "/encrypt/")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if h.negCache.IsBlocked("/encrypt/") {
+		t.Fatal("directory propfind should not populate negative cache")
+	}
+}
+
 func newProbeTestHandler(t *testing.T, backendURL string) *WebDAVHandler {
 	t.Helper()
 
