@@ -58,6 +58,21 @@ func TestUpstreamBackoffState(t *testing.T) {
 	}
 }
 
+func TestClientSideStreamAbortDoesNotTriggerBackoff(t *testing.T) {
+	p := &ProxyServer{
+		config: &ProxyConfig{
+			UpstreamBackoffSeconds: 2,
+		},
+	}
+	for i := 0; i < upstreamFailureThreshold+1; i++ {
+		p.markUpstreamFailure(errors.New("context canceled"))
+	}
+	active, _, _ := p.upstreamBackoffState()
+	if active {
+		t.Fatalf("expected no backoff for client-side stream abort")
+	}
+}
+
 func TestProxyResolverDefaultUsesEnvProxyForPublicHosts(t *testing.T) {
 	t.Setenv("http_proxy", "http://127.0.0.1:9999")
 	t.Setenv("https_proxy", "http://127.0.0.1:9999")

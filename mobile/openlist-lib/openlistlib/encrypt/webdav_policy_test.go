@@ -2,6 +2,9 @@ package encrypt
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -69,5 +72,59 @@ func TestProcessPropfindResponseCachesResolvedRealName(t *testing.T) {
 	}
 	if got, ok := GetCachedRealName("/enc", "MFCW-019.mp4"); !ok || got != realName {
 		t.Fatalf("cached real name=%q ok=%v want=%q", got, ok, realName)
+	}
+}
+
+func TestWebDAVGetUsesCachedRawURL(t *testing.T) {
+	ClearShowNameCache()
+	p, err := NewProxyServer(&ProxyConfig{
+		AlistHost:  "alist.local",
+		AlistPort:  5244,
+		ProxyPort:  5344,
+		AlistHttps: false,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:      "/enc/*",
+				Password:  "123456",
+				EncType:   EncTypeAESCTR,
+				EncName:   true,
+				EncSuffix: ".bin",
+				Enable:    true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	p.storeFileCache("/dav/enc/MFCW-019.mp4", &FileInfo{
+		Name:   "MFCW-019.mp4",
+		Size:   1024,
+		IsDir:  false,
+		Path:   "/dav/enc/MFCW-019.mp4",
+		RawURL: "http://cdn.example/video",
+	})
+	hitURL := ""
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			hitURL = req.URL.String()
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("unauthorized")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/dav/enc/MFCW-019.mp4", nil)
+	rr := httptest.NewRecorder()
+	p.handleWebDAVLegacy(rr, req)
+
+	if hitURL != "http://cdn.example/video" {
+		t.Fatalf("hitURL=%q", hitURL)
 	}
 }
