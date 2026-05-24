@@ -17,22 +17,23 @@ type decryptPlaybackRequest struct {
 	ResponseWriter http.ResponseWriter
 	Request        *http.Request
 
-	Config        *config.Config
-	Probe         *ProbeScheduler
-	StreamProxy   *proxy.StreamProxy
-	FileDAO       *dao.FileDAO
-	SizeResolver  *FileSizeResolver
-	StrategySel   *StrategySelector
-	PasswdInfo    *config.PasswdInfo
-	FileItem      FileItem
-	TargetURL     string
-	ProviderKey   string
-	Path          string
-	InitialSize   int64
-	OverridePath  string
-	CompatKey     string
+	Config           *config.Config
+	Probe            *ProbeScheduler
+	StreamProxy      *proxy.StreamProxy
+	FileDAO          *dao.FileDAO
+	SizeResolver     *FileSizeResolver
+	StrategySel      *StrategySelector
+	PasswdInfo       *config.PasswdInfo
+	FileItem         FileItem
+	TargetURL        string
+	ProviderKey      string
+	Path             string
+	InitialSize      int64
+	OverridePath     string
+	CompatKey        string
 	ConsumerScenario string
-	FailureLogMsg string
+	FailureLogMsg    string
+	LogCategory      string
 
 	FinalPassthroughCount *uint64
 	SizeConflictCount     *uint64
@@ -114,6 +115,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		if reason == "" {
 			reason = "unknown"
 		}
+		logDecryptFailure(req, strategy, reason, false)
 
 		if req.StrategySel != nil && !result.NoLearning && result.Retryable && !result.ResponseStarted {
 			req.StrategySel.RecordFailure(req.ProviderKey, strategy, reason)
@@ -193,7 +195,19 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		return
 	}
 
-	if req.SizeResolver != nil && shouldRetryFreshResolve(lastFailure, firstFrameHint) {
+	if req.SizeResolver != nil && shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
+		logDecryptFailure(req, strategy, lastFailure, true)
+		if req.ConsumerScenario == consumerScenarioRedirect && req.FileDAO != nil && req.FileItem.DisplayPath != "" && req.Config != nil {
+			authCopy := cloneHeader(authHeaders)
+			freshRaw := fetchRawURL(r.Context(), req.Config.GetAlistURL(), req.FileItem.DisplayPath, req.FileItem.EncryptedPath, authCopy, req.FileDAO, 0)
+			if strings.TrimSpace(freshRaw.RawURL) != "" {
+				req.TargetURL = freshRaw.RawURL
+				req.FileItem.TargetURL = freshRaw.RawURL
+			}
+			if freshRaw.Size > 0 {
+				fileSize = freshRaw.Size
+			}
+		}
 		fresh := req.SizeResolver.ResolveSingleFresh(r.Context(), req.FileItem, authHeaders)
 		if fresh.Error == nil && fresh.Size > 0 {
 			if fileSize > 0 && fresh.Size != fileSize {
@@ -203,6 +217,12 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				}
 			}
 			fileSize = fresh.Size
+			if req.ConsumerScenario == consumerScenarioRedirect && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
+				if refreshed, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && refreshed != nil && strings.TrimSpace(refreshed.RawURL) != "" {
+					req.TargetURL = refreshed.RawURL
+					req.FileItem.TargetURL = refreshed.RawURL
+				}
+			}
 			success, lastFailure, lastErr = trySingle(fileSize)
 			if success {
 				return
@@ -226,7 +246,13 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
 }
 
-func shouldRetryFreshResolve(failureReason string, firstFrameHint bool) bool {
+func shouldRetryFreshResolve(failureReason string, firstFrameHint bool, consumerScenario string) bool {
+	if consumerScenario == consumerScenarioRedirect {
+		switch failureReason {
+		case "range_unsatisfiable", "decrypt_validation_failed", "upstream_4xx", "upstream_5xx", "stream_error", "unknown", "":
+			return true
+		}
+	}
 	switch failureReason {
 	case "range_unsatisfiable", "decrypt_validation_failed":
 		return true
@@ -239,10 +265,45 @@ func shouldRetryFreshResolve(failureReason string, firstFrameHint bool) bool {
 	case "upstream_4xx", "upstream_5xx":
 		return false
 	case "timeout", "network_error", "client_disconnect":
-		return false
+		return consumerScenario == consumerScenarioRedirect && failureReason == "network_error"
 	default:
 		return !firstFrameHint
 	}
+}
+
+func logDecryptFailure(req decryptPlaybackRequest, strategy proxy.StreamStrategy, failureReason string, freshRetry bool) {
+	category := strings.TrimSpace(req.LogCategory)
+	if category == "" {
+		category = "playback"
+	}
+	rangeHeader := ""
+	if req.Request != nil {
+		rangeHeader = req.Request.Header.Get("Range")
+	}
+	log.Info().
+		Str("category", category).
+		Str("path", req.Path).
+		Str("display_path", req.FileItem.DisplayPath).
+		Str("target_url", req.TargetURL).
+		Str("range", rangeHeader).
+		Str("strategy", string(strategy)).
+		Str("failure_reason", failureReason).
+		Bool("fresh_retry", freshRetry).
+		Str("consumer_scenario", req.ConsumerScenario).
+		Msg("Decrypt playback attempt failed")
+}
+
+func cloneHeader(src http.Header) http.Header {
+	if len(src) == 0 {
+		return make(http.Header)
+	}
+	dst := make(http.Header, len(src))
+	for k, values := range src {
+		copied := make([]string, len(values))
+		copy(copied, values)
+		dst[k] = copied
+	}
+	return dst
 }
 
 func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.Header, firstFrameHint bool, size int64, expectedBytes int64) {

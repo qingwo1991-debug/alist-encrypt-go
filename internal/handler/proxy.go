@@ -212,6 +212,16 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	displayPath := info.DisplayPath
+	if displayPath == "" {
+		displayPath = resolveRedirectDisplayPath(r)
+	}
+	if displayPath != "" {
+		if refreshed := h.refreshRedirectMetadata(r, displayPath, info); refreshed != nil {
+			info = refreshed
+		}
+	}
 	if info.FileSize == 0 {
 		// When decryption is explicitly requested (decode=1), we must not
 		// silently return encrypted content. SizeUnknownStrict only
@@ -229,11 +239,12 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	proxy.StripWebDAVHeaders(r)
 	r.Host = ""
-
-	displayPath := info.DisplayPath
-	if displayPath == "" {
-		displayPath = resolveRedirectDisplayPath(r)
+	targetHost := ""
+	if parsed, err := url.Parse(info.URL); err == nil {
+		targetHost = parsed.Host
 	}
+	trace.Logf(r.Context(), "redirect", "Decrypt request key=%s display=%s host=%s range=%s strategy=%s",
+		key, displayPath, targetHost, r.Header.Get("Range"), redirectCompatKey(info, passwdInfo, displayPath))
 	if displayPath != "" {
 		r = r.WithContext(proxy.WithDisplayName(r.Context(), path.Base(displayPath)))
 	}
@@ -263,6 +274,7 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		CompatKey:             redirectCompatKey(info, passwdInfo, displayPath),
 		ConsumerScenario:      consumerScenarioRedirect,
 		FailureLogMsg:         "Failed to proxy redirect",
+		LogCategory:           "redirect",
 		FinalPassthroughCount: &h.finalPassthroughCount,
 		SizeConflictCount:     &h.sizeConflictCount,
 		FirstFrameCount:       &h.firstFrameCount,
@@ -337,6 +349,56 @@ func redirectCompatKey(info *redirectInfo, passwdInfo *config.PasswdInfo, displa
 		return info.CompatKey
 	}
 	return buildRangeCompatStorageKey(passwdInfo, displayPath)
+}
+
+func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, displayPath string, info *redirectInfo) *redirectInfo {
+	if h == nil || h.fileDAO == nil || h.cfg == nil || displayPath == "" {
+		return nil
+	}
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	realPath := displayPath
+	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok && strings.TrimSpace(encPath) != "" {
+		realPath = encPath
+	} else if info != nil && info.EncName {
+		passwdInfo := &config.PasswdInfo{
+			Password:  info.Password,
+			EncType:   info.EncType,
+			EncName:   info.EncName,
+			Enable:    true,
+			EncSuffix: "",
+		}
+		realPath = h.convertRedirectDisplayPath(displayPath, passwdInfo)
+	}
+	result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, 0)
+	if info != nil {
+		if strings.TrimSpace(result.RawURL) != "" {
+			info.URL = result.RawURL
+		}
+		if result.Size > 0 {
+			info.FileSize = result.Size
+		}
+		return info
+	}
+	return nil
+}
+
+func (h *ProxyHandler) convertRedirectDisplayPath(displayPath string, passwdInfo *config.PasswdInfo) string {
+	if passwdInfo == nil || !passwdInfo.EncName {
+		return displayPath
+	}
+	fileName := path.Base(displayPath)
+	if encryption.IsOriginalFile(fileName) {
+		realName := encryption.StripOriginalPrefix(fileName)
+		return path.Dir(displayPath) + "/" + realName
+	}
+	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
+	return path.Dir(displayPath) + "/" + converter.ToRealName(fileName)
 }
 
 func resolveRedirectDisplayPath(r *http.Request) string {
@@ -504,9 +566,9 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 const (
-	metadataPrefetchTimeout       = 5 * time.Second
-	maxMetadataBodySize           = 64 * 1024 // 64KB limit for fs/get response
-	defaultUpstreamStalenessMins  = 30        // default threshold for refreshing upstream metadata
+	metadataPrefetchTimeout      = 5 * time.Second
+	maxMetadataBodySize          = 64 * 1024 // 64KB limit for fs/get response
+	defaultUpstreamStalenessMins = 30        // default threshold for refreshing upstream metadata
 )
 
 type metadataPrefetchResult struct {

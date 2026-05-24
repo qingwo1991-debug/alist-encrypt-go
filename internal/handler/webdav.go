@@ -48,6 +48,12 @@ type WebDAVHandler struct {
 const propfindPersistentWriteThreshold = 128
 const webdavAuthContextKey = "webdav-auth"
 
+type webdavRawURLResolution struct {
+	RawURL        string
+	StatusCode    int
+	FailureReason string
+}
+
 // Stats returns WebDAV handler statistics
 func (h *WebDAVHandler) Stats() map[string]interface{} {
 	var selectorStats map[string]interface{}
@@ -263,15 +269,24 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" &&
 		cachedInfo.UpstreamStaleness() < staleThreshold {
 		targetURL = cachedInfo.RawURL
-		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target")
+		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target, display=%s", davPath)
 	}
 	if targetURL == "" {
 		// Fetch raw_url from alist /api/fs/get (PROPFIND XML doesn't include it).
-		if fetched := h.fetchRawURLFromAlist(r, davPath, realPath); fetched != "" {
-			targetURL = fetched
-			trace.Logf(r.Context(), "webdav-get", "Fetched raw_url from alist fs/get")
+		resolve := h.resolveRawURLFromAlist(r, davPath, realPath)
+		if resolve.RawURL != "" {
+			targetURL = resolve.RawURL
+			trace.Logf(r.Context(), "webdav-get", "Fetched raw_url from alist fs/get, display=%s", davPath)
 		} else {
+			trace.Logf(r.Context(), "webdav-get", "raw_url fresh fetch failed, display=%s real=%s status=%d reason=%s",
+				davPath, realPath, resolve.StatusCode, resolve.FailureReason)
+			if passwdInfo != nil && passwdInfo.EncName && isStrictWebDAVRawURLFailure(resolve.StatusCode) {
+				trace.Logf(r.Context(), "webdav-get", "Rejecting /dav fallback for EncName path, display=%s status=%d", davPath, resolve.StatusCode)
+				RespondHTTPErrorWithStatus(w, "Unable to resolve upstream raw_url for encrypted WebDAV playback", http.StatusBadGateway)
+				return
+			}
 			targetURL = httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+			trace.Logf(r.Context(), "webdav-get", "Using /dav fallback target for display=%s", davPath)
 		}
 	}
 
@@ -353,6 +368,10 @@ func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPa
 // fetchRawURLFromAlist calls alist /api/fs/get to get the signed raw_url,
 // caches it, and returns it. PROPFIND XML doesn't include raw_url.
 func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realPath string) string {
+	return h.resolveRawURLFromAlist(r, displayPath, realPath).RawURL
+}
+
+func (h *WebDAVHandler) resolveRawURLFromAlist(r *http.Request, displayPath, realPath string) webdavRawURLResolution {
 	stalenessThreshold := 30 * time.Minute
 	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
 		stalenessThreshold = time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
@@ -364,7 +383,12 @@ func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realP
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		authHeaders.Set("Cookie", cookie)
 	}
-	return fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, stalenessThreshold).RawURL
+	result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, stalenessThreshold)
+	return webdavRawURLResolution{
+		RawURL:        result.RawURL,
+		StatusCode:    result.StatusCode,
+		FailureReason: result.FailureReason,
+	}
 }
 
 // handlePut handles PUT requests with encryption and filename encryption
@@ -544,6 +568,17 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	startAt := time.Now()
 
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
+	ruleSource := "FindByPath"
+	if !found {
+		if dirPasswd, ok := h.passwdDAO.FindByDir(davPath); ok {
+			passwdInfo = dirPasswd
+			found = true
+			ruleSource = "FindByDir"
+		}
+	}
+	if !found {
+		ruleSource = "none"
+	}
 
 	// Read request body (need to buffer for possible retry)
 	body, _ := io.ReadAll(r.Body)
@@ -554,9 +589,16 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	if found && passwdInfo.EncName {
 		if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
 			requestPath = encPath
-			trace.Logf(r.Context(), "propfind", "Using cached enc path: %s -> %s", davPath, requestPath)
+			trace.Logf(r.Context(), "propfind", "Using cached enc path: %s -> %s rule=%s", davPath, requestPath, ruleSource)
+		} else {
+			retryPath := h.convertToRealPath(davPath, passwdInfo)
+			if retryPath != "" && retryPath != davPath {
+				requestPath = retryPath
+				trace.Logf(r.Context(), "propfind", "Using derived enc path: %s -> %s rule=%s", davPath, requestPath, ruleSource)
+			}
 		}
 	}
+	trace.Logf(r.Context(), "propfind", "Request path=%s rule=%s", requestPath, ruleSource)
 
 	// Step 1: Request Alist with the determined path
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+requestPath)
@@ -600,7 +642,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 			realPath := h.convertToRealPath(davPath, passwdInfo)
 			retryURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
-			trace.Logf(r.Context(), "propfind", "404 retry: %s -> %s", davPath, realPath)
+			trace.Logf(r.Context(), "propfind", "404 retry: request=%s retry=%s rule=%s", requestPath, realPath, ruleSource)
 
 			retryReq, err := httputil.NewRequest("PROPFIND", retryURL).
 				WithContext(r.Context()).
@@ -611,6 +653,9 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 				retryResp, err := client.Do(retryReq)
 				if err == nil {
 					resp = retryResp
+					if retryResp.StatusCode == http.StatusMultiStatus {
+						h.fileDAO.SetEncPathMapping(davPath, realPath)
+					}
 				}
 			}
 		}
@@ -966,6 +1011,15 @@ func normalizeProbeDirPath(dirPath string) string {
 		clean = strings.TrimRight(clean, "/") + "/"
 	}
 	return clean
+}
+
+func isStrictWebDAVRawURLFailure(statusCode int) bool {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 // decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response
