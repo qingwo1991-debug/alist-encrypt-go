@@ -3860,12 +3860,10 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// For GET/HEAD, use /d/ prefix instead of /dav/ — upstream alist serves files via /d/.
-	if (r.Method == "GET" || r.Method == "HEAD") && strings.HasPrefix(targetURLPath, "/dav/") {
-		targetURLPath = "/d" + strings.TrimPrefix(targetURLPath, "/dav")
-	} else if (r.Method == "GET" || r.Method == "HEAD") && targetURLPath == "/dav" {
-		targetURLPath = "/d"
-	}
+	// Keep WebDAV GET/HEAD on /dav.
+	// Upstream OpenList handles WebDAV GET/HEAD on the WebDAV endpoint itself
+	// and may return storage-specific redirects or proxied content. Rewriting
+	// to /d here breaks that flow and can trigger 401s on encrypted files.
 
 	targetURL := p.getAlistURL() + targetURLPath
 	if r.URL.RawQuery != "" {

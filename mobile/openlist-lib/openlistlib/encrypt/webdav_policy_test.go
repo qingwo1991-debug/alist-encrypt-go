@@ -194,3 +194,60 @@ func TestWebDAVGetResolvesRawURLViaFsGetOnCacheMiss(t *testing.T) {
 		t.Fatalf("requests=%v sawFsGet=%v sawRaw=%v", requests, sawFsGet, sawRaw)
 	}
 }
+
+func TestWebDAVGetKeepsDavPathWhenNoRawURL(t *testing.T) {
+	ClearShowNameCache()
+	p, err := NewProxyServer(&ProxyConfig{
+		AlistHost:  "alist.local",
+		AlistPort:  5244,
+		ProxyPort:  5344,
+		AlistHttps: false,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:      "/enc/*",
+				Password:  "123456",
+				EncType:   EncTypeAESCTR,
+				EncName:   true,
+				EncSuffix: ".bin",
+				Enable:    true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	hitURL := ""
+	p.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			hitURL = req.URL.String()
+			if req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/api/fs/get") {
+				body := `{"code":404,"message":"object not found"}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("unauthorized")),
+				Request:    req,
+			}, nil
+		}),
+	}
+	p.streamClient = p.httpClient
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/dav/enc/MFCW-019.mp4", nil)
+	rr := httptest.NewRecorder()
+	p.handleWebDAVLegacy(rr, req)
+
+	if !strings.HasPrefix(hitURL, "http://alist.local:5244/dav/enc/") || strings.Contains(hitURL, "/d/enc/") {
+		t.Fatalf("hitURL=%q", hitURL)
+	}
+}
