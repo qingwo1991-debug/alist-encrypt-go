@@ -18,8 +18,14 @@ class AppUpdateDialog extends StatelessWidget {
       required this.version,
       required this.htmlUrl});
 
+  static bool _checking = false;
+
   static checkUpdateAndShowDialog(
       BuildContext context, ValueChanged<bool>? checkFinished) async {
+    if (_checking) {
+      return;
+    }
+    _checking = true;
     final checker = UpdateChecker(owner: "qingwo1991-debug", repo: "alist-encrypt-go");
     try {
       await checker.downloadData();
@@ -28,6 +34,7 @@ class AppUpdateDialog extends StatelessWidget {
       checkFinished?.call(hasNewVersion);
 
       if (hasNewVersion) {
+        if (!context.mounted) return;
         showDialog(
           context: context,
           barrierDismissible: false,
@@ -44,9 +51,12 @@ class AppUpdateDialog extends StatelessWidget {
       }
     } catch (e) {
       checkFinished?.call(false);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${S.of(context).updateFailed}: $e')),
       );
+    } finally {
+      _checking = false;
     }
   }
 

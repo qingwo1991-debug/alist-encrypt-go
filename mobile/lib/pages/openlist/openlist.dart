@@ -64,28 +64,30 @@ class OpenListScreen extends StatelessWidget {
               ),
               PopupMenuButton(
                 tooltip: S.of(context).moreOptions,
+                onSelected: (value) async {
+                  if (value == 1) {
+                    await AppUpdateDialog.checkUpdateAndShowDialog(context, (b) {
+                      if (!b) {
+                        Get.showSnackbar(GetSnackBar(
+                            message: S.of(context).currentIsLatestVersion,
+                            duration: const Duration(seconds: 2)));
+                      }
+                    });
+                  } else if (value == 2) {
+                    if (!context.mounted) return;
+                    showDialog(context: context, builder: ((context) {
+                      return const AppAboutDialog();
+                    }));
+                  }
+                },
                 itemBuilder: (context) {
                   return [
                     PopupMenuItem(
                       value: 1,
-                      onTap: () async {
-                        AppUpdateDialog.checkUpdateAndShowDialog(context, (b) {
-                          if (!b) {
-                            Get.showSnackbar(GetSnackBar(
-                                message: S.of(context).currentIsLatestVersion,
-                                duration: const Duration(seconds: 2)));
-                          }
-                        });
-                      },
                       child: Text(S.of(context).checkForUpdates),
                     ),
                     PopupMenuItem(
                       value: 2,
-                      onTap: () {
-                        showDialog(context: context, builder: ((context){
-                          return const AppAboutDialog();
-                        }));
-                      },
                       child: Text(S.of(context).about),
                     ),
                   ];

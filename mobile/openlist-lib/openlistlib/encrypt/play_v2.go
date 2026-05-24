@@ -114,6 +114,23 @@ func (o *PlayOrchestrator) resolveViaFsGet(ctx context.Context, host, scheme str
 	return rec.Code, respBody
 }
 
+func (p *ProxyServer) resolveRawURLViaFsGet(ctx context.Context, srcHeaders http.Header, displayPath string) (string, int64) {
+	if p == nil || strings.TrimSpace(displayPath) == "" {
+		return "", 0
+	}
+	body, _ := json.Marshal(map[string]string{"path": displayPath})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/fs/get", bytes.NewReader(body)).WithContext(ctx)
+	cloneHeader(req.Header, srcHeaders)
+	rec := httptest.NewRecorder()
+	p.handleFsGet(rec, req)
+	if cached, ok := p.loadFileCache(displayPath); ok && cached != nil {
+		if rawURL := strings.TrimSpace(cached.RawURL); rawURL != "" {
+			return rawURL, cached.Size
+		}
+	}
+	return "", 0
+}
+
 func (o *PlayOrchestrator) streamViaRedirect(ctx context.Context, w http.ResponseWriter, srcReq *http.Request, token string) {
 	if o == nil || o.proxy == nil {
 		http.Error(w, "play orchestrator unavailable", http.StatusInternalServerError)

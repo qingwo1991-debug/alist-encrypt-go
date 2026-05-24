@@ -3878,6 +3878,24 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			noDav := strings.TrimPrefix(filePath, "/dav")
 			if cached, ok := p.loadFileCache(noDav); ok && strings.TrimSpace(cached.RawURL) != "" {
 				targetURL = strings.TrimSpace(cached.RawURL)
+			} else if rawURL, size := p.resolveRawURLViaFsGet(r.Context(), r.Header, noDav); strings.TrimSpace(rawURL) != "" {
+				targetURL = rawURL
+				p.storeFileCache(noDav, &FileInfo{
+					Name:   path.Base(noDav),
+					Size:   size,
+					IsDir:  false,
+					Path:   noDav,
+					RawURL: rawURL,
+				})
+				p.storeFileCache(filePath, &FileInfo{
+					Name:   path.Base(filePath),
+					Size:   size,
+					IsDir:  false,
+					Path:   filePath,
+					RawURL: rawURL,
+				})
+				log.Infof("%s WebDAV GET resolved raw_url via fs/get: display=%s rawURL=%s size=%d",
+					internal.LogPrefix(ctx, internal.TagProxy), noDav, rawURL, size)
 			}
 		}
 	}
