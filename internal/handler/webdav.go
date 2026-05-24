@@ -586,7 +586,8 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Determine the actual path to request from Alist
 	// For files with encrypted names, use cached encrypted path
 	requestPath := davPath
-	if found && passwdInfo.EncName {
+	isDirRequest := strings.HasSuffix(davPath, "/")
+	if found && passwdInfo.EncName && !isDirRequest {
 		if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
 			requestPath = encPath
 			trace.Logf(r.Context(), "propfind", "Using cached enc path: %s -> %s rule=%s", davPath, requestPath, ruleSource)
@@ -603,7 +604,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Step 1: Request Alist with the determined path
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+requestPath)
 
-	if h.negCache != nil && h.negCache.IsBlocked(requestPath) {
+	if !isDirRequest && h.negCache != nil && h.negCache.IsBlocked(requestPath) {
 		trace.Logf(r.Context(), "propfind", "Negative cache hit: %s", requestPath)
 		RespondHTTPErrorWithStatus(w, "Not found", http.StatusNotFound)
 		return
@@ -628,7 +629,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	}
 
 	trace.Logf(r.Context(), "propfind", "Alist response: status=%d", resp.StatusCode)
-	if resp.StatusCode == http.StatusNotFound && h.negCache != nil {
+	if !isDirRequest && resp.StatusCode == http.StatusNotFound && h.negCache != nil {
 		h.negCache.Block(requestPath)
 	}
 
