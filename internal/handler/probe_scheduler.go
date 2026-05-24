@@ -124,30 +124,30 @@ type probeWarmState struct {
 }
 
 type ProbeRecord struct {
-	DisplayPath   string `json:"display_path"`
-	EncryptedPath string `json:"encrypted_path"`
-	TargetHost    string `json:"target_host"`
-	ProviderKey   string `json:"provider_key"`
-	FileName      string `json:"file_name"`
-	Source        string `json:"source"`
-	Priority      string `json:"priority"`
-	Status        string `json:"status"`
-	WarmState     string `json:"warm_state"`
-	ReportedSize  int64  `json:"reported_size"`
-	ResolvedSize  int64  `json:"resolved_size"`
-	SizeSource    string `json:"size_source"`
-	UsedAuthMode  string `json:"used_auth_mode"`
-	FailureReason string `json:"failure_reason"`
-	RawURLFetched bool   `json:"raw_url_fetched"`
-	RangeProbed   bool   `json:"range_probed"`
-	MetaPersisted bool   `json:"meta_persisted"`
-	QueueWaitMs   int64  `json:"queue_wait_ms"`
-	Invalidated   bool   `json:"invalidated"`
+	DisplayPath       string `json:"display_path"`
+	EncryptedPath     string `json:"encrypted_path"`
+	TargetHost        string `json:"target_host"`
+	ProviderKey       string `json:"provider_key"`
+	FileName          string `json:"file_name"`
+	Source            string `json:"source"`
+	Priority          string `json:"priority"`
+	Status            string `json:"status"`
+	WarmState         string `json:"warm_state"`
+	ReportedSize      int64  `json:"reported_size"`
+	ResolvedSize      int64  `json:"resolved_size"`
+	SizeSource        string `json:"size_source"`
+	UsedAuthMode      string `json:"used_auth_mode"`
+	FailureReason     string `json:"failure_reason"`
+	RawURLFetched     bool   `json:"raw_url_fetched"`
+	RangeProbed       bool   `json:"range_probed"`
+	MetaPersisted     bool   `json:"meta_persisted"`
+	QueueWaitMs       int64  `json:"queue_wait_ms"`
+	Invalidated       bool   `json:"invalidated"`
 	ConsumerHitCount  uint64 `json:"consumer_hit_count"`
 	LastConsumerHitAt string `json:"last_consumer_hit_at"`
-	StartedAt     string `json:"started_at"`
-	FinishedAt    string `json:"finished_at"`
-	DurationMs    int64  `json:"duration_ms"`
+	StartedAt         string `json:"started_at"`
+	FinishedAt        string `json:"finished_at"`
+	DurationMs        int64  `json:"duration_ms"`
 }
 
 type ProbeConsumerHit struct {
@@ -186,6 +186,7 @@ type probeExecutionResult struct {
 
 type rawURLFetchResult struct {
 	RawURL        string
+	Size          int64
 	StatusCode    int
 	FailureReason string
 }
@@ -199,21 +200,21 @@ func (ps *ProbeScheduler) SetRawURLFetcher(f RawURLFetcher) {
 
 func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy) *ProbeScheduler {
 	ps := &ProbeScheduler{
-		cfg:         cfg,
-		resolver:    NewFileSizeResolver(cfg, fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
-		fileDAO:     fileDAO,
-		metaStore:   metaStore,
-		stream:      stream,
-		enabled:     cfg != nil && cfg.AlistServer.EnableBackgroundProbe,
-		seen:        make(map[string]time.Time),
-		providerSem: make(map[string]chan struct{}),
-		recentRecords:        make([]ProbeRecord, probeRecordBufferSize),
-		recentConsumerHits:   make([]ProbeConsumerHit, probeRecordBufferSize),
-		recentInvalidations:  make([]ProbeInvalidation, probeRecordBufferSize),
-		successfulWarm:       make(map[string]probeWarmState),
-		sourceCounts:         make(map[string]uint64),
-		statusCounts:         make(map[string]uint64),
-		recentFailureReasons: make(map[string]uint64),
+		cfg:                    cfg,
+		resolver:               NewFileSizeResolver(cfg, fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		fileDAO:                fileDAO,
+		metaStore:              metaStore,
+		stream:                 stream,
+		enabled:                cfg != nil && cfg.AlistServer.EnableBackgroundProbe,
+		seen:                   make(map[string]time.Time),
+		providerSem:            make(map[string]chan struct{}),
+		recentRecords:          make([]ProbeRecord, probeRecordBufferSize),
+		recentConsumerHits:     make([]ProbeConsumerHit, probeRecordBufferSize),
+		recentInvalidations:    make([]ProbeInvalidation, probeRecordBufferSize),
+		successfulWarm:         make(map[string]probeWarmState),
+		sourceCounts:           make(map[string]uint64),
+		statusCounts:           make(map[string]uint64),
+		recentFailureReasons:   make(map[string]uint64),
 		consumerHitsBySource:   make(map[string]uint64),
 		consumerHitsByScenario: make(map[string]uint64),
 	}
@@ -321,39 +322,39 @@ func (ps *ProbeScheduler) Stats() map[string]interface{} {
 		queueCap = cap(ps.queue)
 	}
 	return map[string]interface{}{
-		"enabled":        ps.enabled,
-		"workers":        ps.workers,
-		"provider_limit": ps.providerLimit,
-		"queue_len":      queueLen,
-		"queue_cap":      queueCap,
-		"enqueued_total": atomic.LoadUint64(&ps.enqueuedTotal),
-		"dropped_total":  atomic.LoadUint64(&ps.droppedTotal),
-		"cooldown_skips": atomic.LoadUint64(&ps.cooldownSkips),
-		"running_count":  atomic.LoadUint64(&ps.runningCount),
-		"files_discovered_total": atomic.LoadUint64(&ps.filesDiscoveredTotal),
-		"files_queued_total":     atomic.LoadUint64(&ps.filesQueuedTotal),
-		"files_succeeded_total":  atomic.LoadUint64(&ps.filesSucceededTotal),
-		"files_failed_total":     atomic.LoadUint64(&ps.filesFailedTotal),
-		"files_skipped_total":    atomic.LoadUint64(&ps.filesSkippedTotal),
-		"files_raw_url_fetched":  atomic.LoadUint64(&ps.filesRawURLFetched),
-		"files_range_probed":     atomic.LoadUint64(&ps.filesRangeProbed),
-		"files_meta_persisted":   atomic.LoadUint64(&ps.filesMetaPersisted),
-		"consumer_hit_total":     atomic.LoadUint64(&ps.consumerHitTotal),
-		"consumer_hit_rate":      ps.consumerHitRate(),
-		"last_success_at":        formatProbeTimestamp(atomic.LoadInt64(&ps.lastSuccessAtUnixNano)),
-		"last_failure_at":        formatProbeTimestamp(atomic.LoadInt64(&ps.lastFailureAtUnixNano)),
-		"last_record_finished_at": formatProbeTimestamp(atomic.LoadInt64(&ps.lastRecordFinishedNano)),
-		"source_counts":          ps.snapshotCounterMap(ps.sourceCounts),
-		"status_counts":          ps.snapshotCounterMap(ps.statusCounts),
-		"failure_reasons":        ps.snapshotCounterMap(ps.recentFailureReasons),
+		"enabled":                   ps.enabled,
+		"workers":                   ps.workers,
+		"provider_limit":            ps.providerLimit,
+		"queue_len":                 queueLen,
+		"queue_cap":                 queueCap,
+		"enqueued_total":            atomic.LoadUint64(&ps.enqueuedTotal),
+		"dropped_total":             atomic.LoadUint64(&ps.droppedTotal),
+		"cooldown_skips":            atomic.LoadUint64(&ps.cooldownSkips),
+		"running_count":             atomic.LoadUint64(&ps.runningCount),
+		"files_discovered_total":    atomic.LoadUint64(&ps.filesDiscoveredTotal),
+		"files_queued_total":        atomic.LoadUint64(&ps.filesQueuedTotal),
+		"files_succeeded_total":     atomic.LoadUint64(&ps.filesSucceededTotal),
+		"files_failed_total":        atomic.LoadUint64(&ps.filesFailedTotal),
+		"files_skipped_total":       atomic.LoadUint64(&ps.filesSkippedTotal),
+		"files_raw_url_fetched":     atomic.LoadUint64(&ps.filesRawURLFetched),
+		"files_range_probed":        atomic.LoadUint64(&ps.filesRangeProbed),
+		"files_meta_persisted":      atomic.LoadUint64(&ps.filesMetaPersisted),
+		"consumer_hit_total":        atomic.LoadUint64(&ps.consumerHitTotal),
+		"consumer_hit_rate":         ps.consumerHitRate(),
+		"last_success_at":           formatProbeTimestamp(atomic.LoadInt64(&ps.lastSuccessAtUnixNano)),
+		"last_failure_at":           formatProbeTimestamp(atomic.LoadInt64(&ps.lastFailureAtUnixNano)),
+		"last_record_finished_at":   formatProbeTimestamp(atomic.LoadInt64(&ps.lastRecordFinishedNano)),
+		"source_counts":             ps.snapshotCounterMap(ps.sourceCounts),
+		"status_counts":             ps.snapshotCounterMap(ps.statusCounts),
+		"failure_reasons":           ps.snapshotCounterMap(ps.recentFailureReasons),
 		"consumer_hits_by_source":   ps.snapshotCounterMap(ps.consumerHitsBySource),
 		"consumer_hits_by_scenario": ps.snapshotCounterMap(ps.consumerHitsByScenario),
-		"recent_records":         ps.snapshotRecentRecords(),
-		"recent_consumer_hits":   ps.snapshotRecentConsumerHits(),
-		"invalidations_total":    atomic.LoadUint64(&ps.invalidationsTotal),
-		"recent_invalidations":   ps.snapshotRecentInvalidations(),
-		"warm_state_counts":      ps.snapshotWarmStateCounts(),
-		"current_warm_states":    ps.snapshotWarmStates(),
+		"recent_records":            ps.snapshotRecentRecords(),
+		"recent_consumer_hits":      ps.snapshotRecentConsumerHits(),
+		"invalidations_total":       atomic.LoadUint64(&ps.invalidationsTotal),
+		"recent_invalidations":      ps.snapshotRecentInvalidations(),
+		"warm_state_counts":         ps.snapshotWarmStateCounts(),
+		"current_warm_states":       ps.snapshotWarmStates(),
 	}
 }
 
@@ -1054,7 +1055,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
 		strings.TrimSpace(cached.RawURL) != "" &&
 		cached.UpstreamStaleness() < staleThreshold {
-		return rawURLFetchResult{RawURL: cached.RawURL}
+		return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size}
 	}
 
 	body, _ := json.Marshal(map[string]string{"path": realPath})
@@ -1098,5 +1099,5 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 		RawURL:            result.Data.RawURL,
 		UpstreamFetchedAt: time.Now(),
 	})
-	return rawURLFetchResult{RawURL: result.Data.RawURL, StatusCode: resp.StatusCode}
+	return rawURLFetchResult{RawURL: result.Data.RawURL, Size: result.Data.Size, StatusCode: resp.StatusCode}
 }

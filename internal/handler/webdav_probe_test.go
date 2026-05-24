@@ -11,9 +11,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 )
 
@@ -219,6 +222,118 @@ func TestParsePropfindEntriesIncludesDirectories(t *testing.T) {
 	}
 }
 
+func TestHandlePropfindUsesDirRuleAndPersistsRetryMapping(t *testing.T) {
+	cfg := config.Get()
+	original := cfg.AlistServer
+	t.Cleanup(func() {
+		cfg.AlistServer = original
+	})
+
+	passwd := config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		EncName:  true,
+		Enable:   true,
+		EncPath:  []string{"/encrypt/.*/__probe__"},
+	}
+	cfg.AlistServer.PasswdList = []config.PasswdInfo{passwd}
+
+	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
+	realName := converter.ToRealName("movie.mp4")
+	var filePropfindCalls int
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PROPFIND" {
+			t.Fatalf("method=%s, want PROPFIND", r.Method)
+		}
+		switch r.URL.Path {
+		case "/dav/encrypt/" + realName:
+			filePropfindCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write([]byte(buildProbeMultistatus([]probeResponse{
+				{href: "/dav/encrypt/" + realName, size: 321, isDir: false},
+			})))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	h := newProbeTestHandler(t, backend.URL)
+
+	req := httptest.NewRequest("PROPFIND", "/dav/encrypt/movie.mp4", nil)
+	rec := httptest.NewRecorder()
+
+	h.handlePropfind(rec, req, "/encrypt/movie.mp4")
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if filePropfindCalls != 1 {
+		t.Fatalf("propfind calls=%d, want 1", filePropfindCalls)
+	}
+	if encPath, ok := h.fileDAO.GetEncPath("/encrypt/movie.mp4"); !ok || encPath != "/encrypt/"+realName {
+		t.Fatalf("encPath=%q ok=%v", encPath, ok)
+	}
+}
+
+func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
+	cfg := config.Get()
+	original := cfg.AlistServer
+	t.Cleanup(func() {
+		cfg.AlistServer = original
+	})
+
+	passwd := config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		EncName:  true,
+		Enable:   true,
+		EncPath:  []string{"/encrypt/*"},
+	}
+	cfg.AlistServer.PasswdList = []config.PasswdInfo{passwd}
+
+	var fsGetCalls, davCalls int
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get":
+			fsGetCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":401}`))
+		case "/dav/encrypt/enc_movie.bin":
+			davCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	h := newProbeTestHandler(t, backend.URL)
+	h.fileDAO.SetEncPathMapping("/encrypt/movie.mp4", "/encrypt/enc_movie.bin")
+	h.fileDAO.Set(&dao.FileInfo{
+		Path:              "/encrypt/movie.mp4",
+		Name:              "movie.mp4",
+		Size:              1024,
+		UpstreamFetchedAt: time.Time{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/encrypt/movie.mp4", nil)
+	rec := httptest.NewRecorder()
+
+	h.handleGet(rec, req, "/encrypt/movie.mp4")
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if fsGetCalls != 1 {
+		t.Fatalf("fsGetCalls=%d, want 1", fsGetCalls)
+	}
+	if davCalls != 0 {
+		t.Fatalf("davCalls=%d, want 0", davCalls)
+	}
+}
+
 func newProbeTestHandler(t *testing.T, backendURL string) *WebDAVHandler {
 	t.Helper()
 
@@ -248,11 +363,15 @@ func newProbeTestHandler(t *testing.T, backendURL string) *WebDAVHandler {
 	cfg.AlistServer.ServerPort = port
 	cfg.AlistServer.HTTPS = strings.EqualFold(u.Scheme, "https")
 	cfg.AlistServer.RequestTimeoutSeconds = 3
+	fileDAO := dao.NewFileDAO(store)
+	passwdDAO := dao.NewPasswdDAO(store)
 
 	return &WebDAVHandler{
-		cfg:      cfg,
-		fileDAO:  dao.NewFileDAO(store),
-		negCache: newNegativePathCache(0),
+		cfg:         cfg,
+		fileDAO:     fileDAO,
+		passwdDAO:   passwdDAO,
+		streamProxy: proxy.NewStreamProxy(cfg),
+		negCache:    newNegativePathCache(0),
 	}
 }
 

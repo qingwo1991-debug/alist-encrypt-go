@@ -8,10 +8,10 @@ func TestShouldRetryFreshResolveForSizeRelatedFailures(t *testing.T) {
 		"decrypt_validation_failed",
 	}
 	for _, reason := range cases {
-		if !shouldRetryFreshResolve(reason, false) {
+		if !shouldRetryFreshResolve(reason, false, "") {
 			t.Fatalf("expected retry for %q", reason)
 		}
-		if !shouldRetryFreshResolve(reason, true) {
+		if !shouldRetryFreshResolve(reason, true, "") {
 			t.Fatalf("expected retry for %q on first-frame request", reason)
 		}
 	}
@@ -24,13 +24,12 @@ func TestShouldRetryFreshResolveSkipsNonSizeFailuresOnFirstFrame(t *testing.T) {
 		"upstream_4xx",
 		"upstream_5xx",
 		"timeout",
-		"network_error",
 		"client_disconnect",
 		"stream_error",
 		"unknown",
 	}
 	for _, reason := range cases {
-		if shouldRetryFreshResolve(reason, true) {
+		if shouldRetryFreshResolve(reason, true, "") {
 			t.Fatalf("expected no retry for %q on first-frame request", reason)
 		}
 	}
@@ -44,8 +43,17 @@ func TestShouldRetryFreshResolveAllowsUnknownForNonFirstFrame(t *testing.T) {
 		"custom_reason",
 	}
 	for _, reason := range cases {
-		if !shouldRetryFreshResolve(reason, false) {
+		if !shouldRetryFreshResolve(reason, false, "") {
 			t.Fatalf("expected retry for %q on non-first-frame request", reason)
+		}
+	}
+}
+
+func TestShouldRetryFreshResolveAllowsRedirectMetadataRecovery(t *testing.T) {
+	cases := []string{"upstream_4xx", "upstream_5xx", "stream_error", "unknown", "", "network_error"}
+	for _, reason := range cases {
+		if !shouldRetryFreshResolve(reason, true, consumerScenarioRedirect) {
+			t.Fatalf("expected redirect retry for %q", reason)
 		}
 	}
 }
