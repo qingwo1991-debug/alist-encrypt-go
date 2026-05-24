@@ -277,3 +277,76 @@ func TestPlayV2RedirectRangePreserves206Headers(t *testing.T) {
 		t.Fatalf("decrypted body mismatch: got=%d", len(got))
 	}
 }
+
+func TestPlayV2DoesNotOverwriteStartedResponseOnStreamFailure(t *testing.T) {
+	password := "123456"
+	encType := EncTypeAESCTR
+	fileSize := int64(1024)
+	plain := bytes.Repeat([]byte("B"), int(fileSize))
+	flow, err := NewFlowEncryptor(password, encType, fileSize)
+	if err != nil {
+		t.Fatalf("new flow encryptor: %v", err)
+	}
+	encrypted, err := flow.Encrypt(plain)
+	if err != nil {
+		t.Fatalf("encrypt payload: %v", err)
+	}
+
+	redirectURL := "http://upstream.local/range"
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort: 5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  encType,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range":  []string{"bytes 0-1023/1024"},
+					"Content-Length": []string{"1024"},
+					"Content-Type":   []string{"video/mp4"},
+				},
+				Body:    io.NopCloser(bytes.NewReader(encrypted[:128])),
+				Request: req,
+			}, nil
+		}),
+	}
+
+	key := "range-key-fail"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: redirectURL,
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  encType,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:    fileSize,
+		OriginalURL: "/enc/demo.mp4",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=0-")
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

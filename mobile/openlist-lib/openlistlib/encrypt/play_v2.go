@@ -664,6 +664,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 
 	if outcome != nil && outcome.Err != nil {
+		if outcome.ResponseStarted {
+			return
+		}
 		http.Error(w, outcome.Err.Error(), http.StatusBadGateway)
 	} else {
 		http.Error(w, "stream play failed", http.StatusBadGateway)

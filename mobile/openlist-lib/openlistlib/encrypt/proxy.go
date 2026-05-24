@@ -1059,6 +1059,9 @@ func (p *ProxyServer) markUpstreamFailure(err error) {
 	if p == nil {
 		return
 	}
+	if isClientSideStreamAbort(err) {
+		return
+	}
 	p.upstreamMu.Lock()
 	defer p.upstreamMu.Unlock()
 	p.upstreamFailures++
@@ -1080,6 +1083,16 @@ func (p *ProxyServer) markUpstreamSuccess() {
 	p.upstreamDownAt = time.Time{}
 	p.upstreamError = ""
 	p.upstreamFailures = 0
+}
+
+func isClientSideStreamAbort(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "context canceled") ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "broken pipe")
 }
 
 func (p *ProxyServer) upstreamBackoffState() (active bool, remain time.Duration, reason string) {
@@ -3857,6 +3870,16 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	targetURL := p.getAlistURL() + targetURLPath
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
+	}
+	if r.Method == "GET" && encPath != nil {
+		if cached, ok := p.loadFileCache(filePath); ok && strings.TrimSpace(cached.RawURL) != "" {
+			targetURL = strings.TrimSpace(cached.RawURL)
+		} else if strings.HasPrefix(filePath, "/dav/") {
+			noDav := strings.TrimPrefix(filePath, "/dav")
+			if cached, ok := p.loadFileCache(noDav); ok && strings.TrimSpace(cached.RawURL) != "" {
+				targetURL = strings.TrimSpace(cached.RawURL)
+			}
+		}
 	}
 	negativeCachePath := targetURLPath
 	if strings.HasPrefix(negativeCachePath, "/dav") {
