@@ -368,6 +368,24 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		statusCode = http.StatusPartialContent
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+	log.Infof("V2 redirect attempt: url=%s strategy=%s range=%q upstreamStatus=%d contentRange=%q contentLength=%q fileSize=%d",
+		info.RedirectURL, strategy, clientRangeHeader, resp.StatusCode, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize)
+	if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		return &StreamOutcome{
+			Err:           fmt.Errorf("upstream returned %d", resp.StatusCode),
+			FailureReason: "upstream_4xx",
+			Retryable:     false,
+			StatusCode:    statusCode,
+		}
+	}
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return &StreamOutcome{
+			Err:           fmt.Errorf("upstream returned %d", resp.StatusCode),
+			FailureReason: "upstream_5xx",
+			Retryable:     true,
+			StatusCode:    statusCode,
+		}
+	}
 
 	// If we requested range, but upstream didn't support it, fail/retryable
 	if clientRangeHeader != "" && strategy == StreamStrategyRange && !upstreamIsRange {
@@ -515,6 +533,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 
 	fileSize := o.resolveFileSize(r.Context(), r, info)
+	log.Infof("V2 redirect resolve: key=%s original=%s redirect=%s size=%d range=%q", key, info.OriginalURL, info.RedirectURL, fileSize, r.Header.Get("Range"))
 	if fileSize == 0 {
 		log.Warnf("V2 play: fileSize is 0, skipping decryption and proxying raw stream")
 		req, _ := http.NewRequestWithContext(r.Context(), "GET", info.RedirectURL, nil)
@@ -564,6 +583,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 
 	tryStrategy := func(strategy StreamStrategy) *StreamOutcome {
 		outcome := o.proxyDownloadDecryptWithStrategy(w, r, info, fileSize, strategy)
+		if outcome != nil && outcome.Err != nil {
+			log.Warnf("V2 redirect strategy failed: key=%s strategy=%s reason=%s retryable=%v responseStarted=%v err=%v",
+				key, strategy, outcome.FailureReason, outcome.Retryable, outcome.ResponseStarted, outcome.Err)
+		}
 		if outcome.Err == nil && !outcome.Retryable {
 			o.proxy.strategySelector.RecordSuccess(provider, strategy)
 			o.proxy.localStore.AddStrategy(

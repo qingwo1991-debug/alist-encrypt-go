@@ -3820,6 +3820,10 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
+		log.Infof("%s WebDAV PROPFIND planning: path=%s match=%s methodNeedConvert=%v candidates=%v",
+			internal.LogPrefix(ctx, internal.TagProxy), filePath, matchPath, methodNeedConvert, buildRealPathCandidates(encPath, filePath))
+	}
 
 	if methodNeedConvert && encPath != nil && encPath.EncName {
 		if fileName != "/" && fileName != "." {
@@ -3854,6 +3858,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if r.Method == "PROPFIND" && p.webdavNegativeBlocked(negativeCachePath) {
+		log.Warnf("%s WebDAV negative cache hit: path=%s negativePath=%s", internal.LogPrefix(ctx, internal.TagProxy), filePath, negativeCachePath)
 		http.Error(w, "object not found", http.StatusNotFound)
 		return
 	}
@@ -4160,6 +4165,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				}
 				p.markUpstreamSuccess()
 				p.debugf("webdav", "PROPFIND retry response stage=%s path=%s status=%d", candidate.stage, candidate.path, resp.StatusCode)
+				log.Infof("%s WebDAV PROPFIND retry: stage=%s candidate=%s status=%d",
+					internal.LogPrefix(ctx, internal.TagProxy), candidate.stage, candidate.path, resp.StatusCode)
 				targetURLPath = candidate.path
 				targetURL = retryTargetURL
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -4272,6 +4279,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					log.Infof("WebDAV redirect: probed remote fileSize: %d for %s", fileSize, filePath)
 				}
 			}
+			log.Infof("%s WebDAV redirect planning: path=%s location=%s fileSize=%d range=%q",
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, location, fileSize, clientRangeHeader)
 
 			// 生成唯一的重定向 key
 			redirectKey := fmt.Sprintf("%d-%s", time.Now().UnixNano(), path.Base(filePath))
@@ -4313,7 +4322,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		// 只有响应状态码是 2xx 时才尝试解密
 		// 非 2xx 状态码（如 4xx、5xx 错误）直接透传，不尝试解密
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			log.Debugf("WebDAV GET non-2xx response: status=%d, skip decryption", resp.StatusCode)
+			log.Warnf("%s WebDAV GET non-2xx: path=%s target=%s status=%d contentType=%s",
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, targetURL, resp.StatusCode, resp.Header.Get("Content-Type"))
 			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
@@ -4405,6 +4415,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, targetURL)
 			}
 		}
+		log.Infof("%s WebDAV GET planning: path=%s target=%s fileSize=%d range=%q contentRange=%q",
+			internal.LogPrefix(ctx, internal.TagProxy), filePath, targetURL, fileSize, clientRangeHeader, resp.Header.Get("Content-Range"))
 
 		// 只有当服务端返回了内容，且知道大小，才解密
 		if fileSize > 0 {

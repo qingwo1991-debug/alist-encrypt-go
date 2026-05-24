@@ -3,6 +3,7 @@ package encrypt
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,12 @@ import (
 	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func TestPlayV2ResolveAndStream(t *testing.T) {
 	password := "123456"
@@ -122,5 +129,70 @@ func TestPlayV2ResolveAndStream(t *testing.T) {
 	}
 	if got := streamResp.Body.Bytes(); string(got) != string(plainContent) {
 		t.Fatalf("stream mismatch: got=%q want=%q", string(got), string(plainContent))
+	}
+}
+
+func TestPlayV2RedirectReturnsBadGatewayOnUpstream4xx(t *testing.T) {
+	password := "123456"
+	encType := EncTypeAESCTR
+	redirectURL := "http://upstream.local/missing"
+
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort:         5344,
+		PlayFirstFallback: false,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  encType,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() != redirectURL {
+				t.Fatalf("unexpected redirect url: %s", req.URL.String())
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("unauthorized")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	key := "redirect-key"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: redirectURL,
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  encType,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:    1024,
+		OriginalURL: "/enc/demo.mp4",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/redirect/"+key+"?decode=1", nil)
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "upstream returned 401") {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }
