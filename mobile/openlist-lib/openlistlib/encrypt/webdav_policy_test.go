@@ -128,3 +128,69 @@ func TestWebDAVGetUsesCachedRawURL(t *testing.T) {
 		t.Fatalf("hitURL=%q", hitURL)
 	}
 }
+
+func TestWebDAVGetResolvesRawURLViaFsGetOnCacheMiss(t *testing.T) {
+	ClearShowNameCache()
+	p, err := NewProxyServer(&ProxyConfig{
+		AlistHost:  "alist.local",
+		AlistPort:  5244,
+		ProxyPort:  5344,
+		AlistHttps: false,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:      "/enc/*",
+				Password:  "123456",
+				EncType:   EncTypeAESCTR,
+				EncName:   true,
+				EncSuffix: ".bin",
+				Enable:    true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	requests := make([]string, 0, 2)
+	p.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests = append(requests, req.URL.String())
+			if req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/api/fs/get") {
+				body := `{"code":200,"data":{"name":"GUigmo3YcGdyIf03s.mp4","size":123,"raw_url":"http://cdn.example/fresh"}}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("unauthorized")),
+				Request:    req,
+			}, nil
+		}),
+	}
+	p.streamClient = p.httpClient
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/dav/enc/MFCW-019.mp4", nil)
+	rr := httptest.NewRecorder()
+	p.handleWebDAVLegacy(rr, req)
+
+	var sawFsGet, sawRaw bool
+	for _, reqURL := range requests {
+		if strings.Contains(reqURL, "/api/fs/get") {
+			sawFsGet = true
+		}
+		if reqURL == "http://cdn.example/fresh" {
+			sawRaw = true
+		}
+	}
+	if !sawFsGet || !sawRaw {
+		t.Fatalf("requests=%v sawFsGet=%v sawRaw=%v", requests, sawFsGet, sawRaw)
+	}
+}
