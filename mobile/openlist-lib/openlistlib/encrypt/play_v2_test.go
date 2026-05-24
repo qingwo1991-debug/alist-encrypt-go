@@ -132,14 +132,13 @@ func TestPlayV2ResolveAndStream(t *testing.T) {
 	}
 }
 
-func TestPlayV2RedirectReturnsBadGatewayOnUpstream4xx(t *testing.T) {
+func TestPlayV2RedirectFallsBackToRawUpstream4xxWhenEnabled(t *testing.T) {
 	password := "123456"
 	encType := EncTypeAESCTR
 	redirectURL := "http://upstream.local/missing"
 
 	p, err := NewProxyServer(&ProxyConfig{
-		ProxyPort:         5344,
-		PlayFirstFallback: false,
+		ProxyPort: 5344,
 		EncryptPaths: []*EncryptPath{
 			{
 				Path:     "/enc/*",
@@ -189,10 +188,92 @@ func TestPlayV2RedirectReturnsBadGatewayOnUpstream4xx(t *testing.T) {
 	rr := httptest.NewRecorder()
 	newPlayOrchestrator(p).ServeRedirect(rr, req)
 
-	if rr.Code != http.StatusBadGateway {
+	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "upstream returned 401") {
+	if !strings.Contains(rr.Body.String(), "unauthorized") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestPlayV2RedirectRangePreserves206Headers(t *testing.T) {
+	password := "123456"
+	encType := EncTypeAESCTR
+	fileSize := int64(4096)
+	plain := bytes.Repeat([]byte("A"), int(fileSize))
+	flow, err := NewFlowEncryptor(password, encType, fileSize)
+	if err != nil {
+		t.Fatalf("new flow encryptor: %v", err)
+	}
+	encrypted, err := flow.Encrypt(plain)
+	if err != nil {
+		t.Fatalf("encrypt payload: %v", err)
+	}
+
+	redirectURL := "http://upstream.local/range"
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort: 5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  encType,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range":  []string{"bytes 0-4095/4096"},
+					"Content-Length": []string{"4096"},
+					"Content-Type":   []string{"video/mp4"},
+				},
+				Body:    io.NopCloser(bytes.NewReader(encrypted)),
+				Request: req,
+			}, nil
+		}),
+	}
+
+	key := "range-key"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: redirectURL,
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  encType,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:    fileSize,
+		OriginalURL: "/enc/demo.mp4",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=0-")
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 0-4095/4096" {
+		t.Fatalf("content-range=%q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "4096" {
+		t.Fatalf("content-length=%q", got)
+	}
+	if got := rr.Body.Bytes(); !bytes.Equal(got, plain) {
+		t.Fatalf("decrypted body mismatch: got=%d", len(got))
 	}
 }

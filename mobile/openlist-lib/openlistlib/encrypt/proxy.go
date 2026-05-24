@@ -1633,6 +1633,14 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 						isDir = true
 						size = 0
 					}
+					if curHrefShow != "" && curHrefShow != curHref {
+						showDir := path.Dir(curHrefShow)
+						showName := path.Base(curHrefShow)
+						realName := path.Base(curHref)
+						if showName != "" && showName != "." && showName != "/" && realName != "" && realName != "." && realName != "/" {
+							CacheNameMapping(showDir, showName, realName)
+						}
+					}
 					// 使用带 TTL 的缓存（同时缓存密文与明文路径，便于 WebDAV GET 命中）
 					p.storeFileCache(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
 					if curHrefShow != "" && curHrefShow != curHref {

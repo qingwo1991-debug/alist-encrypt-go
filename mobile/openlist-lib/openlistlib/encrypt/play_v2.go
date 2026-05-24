@@ -413,6 +413,14 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
+	if upstreamIsRange && strategy == StreamStrategyRange {
+		if cr := resp.Header.Get("Content-Range"); cr != "" {
+			w.Header().Set("Content-Range", cr)
+		}
+		if cl := resp.Header.Get("Content-Length"); cl != "" {
+			w.Header().Set("Content-Length", cl)
+		}
+	}
 
 	// Decrypt filename in header
 	lastUrl := r.URL.Query().Get("lastUrl")
@@ -510,10 +518,14 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	decryptReader := NewDecryptReader(readerToStream, encryptor)
 	w.WriteHeader(statusCode)
 
-	_, err = copyWithBuffer(w, decryptReader)
+	written, err := copyWithBuffer(w, decryptReader)
 	if err != nil {
+		log.Warnf("V2 redirect stream copy failed: url=%s strategy=%s written=%d ctxErr=%v err=%v",
+			info.RedirectURL, strategy, written, r.Context().Err(), err)
 		return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true, ResponseStarted: true}
 	}
+	log.Infof("V2 redirect stream copy complete: url=%s strategy=%s written=%d status=%d",
+		info.RedirectURL, strategy, written, statusCode)
 
 	return &StreamOutcome{StatusCode: statusCode}
 }
