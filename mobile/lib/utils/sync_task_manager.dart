@@ -153,7 +153,7 @@ class SyncTaskManager extends ChangeNotifier {
 class LocalMountManager extends ChangeNotifier {
   List<LocalMount> _mounts = [];
   bool _loaded = false;
-  bool _backendReady = false;
+  LocalMountBackendStatus _backendStatus = LocalMountBackendStatus.checking;
 
   /// OpenList 管理 API 客户端（需要先调用 initClient 初始化）
   OpenListApiClient? _apiClient;
@@ -161,7 +161,8 @@ class LocalMountManager extends ChangeNotifier {
   List<LocalMount> get mounts => List.unmodifiable(_mounts);
   bool get isLoaded => _loaded;
   bool get hasApiClient => _apiClient != null;
-  bool get isBackendReady => _backendReady;
+  bool get isBackendReady => _backendStatus == LocalMountBackendStatus.ready;
+  LocalMountBackendStatus get backendStatus => _backendStatus;
 
   /// 初始化 API 客户端
   ///
@@ -172,11 +173,29 @@ class LocalMountManager extends ChangeNotifier {
 
   Future<void> refreshBackendStatus() async {
     if (_apiClient == null) {
-      _backendReady = false;
+      _backendStatus = LocalMountBackendStatus.serviceUnavailable;
       notifyListeners();
       return;
     }
-    _backendReady = await _apiClient!.ping();
+    final isServiceAlive = await _apiClient!.ping();
+    if (!isServiceAlive) {
+      _backendStatus = LocalMountBackendStatus.serviceUnavailable;
+      notifyListeners();
+      return;
+    }
+
+    final authManager = AdminAuthManager.instance;
+    final hadCachedToken = authManager.hasValidCachedToken;
+    final token = await authManager.getToken();
+    if (token == null || token.isEmpty) {
+      _backendStatus = hadCachedToken
+          ? LocalMountBackendStatus.authInvalid
+          : LocalMountBackendStatus.authMissing;
+      notifyListeners();
+      return;
+    }
+
+    _backendStatus = LocalMountBackendStatus.ready;
     notifyListeners();
   }
 
@@ -205,8 +224,8 @@ class LocalMountManager extends ChangeNotifier {
   ///
   /// 成功时 mount 会带有 storageId，isSynced 变为 true
   Future<AddMountResult> addMount(LocalMount mount) async {
-    if (_apiClient == null || !_backendReady) {
-      return AddMountResult.apiError('OpenList 后台不可用，请先确认本地 5244 服务已启动。');
+    if (_apiClient == null || !isBackendReady) {
+      return AddMountResult.apiError(_backendStatus.message);
     }
 
     // 调用 OpenList API 创建存储
@@ -276,7 +295,7 @@ class LocalMountManager extends ChangeNotifier {
     final current = _mounts[index];
 
     if (current.isSynced) {
-      if (_apiClient == null || !_backendReady) {
+      if (_apiClient == null || !isBackendReady) {
         throw StateError('OpenList 后台不可用，无法同步更新挂载信息。');
       }
 
@@ -332,6 +351,31 @@ class LocalMountManager extends ChangeNotifier {
         .replaceAll(RegExp(r'-+'), '-')
         .replaceAll(RegExp(r'^-+|-+$'), '');
     return sanitized.isEmpty ? 'mount' : sanitized;
+  }
+}
+
+enum LocalMountBackendStatus {
+  checking,
+  serviceUnavailable,
+  authMissing,
+  authInvalid,
+  ready,
+}
+
+extension LocalMountBackendStatusMessage on LocalMountBackendStatus {
+  String get message {
+    switch (this) {
+      case LocalMountBackendStatus.checking:
+        return '正在检查 OpenList 后台状态，请稍后重试。';
+      case LocalMountBackendStatus.serviceUnavailable:
+        return 'OpenList 后台不可用，请先确认本地 5244 服务已启动且可访问。';
+      case LocalMountBackendStatus.authMissing:
+        return '未配置管理员密码，请在 OpenList 页面顶部的“设置 Admin 密码”中设置。';
+      case LocalMountBackendStatus.authInvalid:
+        return '管理员密码认证失败，请在 OpenList 页面顶部的“设置 Admin 密码”中重新设置。';
+      case LocalMountBackendStatus.ready:
+        return 'OpenList 后台和管理员认证均已就绪。';
+    }
   }
 }
 

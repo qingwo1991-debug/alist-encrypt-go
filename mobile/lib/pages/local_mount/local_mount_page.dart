@@ -87,6 +87,7 @@ class _LocalMountPageState extends State<LocalMountPage> {
   }
 
   Widget _buildApiWarning() {
+    final status = controller.backendStatus;
     return Card(
       color: Colors.orange.shade50,
       child: Padding(
@@ -95,10 +96,10 @@ class _LocalMountPageState extends State<LocalMountPage> {
           children: [
             const Icon(Icons.info_outline, color: Colors.orange),
             const SizedBox(width: 8),
-            const Expanded(
+            Expanded(
               child: Text(
-                '未连接到 OpenList 后台。当前不会创建本地挂载，请先确认本地 5244 服务已启动且可访问。',
-                style: TextStyle(fontSize: 13),
+                status.message,
+                style: const TextStyle(fontSize: 13),
               ),
             ),
           ],
