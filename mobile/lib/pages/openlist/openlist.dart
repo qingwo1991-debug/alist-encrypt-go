@@ -13,6 +13,7 @@ import 'dart:io';
 
 import '../../generated/l10n.dart';
 import '../../utils/admin_auth_manager.dart';
+import '../local_mount/local_mount_controller.dart';
 import 'log_list_view.dart';
 
 class OpenListScreen extends StatelessWidget {
@@ -22,6 +23,9 @@ class OpenListScreen extends StatelessWidget {
     try {
       await Android().setAdminPwd(pwd);
       AdminAuthManager.instance.invalidate();
+      if (Get.isRegistered<LocalMountController>()) {
+        await Get.find<LocalMountController>().refreshBackendStatus();
+      }
       Get.showSnackbar(const GetSnackBar(
         title: '管理员密码已更新',
         message: 'OpenList、本地挂载和同步任务将共用这份密码。',
