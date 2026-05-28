@@ -14,10 +14,16 @@ import com.openlist.mobile.utils.MyTools
 import com.openlist.mobile.utils.ToastUtils.longToast
 import com.openlist.mobile.utils.ToastUtils.toast
 import com.openlist.pigeon.GeneratedApi
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class AndroidBridge(private val context: Context) : GeneratedApi.Android {
     companion object {
         private const val TAG = "AndroidBridge"
+        private val passwordExecutor = Executors.newSingleThreadExecutor()
     }
 
     override fun addShortcut() {
@@ -38,7 +44,21 @@ class AndroidBridge(private val context: Context) : GeneratedApi.Android {
     }
 
     override fun setAdminPwd(pwd: String) {
-        OpenList.setAdminPassword(pwd)
+        val future = passwordExecutor.submit(Callable {
+            OpenList.setAdminPassword(pwd)
+        })
+        try {
+            future.get(15, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true)
+            throw IllegalStateException("管理员密码更新超时，请稍后重试", e)
+        } catch (e: ExecutionException) {
+            val cause = e.cause
+            if (cause is RuntimeException) {
+                throw cause
+            }
+            throw IllegalStateException(cause?.message ?: "管理员密码更新失败", cause)
+        }
     }
 
     override fun getOpenListHttpPort(): Long {

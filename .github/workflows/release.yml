@@ -180,6 +180,16 @@ jobs:
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            gomobile_target: arm64-v8a
+          - abi: armeabi-v7a
+            gomobile_target: armeabi-v7a
+          - abi: x86_64
+            gomobile_target: x86_64
 
     steps:
       - name: Checkout repository
@@ -204,12 +214,12 @@ jobs:
           bash ./init_openlist.sh
           bash ./init_web.sh
           bash ./init_gomobile.sh
-          bash ./gobind.sh
+          bash ./gobind.sh release ${{ matrix.gomobile_target }}
 
       - name: Upload Android library artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: mobile-aar
+          name: mobile-aar-${{ matrix.abi }}
           path: mobile/android/app/libs/*
           if-no-files-found: error
 
@@ -219,6 +229,16 @@ jobs:
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target_platform: android-arm64
+          - abi: armeabi-v7a
+            target_platform: android-arm
+          - abi: x86_64
+            target_platform: android-x64
 
     steps:
       - name: Checkout repository
@@ -227,7 +247,7 @@ jobs:
       - name: Download Android library artifacts
         uses: actions/download-artifact@v7
         with:
-          name: mobile-aar
+          name: mobile-aar-${{ matrix.abi }}
           path: mobile/android/app/libs
 
       - name: Set up Java
@@ -244,17 +264,20 @@ jobs:
 
       - name: Build APK
         working-directory: mobile
+        env:
+          ABI_FILTERS: ${{ matrix.abi }}
         run: |
           flutter pub get
           flutter build apk --release --split-per-abi \
+            --target-platform=${{ matrix.target_platform }} \
             --build-name=${{ needs.version.outputs.version_name }} \
             --build-number=${{ needs.version.outputs.build_number }}
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v6
         with:
-          name: mobile-apk
-          path: mobile/build/app/outputs/flutter-apk/*.apk
+          name: mobile-apk-${{ matrix.abi }}
+          path: mobile/build/app/outputs/flutter-apk/*${{ matrix.abi }}*.apk
           if-no-files-found: warn
 
   release-core:
@@ -310,8 +333,9 @@ jobs:
       - name: Download APK artifact
         uses: actions/download-artifact@v7
         with:
-          name: mobile-apk
+          pattern: mobile-apk-*
           path: release-mobile
+          merge-multiple: true
 
       - name: Create or update GitHub Release with APK
         env:
