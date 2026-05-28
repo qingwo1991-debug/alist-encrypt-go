@@ -5,4 +5,6 @@ class NativeBridge {
   static Android android = Android();
   static AppConfig appConfig = AppConfig();
   static EncryptProxy encryptProxy = EncryptProxy();
+  static StorageAccess storageAccess = StorageAccess();
+  static SyncTaskApi syncTaskApi = SyncTaskApi();
 }

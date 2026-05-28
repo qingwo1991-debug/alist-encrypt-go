@@ -121,6 +121,9 @@ abstract class EncryptProxy {
     int upstreamBackoffSeconds,
     bool enableLocalBypass,
   );
+
+  /// 设置高级配置 JSON
+  void setEncryptAdvancedConfigJson(String configJson);
   
   /// 添加加密路径
   void addEncryptPath(String path, String password, String encType, bool encName, String encSuffix);
@@ -142,4 +145,51 @@ abstract class EncryptProxy {
   
   /// 验证管理密码
   bool verifyEncryptAdminPassword(String password);
+}
+
+/// 存储访问权限管理接口
+@HostApi()
+abstract class StorageAccess {
+  /// 检查存储访问权限是否已授予
+  bool isStorageAccessGranted();
+
+  /// 请求存储访问权限
+  bool requestStorageAccess();
+
+  /// 打开存储访问权限设置页面
+  void openStorageAccessSettings();
+}
+
+/// 同步任务管理接口
+@HostApi()
+abstract class SyncTaskApi {
+  /// 获取本地挂载配置 JSON
+  String getLocalMountsJson();
+
+  /// 设置本地挂载配置 JSON
+  void setLocalMountsJson(String json);
+
+  /// 获取同步任务配置 JSON
+  String getSyncTasksJson();
+
+  /// 设置同步任务配置 JSON
+  void setSyncTasksJson(String json);
+
+  /// 调度一个定时同步任务
+  void scheduleSyncTask(String taskId, String taskJson);
+
+  /// 取消一个同步任务
+  void cancelSyncTask(String taskId);
+
+  /// 立即执行一个同步任务
+  void runSyncTaskNow(String taskId);
+
+  /// 获取同步任务状态
+  String getSyncTaskStatus(String taskId);
+
+  /// 获取同步任务历史记录 JSON
+  String getSyncTaskHistory(String taskId);
+
+  /// 获取管理 API 认证 token（唯一来源：SyncScheduler.acquireAuthToken）
+  String? acquireAuthToken();
 }

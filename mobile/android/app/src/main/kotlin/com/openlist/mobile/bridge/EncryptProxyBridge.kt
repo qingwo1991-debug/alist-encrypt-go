@@ -240,6 +240,8 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
         Log.d(TAG, "setEncryptAdminPassword")
         try {
             Openlistlib.setEncryptAdminPassword(password)
+            // 持久化密码供 SyncWorker 认证使用
+            AppConfig.encryptAdminPassword = password
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set admin password", e)
             throw e

@@ -1,0 +1,377 @@
+package com.openlist.mobile.sync
+
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Environment
+import android.util.Log
+import androidx.work.*
+import com.openlist.mobile.config.AppConfig
+import com.openlist.mobile.model.openlist.OpenList
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.io.File
+import java.io.FileInputStream
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * WorkManager Worker：执行单个同步任务
+ *
+ * 流程：
+ * 1. 读取任务配置
+ * 2. 校验存储权限
+ * 3. 校验加密代理服务存活 (127.0.0.1:5344)
+ * 4. 扫描源目录（递归）
+ * 5. 过滤扩展名 + 排除目录
+ * 6. 对比本地同步记录（增量判断：filePath + fileSize + lastModified）
+ * 7. 逐个上传至 127.0.0.1:5344
+ * 8. 成功则写入同步记录
+ * 9. 汇总成功/失败数并写入历史
+ * 10. 如启用 deleteAfterSync，删除已成功上传的源文件
+ */
+class SyncWorker(
+    context: Context,
+    workerParams: WorkerParameters
+) : CoroutineWorker(context, workerParams) {
+
+    companion object {
+        const val TAG = "SyncWorker"
+        const val KEY_TASK_ID = "task_id"
+        const val KEY_TASK_JSON = "task_json"
+        const val PROXY_BASE_URL = "http://127.0.0.1:5344"
+        const val DEFAULT_ALIST_BASE_URL = "http://127.0.0.1:5244"
+    }
+
+    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        val taskId = inputData.getString(KEY_TASK_ID) ?: return@withContext Result.failure()
+        val taskJson = inputData.getString(KEY_TASK_JSON) ?: return@withContext Result.failure()
+        val context = applicationContext
+
+        val taskConfig: SyncTaskConfig
+        try {
+            taskConfig = SyncTaskConfig.fromJsonString(taskJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse task config for $taskId", e)
+            recordHistory(context, taskId, 0, 0, 1, listOf("任务配置解析失败: ${e.message ?: "unknown error"}"))
+            return@withContext Result.failure()
+        }
+
+        // 1. 校验存储权限
+        if (!hasStorageAccess()) {
+            Log.w(TAG, "No storage access for task $taskId")
+            recordHistory(context, taskId, 0, 0, 1, listOf("缺少本地存储访问权限"))
+            return@withContext Result.failure()
+        }
+
+        // 2. 校验本地 OpenList / 加密代理服务存活
+        if (!isProxyAlive()) {
+            Log.w(TAG, "Encrypt proxy not alive for task $taskId")
+            recordHistory(context, taskId, 0, 0, 1, listOf("加密代理服务(5344)不可用"))
+            return@withContext Result.failure()
+        }
+        if (!isAlistAlive()) {
+            Log.w(TAG, "OpenList not alive for task $taskId")
+            recordHistory(context, taskId, 0, 0, 1, listOf("OpenList 服务(5244)不可用"))
+            return@withContext Result.failure()
+        }
+
+        // 2.5. 获取认证 token（唯一来源：SyncScheduler.acquireAuthToken）
+        val authToken = SyncScheduler.acquireAuthToken()
+        if (authToken.isNullOrEmpty()) {
+            recordHistory(context, taskId, 0, 0, 1, listOf("未获取到管理认证 token，请先配置管理员密码"))
+            return@withContext Result.failure()
+        }
+
+        // 3. 扫描源目录
+        val sourceDir = File(taskConfig.sourcePath)
+        if (!sourceDir.exists() || !sourceDir.isDirectory) {
+            Log.w(TAG, "Source directory does not exist: ${taskConfig.sourcePath}")
+            recordHistory(context, taskId, 0, 0, 1,
+                listOf("Source directory does not exist: ${taskConfig.sourcePath}"))
+            return@withContext Result.failure()
+        }
+
+        // 4. 收集要上传的文件
+        val filesToUpload = mutableListOf<File>()
+        val excludeNames = taskConfig.excludeFolders.map { it.trimEnd('/') }.toSet()
+        collectFiles(sourceDir, taskConfig.fileExtensions, excludeNames, filesToUpload)
+
+        if (filesToUpload.isEmpty()) {
+            Log.d(TAG, "No files to upload for task $taskId")
+            recordHistory(context, taskId, 0, 0, 0, emptyList())
+            return@withContext Result.success()
+        }
+
+        // 5. 过滤已同步文件（增量判断）
+        val newOrModified = filesToUpload.filter { file ->
+            !SyncRecordStore.isAlreadySynced(
+                context,
+                taskId,
+                file.absolutePath,
+                file.length(),
+                file.lastModified()
+            )
+        }
+
+        if (newOrModified.isEmpty()) {
+            Log.d(TAG, "All files already synced for task $taskId")
+            recordHistory(context, taskId, filesToUpload.size, 0, 0, emptyList())
+            return@withContext Result.success()
+        }
+
+        // 6. 逐个上传
+        var successCount = 0
+        var failureCount = 0
+        val errors = mutableListOf<String>()
+        val syncedFiles = mutableListOf<File>()
+
+        for (file in newOrModified) {
+            try {
+                val remotePath = buildRemotePath(taskConfig, sourceDir, file)
+                uploadFile(file, remotePath, authToken)
+
+                // 记录同步成功
+                SyncRecordStore.markSynced(
+                    context,
+                    SyncRecord(
+                        taskId = taskId,
+                        filePath = file.absolutePath,
+                        fileSize = file.length(),
+                        lastModified = file.lastModified(),
+                        syncedAt = System.currentTimeMillis(),
+                        remotePath = remotePath
+                    )
+                )
+                syncedFiles.add(file)
+                successCount++
+                Log.d(TAG, "Uploaded: ${file.absolutePath} -> $remotePath")
+            } catch (e: Exception) {
+                failureCount++
+                val errorMsg = "${file.name}: ${e.message}"
+                errors.add(errorMsg)
+                Log.e(TAG, "Failed to upload ${file.absolutePath}: ${e.message}", e)
+                // 单文件失败不终止整个任务
+            }
+        }
+
+        // 7. 写入历史
+        recordHistory(context, taskId, newOrModified.size, successCount, failureCount, errors)
+
+        // 8. 如启用 deleteAfterSync，仅删除已成功上传的文件
+        if (taskConfig.deleteAfterSync) {
+            for (file in syncedFiles) {
+                try {
+                    if (file.exists()) {
+                        file.delete()
+                        Log.d(TAG, "Deleted synced file: ${file.absolutePath}")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to delete ${file.absolutePath}: ${e.message}")
+                }
+            }
+        }
+
+        // 9. Worker 返回 success/failure 取决于是否完成主流程（不论单文件失败）
+        if (failureCount > 0) {
+            Result.success() // 主流程完成，单文件失败不影响
+        } else {
+            Result.success()
+        }
+    }
+
+    private fun hasStorageAccess(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            applicationContext.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun isProxyAlive(): Boolean {
+        return isServiceAlive("$PROXY_BASE_URL/ping")
+    }
+
+    private fun isAlistAlive(): Boolean {
+        val port = try {
+            OpenList.getHttpPort()
+        } catch (_: Exception) {
+            5244
+        }
+        return isServiceAlive("http://127.0.0.1:$port/ping") ||
+            isServiceAlive("$DEFAULT_ALIST_BASE_URL/ping")
+    }
+
+    private fun isServiceAlive(url: String): Boolean {
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 2000
+            conn.readTimeout = 2000
+            conn.requestMethod = "GET"
+            val code = conn.responseCode
+            conn.disconnect()
+            code in 200..499
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun collectFiles(
+        dir: File,
+        extensions: List<String>,
+        excludeFolders: Set<String>,
+        result: MutableList<File>,
+        sourceRoot: File? = null,
+        currentRelative: String = ""
+    ) {
+        val root = sourceRoot ?: dir
+        val files = dir.listFiles() ?: return
+        for (file in files) {
+            if (file.isDirectory) {
+                val relPath = if (currentRelative.isEmpty()) file.name
+                              else "$currentRelative/${file.name}"
+                // 排除匹配：按目录名匹配，也按相对路径匹配
+                val shouldExclude = excludeFolders.contains(file.name) ||
+                    excludeFolders.contains(relPath) ||
+                    excludeFolders.any { relPath.startsWith(it.trimEnd('/') + "/") || relPath == it.trimEnd('/') }
+                if (shouldExclude) {
+                    Log.d(TAG, "Excluding directory: $relPath")
+                    continue
+                }
+                collectFiles(file, extensions, excludeFolders, result, root, relPath)
+            } else if (file.isFile) {
+                if (shouldInclude(file, extensions)) {
+                    result.add(file)
+                }
+            }
+        }
+    }
+
+    private fun shouldInclude(file: File, extensions: List<String>): Boolean {
+        // 空列表表示包含所有文件
+        if (extensions.isEmpty()) return true
+        val fileName = file.name.lowercase()
+        return extensions.any { ext ->
+            fileName.endsWith(ext.lowercase())
+        }
+    }
+
+    private fun buildRemotePath(
+        config: SyncTaskConfig,
+        sourceDir: File,
+        file: File
+    ): String {
+        val targetPath = config.targetPath.trimEnd('/')
+        return if (config.preserveFolderStructure) {
+            val relativePath = file.absolutePath
+                .removePrefix(sourceDir.absolutePath)
+                .trimStart('/')
+            "$targetPath/$relativePath"
+        } else {
+            "$targetPath/${file.name}"
+        }
+    }
+
+    private fun uploadFile(file: File, remotePath: String, authToken: String?) {
+        val url = URL("$PROXY_BASE_URL/api/fs/put")
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "PUT"
+            conn.doOutput = true
+            conn.connectTimeout = 30000
+            conn.readTimeout = 300000 // 5 min for large files
+            val encodedPath = android.net.Uri.encode(remotePath)
+            conn.setRequestProperty("File-Path", encodedPath)
+            conn.setRequestProperty("Content-Length", file.length().toString())
+            // 如果配置了管理员密码，携带认证 token
+            if (!authToken.isNullOrEmpty()) {
+                conn.setRequestProperty("Authorization", "Bearer $authToken")
+            }
+
+            // Write file body
+            FileInputStream(file).use { input ->
+                conn.outputStream.use { output ->
+                    input.copyTo(output, 8192)
+                }
+            }
+
+            val responseCode = conn.responseCode
+            if (responseCode !in 200..299) {
+                val errorBody = try {
+                    conn.errorStream?.bufferedReader()?.readText() ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
+                throw Exception("HTTP $responseCode: $errorBody")
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun recordHistory(
+        context: Context,
+        taskId: String,
+        totalFiles: Int,
+        successCount: Int,
+        failureCount: Int,
+        errors: List<String>
+    ) {
+        SyncRecordStore.addHistory(
+            context,
+            SyncHistoryEntry(
+                taskId = taskId,
+                runAt = System.currentTimeMillis(),
+                totalFiles = totalFiles,
+                successCount = successCount,
+                failureCount = failureCount,
+                errors = errors
+            )
+        )
+
+        // 更新任务的最后同步状态到 AppConfig
+        updateTaskStatus(context, taskId, successCount, if (errors.isNotEmpty()) errors.last() else null)
+    }
+
+    private fun updateTaskStatus(
+        context: Context,
+        taskId: String,
+        fileCount: Int,
+        lastError: String?
+    ) {
+        try {
+            val tasksJson = AppConfig.syncTasksJson
+            val tasks = try {
+                SyncTaskConfig.listFromJsonArray(tasksJson)
+            } catch (_: Exception) {
+                return
+            }
+
+            val index = tasks.indexOfFirst { it.id == taskId }
+            if (index >= 0) {
+                val updated = tasks.toMutableList()
+                val old = tasks[index]
+                updated[index] = old.copy(
+                    lastSyncTime = System.currentTimeMillis(),
+                    lastSyncFileCount = fileCount,
+                    lastError = lastError
+                )
+                AppConfig.syncTasksJson = Json { ignoreUnknownKeys = true }
+                    .encodeToString(updated)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update task status for $taskId", e)
+        }
+    }
+}
+
+/**
+ * SyncTaskConfig 扩展：从 JSON 数组字符串解析
+ */
+private fun SyncTaskConfig.Companion.listFromJsonArray(jsonArray: String): List<SyncTaskConfig> {
+    if (jsonArray.isBlank() || jsonArray == "[]") return emptyList()
+    val json = Json { ignoreUnknownKeys = true }
+    return json.decodeFromString(jsonArray)
+}

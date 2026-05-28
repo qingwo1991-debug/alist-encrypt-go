@@ -51,4 +51,13 @@ object AppConfig {
             mDataDir = value
         }
 
+    // 本地目录挂载配置（JSON 数组字符串）
+    var localMountsJson: String by prefs.dynamic("localMountsJson", fallback = "[]")
+
+    // 同步任务配置（JSON 数组字符串）
+    var syncTasksJson: String by prefs.dynamic("syncTasksJson", fallback = "[]")
+
+    // 加密代理管理员密码（用于同步任务上传时的认证）
+    var encryptAdminPassword: String by prefs.dynamic("encryptAdminPassword", fallback = "")
+
 }

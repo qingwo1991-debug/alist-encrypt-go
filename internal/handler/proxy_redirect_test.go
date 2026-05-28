@@ -77,14 +77,24 @@ func TestHandleRedirectDecryptsUsingUnifiedPlaybackFlow(t *testing.T) {
 		if got := r.Header.Get("Referer"); got != "" {
 			t.Fatalf("Referer header should be stripped, got %q", got)
 		}
-		if got := r.Header.Get("Range"); got != "bytes=0-1023" {
-			t.Fatalf("Range=%q, want %q", got, "bytes=0-1023")
+		switch got := r.Header.Get("Range"); got {
+		case "bytes=0-31":
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Range", "bytes 0-31/4096")
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:32])
+			return
+		case "bytes=0-1023":
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Range", "bytes 0-1023/4096")
+			w.Header().Set("Content-Length", "1024")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:1024])
+			return
+		default:
+			t.Fatalf("Range=%q, want probe or playback range", got)
 		}
-		w.Header().Set("Content-Type", "video/mp4")
-		w.Header().Set("Content-Range", "bytes 0-1023/4096")
-		w.Header().Set("Content-Length", "1024")
-		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(ciphertext[:1024])
 	}))
 	defer upstream.Close()
 
@@ -160,8 +170,17 @@ func TestHandleRedirectRefreshesMetadataBeforeDecrypt(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 		case "/fresh":
 			freshHits++
-			if got := r.Header.Get("Range"); got != "bytes=0-1023" {
-				t.Fatalf("Range=%q, want bytes=0-1023", got)
+			switch got := r.Header.Get("Range"); got {
+			case "bytes=0-31":
+				w.Header().Set("Content-Type", "video/mp4")
+				w.Header().Set("Content-Range", "bytes 0-31/4096")
+				w.Header().Set("Content-Length", "32")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(ciphertext[:32])
+				return
+			case "bytes=0-1023":
+			default:
+				t.Fatalf("Range=%q, want bytes=0-1023 or probe", got)
 			}
 			w.Header().Set("Content-Type", "video/mp4")
 			w.Header().Set("Content-Range", "bytes 0-1023/4096")
