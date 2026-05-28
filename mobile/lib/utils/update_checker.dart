@@ -96,11 +96,11 @@ class UpdateChecker {
   }
 
   String getUpdateContent() {
-    return data['body'];
+    return data['body']?.toString().trim() ?? '';
   }
 
   String getHtmlUrl() {
-    return data['html_url'];
+    return data['html_url']?.toString() ?? '';
   }
 
   /// Compare two semantic version strings

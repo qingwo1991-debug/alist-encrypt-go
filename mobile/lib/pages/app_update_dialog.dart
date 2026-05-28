@@ -26,12 +26,41 @@ class AppUpdateDialog extends StatelessWidget {
       return;
     }
     _checking = true;
+    var loadingShown = false;
     final checker = UpdateChecker(owner: "qingwo1991-debug", repo: "alist-encrypt-go");
     try {
+      if (context.mounted) {
+        loadingShown = true;
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => const AlertDialog(
+            content: Row(
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Text('正在检查更新...'),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+
       await checker.downloadData();
       final hasNewVersion = await checker.hasNewVersion();
 
       checkFinished?.call(hasNewVersion);
+
+      if (loadingShown && context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        loadingShown = false;
+      }
 
       if (hasNewVersion) {
         if (!context.mounted) return;
@@ -51,6 +80,10 @@ class AppUpdateDialog extends StatelessWidget {
       }
     } catch (e) {
       checkFinished?.call(false);
+      if (loadingShown && context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        loadingShown = false;
+      }
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${S.of(context).updateFailed}: $e')),
@@ -103,8 +136,8 @@ class AppUpdateDialog extends StatelessWidget {
               margin: EdgeInsets.zero,
               child: Padding(
                 padding: const EdgeInsets.all(12),
-                child: Text(
-                  content,
+              child: Text(
+                  content.isEmpty ? '未提供更新说明，请直接前往发布页面查看。' : content,
                   style: theme.textTheme.bodyMedium,
                 ),
               ),
