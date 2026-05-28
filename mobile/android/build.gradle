@@ -1,7 +1,7 @@
 buildscript {
     ext{
         kotlin_version = '1.9.22'
-        agp_version = '8.3.2'
+        agp_version = '8.7.3'
         room_version = '2.6.1'
         ksp_version = '1.9.22-1.0.17'
     }
