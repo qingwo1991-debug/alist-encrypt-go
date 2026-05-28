@@ -11,12 +11,8 @@ import com.openlist.mobile.config.AppConfig
 import com.openlist.mobile.constant.LogLevel
 import com.openlist.mobile.utils.ToastUtils.longToast
 import java.io.File
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Locale
-import org.json.JSONObject
 
 object OpenList : Event, LogCallback {
     const val TAG = "OpenList"
@@ -92,39 +88,10 @@ object OpenList : Event, LogCallback {
         val encryptConfigPath = File(dataDir, "encrypt_config.json").absolutePath
         Openlistlib.initEncryptProxy(encryptConfigPath)
         Openlistlib.setEncryptAdminPassword(normalizedPassword)
+        check(Openlistlib.verifyEncryptAdminPassword(normalizedPassword)) {
+            "加密代理管理员密码更新失败，请重试"
+        }
         AppConfig.encryptAdminPassword = normalizedPassword
-
-        if (isRunning() && !verifyAdminLogin(normalizedPassword)) {
-            throw IllegalStateException("管理员密码更新后校验失败，请重试")
-        }
-    }
-
-    private fun verifyAdminLogin(password: String): Boolean {
-        return try {
-            val loginUrl = URL("http://127.0.0.1:${getHttpPort()}/api/auth/login")
-            val conn = loginUrl.openConnection() as HttpURLConnection
-            try {
-                conn.requestMethod = "POST"
-                conn.doOutput = true
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
-                conn.setRequestProperty("Content-Type", "application/json")
-
-                val loginBody = JSONObject().apply {
-                    put("username", "admin")
-                    put("password", password)
-                }.toString()
-
-                OutputStreamWriter(conn.outputStream).use { it.write(loginBody) }
-                conn.outputStream.close()
-                conn.responseCode == 200
-            } finally {
-                conn.disconnect()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to verify admin login after password update", e)
-            false
-        }
     }
 
 

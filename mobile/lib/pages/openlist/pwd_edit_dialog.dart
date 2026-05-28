@@ -18,6 +18,7 @@ class _PwdEditDialogState extends State<PwdEditDialog>
   final TextEditingController pwdController = TextEditingController();
   String? _errorText;
   bool _isSubmitting = false;
+  bool _obscureText = true;
 
   @override
   void dispose() {
@@ -35,9 +36,21 @@ class _PwdEditDialogState extends State<PwdEditDialog>
           TextField(
             controller: pwdController,
             enabled: !_isSubmitting,
-            obscureText: true,
-            decoration: const InputDecoration(
+            obscureText: _obscureText,
+            decoration: InputDecoration(
               labelText: "admin密码",
+              suffixIcon: IconButton(
+                onPressed: _isSubmitting
+                    ? null
+                    : () {
+                        setState(() {
+                          _obscureText = !_obscureText;
+                        });
+                      },
+                icon: Icon(
+                  _obscureText ? Icons.visibility : Icons.visibility_off,
+                ),
+              ),
             ),
           ),
           if (_errorText != null) ...[
