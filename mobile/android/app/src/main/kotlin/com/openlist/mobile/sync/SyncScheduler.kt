@@ -8,6 +8,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.json.JSONObject
 import java.io.OutputStreamWriter
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
@@ -28,6 +29,7 @@ object SyncScheduler {
     private const val TAG = "SyncScheduler"
     private const val WORK_NAME_PREFIX = "sync_task_"
     private const val WORK_NAME_ONETIME_PREFIX = "sync_task_onetime_"
+    private const val ENCRYPT_CONFIG_FILE_NAME = "encrypt_config.json"
 
     /**
      * 调度一个定时同步任务（PeriodicWorkRequest）
@@ -247,12 +249,28 @@ object SyncScheduler {
      * @return token 字符串；未配置密码或登录失败返回 null
      */
     fun acquireAuthToken(): String? {
-        val password = AppConfig.encryptAdminPassword
+        var password = AppConfig.encryptAdminPassword.trim()
+        if (password.isBlank()) {
+            password = loadPasswordFromEncryptConfig().orEmpty()
+        }
         if (password.isBlank()) {
             Log.w(TAG, "No encrypt admin password configured, cannot acquire token")
             return null
         }
 
+        acquireAuthTokenWithPassword(password)?.let { return it }
+
+        // 兼容中途接入同步/挂载功能的旧安装：如果 AppConfig 里的密码失效，
+        // 但 encrypt_config.json 中已有现成密码，则使用配置文件里的值再试一次。
+        val configPassword = loadPasswordFromEncryptConfig()
+        if (!configPassword.isNullOrBlank() && configPassword != password) {
+            acquireAuthTokenWithPassword(configPassword)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun acquireAuthTokenWithPassword(password: String): String? {
         return try {
             val loginUrl = URL("$PROXY_BASE_URL/api/auth/login")
             val conn = loginUrl.openConnection() as HttpURLConnection
@@ -276,6 +294,9 @@ object SyncScheduler {
                     val json = JSONObject(response)
                     val token = json.optJSONObject("data")?.optString("token")
                     if (!token.isNullOrEmpty()) {
+                        if (AppConfig.encryptAdminPassword != password) {
+                            AppConfig.encryptAdminPassword = password
+                        }
                         Log.d(TAG, "Auth token acquired for admin API access")
                         return token
                     }
@@ -287,6 +308,34 @@ object SyncScheduler {
             null
         } catch (e: Exception) {
             Log.w(TAG, "Failed to acquire auth token: ${e.message}")
+            null
+        }
+    }
+
+    private fun loadPasswordFromEncryptConfig(): String? {
+        return try {
+            val configFile = File(AppConfig.dataDir, ENCRYPT_CONFIG_FILE_NAME)
+            if (!configFile.exists()) {
+                return null
+            }
+
+            val raw = configFile.readText()
+            if (raw.isBlank()) {
+                return null
+            }
+
+            val password = JSONObject(raw).optString("adminPassword").trim()
+            if (password.isBlank()) {
+                return null
+            }
+
+            if (AppConfig.encryptAdminPassword != password) {
+                AppConfig.encryptAdminPassword = password
+            }
+            Log.d(TAG, "Recovered encrypt admin password from config file")
+            password
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read encrypt admin password from config file: ${e.message}")
             null
         }
     }
