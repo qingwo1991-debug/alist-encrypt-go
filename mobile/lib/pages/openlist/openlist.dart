@@ -19,7 +19,7 @@ import 'log_list_view.dart';
 class OpenListScreen extends StatelessWidget {
   const OpenListScreen({Key? key}) : super(key: key);
 
-  Future<void> _updateAdminPassword(String pwd) async {
+  Future<String?> _updateAdminPassword(String pwd) async {
     try {
       await Android().setAdminPwd(pwd);
       AdminAuthManager.instance.invalidate();
@@ -31,12 +31,9 @@ class OpenListScreen extends StatelessWidget {
         message: 'OpenList、本地挂载和同步任务将共用这份密码。',
         duration: Duration(seconds: 2),
       ));
+      return null;
     } catch (e) {
-      Get.showSnackbar(GetSnackBar(
-        title: '管理员密码更新失败',
-        message: e.toString(),
-        duration: const Duration(seconds: 3),
-      ));
+      return e.toString();
     }
   }
 
@@ -55,7 +52,7 @@ class OpenListScreen extends StatelessWidget {
                   showDialog(
                       context: context,
                       builder: (context) =>
-                          PwdEditDialog(onConfirm: (pwd) { _updateAdminPassword(pwd); }));
+                          PwdEditDialog(onConfirm: _updateAdminPassword));
                 },
                 icon: const Icon(Icons.password),
               ),

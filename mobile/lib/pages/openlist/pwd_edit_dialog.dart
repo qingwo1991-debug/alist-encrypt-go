@@ -3,7 +3,7 @@ import 'package:get/get.dart';
 import '../../generated/l10n.dart';
 
 class PwdEditDialog extends StatefulWidget {
-  final ValueChanged<String> onConfirm;
+  final Future<String?> Function(String) onConfirm;
 
   const PwdEditDialog({super.key, required this.onConfirm});
 
@@ -16,6 +16,8 @@ class PwdEditDialog extends StatefulWidget {
 class _PwdEditDialogState extends State<PwdEditDialog>
     with SingleTickerProviderStateMixin {
   final TextEditingController pwdController = TextEditingController();
+  String? _errorText;
+  bool _isSubmitting = false;
 
   @override
   void dispose() {
@@ -32,23 +34,61 @@ class _PwdEditDialogState extends State<PwdEditDialog>
         children: [
           TextField(
             controller: pwdController,
+            enabled: !_isSubmitting,
+            obscureText: true,
             decoration: const InputDecoration(
               labelText: "admin密码",
             ),
           ),
+          if (_errorText != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              _errorText!,
+              style: const TextStyle(color: Colors.red, fontSize: 12),
+            ),
+          ],
         ],
       ),
       actions: [
         TextButton(
-          onPressed: () {Get.back();},
+          onPressed: _isSubmitting ? null : () {Get.back();},
           child: Text(S.of(context).cancel),
         ),
         FilledButton(
-          onPressed: () {
-            Get.back();
-            widget.onConfirm(pwdController.text);
+          onPressed: _isSubmitting ? null : () async {
+            final password = pwdController.text.trim();
+            if (password.length < 4) {
+              setState(() {
+                _errorText = '管理员密码至少需要 4 位';
+              });
+              return;
+            }
+
+            setState(() {
+              _isSubmitting = true;
+              _errorText = null;
+            });
+
+            final error = await widget.onConfirm(password);
+            if (!mounted) return;
+
+            if (error == null) {
+              Get.back();
+              return;
+            }
+
+            setState(() {
+              _isSubmitting = false;
+              _errorText = error;
+            });
           },
-          child: Text(S.of(context).confirm),
+          child: _isSubmitting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Text(S.of(context).confirm),
         ),
       ],
     );
