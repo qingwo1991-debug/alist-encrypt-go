@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'admin_auth_manager.dart';
 import '../contant/native_bridge.dart';
 import '../models/local_mount.dart';
 import '../models/sync_task.dart';
