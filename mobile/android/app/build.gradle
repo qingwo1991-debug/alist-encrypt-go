@@ -3,9 +3,9 @@ plugins {
     id "org.jetbrains.kotlin.android"
     id "kotlin-parcelize"
     // kapt 已移除 - 如需 Room 等注解处理，请使用 KSP
-    // id "com.google.devtools.ksp" version "1.9.22-1.0.17"
+    // id "com.google.devtools.ksp" version "2.1.20-2.0.0"
     id "dev.flutter.flutter-gradle-plugin"
-    id "org.jetbrains.kotlin.plugin.serialization" version "1.9.22"
+    id "org.jetbrains.kotlin.plugin.serialization" version "2.1.20"
 }
 
 def pro = new Properties()
