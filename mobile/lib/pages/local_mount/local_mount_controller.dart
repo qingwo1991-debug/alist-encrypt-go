@@ -11,6 +11,7 @@ class LocalMountController extends GetxController {
   bool get isLoaded => _manager.isLoaded;
   bool get hasApiClient => _manager.hasApiClient;
   bool get isBackendReady => _manager.isBackendReady;
+  LocalMountBackendStatus get backendStatus => _manager.backendStatus;
 
   String _generateId() =>
       'mount_${DateTime.now().millisecondsSinceEpoch}_${(_manager.mounts.length + 1)}';

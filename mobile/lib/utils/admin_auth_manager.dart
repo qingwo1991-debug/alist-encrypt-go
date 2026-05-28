@@ -41,4 +41,10 @@ class AdminAuthManager {
     _cachedToken = null;
     _expiresAt = 0;
   }
+
+  /// 当前是否存在已缓存的有效 token
+  bool get hasValidCachedToken =>
+      _cachedToken != null &&
+      _cachedToken!.isNotEmpty &&
+      DateTime.now().millisecondsSinceEpoch < _expiresAt;
 }

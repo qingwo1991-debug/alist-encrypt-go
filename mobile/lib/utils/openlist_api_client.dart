@@ -48,14 +48,27 @@ class OpenListApiClient {
     final token = await _getToken();
     if (token == null || token.isEmpty) {
       throw AuthException(
-        '未配置管理员密码，无法调用管理 API。\n请在"加密代理配置"中设置管理员密码。',
+        AuthFailureReason.notConfigured,
+        '未配置管理员密码，无法调用管理 API。\n请在 OpenList 页面顶部的“设置 Admin 密码”中重新设置。',
       );
     }
     final headers = {'Authorization': 'Bearer $token'};
     final url = '$_baseUrl$path';
-    return method == 'GET'
-        ? _dio.get(url, options: Options(headers: headers))
-        : _dio.post(url, data: data, options: Options(headers: headers));
+    try {
+      return method == 'GET'
+          ? _dio.get(url, options: Options(headers: headers))
+          : _dio.post(url, data: data, options: Options(headers: headers));
+    } on DioException catch (e) {
+      final statusCode = e.response?.statusCode ?? 0;
+      if (statusCode == 401 || statusCode == 403) {
+        _authManager.invalidate();
+        throw AuthException(
+          AuthFailureReason.invalidCredentials,
+          '管理员密码认证失败，无法调用管理 API。\n请在 OpenList 页面顶部的“设置 Admin 密码”中重新设置。',
+        );
+      }
+      rethrow;
+    }
   }
 
   Future<List<Map<String, dynamic>>> listStorages() async {
@@ -187,8 +200,14 @@ class OpenListApiClient {
 }
 
 class AuthException implements Exception {
+  final AuthFailureReason reason;
   final String message;
-  AuthException(this.message);
+  AuthException(this.reason, this.message);
   @override
   String toString() => message;
+}
+
+enum AuthFailureReason {
+  notConfigured,
+  invalidCredentials,
 }

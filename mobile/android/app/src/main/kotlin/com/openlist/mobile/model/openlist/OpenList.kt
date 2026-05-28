@@ -81,6 +81,8 @@ object OpenList : Event, LogCallback {
         Log.d(TAG, "setAdminPassword: $dataDir")
         Openlistlib.setConfigData(dataDir)
         Openlistlib.setAdminPassword(pwd)
+        Openlistlib.setEncryptAdminPassword(pwd)
+        AppConfig.encryptAdminPassword = pwd
     }
 
 
