@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/rs/zerolog/log"
 )
 
@@ -387,6 +388,9 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 						}
 						filePath := path.Join(dirPath, name)
 						h.fileDAO.SetFromAlistResponse(filePath, fileData)
+						if cached, ok := h.fileDAO.Get(filePath); ok && cached != nil && cached.ContentVersion == encryption.ContentVersionV2 && cached.Size > 0 {
+							fileData["size"] = float64(cached.Size)
+						}
 						if !isDir && allowDecrypt && enableProbe {
 							if sizeVal, ok := fileData["size"].(float64); ok {
 								size := int64(sizeVal)

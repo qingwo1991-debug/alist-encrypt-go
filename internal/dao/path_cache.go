@@ -13,6 +13,9 @@ type PathEntry struct {
 	DisplayPath       string // Secondary index (decrypted/display path)
 	Name              string // Display filename
 	Size              int64  // File size
+	CiphertextSize    int64  // Upstream ciphertext size
+	ContentVersion    int    // 1 legacy, 2 header-based
+	HeaderLen         int64  // Header bytes for v2
 	IsDir             bool   // Is directory
 	RawURL            string // Cached upstream direct URL
 	Sign              string // Cached upstream sign
