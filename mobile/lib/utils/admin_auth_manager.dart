@@ -4,7 +4,7 @@ import '../contant/native_bridge.dart';
 ///
 /// 唯一可信的 token 来源：
 /// - 通过 NativeBridge.syncTaskApi.acquireAuthToken() 获取
-/// - 底层复用 SyncScheduler.acquireAuthToken() → AppConfig.encryptAdminPassword
+/// - 底层复用 SyncScheduler.acquireAuthToken() 登录本机 OpenList 管理 API
 /// - 不由 LocalMount 或其他模块自己猜密码
 class AdminAuthManager {
   AdminAuthManager._();

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import '../../generated/l10n.dart';
@@ -82,7 +84,10 @@ class _PwdEditDialogState extends State<PwdEditDialog>
               _errorText = null;
             });
 
-            final error = await widget.onConfirm(password);
+            final error = await widget.onConfirm(password).timeout(
+              const Duration(seconds: 20),
+              onTimeout: () => '管理员密码更新超时，请稍后重试。',
+            );
             if (!mounted) return;
 
             if (error == null) {

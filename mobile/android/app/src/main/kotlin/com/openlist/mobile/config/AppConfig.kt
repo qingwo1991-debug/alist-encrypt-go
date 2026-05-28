@@ -57,7 +57,7 @@ object AppConfig {
     // 同步任务配置（JSON 数组字符串）
     var syncTasksJson: String by prefs.dynamic("syncTasksJson", fallback = "[]")
 
-    // 加密代理管理员密码（用于同步任务上传时的认证）
+    // OpenList/encrypt proxy 共用的管理员明文密码，用于本地挂载和同步任务换取管理 token
     var encryptAdminPassword: String by prefs.dynamic("encryptAdminPassword", fallback = "")
 
 }

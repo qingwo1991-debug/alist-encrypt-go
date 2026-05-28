@@ -1,9 +1,11 @@
 package openlistlib
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/OpenListTeam/OpenList/v4/cmd"
 	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
-	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
@@ -24,20 +26,22 @@ func SetConfigNoPrefix(b bool) {
 	flags.NoPrefix = b
 }
 
-func SetAdminPassword(pwd string) {
-	bootstrap.Init()
+func SetAdminPassword(pwd string) error {
+	pwd = strings.TrimSpace(pwd)
+	if len(pwd) < 4 {
+		return fmt.Errorf("admin password must be at least 4 characters")
+	}
+
 	admin, err := op.GetAdmin()
 	if err != nil {
-		utils.Log.Errorf("failed get admin user: %+v", err)
-		return
+		return fmt.Errorf("failed get admin user: %w", err)
 	}
 	admin.SetPassword(pwd)
 	if err := op.UpdateUser(admin); err != nil {
-		utils.Log.Errorf("failed update admin user: %+v", err)
-		return
+		return fmt.Errorf("failed update admin user: %w", err)
 	}
 	utils.Log.Infof("admin user has been updated:")
 	utils.Log.Infof("username: %s", admin.Username)
-	utils.Log.Infof("password: %s", pwd)
 	cmd.DelAdminCacheOnline()
+	return nil
 }
