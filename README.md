@@ -1,51 +1,34 @@
-# Alist-Encrypt-Go
+<div align="center">
+  <h1>Alist-Encrypt-Go</h1>
+  <p>Transparent encryption proxy for Alist — Go 重写，单二进制部署</p>
+  <p>
+    <a href="https://github.com/qingwo1991-debug/alist-encrypt-go/releases"><img src="https://img.shields.io/github/v/release/qingwo1991-debug/alist-encrypt-go?style=flat-square" alt="Release"></a>
+    <a href=".github/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/qingwo1991-debug/alist-encrypt-go/release.yml?style=flat-square" alt="Build"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go" alt="Go"></a>
+    <a href="https://flutter.dev/"><img src="https://img.shields.io/badge/Flutter-3.24-02569B?style=flat-square&logo=flutter" alt="Flutter"></a>
+  </p>
+</div>
 
-基于 Go 语言重构的 Alist 透明加密代理，提供文件内容加密和文件名加密功能。
+---
 
-> **本项目是 [alist-encrypt](https://github.com/traceless/alist-encrypt) 的 Go 语言重构版本**
+Alist-Encrypt-Go is a **transparent encryption proxy** for [Alist](https://github.com/alist-org/alist). It sits between clients and Alist, encrypting file content and filenames on the fly while preserving full compatibility with video seeking, WebDAV, and range requests.
 
-## 重构优化
+In addition to the standalone backend, this project also produces an **Android APK** based on [OpenList](https://github.com/OpenListTeam/OpenList) that bundles the encryption proxy directly into a mobile file manager app.
 
-相比原 Node.js 版本，Go 重构版本带来以下优化：
+## Quick Start
 
-| 优化项 | 说明 |
-|--------|------|
-| **内存占用** | 从 Node.js 的 ~150MB 降低到 ~15MB |
-| **启动速度** | 单二进制文件，毫秒级启动 |
-| **并发性能** | Go 协程原生支持高并发，文件名解密并行处理 |
-| **HTTP/2 支持** | 原生 h2c 和 HTTPS HTTP/2 支持 |
-| **512KB 流缓冲** | 大缓冲池优化高码率视频流传输 |
-| **连接池复用** | HTTP 客户端连接池，减少连接开销 |
-| **PBKDF2/MixBase64 缓存** | 密钥派生和文件名加密结果缓存，提升解密性能 |
-| **ChaCha20 加密** | 新增 ChaCha20 算法，无 AES-NI 的 CPU 性能提升 3-5 倍 |
-| **用户名可修改** | 支持自定义管理员用户名（原版固定为 admin） |
-| **单文件部署** | 无需 Node.js 运行时，单二进制即可运行 |
+```bash
+# Start Alist + encryption proxy
+docker compose up -d
 
-## 功能特性
+# Access management UI
+open http://your-ip:5344/index
+```
 
-- **透明加密**: AES-128-CTR、ChaCha20、RC4-MD5 文件内容加密
-- **文件名加密**: MixBase64 + CRC6 校验的文件名加密
-- **Range 请求**: 支持视频拖拽进度（加密文件也支持 Seek）
-- **WebDAV 支持**: 加密的 WebDAV 访问
-- **H2C 热切换**: 管理界面切换 HTTP/2 无需手动重启
-- **Docker 就绪**: 多架构镜像（amd64/arm64），轻松容器化部署
-
-## 发行物模式
-
-- **独立后端模式（默认）**: 内嵌 Web 管理页，适用于 Docker、Windows exe、Linux 单文件部署。
-- **嵌入式模式（`noembedwebui`）**: 不内嵌 `/public` 管理页，适用于 Android APK / 外部管理端集成。
-- 两种模式共用同一套核心代理、加密、WebDAV、Range、策略与缓存逻辑。
-- 客户端可调用 `/enc-api/getBuildInfo` 判断当前构建是否带内嵌管理页。
-
-## 快速开始
-
-### Docker Compose（推荐）
-
-创建 `docker-compose.yml`:
+Create `docker-compose.yml`:
 
 ```yaml
-version: '3.8'
-
 services:
   alist-encrypt:
     image: ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
@@ -54,18 +37,15 @@ services:
     ports:
       - "5344:5344"
     volumes:
-      - ./conf:/app/conf    # 配置目录（重要：存储加密密码等配置）
-      - ./data:/app/data    # 数据目录（存储用户凭据）
+      - ./conf:/app/conf
+      - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
-      - ALIST_HOST=alist    # Alist 容器名或主机地址
-      - ALIST_PORT=5244     # Alist 端口
-    networks:
-      - alist-network
+      - ALIST_HOST=alist
+      - ALIST_PORT=5244
     depends_on:
       - alist
 
-  # Alist 服务
   alist:
     image: xhofe/alist:latest
     container_name: alist
@@ -76,23 +56,9 @@ services:
       - ./alist-data:/opt/alist/data
     environment:
       - TZ=Asia/Shanghai
-    networks:
-      - alist-network
-
-networks:
-  alist-network:
-    driver: bridge
 ```
 
-启动服务：
-
-```bash
-docker compose up -d
-```
-
-访问管理界面: `http://your-ip:5344/index`
-
-### Docker Run
+Docker run:
 
 ```bash
 docker run -d \
@@ -105,160 +71,144 @@ docker run -d \
   ghcr.io/qingwo1991-debug/alist-encrypt-go:latest
 ```
 
-> **重要**: 务必挂载 `conf` 和 `data` 目录，否则重启后配置和用户数据会丢失！
+> Mount `conf` and `data` volumes — otherwise configuration and user data are lost on restart.
 
-### 从源码构建
+## Features
+
+| Category | Features |
+|----------|----------|
+| **Encryption** | AES-128-CTR, ChaCha20, RC4-MD5 file content encryption; MixBase64 + CRC6 filename encryption |
+| **Streaming** | Encrypted range seek support — video seeking works even with encrypted files |
+| **WebDAV** | Full WebDAV proxy over encrypted storage |
+| **Performance** | Connection pooling, PBKDF2/MixBase64 caching, 512 KB stream buffer, background probe scheduler |
+| **HTTP/2** | Native h2c and HTTPS HTTP/2 support with hot-switch via management UI |
+| **Proxy Routing** | Domain-based proxy routing (`direct` / `env` / `fixed` / `rules`) with built-in provider domain dictionary |
+| **Smart Learning** | Automatic Range compatibility detection and caching per storage provider; configurable probe scheduler with concurrency control and cooldown |
+| **Database** | In-memory by default; optional MySQL for persistent Range compatibility cache and file metadata |
+| **Deployment** | Single binary, multi-arch Docker images (linux/amd64, linux/arm64), Android APK |
+| **Management** | Vue 3 management UI: Alist config, WebDAV settings, local encrypt/decrypt, file transfer, online encrypt config |
+
+## Encryption Algorithms
+
+| Algorithm | Intel AES-NI | ARM / No AES-NI |
+|-----------|--------------|-----------------|
+| **AES-128-CTR** (v1 / v2) | ✅ Recommended | ⚠️ Slower |
+| **ChaCha20** (v1 / v2) | ✅ Good | ✅ Recommended |
+| **RC4-MD5** (v1 / v2) | ✅ Fastest | ✅ Fastest |
+
+Content encryption has two versions: **v1** (PBKDF2 + file size in key derivation) and **v2** (enhanced KDF with additional entropy). Filename encryption uses MixBase64 with CRC6 integrity check.
+
+## Build Modes
+
+This project produces **two artifact types** via GitHub Actions:
+
+### 1. Standalone Backend (default)
+
+Embedded Web management UI; single binary or Docker image. Ideal for:
+
+- Docker deployment on NAS / VPS
+- Windows exe / Linux binary direct execution
+- Linux amd64, arm64, darwin amd64/arm64, windows amd64
 
 ```bash
-# 克隆仓库
-git clone https://github.com/qingwo1991-debug/alist-encrypt-go.git
-cd alist-encrypt-go
-
-# 构建前端
-cd enc-webui
-npm install
-npm run build
-cd ..
-
-# 复制前端到嵌入目录
-cp -r enc-webui/dist/* web/public/
-
-# 构建 Go 二进制
+# With embedded web UI (default)
 go build -o alist-encrypt-go ./cmd/server
 
-# 运行
-./alist-encrypt-go
-```
-
-构建不带内嵌管理页的版本（供 APK / 外部管理端使用）：
-
-```bash
+# Without embedded web UI (for external management)
 go build -tags noembedwebui -o alist-encrypt-go ./cmd/server
 ```
 
-说明：
+### 2. Mobile Android APK
 
-- 默认构建保留 `/public`、`/static`、`/index` 管理页路由。
-- `noembedwebui` 构建不会注册内嵌管理页路由，`/index` 会返回 404 JSON。
-- `noembedwebui` 构建仍保留 `/enc-api/*`、`/d/*`、`/dav/*`、`/api/fs/*` 等核心接口。
+A Flutter-based Android client based on [OpenList-Mobile](https://github.com/OpenListTeam/OpenList-Mobile) that bundles the encryption proxy as a Go binding (AAR). Requires:
 
-### 数据库配置（可选）
+- Flutter 3.24+
+- Go 1.24+
+- Android SDK 35, NDK 25.2.9519653
+- gomobile
 
-启用 MySQL 持久化（Host 策略与文件元数据）时，必须同时设置以下两个环境变量：
+```bash
+# 1. Build Go Android binding (AAR)
+cd mobile/openlist-lib/scripts
+./init_openlist.sh
+./init_web.sh
+./init_gomobile.sh
+./gobind.sh
 
-```text
-DB_TYPE=mysql
-DB_DSN=<db_user>:<db_password>@tcp(<db_host>:3306)/<db_name>?charset=utf8mb4&parseTime=True&loc=Local
+# 2. Build Flutter APK
+cd mobile
+flutter pub get
+flutter build apk --release --split-per-abi
+
+# Output: OpenList-Encrypt-<version>_{arm64-v8a,armeabi-v7a,x86_64}.apk
 ```
 
-仅设置其中一个不会启用 MySQL，将自动使用内存模式。
+See [mobile/BUILD_GUIDE.md](mobile/BUILD_GUIDE.md) for detailed build instructions.
 
-> MySQL 仅用于持久化缓存（range 兼容性、策略状态、文件元数据）。重复访问相同文件时，项目会避免多次写入同一条 MySQL 记录，减轻数据库压力。
+## Build from Source (Standalone)
 
-## 验证与调优
+```bash
+git clone https://github.com/qingwo1991-debug/alist-encrypt-go.git
+cd alist-encrypt-go
 
-- 分片上传与策略观测验证：`bash tools/verify_chunk_upload.sh`
-- 分片上传验证说明：`docs/UPLOAD_CHUNK_VERIFICATION.md`
-- 生产调优建议：`docs/PRODUCTION_TUNING_PROFILES.md`
+# Build frontend
+cd enc-webui
+pnpm install && pnpm build
+cd ..
 
-## 环境变量
+# Copy to embed directory
+cp -r enc-webui/dist/* web/public/
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `ALIST_HOST` | Alist 服务器地址 | `localhost` |
-| `ALIST_PORT` | Alist 服务器端口 | `5244` |
-| `TZ` | 时区 | `UTC` |
-| `DB_TYPE` | 数据库类型（仅支持 `mysql`；需与 `DB_DSN` 同时设置才启用） | 空 |
-| `DB_DSN` | MySQL 连接串（需与 `DB_TYPE` 同时设置才启用） | 空 |
-| `RANGE_FAIL_TO_DOWNGRADE` | Range 连续失败后降级阈值 | `2` |
-| `RANGE_SUCCESS_TO_RECOVER` | Range 连续成功后恢复阈值 | `3` |
-| `RANGE_REPROBE_MINUTES` | Range 不兼容后的重探间隔（分钟） | `30` |
-| `RANGE_PROBE_TIMEOUT_SECONDS` | 后台 Range 探测超时（秒） | `8` |
+# Build Go binary
+go build -o alist-encrypt-go ./cmd/server
+```
 
-## 代理分流（网盘多选）
+## Environment Variables
 
-- 支持 `direct/env/fixed/rules` 四种代理模式（默认 `direct`）。
-- `rules` 模式下可按“网盘 -> 域名”分流，未命中规则默认直连。
-- 管理页会显示网盘中文名（如“谷歌云盘/谷歌相册/微软网盘”），支持多选并自动展开域名规则。
-- 默认使用内置字典种子 + 手工维护（适配 OpenList/本项目分离部署）。
-- 字典文件保存于 `conf/proxy_domain_dict.json`。
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALIST_HOST` | Alist server address | `localhost` |
+| `ALIST_PORT` | Alist server port | `5244` |
+| `TZ` | Timezone | `UTC` |
+| `DB_TYPE` | Database type (`mysql` only; requires `DB_DSN`) | _(empty, in-memory)_ |
+| `DB_DSN` | MySQL connection string | _(empty, in-memory)_ |
+| `RANGE_FAIL_TO_DOWNGRADE` | Range failure threshold before downgrade | `2` |
+| `RANGE_SUCCESS_TO_RECOVER` | Range success threshold to restore | `3` |
+| `RANGE_REPROBE_MINUTES` | Re-probe interval after incompatibility (min) | `30` |
+| `RANGE_PROBE_TIMEOUT_SECONDS` | Background probe timeout (s) | `8` |
 
-## 智能学习配置（默认开启）
+### Database
 
-以下配置属于“收益大于成本”的项，默认已开启；并且服务端会做范围收敛，超出范围会自动夹紧到合法区间。
-`rangeCompatTtlMinutes` 已废弃，不再生效，请使用 `rangeReprobeMinutes`。
+Optional MySQL for persistent caching (Range compatibility, strategy state, file metadata). Both `DB_TYPE` and `DB_DSN` must be set to enable; otherwise in-memory mode is used. Repeated file accesses avoid duplicate writes to reduce DB load.
 
-| 配置项 | 默认值 | 合法范围 | 说明 |
-|------|------|------|------|
-| `enableRangeCompatCache` | `true` | `true/false` | 启用 Range 能力学习（建议保持开启） |
-| `enableBackgroundProbe` | `true` | `true/false` | 启用后台低频补探（冷启动与失效重探） |
-| `rangeFailToDowngrade` | `2` | `1-10` | 连续失败多少次后标记不兼容并降级 |
-| `rangeSuccessToRecover` | `3` | `1-20` | 连续成功多少次后恢复 Range 首选 |
-| `rangeReprobeMinutes` | `30` | `1-1440` | 不兼容后下一次后台重探间隔 |
-| `rangeProbeTimeoutSeconds` | `8` | `2-60` | 单次后台 Range 探测超时 |
-| `probeConcurrency` | `4` | `1-20` | 后台探测总并发 |
-| `probeProviderConcurrency` | `1` | `1-5` | 单 provider 探测并发上限 |
-| `probeMinDelayMs` | `3000` | `0-60000` | 后台探测最小随机延迟 |
-| `probeMaxDelayMs` | `15000` | `0-120000` | 后台探测最大随机延迟 |
-| `probeCooldownMinutes` | `1440` | `1-10080` | 同一路径探测冷却时间 |
-| `probeQueueSize` | `1000` | `100-10000` | 后台探测队列容量 |
+## Default Credentials
 
-## 加密算法选择
+- Initial admin user: `admin`
+- Password: randomly generated on first start, printed in startup logs
+- **Change password immediately after first login.**
 
-| CPU 类型 | AES-NI | 推荐算法 |
-|----------|--------|----------|
-| Intel Core i3/i5/i7/i9 | ✅ 有 | `aesctr` |
-| AMD Ryzen | ✅ 有 | `aesctr` |
-| Intel Celeron/Pentium (J4125, N5105) | ❌ 无 | `chacha20` |
-| ARM (树莓派、NAS 等) | ❌ 无 | `chacha20` |
+> A default encryption rule `/encrypt/*` is pre-configured with password `123456` for demonstration. This is the *file encryption password*, not the admin login password. Modify or remove it in production.
 
-## 默认凭据
+## Management UI
 
-- 首次启动会自动创建管理员用户 `admin`
-- 首次密码为随机生成，并会打印到启动日志
-- 修改密码后旧密码立即失效
+Access `http://your-ip:5344/index` to manage:
 
-**首次登录后请立即修改用户名和密码，并妥善保管启动日志中的初始密码。**
+- **Dashboard** — system overview
+- **Alist Config** — server address, encryption password, H2C switch
+- **WebDAV** — encrypted WebDAV proxy configuration
+- **Local Encrypt/Decrypt** — encrypt or decrypt local folders
+- **Online Config** — encryption rules, proxy mode, Range learning settings
+- **File Transfer** — folder conversion and file migration
 
-## 默认加密规则说明
+> The embedded Web UI is only available in the default standalone build. Android APK and `noembedwebui` builds leave `/index` returning 404 and rely on the native app for configuration.
 
-- 默认配置会包含一条示例加密规则：`/encrypt/*`
-- 该示例规则的默认文件加密密码是 `123456`
-- 这个 `123456` 仅用于示例文件加密规则，不是管理员登录密码
-- 生产环境请按自己的目录与密码策略及时修改或删除该示例规则
+## Acknowledgements
 
-## 管理界面
+- [alist-encrypt](https://github.com/traceless/alist-encrypt) — original Node.js project by [@traceless](https://github.com/traceless)
+- [Alist](https://github.com/alist-org/alist) — multi-storage file list tool
+- [OpenList](https://github.com/OpenListTeam/OpenList) — Alist community fork with mobile support
+- AI-assisted development: Google, Anthropic (Claude), Antigravity
 
-访问 `http://your-ip:5344/index` 进入管理界面：
+## License
 
-- **首页**: 修改用户名、密码，切换主题和语言
-- **配置 Alist**: 设置 Alist 服务器地址、加密密码、H2C 开关
-- **WebDAV 配置**: 配置 WebDAV 加密代理
-- **本地加解密**: 对本地文件夹进行加解密操作
-
-说明：
-
-- 仅默认独立后端构建提供内嵌 Web 管理页。
-- Android APK / 其他嵌入式发行物建议使用 `noembedwebui` 构建，并由各自客户端提供配置界面。
-
-## 鸣谢
-
-### 原项目
-
-- [alist-encrypt](https://github.com/traceless/alist-encrypt) - 原项目作者 [@traceless](https://github.com/traceless)，感谢开创性工作！
-- [Alist](https://github.com/alist-org/alist) - 优秀的网盘挂载工具
-
-### AI 辅助开发
-
-本项目的 Go 语言重构由 AI 辅助完成：
-
-- **[Google](https://www.google.com/)** - 感谢 Google 在 AI 领域的研究贡献
-- **[Anthropic](https://www.anthropic.com/)** - Claude AI 开发商
-
-### 特别鸣谢
-
-**Antigravity** - 强大的 AI 编程助手，使得这次从 Node.js 到 Go 的完整重构成为可能。从代码架构设计、加密算法移植、WebDAV 协议实现到前端优化，全程 AI 辅助完成。
-
-## 许可证
-
-MIT License
+[MIT](LICENSE)
