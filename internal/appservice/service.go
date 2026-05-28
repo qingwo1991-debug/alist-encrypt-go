@@ -190,15 +190,17 @@ func (s *Service) ValidateScanConfig(raw map[string]interface{}, ctx context.Con
 			"message":    "未配置扫描账号，请填写 scanUsername/scanPassword 或 scanAuthHeader",
 		}, nil
 	}
-	tempCfg := *s.cfg
-	tempCfg.AlistServer = server
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Depth", "0")
 	req.Header.Set("Authorization", authHeader)
-	client := proxy.NewHTTPClient(&tempCfg, getAlistRequestTimeout(&tempCfg))
+	tempCfg := &config.Config{
+		AlistServer: server,
+		Proxy:       s.cfg.Proxy,
+	}
+	client := proxy.NewHTTPClient(tempCfg, getAlistRequestTimeout(tempCfg))
 	resp, err := client.Do(req)
 	if err != nil {
 		return map[string]interface{}{
