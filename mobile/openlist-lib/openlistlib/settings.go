@@ -3,6 +3,7 @@ package openlistlib
 import (
 	"github.com/OpenListTeam/OpenList/v4/cmd"
 	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
+	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
@@ -24,6 +25,7 @@ func SetConfigNoPrefix(b bool) {
 }
 
 func SetAdminPassword(pwd string) {
+	bootstrap.Init()
 	admin, err := op.GetAdmin()
 	if err != nil {
 		utils.Log.Errorf("failed get admin user: %+v", err)
