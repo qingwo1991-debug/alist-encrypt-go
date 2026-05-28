@@ -4,26 +4,26 @@ echo "Installing gomobile and dependencies..."
 
 # Install gomobile command
 echo "Installing gomobile command..."
-go install golang.org/x/mobile/cmd/gomobile@latest || {
+go install golang.org/x/mobile/cmd/gomobile || {
     echo "Failed to install gomobile"
     exit 1
 }
 
 # Install gobind command (needed for iOS)
 echo "Installing gobind command..."
-go install golang.org/x/mobile/cmd/gobind@latest || {
+go install golang.org/x/mobile/cmd/gobind || {
     echo "Failed to install gobind"
     exit 1
 }
 
 # Install bind packages
 echo "Installing bind packages..."
-go get golang.org/x/mobile/bind@latest || {
+go get golang.org/x/mobile/bind || {
     echo "Failed to install golang.org/x/mobile/bind"
     exit 1
 }
 
-go get golang.org/x/mobile/bind/objc@latest || {
+go get golang.org/x/mobile/bind/objc || {
     echo "Failed to install golang.org/x/mobile/bind/objc"
     exit 1
 }
