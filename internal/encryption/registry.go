@@ -51,6 +51,21 @@ func NewCipher(encType EncType, password string, fileSize int64) (Cipher, error)
 	return factory(password, fileSize)
 }
 
+func NewCipherV2(encType EncType, password string, plainSize int64, nonceField []byte) (Cipher, error) {
+	switch encType {
+	case EncTypeAESCTR:
+		return NewAESCTRV2(password, plainSize, nonceField)
+	case EncTypeRC4MD5:
+		return NewRC4MD5V2(password, plainSize, nonceField)
+	case EncTypeChaCha20:
+		return NewChaCha20V2(password, plainSize, nonceField)
+	case "":
+		return NewAESCTRV2(password, plainSize, nonceField)
+	default:
+		return nil, fmt.Errorf("unsupported v2 encryption type: %s", encType)
+	}
+}
+
 // ListRegistered returns all registered cipher types
 func ListRegistered() []EncType {
 	registryMu.RLock()

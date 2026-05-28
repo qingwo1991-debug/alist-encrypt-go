@@ -10,6 +10,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
@@ -46,6 +47,19 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	w := req.ResponseWriter
 	r := req.Request
 	fileSize := req.InitialSize
+	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
+		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
+			meta := encryption.ContentMeta{
+				EncType:        encryption.EncType(req.PasswdInfo.EncType),
+				Version:        info.ContentVersion,
+				HeaderLen:      info.HeaderLen,
+				PlainSize:      info.Size,
+				CiphertextSize: info.CiphertextSize,
+			}
+			r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
+			req.Request = r
+		}
+	}
 
 	authHeaders := make(http.Header)
 	if auth := r.Header.Get("Authorization"); auth != "" {

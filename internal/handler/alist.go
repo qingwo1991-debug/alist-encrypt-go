@@ -743,9 +743,6 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	// Process response
 	if found {
 		if data, ok := respData["data"].(map[string]interface{}); ok {
-			// Cache file info
-			h.fileDAO.SetFromAlistResponse(originalPath, data)
-
 			// Decrypt filename for display
 			if passwdInfo.EncName {
 				if name, ok := data["name"].(string); ok {
@@ -757,19 +754,38 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 
 			// Modify raw_url for encrypted files
 			if rawURL, ok := data["raw_url"].(string); ok && rawURL != "" {
-				fileSize := int64(0)
+				ciphertextSize := int64(0)
 				if size, ok := data["size"].(float64); ok {
-					fileSize = int64(size)
+					ciphertextSize = int64(size)
+				}
+				meta := h.streamProxy.InspectEncryptedContent(r.Context(), rawURL, r.Header, passwdInfo, ciphertextSize)
+				fileSize := ciphertextSize
+				if meta.IsV2() && meta.PlainSize > 0 {
+					fileSize = meta.PlainSize
+					data["size"] = float64(fileSize)
 				}
 				if fileSize > 0 {
 					h.upsertMetaFromListing(r.Context(), originalPath, fileSize)
 				}
 				h.enqueueProbeFromList(r, originalPath, fileSize)
+				_ = h.fileDAO.Set(&dao.FileInfo{
+					Path:           originalPath,
+					Name:           path.Base(originalPath),
+					Size:           fileSize,
+					CiphertextSize: ciphertextSize,
+					ContentVersion: meta.Version,
+					HeaderLen:      meta.HeaderLen,
+					IsDir:          false,
+					RawURL:         rawURL,
+					Sign:           func() string { v, _ := data["sign"].(string); return v }(),
+				})
 
 				// Register redirect and update URL
 				key := h.proxyHandler.RegisterRedirect(rawURL, fileSize, passwdInfo, originalPath)
 				redirectPath := buildRedirectPath(key, originalPath, true)
 				data["raw_url"] = buildRedirectURL(r, redirectPath)
+			} else {
+				h.fileDAO.SetFromAlistResponse(originalPath, data)
 			}
 
 			if provider, ok := data["provider"].(string); ok && provider == "AliyundriveOpen" {

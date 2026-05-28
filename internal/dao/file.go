@@ -15,6 +15,9 @@ type FileInfo struct {
 	Path              string    `json:"path"`
 	Name              string    `json:"name"`
 	Size              int64     `json:"size"`
+	CiphertextSize    int64     `json:"ciphertext_size"`
+	ContentVersion    int       `json:"content_version"`
+	HeaderLen         int64     `json:"header_len"`
 	IsDir             bool      `json:"is_dir"`
 	Modified          time.Time `json:"modified"`
 	RawURL            string    `json:"raw_url"`
@@ -72,12 +75,15 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	// Check unified path cache first
 	if entry, ok := d.pathCache.Get(path); ok {
 		fi := &FileInfo{
-			Path:   entry.DisplayPath,
-			Name:   entry.Name,
-			Size:   entry.Size,
-			IsDir:  entry.IsDir,
-			RawURL: entry.RawURL,
-			Sign:   entry.Sign,
+			Path:           entry.DisplayPath,
+			Name:           entry.Name,
+			Size:           entry.Size,
+			CiphertextSize: entry.CiphertextSize,
+			ContentVersion: entry.ContentVersion,
+			HeaderLen:      entry.HeaderLen,
+			IsDir:          entry.IsDir,
+			RawURL:         entry.RawURL,
+			Sign:           entry.Sign,
 		}
 		if entry.UpstreamFetchedAt > 0 {
 			fi.UpstreamFetchedAt = time.Unix(0, entry.UpstreamFetchedAt)
@@ -111,6 +117,9 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		DisplayPath:       info.Path,
 		Name:              info.Name,
 		Size:              info.Size,
+		CiphertextSize:    info.CiphertextSize,
+		ContentVersion:    info.ContentVersion,
+		HeaderLen:         info.HeaderLen,
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
 		Sign:              info.Sign,

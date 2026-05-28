@@ -87,7 +87,7 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Password  string `json:"password"`
 		EncType   string `json:"encType"`
-		Operation string `json:"operation"` // "enc" or "dec"
+		Operation string `json:"operation"`  // "enc" or "dec"
 		SrcPath   string `json:"folderPath"` // match old API field name
 		DstPath   string `json:"outPath"`
 		EncName   bool   `json:"encName"`
@@ -177,10 +177,10 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 	go runEncryptTask(task, files)
 
 	RespondSuccess(w, map[string]interface{}{
-		"taskId":    task.ID,
+		"taskId":     task.ID,
 		"totalFiles": task.TotalFiles,
 		"totalBytes": task.TotalBytes,
-		"message":   "Encryption started in background",
+		"message":    "Encryption started in background",
 	})
 }
 
@@ -324,11 +324,6 @@ func runEncryptTask(task *EncryptTask, files []string) {
 }
 
 func processFile(src, dst, password, encType string, fileSize int64, operation string) error {
-	flowEnc, err := encryption.NewFlowEnc(password, encType, fileSize)
-	if err != nil {
-		return fmt.Errorf("create cipher: %w", err)
-	}
-
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open src: %w", err)
@@ -341,13 +336,24 @@ func processFile(src, dst, password, encType string, fileSize int64, operation s
 	}
 	defer out.Close()
 
-	var reader io.Reader = in
 	if operation == "enc" {
-		reader = flowEnc.EncryptReader(in)
-	} else {
-		reader = flowEnc.DecryptReader(in)
+		enc, err := encryption.NewLatestContentEncryptor(password, encType, fileSize)
+		if err != nil {
+			return fmt.Errorf("create cipher: %w", err)
+		}
+		reader, err := enc.EncryptReader(in, 0)
+		if err != nil {
+			return fmt.Errorf("create encrypt reader: %w", err)
+		}
+		buf := make([]byte, 512*1024)
+		_, err = io.CopyBuffer(out, reader, buf)
+		return err
 	}
 
+	reader, _, err := encryption.AutoDecryptReader(password, encryption.EncType(encType), in, fileSize)
+	if err != nil {
+		return fmt.Errorf("create decrypt reader: %w", err)
+	}
 	buf := make([]byte, 512*1024)
 	_, err = io.CopyBuffer(out, reader, buf)
 	return err

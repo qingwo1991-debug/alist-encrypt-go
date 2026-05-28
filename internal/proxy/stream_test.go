@@ -189,17 +189,6 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 	copy(fullPlain[firstStart:], firstChunk)
 	copy(fullPlain[secondStart:], secondChunk)
 
-	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
-	if err != nil {
-		t.Fatalf("failed to create flow enc: %v", err)
-	}
-	fullCipher := make([]byte, len(fullPlain))
-	copy(fullCipher, fullPlain)
-	flow.Encrypt(fullCipher)
-
-	expectedFirst := fullCipher[firstStart : firstStart+int64(len(firstChunk))]
-	expectedSecond := fullCipher[secondStart : secondStart+int64(len(secondChunk))]
-
 	received := map[int][]byte{}
 	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
 		body, _ := io.ReadAll(r.Body)
@@ -236,11 +225,35 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 		t.Fatalf("second chunk upload failed: %v", err)
 	}
 
-	if string(received[1]) != string(expectedFirst) {
-		t.Fatalf("first encrypted chunk mismatch")
+	meta, ok, err := encryption.ParseContentHeader(encryption.EncTypeAESCTR, received[1], int64(len(received[1])+len(received[2])))
+	if err != nil || !ok {
+		t.Fatalf("expected v2 header, ok=%v err=%v", ok, err)
 	}
-	if string(received[2]) != string(expectedSecond) {
-		t.Fatalf("second encrypted chunk mismatch")
+	if meta.PlainSize != fileSize {
+		t.Fatalf("plainSize=%d want=%d", meta.PlainSize, fileSize)
+	}
+	reader, _, err := encryption.AutoDecryptReader("123456", encryption.EncTypeAESCTR, bytes.NewReader(received[1]), int64(len(received[1])))
+	if err != nil {
+		t.Fatalf("auto decrypt reader: %v", err)
+	}
+	decryptedFirst, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read decrypted: %v", err)
+	}
+	if !bytes.Equal(decryptedFirst, firstChunk) {
+		t.Fatalf("first decrypted chunk mismatch")
+	}
+	cipher2, err := encryption.NewCipherV2(encryption.EncTypeAESCTR, "123456", meta.PlainSize, meta.NonceField)
+	if err != nil {
+		t.Fatalf("new v2 cipher: %v", err)
+	}
+	if err := cipher2.SetPosition(secondStart); err != nil {
+		t.Fatalf("set position: %v", err)
+	}
+	secondCipher := append([]byte(nil), received[2]...)
+	cipher2.Decrypt(secondCipher)
+	if !bytes.Equal(secondCipher, secondChunk) {
+		t.Fatalf("second decrypted chunk mismatch")
 	}
 }
 
