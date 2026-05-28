@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -330,9 +332,20 @@ func DefaultConfig() *Config {
 			DisableCleanup:         false,
 		},
 		DataDir:   "./data",
-		JWTSecret: "alist-encrypt-secret",
+		JWTSecret: "",
 		JWTExpire: 48,
 	}
+}
+
+func generateRandomSecret(n int) (string, error) {
+	if n <= 0 {
+		n = 32
+	}
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // Load loads configuration from file
@@ -354,6 +367,7 @@ func LoadFromBaseDir(baseDir string) *Config {
 
 func loadConfigAt(configPath string) *Config {
 	cfg := DefaultConfig()
+	cfg.configPath = configPath
 
 	confDir := filepath.Dir(configPath)
 	baseDir := filepath.Dir(confDir)
@@ -365,7 +379,7 @@ func loadConfigAt(configPath string) *Config {
 	if data, err := os.ReadFile(configPath); err == nil {
 		if migrated, migratedData := migrateLegacyRangeCompatTTL(data); migrated {
 			data = migratedData
-			if err := os.WriteFile(configPath, migratedData, 0644); err != nil {
+			if err := os.WriteFile(configPath, migratedData, 0600); err != nil {
 				log.Warn().Err(err).Msg("Failed to persist migrated range compat config")
 			} else {
 				log.Info().Str("path", configPath).Msg("Migrated legacy rangeCompatTtlMinutes to rangeReprobeMinutes")
@@ -384,7 +398,19 @@ func loadConfigAt(configPath string) *Config {
 	cfg.applyEnvOverrides()
 	cfg.normalizeAlistServerTuning()
 	cfg.normalizeProxyConfig()
-	cfg.configPath = configPath
+
+	if strings.TrimSpace(cfg.JWTSecret) == "" || cfg.JWTSecret == "alist-encrypt-secret" {
+		secret, err := generateRandomSecret(32)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to generate JWT secret")
+		}
+		cfg.JWTSecret = secret
+		if err := cfg.Save(); err != nil {
+			log.Warn().Err(err).Msg("Failed to persist generated JWT secret")
+		} else {
+			log.Info().Msg("Generated new random JWT secret and saved to config")
+		}
+	}
 
 	if cfg.DataDir == "" || cfg.DataDir == "./data" {
 		cfg.DataDir = filepath.Join(baseDir, "data")
@@ -479,7 +505,7 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	return os.WriteFile(configPath, data, 0644)
+	return os.WriteFile(configPath, data, 0600)
 }
 
 func (c *Config) applyEnvOverrides() {

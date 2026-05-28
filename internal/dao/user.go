@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/argon2"
 
 	"github.com/alist-encrypt-go/internal/storage"
@@ -177,7 +178,26 @@ func (d *UserDAO) EnsureDefaultUser() error {
 	if _, err := d.GetFirstUser(); err == nil {
 		return nil // User exists
 	}
-	return d.Create("admin", "123456")
+	password, err := randomPassword(12)
+	if err != nil {
+		return err
+	}
+	if err := d.Create("admin", password); err != nil {
+		return err
+	}
+	log.Warn().Str("username", "admin").Str("password", password).Msg("Generated initial admin password; change it after first login")
+	return nil
+}
+
+func randomPassword(n int) (string, error) {
+	if n <= 0 {
+		n = 12
+	}
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // GetFirstUser returns the first user in the database
