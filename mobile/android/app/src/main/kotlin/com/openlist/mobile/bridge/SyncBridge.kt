@@ -82,7 +82,7 @@ class SyncBridge(private val context: Context) {
                         val args = message as List<*>
                         val taskId = args[0] as String
                         val taskJson = args[1] as String
-                        SyncScheduler.schedule(context, taskId, taskJson)
+                        SyncScheduler.schedule(bridge.context, taskId, taskJson)
                         reply.reply(listOf(null))
                     } catch (e: Exception) {
                         Log.e(TAG, "scheduleSyncTask error", e)
@@ -96,7 +96,7 @@ class SyncBridge(private val context: Context) {
                     try {
                         val args = message as List<*>
                         val taskId = args[0] as String
-                        SyncScheduler.cancel(context, taskId)
+                        SyncScheduler.cancel(bridge.context, taskId)
                         reply.reply(listOf(null))
                     } catch (e: Exception) {
                         Log.e(TAG, "cancelSyncTask error", e)
@@ -110,7 +110,7 @@ class SyncBridge(private val context: Context) {
                     try {
                         val args = message as List<*>
                         val taskId = args[0] as String
-                        SyncScheduler.runNow(context, taskId)
+                        SyncScheduler.runNow(bridge.context, taskId)
                         reply.reply(listOf(null))
                     } catch (e: Exception) {
                         Log.e(TAG, "runSyncTaskNow error", e)
@@ -124,7 +124,7 @@ class SyncBridge(private val context: Context) {
                     try {
                         val args = message as List<*>
                         val taskId = args[0] as String
-                        val status = SyncScheduler.getStatus(context, taskId)
+                        val status = SyncScheduler.getStatus(bridge.context, taskId)
                         reply.reply(listOf(status))
                     } catch (e: Exception) {
                         Log.e(TAG, "getSyncTaskStatus error", e)
@@ -138,7 +138,7 @@ class SyncBridge(private val context: Context) {
                     try {
                         val args = message as List<*>
                         val taskId = args[0] as String
-                        val history = SyncScheduler.getHistory(context, taskId)
+                        val history = SyncScheduler.getHistory(bridge.context, taskId)
                         reply.reply(listOf(history))
                     } catch (e: Exception) {
                         Log.e(TAG, "getSyncTaskHistory error", e)
