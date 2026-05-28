@@ -5,6 +5,8 @@ import '../../generated/l10n.dart';
 import '../../contant/native_bridge.dart';
 import 'provider_routing_page.dart';
 import 'dir_sync_status_page.dart';
+import '../local_mount/local_mount_page.dart';
+import '../sync/sync_task_list_page.dart';
 
 /// 加密配置页面
 class EncryptConfigPage extends StatefulWidget {
@@ -964,6 +966,40 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                           ),
                         );
                         await _loadConfigViaV2Api();
+                      },
+                    ),
+                    const SizedBox(height: 8),
+
+                    // 本地目录挂载入口
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.folder),
+                      title: const Text('本地目录挂载'),
+                      subtitle: const Text('挂载手机本地目录到 OpenList，支持 Download、DCIM 等'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const LocalMountPage(),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 8),
+
+                    // 同步任务入口
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.sync),
+                      title: const Text('同步任务'),
+                      subtitle: const Text('加密后定时同步上传到云端，支持文件类型过滤、WiFi-only'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const SyncTaskListPage(),
+                          ),
+                        );
                       },
                     ),
                     const SizedBox(height: 8),

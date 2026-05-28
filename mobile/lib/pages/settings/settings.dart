@@ -11,6 +11,7 @@ import 'package:get/get.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../generated/l10n.dart';
+import '../../utils/storage_permission_helper.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -61,6 +62,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Permission.notification.request();
                 },
               )),
+          Visibility(
+            visible: !controller._storageGranted.value,
+            child: BasicPreference(
+              title: '授予存储访问权限',
+              subtitle: '挂载本地目录和加密同步功能需要此权限',
+              leading: const Icon(Icons.folder_open, color: Colors.orange),
+              onTap: () async {
+                await StoragePermissionHelper.requestWithRationale(context);
+                controller.updateData();
+              },
+            ),
+          ),
 
           DividerPreference(title: S.of(context).general),
 
@@ -251,6 +264,7 @@ class _SettingsController extends GetxController {
   final _downloadDir = "".obs;
   final _autoUpdate = true.obs;
   final _notificationGranted = true.obs;
+  final _storageGranted = true.obs;
 
   setDataDir(String value) async {
     NativeBridge.appConfig.setDataDir(value);
@@ -345,5 +359,6 @@ class _SettingsController extends GetxController {
     } else {
       _notificationGranted.value = true;
     }
+    _storageGranted.value = await StoragePermissionHelper.isGranted();
   }
 }

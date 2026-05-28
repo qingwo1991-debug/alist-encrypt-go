@@ -13,6 +13,8 @@ import com.openlist.mobile.bridge.AppConfigBridge
 import com.openlist.mobile.bridge.CommonBridge
 import com.openlist.mobile.bridge.EncryptProxyBridge
 import com.openlist.mobile.bridge.ServiceBridge
+import com.openlist.mobile.bridge.StorageBridge
+import com.openlist.mobile.bridge.SyncBridge
 import com.openlist.mobile.model.ShortCuts
 import com.openlist.mobile.model.openlist.Logger
 import com.openlist.pigeon.GeneratedApi
@@ -51,6 +53,8 @@ class MainActivity : FlutterActivity() {
         GeneratedApi.Android.setUp(binaryMessage, AndroidBridge(this))
         GeneratedApi.NativeCommon.setUp(binaryMessage, CommonBridge(this))
         GeneratedApi.EncryptProxy.setUp(binaryMessage, EncryptProxyBridge(this))
+        StorageBridge.setUp(binaryMessage, StorageBridge(this))
+        SyncBridge.setUp(binaryMessage, SyncBridge(this))
         mEvent = GeneratedApi.Event(binaryMessage)
 
         // 设置服务桥接
