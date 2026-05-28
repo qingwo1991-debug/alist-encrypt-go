@@ -1,6 +1,7 @@
 import 'package:get/get.dart';
 import 'package:file_picker/file_picker.dart';
 
+import '../../generated_api.dart';
 import '../../models/local_mount.dart';
 import '../../utils/sync_task_manager.dart';
 
@@ -25,8 +26,14 @@ class LocalMountController extends GetxController {
   /// 初始化 OpenList API 客户端
   ///
   /// 认证 token 统一由 AdminAuthManager 获取，不再接受密码参数
-  void initApiClient() {
-    _manager.initClient(baseUrl: 'http://127.0.0.1:5244');
+  Future<void> initApiClient() async {
+    var port = 5244;
+    try {
+      port = await Android().getOpenListHttpPort();
+    } catch (_) {
+      port = 5244;
+    }
+    _manager.initClient(baseUrl: 'http://127.0.0.1:$port');
   }
 
   Future<void> refreshBackendStatus() async {

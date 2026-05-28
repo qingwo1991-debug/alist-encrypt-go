@@ -38,7 +38,7 @@ class _LocalMountPageState extends State<LocalMountPage> {
 
   /// 初始化 API 客户端（token 统一由 AdminAuthManager 获取）
   Future<void> _initApiClient() async {
-    controller.initApiClient();
+    await controller.initApiClient();
     await controller.refreshBackendStatus();
   }
 

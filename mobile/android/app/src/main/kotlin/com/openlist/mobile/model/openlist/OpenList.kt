@@ -84,15 +84,15 @@ object OpenList : Event, LogCallback {
         Log.d(TAG, "setAdminPassword: $dataDir")
         Openlistlib.setConfigData(dataDir)
 
+        Openlistlib.setAdminPassword(normalizedPassword)
+        AppConfig.encryptAdminPassword = normalizedPassword
+
         val encryptConfigPath = File(dataDir, "encrypt_config.json").absolutePath
         Openlistlib.initEncryptProxy(encryptConfigPath)
         Openlistlib.setEncryptAdminPassword(normalizedPassword)
         check(Openlistlib.verifyEncryptAdminPassword(normalizedPassword)) {
             "加密代理管理员密码更新失败，请重试"
         }
-        AppConfig.encryptAdminPassword = normalizedPassword
-
-        Openlistlib.setAdminPassword(normalizedPassword)
     }
 
 

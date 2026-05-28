@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.work.*
 import com.openlist.mobile.config.AppConfig
+import com.openlist.mobile.model.openlist.OpenList
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.json.JSONObject
@@ -237,14 +238,15 @@ object SyncScheduler {
 
     // ── 认证令牌获取（供 SyncWorker、SyncBridge 等复用）──
 
-    private const val PROXY_BASE_URL = "http://127.0.0.1:5344"
+    private const val DEFAULT_OPENLIST_PORT = 5244
 
     /**
-     * 使用已存储的 encryptAdminPassword 登录加密代理获取 JWT token。
+     * 使用已存储的 admin 密码登录 OpenList 管理 API 获取 JWT token。
      *
      * 这是唯一可信的 token 获取来源：
-     * - 密码由 EncryptProxyBridge.setEncryptAdminPassword 写入 AppConfig
-     * - 不依赖 SharedPreferences 或其他第二套凭据
+     * - OpenList.setAdminPassword 同时写入 OpenList 用户密码和加密代理配置
+     * - 旧安装会从 encrypt_config.json 主动恢复明文密码
+     * - token 直接来自 OpenList(5244/实际配置端口)，本地挂载不依赖 5344 代理是否启动
      *
      * @return token 字符串；未配置密码或登录失败返回 null
      */
@@ -271,8 +273,15 @@ object SyncScheduler {
     }
 
     private fun acquireAuthTokenWithPassword(password: String): String? {
+        for (baseUrl in openListBaseUrls()) {
+            acquireAuthTokenWithPassword(baseUrl, password)?.let { return it }
+        }
+        return null
+    }
+
+    private fun acquireAuthTokenWithPassword(baseUrl: String, password: String): String? {
         return try {
-            val loginUrl = URL("$PROXY_BASE_URL/api/auth/login")
+            val loginUrl = URL("$baseUrl/api/auth/login")
             val conn = loginUrl.openConnection() as HttpURLConnection
             try {
                 conn.requestMethod = "POST"
@@ -297,19 +306,33 @@ object SyncScheduler {
                         if (AppConfig.encryptAdminPassword != password) {
                             AppConfig.encryptAdminPassword = password
                         }
-                        Log.d(TAG, "Auth token acquired for admin API access")
+                        Log.d(TAG, "Auth token acquired for admin API access via $baseUrl")
                         return token
                     }
                 }
-                Log.w(TAG, "Token login failed: HTTP ${conn.responseCode}")
+                Log.w(TAG, "Token login failed via $baseUrl: HTTP ${conn.responseCode}")
             } finally {
                 conn.disconnect()
             }
             null
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to acquire auth token: ${e.message}")
+            Log.w(TAG, "Failed to acquire auth token via $baseUrl: ${e.message}")
             null
         }
+    }
+
+    private fun openListBaseUrls(): List<String> {
+        val urls = linkedSetOf<String>()
+        val configuredPort = try {
+            OpenList.getHttpPort()
+        } catch (_: Exception) {
+            DEFAULT_OPENLIST_PORT
+        }
+        if (configuredPort > 0) {
+            urls.add("http://127.0.0.1:$configuredPort")
+        }
+        urls.add("http://127.0.0.1:$DEFAULT_OPENLIST_PORT")
+        return urls.toList()
     }
 
     private fun loadPasswordFromEncryptConfig(): String? {
