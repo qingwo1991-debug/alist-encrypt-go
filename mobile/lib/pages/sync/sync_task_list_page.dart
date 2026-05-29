@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../models/sync_task.dart';
@@ -14,22 +16,50 @@ class SyncTaskListPage extends StatefulWidget {
 
 class _SyncTaskListPageState extends State<SyncTaskListPage> {
   final SyncTaskManager _manager = SyncTaskManager();
+  final Map<String, Map<String, dynamic>> _statusByTaskId = {};
+  Timer? _statusTimer;
 
   @override
   void initState() {
     super.initState();
     _manager.addListener(_onChanged);
-    _manager.loadTasks();
+    _reloadTasks();
+    _statusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _refreshStatuses();
+    });
   }
 
   @override
   void dispose() {
+    _statusTimer?.cancel();
     _manager.removeListener(_onChanged);
     super.dispose();
   }
 
   void _onChanged() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _reloadTasks() async {
+    await _manager.loadTasks();
+    await _refreshStatuses();
+  }
+
+  Future<void> _refreshStatuses() async {
+    if (!mounted || !_manager.isLoaded || _manager.tasks.isEmpty) return;
+    final next = <String, Map<String, dynamic>>{};
+    for (final task in _manager.tasks) {
+      final status = await _manager.getTaskStatus(task.id);
+      if (status != null) {
+        next[task.id] = status;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _statusByTaskId
+        ..clear()
+        ..addAll(next);
+    });
   }
 
   @override
@@ -91,6 +121,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
   }
 
   Widget _buildTaskCard(SyncTask task) {
+    final status = _statusByTaskId[task.id];
     return Card(
       child: ExpansionTile(
         leading: Icon(
@@ -122,6 +153,12 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                 _buildInfoRow('仅在WiFi下', task.wifiOnly ? '是' : '否'),
                 _buildInfoRow('保留目录结构', task.preserveFolderStructure ? '是' : '否'),
                 _buildInfoRow('备份后删除本地', task.deleteAfterSync ? '是 ⚠️' : '否'),
+                if (status != null)
+                  _buildInfoRow(
+                    '运行状态',
+                    _describeStatus(status),
+                    isError: _isFailedStatus(status),
+                  ),
                 if (task.lastSyncTime != null)
                   _buildInfoRow(
                     '上次同步',
@@ -205,7 +242,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         builder: (_) => SyncTaskEditPage(existingTask: task),
       ),
     );
-    _manager.loadTasks();
+    await _reloadTasks();
   }
 
   Future<void> _openHistory(SyncTask task) async {
@@ -220,6 +257,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
   Future<void> _runNow(SyncTask task) async {
     try {
       await _manager.runTaskNow(task.id);
+      await _refreshStatuses();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('任务 "${task.name}" 已开始执行')),
@@ -232,6 +270,21 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         );
       }
     }
+  }
+
+  bool _isFailedStatus(Map<String, dynamic> status) {
+    final oneTimeState = status['oneTimeState']?.toString() ?? '';
+    final periodicState = status['periodicState']?.toString() ?? '';
+    return oneTimeState == 'FAILED' || periodicState == 'FAILED';
+  }
+
+  String _describeStatus(Map<String, dynamic> status) {
+    final oneTimeState = status['oneTimeState']?.toString() ?? 'NONE';
+    final periodicState = status['periodicState']?.toString() ?? 'UNKNOWN';
+    if (oneTimeState != 'NONE') {
+      return '立即任务: $oneTimeState';
+    }
+    return '周期任务: $periodicState';
   }
 
   void _confirmDelete(SyncTask task) {
