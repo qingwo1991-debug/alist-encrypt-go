@@ -1,12 +1,15 @@
 package com.openlist.mobile.bridge
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.openlist.mobile.config.AppConfig
 import com.openlist.mobile.sync.SyncScheduler
 import io.flutter.plugin.common.BasicMessageChannel
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.StandardMessageCodec
+import java.util.concurrent.Executors
 
 /**
  * 同步任务管理桥接
@@ -21,6 +24,8 @@ class SyncBridge(private val context: Context) {
     companion object {
         private const val TAG = "SyncBridge"
         private const val CHANNEL_PREFIX = "dev.flutter.pigeon.openlist_mobile.SyncTaskApi"
+        private val authExecutor = Executors.newSingleThreadExecutor()
+        private val mainHandler = Handler(Looper.getMainLooper())
 
         fun setUp(binaryMessenger: BinaryMessenger, bridge: SyncBridge) {
             val codec = StandardMessageCodec()
@@ -149,28 +154,38 @@ class SyncBridge(private val context: Context) {
             // acquireAuthToken
             BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.acquireAuthToken", codec)
                 .setMessageHandler { _, reply ->
-                    try {
-                        val token = SyncScheduler.acquireAuthToken()
-                        reply.reply(listOf(token ?: ""))
-                    } catch (e: Exception) {
-                        Log.e(TAG, "acquireAuthToken error", e)
-                        reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    authExecutor.execute {
+                        try {
+                            val token = SyncScheduler.acquireAuthToken()
+                            replyOnMain(reply, listOf(token ?: ""))
+                        } catch (e: Exception) {
+                            Log.e(TAG, "acquireAuthToken error", e)
+                            replyOnMain(reply, listOf(e.javaClass.simpleName, e.message, null))
+                        }
                     }
                 }
 
             // acquireAuthTokenByPassword
             BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.acquireAuthTokenByPassword", codec)
                 .setMessageHandler { message, reply ->
-                    try {
-                        val args = message as List<*>
-                        val password = args[0] as String
-                        val token = SyncScheduler.acquireAuthTokenByPassword(password)
-                        reply.reply(listOf(token ?: ""))
-                    } catch (e: Exception) {
-                        Log.e(TAG, "acquireAuthTokenByPassword error", e)
-                        reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    authExecutor.execute {
+                        try {
+                            val args = message as List<*>
+                            val password = args[0] as String
+                            val token = SyncScheduler.acquireAuthTokenByPassword(password)
+                            replyOnMain(reply, listOf(token ?: ""))
+                        } catch (e: Exception) {
+                            Log.e(TAG, "acquireAuthTokenByPassword error", e)
+                            replyOnMain(reply, listOf(e.javaClass.simpleName, e.message, null))
+                        }
                     }
                 }
+        }
+
+        private fun replyOnMain(reply: BasicMessageChannel.Reply<Any>, payload: List<Any?>) {
+            mainHandler.post {
+                reply.reply(payload)
+            }
         }
     }
 }
