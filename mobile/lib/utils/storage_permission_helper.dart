@@ -107,7 +107,7 @@ class StoragePermissionHelper {
       builder: (ctx) => AlertDialog(
         title: const Text('需要存储权限'),
         content: const Text(
-          '访问本地目录、挂载目录和加密同步上传需要存储权限。\n\n'
+          '读取手机照片、视频并执行加密备份需要存储权限。\n\n'
           '未配置前不会自动上传任何文件。\n\n'
           '点击"前往设置"后，请在系统设置中授予存储权限。',
         ),
