@@ -157,6 +157,20 @@ class SyncBridge(private val context: Context) {
                         reply.reply(listOf(e.javaClass.simpleName, e.message, null))
                     }
                 }
+
+            // acquireAuthTokenByPassword
+            BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.acquireAuthTokenByPassword", codec)
+                .setMessageHandler { message, reply ->
+                    try {
+                        val args = message as List<*>
+                        val password = args[0] as String
+                        val token = SyncScheduler.acquireAuthTokenByPassword(password)
+                        reply.reply(listOf(token ?: ""))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "acquireAuthTokenByPassword error", e)
+                        reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    }
+                }
         }
     }
 }

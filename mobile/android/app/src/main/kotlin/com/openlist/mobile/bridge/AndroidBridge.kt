@@ -44,16 +44,22 @@ class AndroidBridge(private val context: Context) : GeneratedApi.Android {
     }
 
     override fun setAdminPwd(pwd: String) {
+        Log.d(TAG, "setAdminPwd requested")
         val future = passwordExecutor.submit(Callable {
+            Log.d(TAG, "setAdminPwd worker started")
             OpenList.setAdminPassword(pwd)
+            Log.d(TAG, "setAdminPwd worker finished")
         })
         try {
             future.get(15, TimeUnit.SECONDS)
+            Log.d(TAG, "setAdminPwd completed successfully")
         } catch (e: TimeoutException) {
+            Log.e(TAG, "setAdminPwd timed out", e)
             future.cancel(true)
             throw IllegalStateException("管理员密码更新超时，请稍后重试", e)
         } catch (e: ExecutionException) {
             val cause = e.cause
+            Log.e(TAG, "setAdminPwd failed", cause ?: e)
             if (cause is RuntimeException) {
                 throw cause
             }

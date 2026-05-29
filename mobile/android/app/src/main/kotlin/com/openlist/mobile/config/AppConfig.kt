@@ -57,7 +57,7 @@ object AppConfig {
     // 同步任务配置（JSON 数组字符串）
     var syncTasksJson: String by prefs.dynamic("syncTasksJson", fallback = "[]")
 
-    // OpenList/encrypt proxy 共用的管理员明文密码，用于本地挂载和同步任务换取管理 token
+    // 本地缓存的 OpenList 管理员密码，仅用于移动端本地挂载/同步换取 5244 管理 token
     var encryptAdminPassword: String by prefs.dynamic("encryptAdminPassword", fallback = "")
 
 }

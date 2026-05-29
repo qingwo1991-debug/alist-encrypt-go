@@ -1613,4 +1613,28 @@ class SyncTaskApi {
       return (token == null || token.isEmpty) ? null : token;
     }
   }
+
+  /// 使用用户录入的管理员密码直接换取管理 token，并缓存到本地配置
+  Future<String?> acquireAuthTokenByPassword(String password) async {
+    const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.SyncTaskApi.acquireAuthTokenByPassword';
+    final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(<Object?>[password]) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      final token = __pigeon_replyList[0] as String?;
+      return (token == null || token.isEmpty) ? null : token;
+    }
+  }
 }

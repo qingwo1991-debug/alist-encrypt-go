@@ -192,4 +192,7 @@ abstract class SyncTaskApi {
 
   /// 获取管理 API 认证 token（唯一来源：SyncScheduler.acquireAuthToken）
   String? acquireAuthToken();
+
+  /// 使用用户录入的管理员密码直接换取管理 token，并缓存到本地配置
+  String? acquireAuthTokenByPassword(String password);
 }
