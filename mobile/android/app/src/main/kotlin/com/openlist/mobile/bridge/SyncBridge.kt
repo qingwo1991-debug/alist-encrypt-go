@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.openlist.mobile.config.AppConfig
+import com.openlist.mobile.sync.SyncRecordStore
 import com.openlist.mobile.sync.SyncScheduler
 import io.flutter.plugin.common.BasicMessageChannel
 import io.flutter.plugin.common.BinaryMessenger
@@ -147,6 +148,20 @@ class SyncBridge(private val context: Context) {
                         reply.reply(listOf(history))
                     } catch (e: Exception) {
                         Log.e(TAG, "getSyncTaskHistory error", e)
+                        reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    }
+                }
+
+            // clearSyncTaskRecords
+            BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.clearSyncTaskRecords", codec)
+                .setMessageHandler { message, reply ->
+                    try {
+                        val args = message as List<*>
+                        val taskId = args[0] as String
+                        SyncRecordStore.clearRecords(bridge.context, taskId)
+                        reply.reply(listOf(null))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "clearSyncTaskRecords error", e)
                         reply.reply(listOf(e.javaClass.simpleName, e.message, null))
                     }
                 }

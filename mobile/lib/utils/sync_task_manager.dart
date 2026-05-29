@@ -62,6 +62,19 @@ class SyncTaskManager extends ChangeNotifier {
   Future<void> updateTask(SyncTask updated) async {
     final index = _tasks.indexWhere((t) => t.id == updated.id);
     if (index == -1) return;
+    final previous = _tasks[index];
+
+    if (_requiresRecordReset(previous, updated)) {
+      try {
+        await NativeBridge.syncTaskApi.clearSyncTaskRecords(updated.id);
+      } catch (e) {
+        debugPrint('Failed to clear sync records for ${updated.id}: $e');
+      }
+      updated
+        ..lastSyncTime = null
+        ..lastSyncFileCount = null
+        ..lastError = null;
+    }
 
     _tasks[index] = updated;
     await _saveTasks();
@@ -96,6 +109,12 @@ class SyncTaskManager extends ChangeNotifier {
       await NativeBridge.syncTaskApi.cancelSyncTask(taskId);
     } catch (e) {
       debugPrint('Failed to cancel task $taskId: $e');
+    }
+
+    try {
+      await NativeBridge.syncTaskApi.clearSyncTaskRecords(taskId);
+    } catch (e) {
+      debugPrint('Failed to clear sync records for $taskId: $e');
     }
   }
 
@@ -142,6 +161,25 @@ class SyncTaskManager extends ChangeNotifier {
     } catch (_) {
       return null;
     }
+  }
+
+  bool _requiresRecordReset(SyncTask previous, SyncTask next) {
+    return previous.sourcePath != next.sourcePath ||
+        previous.targetPath != next.targetPath ||
+        previous.preserveFolderStructure != next.preserveFolderStructure ||
+        !_sameStringList(previous.fileExtensions, next.fileExtensions) ||
+        !_sameStringList(previous.excludeFolders, next.excludeFolders);
+  }
+
+  bool _sameStringList(List<String> a, List<String> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    final left = a.map((e) => e.trim()).toList()..sort();
+    final right = b.map((e) => e.trim()).toList()..sort();
+    for (var i = 0; i < left.length; i++) {
+      if (left[i] != right[i]) return false;
+    }
+    return true;
   }
 }
 

@@ -92,6 +92,8 @@ class _SyncHistoryPageState extends State<SyncHistoryPage> {
   Widget _buildHistoryCard(Map<String, dynamic> entry) {
     final runAt = entry['runAt'] as int? ?? 0;
     final totalFiles = entry['totalFiles'] as int? ?? 0;
+    final pendingFiles = entry['pendingFiles'] as int? ?? totalFiles;
+    final skippedFiles = entry['skippedFiles'] as int? ?? 0;
     final successCount = entry['successCount'] as int? ?? 0;
     final failureCount = entry['failureCount'] as int? ?? 0;
     final errors = (entry['errors'] as List<dynamic>?)
@@ -128,7 +130,11 @@ class _SyncHistoryPageState extends State<SyncHistoryPage> {
             const SizedBox(height: 12),
             Row(
               children: [
-                _buildStatChip('总计', totalFiles, Colors.blue),
+                _buildStatChip('总扫描', totalFiles, Colors.blue),
+                const SizedBox(width: 8),
+                _buildStatChip('待上传', pendingFiles, Colors.deepPurple),
+                const SizedBox(width: 8),
+                _buildStatChip('已跳过', skippedFiles, Colors.teal),
                 const SizedBox(width: 8),
                 _buildStatChip('成功', successCount, Colors.green),
                 const SizedBox(width: 8),

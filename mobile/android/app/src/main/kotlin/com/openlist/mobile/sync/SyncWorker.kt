@@ -56,14 +56,14 @@ class SyncWorker(
             taskConfig = SyncTaskConfig.fromJsonString(taskJson)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse task config for $taskId", e)
-            recordHistory(context, taskId, 0, 0, 1, listOf("任务配置解析失败: ${e.message ?: "unknown error"}"))
+            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("任务配置解析失败: ${e.message ?: "unknown error"}"))
             return@withContext Result.failure()
         }
 
         // 1. 校验存储权限
         if (!hasStorageAccess()) {
             Log.w(TAG, "No storage access for task $taskId")
-            recordHistory(context, taskId, 0, 0, 1, listOf("缺少本地存储访问权限"))
+            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("缺少本地存储访问权限"))
             return@withContext Result.failure()
         }
 
@@ -71,12 +71,12 @@ class SyncWorker(
         ensureRuntimeReady()
         if (!isProxyAlive()) {
             Log.w(TAG, "Encrypt proxy not alive for task $taskId")
-            recordHistory(context, taskId, 0, 0, 1, listOf("加密代理服务不可用"))
+            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("加密代理服务不可用"))
             return@withContext Result.failure()
         }
         if (!isAlistAlive()) {
             Log.w(TAG, "OpenList not alive for task $taskId")
-            recordHistory(context, taskId, 0, 0, 1, listOf("OpenList 服务(5244)不可用"))
+            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("OpenList 服务(5244)不可用"))
             return@withContext Result.failure()
         }
 
@@ -88,6 +88,8 @@ class SyncWorker(
                 taskId,
                 0,
                 0,
+                0,
+                0,
                 1,
                 listOf("目标路径未配置为加密路径，已阻止上传：${taskConfig.targetPath}")
             )
@@ -97,7 +99,7 @@ class SyncWorker(
         // 2.5. 获取认证 token（唯一来源：SyncScheduler.acquireAuthToken）
         val authToken = SyncScheduler.acquireAuthToken()
         if (authToken.isNullOrEmpty()) {
-            recordHistory(context, taskId, 0, 0, 1, listOf("未获取到管理认证 token，请先配置管理员密码"))
+            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("未获取到管理认证 token，请先配置管理员密码"))
             return@withContext Result.failure()
         }
 
@@ -105,7 +107,7 @@ class SyncWorker(
         val sourceDir = File(taskConfig.sourcePath)
         if (!sourceDir.exists() || !sourceDir.isDirectory) {
             Log.w(TAG, "Source directory does not exist: ${taskConfig.sourcePath}")
-            recordHistory(context, taskId, 0, 0, 1,
+            recordHistory(context, taskId, 0, 0, 0, 0, 1,
                 listOf("Source directory does not exist: ${taskConfig.sourcePath}"))
             return@withContext Result.failure()
         }
@@ -117,24 +119,36 @@ class SyncWorker(
 
         if (filesToUpload.isEmpty()) {
             Log.d(TAG, "No files to upload for task $taskId")
-            recordHistory(context, taskId, 0, 0, 0, emptyList())
+            recordHistory(context, taskId, 0, 0, 0, 0, 0, emptyList())
             return@withContext Result.success()
         }
 
         // 5. 过滤已同步文件（增量判断）
         val newOrModified = filesToUpload.filter { file ->
+            val remotePath = buildRemotePath(taskConfig, sourceDir, file)
             !SyncRecordStore.isAlreadySynced(
                 context,
                 taskId,
                 file.absolutePath,
                 file.length(),
-                file.lastModified()
+                file.lastModified(),
+                remotePath
             )
         }
+        val skippedCount = filesToUpload.size - newOrModified.size
 
         if (newOrModified.isEmpty()) {
             Log.d(TAG, "All files already synced for task $taskId")
-            recordHistory(context, taskId, filesToUpload.size, 0, 0, emptyList())
+            recordHistory(
+                context,
+                taskId,
+                filesToUpload.size,
+                0,
+                skippedCount,
+                0,
+                0,
+                emptyList()
+            )
             return@withContext Result.success()
         }
 
@@ -174,7 +188,16 @@ class SyncWorker(
         }
 
         // 7. 写入历史
-        recordHistory(context, taskId, newOrModified.size, successCount, failureCount, errors)
+        recordHistory(
+            context,
+            taskId,
+            filesToUpload.size,
+            newOrModified.size,
+            skippedCount,
+            successCount,
+            failureCount,
+            errors
+        )
 
         // 8. 如启用 deleteAfterSync，仅删除已成功上传的文件
         if (taskConfig.deleteAfterSync) {
@@ -393,6 +416,8 @@ class SyncWorker(
         context: Context,
         taskId: String,
         totalFiles: Int,
+        pendingFiles: Int,
+        skippedFiles: Int,
         successCount: Int,
         failureCount: Int,
         errors: List<String>
@@ -403,6 +428,8 @@ class SyncWorker(
                 taskId = taskId,
                 runAt = System.currentTimeMillis(),
                 totalFiles = totalFiles,
+                pendingFiles = pendingFiles,
+                skippedFiles = skippedFiles,
                 successCount = successCount,
                 failureCount = failureCount,
                 errors = errors
@@ -410,7 +437,7 @@ class SyncWorker(
         )
 
         // 更新任务的最后同步状态到 AppConfig
-        updateTaskStatus(context, taskId, successCount, if (errors.isNotEmpty()) errors.last() else null)
+        updateTaskStatus(context, taskId, totalFiles, if (errors.isNotEmpty()) errors.last() else null)
     }
 
     private fun updateTaskStatus(

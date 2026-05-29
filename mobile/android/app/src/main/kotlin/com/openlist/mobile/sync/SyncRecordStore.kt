@@ -28,6 +28,8 @@ data class SyncHistoryEntry(
     val taskId: String,
     val runAt: Long,
     val totalFiles: Int,
+    val pendingFiles: Int = 0,
+    val skippedFiles: Int = 0,
     val successCount: Int,
     val failureCount: Int,
     val errors: List<String> = emptyList()
@@ -111,11 +113,19 @@ object SyncRecordStore {
     }
 
     @Synchronized
-    fun isAlreadySynced(context: Context, taskId: String, filePath: String, fileSize: Long, lastModified: Long): Boolean {
+    fun isAlreadySynced(
+        context: Context,
+        taskId: String,
+        filePath: String,
+        fileSize: Long,
+        lastModified: Long,
+        remotePath: String
+    ): Boolean {
         val key = "$taskId:$filePath"
         val container = load(context)
         val existing = container.records[key]
         return existing != null &&
+            existing.remotePath == remotePath &&
             existing.fileSize == fileSize &&
             existing.lastModified == lastModified
     }
