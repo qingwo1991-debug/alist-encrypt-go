@@ -84,7 +84,7 @@ docker run -d \
 | **HTTP/2** | 原生 h2c 和 HTTPS 支持，管理界面热切换 |
 | **代理分流** | 按域名分流（`direct` / `env` / `fixed` / `rules`），内置网盘域名字典 |
 | **智能学习** | 自动探测各存储的 Range 兼容性并缓存，支持并发控制和冷却时间 |
-| **数据库** | 默认内存模式；可选 MySQL 持久化 Range 缓存与文件元数据 |
+| **数据库** | 默认 BoltDB 文件存储；可选 MySQL 持久化 Range 缓存与文件元数据 |
 | **部署** | 单二进制、多架构 Docker（linux/amd64, linux/arm64）、Android APK |
 | **管理界面** | Vue 3 管理面板：Alist 配置、WebDAV 设置、本地加解密、在线加密规则、文件迁移 |
 
@@ -170,16 +170,28 @@ go build -o alist-encrypt-go ./cmd/server
 | `ALIST_HOST` | Alist 服务器地址 | `localhost` |
 | `ALIST_PORT` | Alist 服务器端口 | `5244` |
 | `TZ` | 时区 | `UTC` |
-| `DB_TYPE` | 数据库类型（仅 `mysql`；需与 `DB_DSN` 同时设置才启用） | 空，默认内存模式 |
-| `DB_DSN` | MySQL 连接串 | 空，默认内存模式 |
+| `DB_TYPE` | 数据库类型（仅 `mysql`；需与 `DB_DSN` 同时设置才启用） | 空，默认 BoltDB |
+| `DB_DSN` | MySQL 连接串 | 空，默认 BoltDB |
+| `DB_DISABLE_CLEANUP` | 禁用数据库定期清理 | `false` |
 | `RANGE_FAIL_TO_DOWNGRADE` | Range 连续失败降级阈值 | `2` |
 | `RANGE_SUCCESS_TO_RECOVER` | Range 连续成功恢复阈值 | `3` |
 | `RANGE_REPROBE_MINUTES` | 不兼容后重探间隔（分钟） | `30` |
 | `RANGE_PROBE_TIMEOUT_SECONDS` | 后台 Range 探测超时（秒） | `8` |
+| `PROBE_ENABLE` | 启用后台 Range 兼容性探测 | `true` |
+| `PROBE_CONCURRENCY` | 探测全局并发数 | `4` |
+| `PROBE_PROVIDER_CONCURRENCY` | 每存储源并发数 | `1` |
+| `PROBE_MIN_DELAY_MS` | 探测最小延迟（毫秒） | `3000` |
+| `PROBE_MAX_DELAY_MS` | 探测最大延迟（毫秒） | `15000` |
+| `PROBE_COOLDOWN_MINUTES` | 探测冷却时间（分钟） | `1440` |
+| `PROBE_QUEUE_SIZE` | 探测队列容量 | `1000` |
+| `PROBE_MIN_SIZE_BYTES` | 触发探测的最小文件大小（字节） | `104857600` |
+| `PLAY_FIRST_FALLBACK` | Range 失败时回退全量播放 | `false` |
+| `SIZE_UNKNOWN_STRICT` | 未知大小时严格处理 | `true` |
+| `CHUNKED_SEEK_MAX_DISCARD_BYTES` | 分块 Seek 最大丢弃字节数 | `8388608` |
 
 ### 数据库
 
-可选 MySQL 用于持久化缓存（Range 兼容性、策略状态、文件元数据）。`DB_TYPE` 和 `DB_DSN` 必须同时设置才启用，否则使用内存模式。重复访问相同文件时，项目会避免多次写入同一条记录以减轻数据库压力。
+可选 MySQL 用于持久化缓存（Range 兼容性、策略状态、文件元数据）。`DB_TYPE` 和 `DB_DSN` 必须同时设置才启用，否则默认使用 BoltDB 文件存储（`data/alist-encrypt.db`）。重复访问相同文件时，项目会避免多次写入同一条记录以减轻数据库压力。
 
 ## 默认凭据
 
