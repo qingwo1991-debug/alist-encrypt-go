@@ -191,6 +191,11 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                       onPressed: () => _runNow(task),
                     ),
                     TextButton.icon(
+                      icon: const Icon(Icons.restart_alt),
+                      label: const Text('重传'),
+                      onPressed: () => _confirmRerunFromScratch(task),
+                    ),
+                    TextButton.icon(
                       icon: const Icon(Icons.edit),
                       label: const Text('编辑'),
                       onPressed: () => _openEditPage(task),
@@ -353,6 +358,45 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('执行失败: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _confirmRerunFromScratch(SyncTask task) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空记录并重传'),
+        content: Text(
+          '这会清空任务 "${task.name}" 的本地增量记录，并重新上传当前扫描到的文件。云端已有同名文件可能被覆盖，是否继续？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('继续'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _manager.rerunTaskFromScratch(task.id);
+      await _refreshStatuses();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('任务 "${task.name}" 已清空记录并重新执行')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('重传失败: $e')),
         );
       }
     }
