@@ -272,6 +272,9 @@ class LocalMountManager extends ChangeNotifier {
       }
       debugPrint('[LocalMountManager] Create storage returned null/unexpected');
       return AddMountResult.apiError('创建存储失败：API 返回异常');
+    } on ApiException catch (e) {
+      debugPrint('[LocalMountManager] Create storage api error: code=${e.code} message=${e.message} data=${e.data}');
+      return AddMountResult.apiError('创建存储失败：${e.message}');
     } catch (e) {
       debugPrint('[LocalMountManager] Create storage error: $e');
       return AddMountResult.apiError('创建存储失败: $e');

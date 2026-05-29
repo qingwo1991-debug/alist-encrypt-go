@@ -52,12 +52,24 @@ class OpenListApiClient {
         '未录入 OpenList 管理员密码，无法调用管理 API。\n请先输入当前密码校验；如果密码不一致，再到 OpenList 页面重置。',
       );
     }
-    final headers = {'Authorization': 'Bearer $token'};
+    final headers = {'Authorization': token};
     final url = '$_baseUrl$path';
     try {
-      return method == 'GET'
+      final resp = await (method == 'GET'
           ? _dio.get(url, options: Options(headers: headers))
-          : _dio.post(url, data: data, options: Options(headers: headers));
+          : _dio.post(url, data: data, options: Options(headers: headers)));
+      final payload = resp.data;
+      if (payload is Map<String, dynamic>) {
+        final code = payload['code'];
+        if (code is int && code != 200) {
+          throw ApiException(
+            code,
+            payload['message']?.toString() ?? 'OpenList API 调用失败',
+            payload['data'],
+          );
+        }
+      }
+      return resp;
     } on DioException catch (e) {
       final statusCode = e.response?.statusCode ?? 0;
       if (statusCode == 401 || statusCode == 403) {
@@ -67,6 +79,8 @@ class OpenListApiClient {
           'OpenList 管理员密码认证失败，无法调用管理 API。\n请重新输入正确密码；如果当前密码确实已变更，再到 OpenList 页面重置。',
         );
       }
+      rethrow;
+    } on ApiException {
       rethrow;
     }
   }
@@ -87,6 +101,8 @@ class OpenListApiClient {
       return [];
     } on AuthException {
       rethrow;
+    } on ApiException {
+      rethrow;
     } catch (e) {
       debugPrint('[OpenListApiClient] listStorages error: $e');
       return [];
@@ -99,32 +115,38 @@ class OpenListApiClient {
     required String mountPath,
   }) async {
     try {
-      final resp = await _authRequest('POST', '/api/admin/storage/create', data: {
-        'mount_path': mountPath,
-        'driver': 'Local',
-        'order': 0,
-        'remark': name,
-        'addition': json.encode({
-          'root_folder_path': localPath,
-          'thumbnail': false,
-          'thumb_cache_folder': '',
-          'show_hidden': true,
-          'mkdir_perm': '777',
-          'recycle_bin_path': 'delete permanently',
-        }),
-        'enable_sign': false,
-        'order_by': '',
-        'order_direction': '',
-        'extract_folder': '',
-        'web_proxy': false,
-        'webdav_policy': 'native_proxy',
-      });
+      final resp = await _authRequest(
+        'POST',
+        '/api/admin/storage/create',
+        data: {
+          'mount_path': mountPath,
+          'driver': 'Local',
+          'order': 0,
+          'remark': name,
+          'addition': json.encode({
+            'root_folder_path': localPath,
+            'thumbnail': false,
+            'thumb_cache_folder': '',
+            'show_hidden': true,
+            'mkdir_perm': '777',
+            'recycle_bin_path': 'delete permanently',
+          }),
+          'enable_sign': false,
+          'order_by': '',
+          'order_direction': '',
+          'extract_folder': '',
+          'web_proxy': false,
+          'webdav_policy': 'native_proxy',
+        },
+      );
       final data = resp.data;
       if (data is Map<String, dynamic> && data['code'] == 200) {
         return data['data'] as Map<String, dynamic>?;
       }
       return null;
     } on AuthException {
+      rethrow;
+    } on ApiException {
       rethrow;
     } catch (e) {
       debugPrint('[OpenListApiClient] createLocalStorage error: $e');
@@ -142,6 +164,8 @@ class OpenListApiClient {
       return data is Map<String, dynamic> && data['code'] == 200;
     } on AuthException {
       rethrow;
+    } on ApiException {
+      rethrow;
     } catch (e) {
       debugPrint('[OpenListApiClient] deleteStorage error: $e');
       return false;
@@ -157,6 +181,8 @@ class OpenListApiClient {
       }
       return null;
     } on AuthException {
+      rethrow;
+    } on ApiException {
       rethrow;
     } catch (e) {
       debugPrint('[OpenListApiClient] getStorage error: $e');
@@ -174,6 +200,8 @@ class OpenListApiClient {
       final data = resp.data;
       return data is Map<String, dynamic> && data['code'] == 200;
     } on AuthException {
+      rethrow;
+    } on ApiException {
       rethrow;
     } catch (e) {
       debugPrint('[OpenListApiClient] updateStorage error: $e');
@@ -205,6 +233,17 @@ class AuthException implements Exception {
   AuthException(this.reason, this.message);
   @override
   String toString() => message;
+}
+
+class ApiException implements Exception {
+  final int code;
+  final String message;
+  final Object? data;
+
+  ApiException(this.code, this.message, [this.data]);
+
+  @override
+  String toString() => 'OpenList API($code): $message';
 }
 
 enum AuthFailureReason {
