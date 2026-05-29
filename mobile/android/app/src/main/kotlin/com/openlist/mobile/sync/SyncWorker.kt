@@ -304,7 +304,7 @@ class SyncWorker(
             conn.setRequestProperty("Content-Length", file.length().toString())
             // 如果配置了管理员密码，携带认证 token
             if (!authToken.isNullOrEmpty()) {
-                conn.setRequestProperty("Authorization", "Bearer $authToken")
+                conn.setRequestProperty("Authorization", authToken)
             }
 
             // Write file body
