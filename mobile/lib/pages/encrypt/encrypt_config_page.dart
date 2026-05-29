@@ -974,8 +974,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.folder),
-                      title: const Text('本地目录挂载'),
-                      subtitle: const Text('挂载手机本地目录到 OpenList，支持 Download、DCIM 等'),
+                      title: const Text('高级：本地目录挂载'),
+                      subtitle: const Text('把手机目录作为 OpenList Local 存储浏览；媒体备份不需要配置这里'),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () {
                         Navigator.of(context).push(
@@ -991,8 +991,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.sync),
-                      title: const Text('同步任务'),
-                      subtitle: const Text('加密后定时同步上传到云端，支持文件类型过滤、WiFi-only'),
+                      title: const Text('媒体加密备份'),
+                      subtitle: const Text('照片/视频定时上传到已启用加密路径，可选择成功后删除本地'),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () {
                         Navigator.of(context).push(

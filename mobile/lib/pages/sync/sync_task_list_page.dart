@@ -36,12 +36,12 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('同步任务'),
+        title: const Text('媒体加密备份'),
         actions: [
           IconButton(
             icon: const Icon(Icons.add),
             onPressed: () => _openEditPage(null),
-            tooltip: '新建任务',
+            tooltip: '新建媒体备份',
           ),
         ],
       ),
@@ -59,16 +59,20 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.sync_disabled, size: 64, color: Theme.of(context).hintColor),
+            Icon(
+              Icons.cloud_upload_outlined,
+              size: 64,
+              color: Theme.of(context).hintColor,
+            ),
             const SizedBox(height: 16),
             Text(
-              '暂无同步任务',
+              '暂无媒体备份任务',
               style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
             ),
             const SizedBox(height: 16),
             FilledButton.icon(
               icon: const Icon(Icons.add),
-              label: const Text('新建同步任务'),
+              label: const Text('新建媒体备份'),
               onPressed: () => _openEditPage(null),
             ),
           ],
@@ -105,8 +109,8 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildInfoRow('源路径', task.sourcePath),
-                _buildInfoRow('目标路径', task.targetPath),
+                _buildInfoRow('手机目录', task.sourcePath),
+                _buildInfoRow('加密目标路径', task.targetPath),
                 _buildInfoRow(
                   '文件类型',
                   task.fileExtensions.isEmpty
@@ -117,7 +121,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                 _buildInfoRow('同步间隔', '${task.intervalHours}小时'),
                 _buildInfoRow('仅在WiFi下', task.wifiOnly ? '是' : '否'),
                 _buildInfoRow('保留目录结构', task.preserveFolderStructure ? '是' : '否'),
-                _buildInfoRow('同步后删除', task.deleteAfterSync ? '是 ⚠️' : '否'),
+                _buildInfoRow('备份后删除本地', task.deleteAfterSync ? '是 ⚠️' : '否'),
                 if (task.lastSyncTime != null)
                   _buildInfoRow(
                     '上次同步',
@@ -234,8 +238,8 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('删除任务'),
-        content: Text('确定要删除同步任务 "${task.name}" 吗？'),
+        title: const Text('删除备份任务'),
+        content: Text('确定要删除媒体备份任务 "${task.name}" 吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),

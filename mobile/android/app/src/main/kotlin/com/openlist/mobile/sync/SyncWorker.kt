@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import openlistlib.Openlistlib
+import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.net.HttpURLConnection
@@ -22,11 +24,11 @@ import java.net.URL
  * 流程：
  * 1. 读取任务配置
  * 2. 校验存储权限
- * 3. 校验加密代理服务存活 (127.0.0.1:5344)
+ * 3. 校验加密代理服务存活（使用当前配置端口，默认 5344）
  * 4. 扫描源目录（递归）
  * 5. 过滤扩展名 + 排除目录
  * 6. 对比本地同步记录（增量判断：filePath + fileSize + lastModified）
- * 7. 逐个上传至 127.0.0.1:5344
+ * 7. 逐个上传至本机加密代理
  * 8. 成功则写入同步记录
  * 9. 汇总成功/失败数并写入历史
  * 10. 如启用 deleteAfterSync，删除已成功上传的源文件
@@ -40,8 +42,8 @@ class SyncWorker(
         const val TAG = "SyncWorker"
         const val KEY_TASK_ID = "task_id"
         const val KEY_TASK_JSON = "task_json"
-        const val PROXY_BASE_URL = "http://127.0.0.1:5344"
         const val DEFAULT_ALIST_BASE_URL = "http://127.0.0.1:5244"
+        const val DEFAULT_PROXY_PORT = 5344L
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -66,14 +68,29 @@ class SyncWorker(
         }
 
         // 2. 校验本地 OpenList / 加密代理服务存活
+        ensureRuntimeReady()
         if (!isProxyAlive()) {
             Log.w(TAG, "Encrypt proxy not alive for task $taskId")
-            recordHistory(context, taskId, 0, 0, 1, listOf("加密代理服务(5344)不可用"))
+            recordHistory(context, taskId, 0, 0, 1, listOf("加密代理服务不可用"))
             return@withContext Result.failure()
         }
         if (!isAlistAlive()) {
             Log.w(TAG, "OpenList not alive for task $taskId")
             recordHistory(context, taskId, 0, 0, 1, listOf("OpenList 服务(5244)不可用"))
+            return@withContext Result.failure()
+        }
+
+        // 2.1. 强制要求目标路径在已启用加密路径内，避免明文上传后误删本地文件
+        if (!isEncryptedTargetPath(taskConfig.targetPath)) {
+            Log.w(TAG, "Target path is not covered by enabled encrypt paths: ${taskConfig.targetPath}")
+            recordHistory(
+                context,
+                taskId,
+                0,
+                0,
+                1,
+                listOf("目标路径未配置为加密路径，已阻止上传：${taskConfig.targetPath}")
+            )
             return@withContext Result.failure()
         }
 
@@ -191,7 +208,7 @@ class SyncWorker(
     }
 
     private fun isProxyAlive(): Boolean {
-        return isServiceAlive("$PROXY_BASE_URL/ping")
+        return isServiceAlive("${proxyBaseUrl()}/ping")
     }
 
     private fun isAlistAlive(): Boolean {
@@ -275,7 +292,7 @@ class SyncWorker(
     }
 
     private fun uploadFile(file: File, remotePath: String, authToken: String?) {
-        val url = URL("$PROXY_BASE_URL/api/fs/put")
+        val url = URL("${proxyBaseUrl()}/api/fs/put")
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "PUT"
@@ -309,6 +326,67 @@ class SyncWorker(
         } finally {
             conn.disconnect()
         }
+    }
+
+    private fun ensureRuntimeReady() {
+        try {
+            if (!isAlistAlive()) {
+                OpenList.startup()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to start OpenList before sync: ${e.message}")
+        }
+
+        try {
+            val configPath = File(AppConfig.dataDir, "encrypt_config.json").absolutePath
+            Openlistlib.initEncryptProxy(configPath)
+            if (!Openlistlib.isEncryptProxyRunning()) {
+                Openlistlib.startEncryptProxy()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to start encrypt proxy before sync: ${e.message}")
+        }
+    }
+
+    private fun proxyBaseUrl(): String {
+        val configuredPort = try {
+            Openlistlib.getEncryptProxyPort()
+        } catch (_: Exception) {
+            DEFAULT_PROXY_PORT
+        }
+        val port = if (configuredPort > 0) configuredPort else DEFAULT_PROXY_PORT
+        return "http://127.0.0.1:$port"
+    }
+
+    private fun isEncryptedTargetPath(targetPath: String): Boolean {
+        val target = normalizeOpenListPath(targetPath)
+        if (target.isBlank()) return false
+        return try {
+            val configJson = Openlistlib.getEncryptConfigJson()
+            if (configJson.isBlank() || configJson == "{}") return false
+            val paths = JSONObject(configJson).optJSONArray("encryptPaths") ?: return false
+            for (i in 0 until paths.length()) {
+                val item = paths.optJSONObject(i) ?: continue
+                if (!item.optBoolean("enable", true)) continue
+                val encryptPath = normalizeOpenListPath(item.optString("path"))
+                if (encryptPath.isBlank()) continue
+                if (encryptPath == "/" || target == encryptPath || target.startsWith("$encryptPath/")) {
+                    return true
+                }
+            }
+            false
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to validate encrypted target path: ${e.message}")
+            false
+        }
+    }
+
+    private fun normalizeOpenListPath(path: String): String {
+        val trimmed = path.trim().replace('\\', '/')
+        if (trimmed == "/") return "/"
+        val normalized = trimmed.trimEnd('/')
+        if (normalized.isBlank()) return ""
+        return if (normalized.startsWith("/")) normalized else "/$normalized"
     }
 
     private fun recordHistory(

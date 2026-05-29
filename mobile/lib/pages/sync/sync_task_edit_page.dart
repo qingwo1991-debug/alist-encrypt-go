@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 
+import '../../contant/native_bridge.dart';
 import '../../models/sync_task.dart';
 import '../../utils/sync_task_manager.dart';
 import '../../utils/storage_permission_helper.dart';
@@ -28,6 +31,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
   bool _preserveFolderStructure = true;
   List<String> _selectedExtensions = [];
   final Set<String> _selectedPresets = {};
+  List<String> _enabledEncryptPaths = [];
 
   bool get isEditing => widget.existingTask != null;
 
@@ -53,7 +57,16 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
           _selectedPresets.add(entry.key);
         }
       }
+    } else {
+      _selectedPresets
+        ..add('照片')
+        ..add('视频');
+      _selectedExtensions = [
+        ...SyncTask.presetExtensions['照片']!,
+        ...SyncTask.presetExtensions['视频']!,
+      ];
     }
+    _loadEncryptPaths();
   }
 
   @override
@@ -69,7 +82,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(isEditing ? '编辑同步任务' : '新建同步任务'),
+        title: Text(isEditing ? '编辑媒体备份' : '新建媒体备份'),
         actions: [
           if (isEditing)
             const Padding(
@@ -89,7 +102,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
               controller: _nameController,
               decoration: const InputDecoration(
                 labelText: '任务名称',
-                hintText: '例: 照片自动同步',
+                hintText: '例: 相册加密备份',
               ),
               validator: (v) => v == null || v.isEmpty ? '请输入任务名称' : null,
             ),
@@ -109,16 +122,54 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
             const SizedBox(height: 16),
             TextFormField(
               controller: _targetPathController,
-              decoration: const InputDecoration(
-                labelText: '目标路径 (Alist 路径)',
-                hintText: '/encrypt/photos',
+              decoration: InputDecoration(
+                labelText: '云端加密目标路径',
+                hintText: _enabledEncryptPaths.isEmpty
+                    ? '/encrypt/photos'
+                    : '${_enabledEncryptPaths.first}/photos',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.lock),
+                  tooltip: '选择已启用加密路径',
+                  onPressed: _enabledEncryptPaths.isEmpty
+                      ? null
+                      : _showEncryptPathPicker,
+                ),
               ),
-              validator: (v) => v == null || v.isEmpty ? '请输入目标路径' : null,
+              validator: (v) {
+                if (v == null || v.trim().isEmpty) return '请输入目标路径';
+                if (!_isCoveredByEnabledEncryptPath(v.trim())) {
+                  return '目标路径必须位于已启用的加密路径内';
+                }
+                return null;
+              },
             ),
+            if (_enabledEncryptPaths.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: _enabledEncryptPaths.map((path) {
+                  return ActionChip(
+                    avatar: const Icon(Icons.lock, size: 16),
+                    label: Text(path),
+                    onPressed: () => _applyEncryptPath(path),
+                  );
+                }).toList(),
+              ),
+            ] else ...[
+              const SizedBox(height: 8),
+              Text(
+                '请先在加密路径中添加并启用目标路径，否则不会创建备份任务。',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 13,
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
 
             // 文件类型预设
-            Text('文件类型过滤', style: Theme.of(context).textTheme.titleMedium),
+            Text('备份文件类型', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
@@ -185,7 +236,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
             ),
             SwitchListTile(
               title: const Text('同步后删除源文件 ⚠️'),
-              subtitle: const Text('仅删除已确认上传成功的文件，高风险操作'),
+              subtitle: const Text('只删除已成功上传到加密目标路径的文件'),
               value: _deleteAfterSync,
               onChanged: (v) => setState(() => _deleteAfterSync = v),
               contentPadding: EdgeInsets.zero,
@@ -203,7 +254,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
                         SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            '启用后，成功上传的文件将从本地删除。请确认云端已正确存储后再启用！',
+                            '启用后，只有确认上传成功的文件会从本地删除。目标路径未命中加密配置时任务会直接失败，不会删除本地文件。',
                             style: TextStyle(color: Colors.red, fontSize: 13),
                           ),
                         ),
@@ -286,6 +337,58 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
     }
   }
 
+  Future<void> _loadEncryptPaths() async {
+    try {
+      final configJson = await NativeBridge.encryptProxy.getEncryptConfigJson();
+      if (!mounted || configJson.isEmpty || configJson == '{}') return;
+      final config = json.decode(configJson) as Map<String, dynamic>;
+      final paths = config['encryptPaths'] as List<dynamic>? ?? [];
+      final enabled = paths
+          .whereType<Map>()
+          .where((p) => p['enable'] as bool? ?? true)
+          .map((p) => _normalizeOpenListPath(p['path']?.toString() ?? ''))
+          .where((p) => p.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+      setState(() {
+        _enabledEncryptPaths = enabled;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _enabledEncryptPaths = [];
+        });
+      }
+    }
+  }
+
+  void _showEncryptPathPicker() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final path in _enabledEncryptPaths)
+              ListTile(
+                leading: const Icon(Icons.lock),
+                title: Text(path),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _applyEncryptPath(path);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _applyEncryptPath(String path) {
+    _targetPathController.text = path;
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -306,7 +409,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
       id: taskId,
       name: _nameController.text.trim(),
       sourcePath: _sourcePathController.text.trim(),
-      targetPath: _targetPathController.text.trim(),
+      targetPath: _normalizeOpenListPath(_targetPathController.text),
       fileExtensions: _selectedExtensions,
       excludeFolders: excludeFolders,
       intervalHours: _intervalHours,
@@ -326,5 +429,23 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
     }
 
     if (mounted) Navigator.pop(context);
+  }
+
+  bool _isCoveredByEnabledEncryptPath(String path) {
+    final target = _normalizeOpenListPath(path);
+    if (target.isEmpty || _enabledEncryptPaths.isEmpty) return false;
+    return _enabledEncryptPaths.any((encryptPath) {
+      return encryptPath == '/' ||
+          target == encryptPath ||
+          target.startsWith('$encryptPath/');
+    });
+  }
+
+  String _normalizeOpenListPath(String path) {
+    final trimmed = path.trim().replaceAll('\\', '/');
+    if (trimmed == '/') return '/';
+    final normalized = trimmed.replaceAll(RegExp(r'/+$'), '');
+    if (normalized.isEmpty) return '';
+    return normalized.startsWith('/') ? normalized : '/$normalized';
   }
 }
