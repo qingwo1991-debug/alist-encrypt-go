@@ -60,6 +60,8 @@ class SyncWorker(
             return@withContext Result.failure()
         }
 
+        publishProgress(phase = "PREPARING")
+
         // 1. 校验存储权限
         if (!hasStorageAccess()) {
             Log.w(TAG, "No storage access for task $taskId")
@@ -116,6 +118,10 @@ class SyncWorker(
         val filesToUpload = mutableListOf<File>()
         val excludeNames = taskConfig.excludeFolders.map { it.trimEnd('/') }.toSet()
         collectFiles(sourceDir, taskConfig.fileExtensions, excludeNames, filesToUpload)
+        publishProgress(
+            phase = "SCANNING",
+            scannedFiles = filesToUpload.size,
+        )
 
         if (filesToUpload.isEmpty()) {
             Log.d(TAG, "No files to upload for task $taskId")
@@ -136,6 +142,12 @@ class SyncWorker(
             )
         }
         val skippedCount = filesToUpload.size - newOrModified.size
+        publishProgress(
+            phase = "READY",
+            scannedFiles = filesToUpload.size,
+            pendingFiles = newOrModified.size,
+            skippedFiles = skippedCount,
+        )
 
         if (newOrModified.isEmpty()) {
             Log.d(TAG, "All files already synced for task $taskId")
@@ -161,6 +173,15 @@ class SyncWorker(
         for (file in newOrModified) {
             try {
                 val remotePath = buildRemotePath(taskConfig, sourceDir, file)
+                publishProgress(
+                    phase = "UPLOADING",
+                    currentFile = file.name,
+                    scannedFiles = filesToUpload.size,
+                    pendingFiles = newOrModified.size,
+                    skippedFiles = skippedCount,
+                    uploadedFiles = successCount,
+                    failedFiles = failureCount,
+                )
                 uploadFile(file, remotePath, authToken)
 
                 // 记录同步成功
@@ -177,11 +198,29 @@ class SyncWorker(
                 )
                 syncedFiles.add(file)
                 successCount++
+                publishProgress(
+                    phase = "UPLOADING",
+                    currentFile = file.name,
+                    scannedFiles = filesToUpload.size,
+                    pendingFiles = newOrModified.size,
+                    skippedFiles = skippedCount,
+                    uploadedFiles = successCount,
+                    failedFiles = failureCount,
+                )
                 Log.d(TAG, "Uploaded: ${file.absolutePath} -> $remotePath")
             } catch (e: Exception) {
                 failureCount++
                 val errorMsg = "${file.name}: ${e.message}"
                 errors.add(errorMsg)
+                publishProgress(
+                    phase = "UPLOADING",
+                    currentFile = file.name,
+                    scannedFiles = filesToUpload.size,
+                    pendingFiles = newOrModified.size,
+                    skippedFiles = skippedCount,
+                    uploadedFiles = successCount,
+                    failedFiles = failureCount,
+                )
                 Log.e(TAG, "Failed to upload ${file.absolutePath}: ${e.message}", e)
                 // 单文件失败不终止整个任务
             }
@@ -214,6 +253,14 @@ class SyncWorker(
         }
 
         // 9. Worker 返回 success/failure 取决于是否完成主流程（不论单文件失败）
+        publishProgress(
+            phase = "COMPLETED",
+            scannedFiles = filesToUpload.size,
+            pendingFiles = newOrModified.size,
+            skippedFiles = skippedCount,
+            uploadedFiles = successCount,
+            failedFiles = failureCount,
+        )
         if (failureCount > 0) {
             Result.success() // 主流程完成，单文件失败不影响
         } else {
@@ -410,6 +457,26 @@ class SyncWorker(
         val normalized = trimmed.trimEnd('/')
         if (normalized.isBlank()) return ""
         return if (normalized.startsWith("/")) normalized else "/$normalized"
+    }
+
+    private suspend fun publishProgress(
+        phase: String,
+        currentFile: String? = null,
+        scannedFiles: Int? = null,
+        pendingFiles: Int? = null,
+        skippedFiles: Int? = null,
+        uploadedFiles: Int? = null,
+        failedFiles: Int? = null,
+    ) {
+        val builder = Data.Builder()
+            .putString("phase", phase)
+        currentFile?.let { builder.putString("currentFile", it) }
+        scannedFiles?.let { builder.putInt("scannedFiles", it) }
+        pendingFiles?.let { builder.putInt("pendingFiles", it) }
+        skippedFiles?.let { builder.putInt("skippedFiles", it) }
+        uploadedFiles?.let { builder.putInt("uploadedFiles", it) }
+        failedFiles?.let { builder.putInt("failedFiles", it) }
+        setProgress(builder.build())
     }
 
     private fun recordHistory(

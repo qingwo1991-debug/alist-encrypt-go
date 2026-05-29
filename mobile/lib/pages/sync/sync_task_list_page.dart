@@ -159,6 +159,8 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                     _describeStatus(status),
                     isError: _isFailedStatus(status),
                   ),
+                if (status != null && _hasRuntimeProgress(status))
+                  _buildRuntimeProgress(status),
                 if (status != null && status['lastHistoryEntry'] is Map)
                   ..._buildHistorySummaryRows(
                     status['lastHistoryEntry'] as Map<String, dynamic>,
@@ -254,6 +256,71 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
     ];
   }
 
+  bool _hasRuntimeProgress(Map<String, dynamic> status) {
+    return status['scannedFiles'] != null ||
+        status['pendingFiles'] != null ||
+        status['uploadedFiles'] != null ||
+        status['failedFiles'] != null ||
+        status['currentFile'] != null;
+  }
+
+  Widget _buildRuntimeProgress(Map<String, dynamic> status) {
+    final scannedFiles = status['scannedFiles'] as int?;
+    final pendingFiles = status['pendingFiles'] as int?;
+    final skippedFiles = status['skippedFiles'] as int?;
+    final uploadedFiles = status['uploadedFiles'] as int? ?? 0;
+    final failedFiles = status['failedFiles'] as int? ?? 0;
+    final currentFile = status['currentFile']?.toString();
+    final phase = _describePhase(status['currentPhase']?.toString());
+    final denominator = pendingFiles ?? scannedFiles ?? 0;
+    final completed = uploadedFiles + failedFiles;
+    final progress = denominator > 0 ? (completed / denominator).clamp(0.0, 1.0) : null;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildInfoRow('当前阶段', phase),
+          if (currentFile != null && currentFile.isNotEmpty)
+            _buildInfoRow('当前文件', currentFile),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _buildMetricChip('扫描', '${scannedFiles ?? 0}', Colors.blue),
+              _buildMetricChip('待传', '${pendingFiles ?? 0}', Colors.deepPurple),
+              _buildMetricChip('跳过', '${skippedFiles ?? 0}', Colors.teal),
+              _buildMetricChip('成功', '$uploadedFiles', Colors.green),
+              _buildMetricChip('失败', '$failedFiles',
+                  failedFiles > 0 ? Colors.red : Colors.grey),
+            ],
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(value: progress),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMetricChip(String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Text(
+        '$label $value',
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
   Future<void> _openEditPage(SyncTask? task) async {
     await Navigator.push(
       context,
@@ -304,6 +371,23 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
       return '立即任务: $oneTimeState';
     }
     return '周期任务: $periodicState';
+  }
+
+  String _describePhase(String? phase) {
+    switch (phase) {
+      case 'PREPARING':
+        return '准备中';
+      case 'SCANNING':
+        return '扫描本地文件';
+      case 'READY':
+        return '等待上传';
+      case 'UPLOADING':
+        return '上传中';
+      case 'COMPLETED':
+        return '已完成';
+      default:
+        return '未知';
+    }
   }
 
   void _confirmDelete(SyncTask task) {

@@ -164,6 +164,7 @@ object SyncScheduler {
 
         var periodicState = "NOT_SCHEDULED"
         var oneTimeState = "NONE"
+        var activeProgress: Data? = null
 
         // 检查 PeriodicWork
         try {
@@ -171,7 +172,11 @@ object SyncScheduler {
                 .getWorkInfosForUniqueWork(periodicName)
                 .get()
             if (periodicWorkInfo.isNotEmpty()) {
-                periodicState = periodicWorkInfo[0].state.name
+                val info = periodicWorkInfo[0]
+                periodicState = info.state.name
+                if (activeProgress == null && !info.progress.keyValueMap.isEmpty()) {
+                    activeProgress = info.progress
+                }
             }
         } catch (_: Exception) {
             periodicState = "UNKNOWN"
@@ -183,7 +188,11 @@ object SyncScheduler {
                 .getWorkInfosForUniqueWork(onetimeName)
                 .get()
             if (oneTimeWorkInfo.isNotEmpty()) {
-                oneTimeState = oneTimeWorkInfo[0].state.name
+                val info = oneTimeWorkInfo[0]
+                oneTimeState = info.state.name
+                if (!info.progress.keyValueMap.isEmpty()) {
+                    activeProgress = info.progress
+                }
             }
         } catch (_: Exception) {
             oneTimeState = "UNKNOWN"
@@ -213,6 +222,13 @@ object SyncScheduler {
             taskId = taskId,
             periodicState = periodicState,
             oneTimeState = oneTimeState,
+            currentPhase = activeProgress?.getString("phase"),
+            currentFile = activeProgress?.getString("currentFile"),
+            scannedFiles = activeProgress?.getInt("scannedFiles", -1)?.takeIf { it >= 0 },
+            pendingFiles = activeProgress?.getInt("pendingFiles", -1)?.takeIf { it >= 0 },
+            skippedFiles = activeProgress?.getInt("skippedFiles", -1)?.takeIf { it >= 0 },
+            uploadedFiles = activeProgress?.getInt("uploadedFiles", -1)?.takeIf { it >= 0 },
+            failedFiles = activeProgress?.getInt("failedFiles", -1)?.takeIf { it >= 0 },
             lastSyncTime = lastSyncTime,
             lastSyncFileCount = lastSyncFileCount,
             lastError = lastError,

@@ -128,18 +128,19 @@ class _SyncHistoryPageState extends State<SyncHistoryPage> {
               ],
             ),
             const SizedBox(height: 12),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
                 _buildStatChip('总扫描', totalFiles, Colors.blue),
-                const SizedBox(width: 8),
                 _buildStatChip('待上传', pendingFiles, Colors.deepPurple),
-                const SizedBox(width: 8),
                 _buildStatChip('已跳过', skippedFiles, Colors.teal),
-                const SizedBox(width: 8),
                 _buildStatChip('成功', successCount, Colors.green),
-                const SizedBox(width: 8),
-                _buildStatChip('失败', failureCount,
-                    failureCount > 0 ? Colors.red : Colors.grey),
+                _buildStatChip(
+                  '失败',
+                  failureCount,
+                  failureCount > 0 ? Colors.red : Colors.grey,
+                ),
               ],
             ),
             if (errors.isNotEmpty) ...[
