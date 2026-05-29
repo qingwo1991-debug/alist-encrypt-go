@@ -5,7 +5,9 @@ import android.content.pm.PackageManager
 import android.os.Environment
 import android.util.Log
 import androidx.work.*
+import com.openlist.mobile.constant.LogLevel
 import com.openlist.mobile.config.AppConfig
+import com.openlist.mobile.model.openlist.Logger
 import com.openlist.mobile.model.openlist.OpenList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -17,6 +19,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 /**
  * WorkManager Worker：执行单个同步任务
@@ -44,6 +48,7 @@ class SyncWorker(
         const val KEY_TASK_JSON = "task_json"
         const val DEFAULT_ALIST_BASE_URL = "http://127.0.0.1:5244"
         const val DEFAULT_PROXY_PORT = 5344L
+        private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -365,6 +370,7 @@ class SyncWorker(
         val url = URL("${proxyBaseUrl()}/api/fs/put")
         val conn = url.openConnection() as HttpURLConnection
         try {
+            appLog(LogLevel.INFO, "媒体备份上传开始：remotePath=$remotePath local=${file.name} size=${file.length()}")
             conn.requestMethod = "PUT"
             conn.doOutput = true
             conn.connectTimeout = 30000
@@ -385,14 +391,49 @@ class SyncWorker(
             }
 
             val responseCode = conn.responseCode
-            if (responseCode !in 200..299) {
-                val errorBody = try {
-                    conn.errorStream?.bufferedReader()?.readText() ?: ""
-                } catch (_: Exception) {
-                    ""
+            val responseBody = try {
+                if (responseCode in 200..299) {
+                    conn.inputStream?.bufferedReader()?.readText().orEmpty()
+                } else {
+                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
                 }
-                throw Exception("HTTP $responseCode: $errorBody")
+            } catch (_: Exception) {
+                ""
             }
+
+            if (responseCode >= 400) {
+                appLog(
+                    LogLevel.WARN,
+                    "媒体备份上传失败：remotePath=$remotePath http=$responseCode body=${compactBody(responseBody)}"
+                )
+                throw Exception("HTTP $responseCode: $responseBody")
+            }
+
+            val json = try {
+                if (responseBody.isBlank()) {
+                    null
+                } else {
+                    JSONObject(responseBody)
+                }
+            } catch (_: Exception) {
+                null
+            }
+            val apiCode = json?.optInt("code", -1) ?: -1
+            val message = json?.optString("message").orEmpty()
+            if (apiCode != 200) {
+                appLog(
+                    LogLevel.WARN,
+                    "媒体备份上传失败：remotePath=$remotePath http=$responseCode apiCode=$apiCode message=$message body=${compactBody(responseBody)}"
+                )
+                throw Exception(
+                    if (message.isNotBlank()) "API code $apiCode: $message"
+                    else "API code $apiCode: $responseBody"
+                )
+            }
+            appLog(
+                LogLevel.INFO,
+                "媒体备份上传成功：remotePath=$remotePath http=$responseCode apiCode=$apiCode message=$message"
+            )
         } finally {
             conn.disconnect()
         }
@@ -477,6 +518,15 @@ class SyncWorker(
         uploadedFiles?.let { builder.putInt("uploadedFiles", it) }
         failedFiles?.let { builder.putInt("failedFiles", it) }
         setProgress(builder.build())
+    }
+
+    private fun compactBody(body: String, maxLen: Int = 240): String {
+        val compact = body.replace('\n', ' ').replace('\r', ' ').trim()
+        return if (compact.length <= maxLen) compact else compact.take(maxLen) + "..."
+    }
+
+    private fun appLog(level: Int, msg: String) {
+        Logger.log(level, logDateFormatter.format(System.currentTimeMillis()), msg)
     }
 
     private fun recordHistory(
