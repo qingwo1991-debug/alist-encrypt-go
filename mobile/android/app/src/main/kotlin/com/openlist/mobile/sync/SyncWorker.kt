@@ -355,7 +355,7 @@ class SyncWorker(
         sourceDir: File,
         file: File
     ): String {
-        val targetPath = config.targetPath.trimEnd('/')
+        val targetPath = normalizeOpenListPath(config.targetPath)
         return if (config.preserveFolderStructure) {
             val relativePath = file.absolutePath
                 .removePrefix(sourceDir.absolutePath)
@@ -495,7 +495,12 @@ class SyncWorker(
     private fun normalizeOpenListPath(path: String): String {
         val trimmed = path.trim().replace('\\', '/')
         if (trimmed == "/") return "/"
-        val normalized = trimmed.trimEnd('/')
+        val wildcardNormalized = if (trimmed.endsWith("/*")) {
+            trimmed.dropLast(2)
+        } else {
+            trimmed
+        }
+        val normalized = wildcardNormalized.trimEnd('/')
         if (normalized.isBlank()) return ""
         return if (normalized.startsWith("/")) normalized else "/$normalized"
     }
