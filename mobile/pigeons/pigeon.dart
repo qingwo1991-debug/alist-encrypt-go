@@ -184,6 +184,9 @@ abstract class SyncTaskApi {
   /// 立即执行一个同步任务
   void runSyncTaskNow(String taskId);
 
+  /// 清理某个同步任务的增量记录
+  void clearSyncTaskRecords(String taskId);
+
   /// 获取同步任务状态
   String getSyncTaskStatus(String taskId);
 

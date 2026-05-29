@@ -159,6 +159,10 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                     _describeStatus(status),
                     isError: _isFailedStatus(status),
                   ),
+                if (status != null && status['lastHistoryEntry'] is Map)
+                  ..._buildHistorySummaryRows(
+                    status['lastHistoryEntry'] as Map<String, dynamic>,
+                  ),
                 if (task.lastSyncTime != null)
                   _buildInfoRow(
                     '上次同步',
@@ -167,7 +171,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                         .substring(0, 19),
                   ),
                 if (task.lastSyncFileCount != null)
-                  _buildInfoRow('上次同步文件数', '${task.lastSyncFileCount}'),
+                  _buildInfoRow('上次扫描文件数', '${task.lastSyncFileCount}'),
                 if (task.lastError != null && task.lastError!.isNotEmpty)
                   _buildInfoRow('最后错误', task.lastError!, isError: true),
                 const SizedBox(height: 8),
@@ -233,6 +237,21 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         ],
       ),
     );
+  }
+
+  List<Widget> _buildHistorySummaryRows(Map<String, dynamic> history) {
+    final totalFiles = history['totalFiles'] as int? ?? 0;
+    final pendingFiles = history['pendingFiles'] as int? ?? totalFiles;
+    final skippedFiles = history['skippedFiles'] as int? ?? 0;
+    final successCount = history['successCount'] as int? ?? 0;
+    final failureCount = history['failureCount'] as int? ?? 0;
+    return [
+      _buildInfoRow('本次扫描', '$totalFiles'),
+      _buildInfoRow('待上传', '$pendingFiles'),
+      _buildInfoRow('已跳过', '$skippedFiles'),
+      _buildInfoRow('成功/失败', '$successCount / $failureCount',
+          isError: failureCount > 0),
+    ];
   }
 
   Future<void> _openEditPage(SyncTask? task) async {
