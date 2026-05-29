@@ -3,7 +3,9 @@ package com.openlist.mobile.sync
 import android.content.Context
 import android.util.Log
 import androidx.work.*
+import com.openlist.mobile.constant.LogLevel
 import com.openlist.mobile.config.AppConfig
+import com.openlist.mobile.model.openlist.Logger
 import com.openlist.mobile.model.openlist.OpenList
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -12,6 +14,8 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
@@ -30,6 +34,7 @@ object SyncScheduler {
     private const val TAG = "SyncScheduler"
     private const val WORK_NAME_PREFIX = "sync_task_"
     private const val WORK_NAME_ONETIME_PREFIX = "sync_task_onetime_"
+    private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
 
     /**
      * 调度一个定时同步任务（PeriodicWorkRequest）
@@ -253,10 +258,12 @@ object SyncScheduler {
         val password = AppConfig.encryptAdminPassword.trim()
         if (password.isBlank()) {
             Log.w(TAG, "No cached OpenList admin password configured, cannot acquire token")
+            appLog(LogLevel.WARN, "本地挂载认证跳过：未缓存 OpenList 管理员密码")
             return null
         }
 
         acquireAuthTokenWithPassword(password)?.let { return it }
+        appLog(LogLevel.WARN, "本地挂载认证失败：缓存的 OpenList 管理员密码无法登录")
         return null
     }
 
@@ -264,6 +271,7 @@ object SyncScheduler {
         val password = rawPassword.trim()
         if (password.isBlank()) {
             Log.w(TAG, "acquireAuthTokenByPassword skipped: blank password")
+            appLog(LogLevel.WARN, "本地挂载认证跳过：输入的 OpenList 管理员密码为空")
             return null
         }
         Log.d(TAG, "Trying explicit admin password for management token")
@@ -282,6 +290,7 @@ object SyncScheduler {
             val loginUrl = URL("$baseUrl/api/auth/login/hash")
             val conn = loginUrl.openConnection() as HttpURLConnection
             try {
+                appLog(LogLevel.INFO, "本地挂载认证开始：$baseUrl/api/auth/login/hash")
                 conn.requestMethod = "POST"
                 conn.doOutput = true
                 conn.connectTimeout = 5000
@@ -314,14 +323,20 @@ object SyncScheduler {
                             AppConfig.encryptAdminPassword = password
                         }
                         Log.d(TAG, "Auth token acquired via login/hash for admin API access via $baseUrl")
+                        appLog(LogLevel.INFO, "本地挂载认证成功：OpenList 管理员密码已校验")
                         return token
                     }
+                    appLog(
+                        LogLevel.WARN,
+                        "本地挂载认证失败：http=$responseCode apiCode=$apiCode message=$message tokenEmpty=${token.isNullOrEmpty()}"
+                    )
                     Log.w(
                         TAG,
                         "OpenList login/hash failed via $baseUrl: http=$responseCode apiCode=$apiCode " +
                             "message=$message tokenEmpty=${token.isNullOrEmpty()}"
                     )
                 } else {
+                    appLog(LogLevel.WARN, "本地挂载认证失败：http=$responseCode emptyBody=${response.isBlank()}")
                     Log.w(TAG, "OpenList login/hash failed via $baseUrl: http=$responseCode emptyBody=${response.isBlank()}")
                 }
             } finally {
@@ -329,6 +344,7 @@ object SyncScheduler {
             }
             null
         } catch (e: Exception) {
+            appLog(LogLevel.WARN, "本地挂载认证异常：${e.javaClass.simpleName}: ${e.message}")
             Log.w(TAG, "Failed to acquire auth token via $baseUrl: ${e.message}")
             null
         }
@@ -352,5 +368,12 @@ object SyncScheduler {
         val input = "$password-https://github.com/alist-org/alist"
         val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun appLog(level: Int, msg: String) {
+        val time = synchronized(logDateFormatter) {
+            logDateFormatter.format(System.currentTimeMillis())
+        }
+        Logger.log(level, time, msg)
     }
 }

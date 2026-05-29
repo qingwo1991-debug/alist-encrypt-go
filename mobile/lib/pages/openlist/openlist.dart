@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:openlist_mobile/generated_api.dart';
 import 'package:openlist_mobile/pages/openlist/about_dialog.dart';
 import 'package:openlist_mobile/pages/openlist/pwd_edit_dialog.dart';
@@ -9,7 +12,6 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'dart:io';
 
 import '../../generated/l10n.dart';
 import '../../utils/admin_auth_manager.dart';
@@ -26,7 +28,16 @@ class OpenListScreen extends StatelessWidget {
       debugPrint('[OpenListScreen] setAdminPwd success');
       AdminAuthManager.instance.invalidate();
       if (Get.isRegistered<LocalMountController>()) {
-        await Get.find<LocalMountController>().refreshBackendStatus();
+        unawaited(
+          Get.find<LocalMountController>()
+              .refreshBackendStatus()
+              .timeout(const Duration(seconds: 5))
+              .catchError((e) {
+            debugPrint(
+              '[OpenListScreen] refreshBackendStatus after password update failed: $e',
+            );
+          }),
+        );
       }
       Get.showSnackbar(const GetSnackBar(
         title: '管理员密码已更新',
