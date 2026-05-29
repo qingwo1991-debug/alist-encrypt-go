@@ -128,6 +128,30 @@ class SyncTaskManager extends ChangeNotifier {
     }
   }
 
+  Future<void> clearTaskRecords(String taskId) async {
+    try {
+      await NativeBridge.syncTaskApi.clearSyncTaskRecords(taskId);
+    } catch (e) {
+      debugPrint('Failed to clear sync records for $taskId: $e');
+      rethrow;
+    }
+
+    final index = _tasks.indexWhere((t) => t.id == taskId);
+    if (index >= 0) {
+      _tasks[index]
+        ..lastSyncTime = null
+        ..lastSyncFileCount = null
+        ..lastError = null;
+      await _saveTasks();
+      notifyListeners();
+    }
+  }
+
+  Future<void> rerunTaskFromScratch(String taskId) async {
+    await clearTaskRecords(taskId);
+    await runTaskNow(taskId);
+  }
+
   /// 获取同步任务状态（JSON）
   Future<Map<String, dynamic>?> getTaskStatus(String taskId) async {
     try {
