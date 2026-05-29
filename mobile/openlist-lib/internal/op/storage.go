@@ -48,25 +48,46 @@ func GetStorageByMountPath(mountPath string) (driver.Driver, error) {
 func CreateStorage(ctx context.Context, storage model.Storage) (uint, error) {
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+	log.Infof(
+		"[mobile_storage_create] normalized mount_path=%s driver=%s remark=%s",
+		storage.MountPath,
+		storage.Driver,
+		storage.Remark,
+	)
 	var err error
 	// check driver first
 	driverName := storage.Driver
 	driverNew, err := GetDriver(driverName)
 	if err != nil {
+		log.Warnf("[mobile_storage_create] get driver failed driver=%s err=%v", driverName, err)
 		return 0, errors.WithMessage(err, "failed get driver new")
 	}
 	storageDriver := driverNew()
 	// insert storage to database
 	err = db.CreateStorage(&storage)
 	if err != nil {
+		log.Warnf("[mobile_storage_create] db create failed mount_path=%s err=%v", storage.MountPath, err)
 		return storage.ID, errors.WithMessage(err, "failed create storage in database")
 	}
 	// already has an id
 	err = initStorage(ctx, storage, storageDriver)
 	go callStorageHooks("add", storageDriver)
 	if err != nil {
+		log.Warnf(
+			"[mobile_storage_create] init failed id=%d mount_path=%s driver=%s err=%v",
+			storage.ID,
+			storage.MountPath,
+			storage.Driver,
+			err,
+		)
 		return storage.ID, errors.Wrap(err, "failed init storage but storage is already created")
 	}
+	log.Infof(
+		"[mobile_storage_create] initialized id=%d mount_path=%s driver=%s",
+		storage.ID,
+		storage.MountPath,
+		storage.Driver,
+	)
 	log.Debugf("storage %+v is created", storageDriver)
 	return storage.ID, nil
 }
@@ -109,6 +130,15 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 	}()
 	// Unmarshal Addition
 	err = utils.Json.UnmarshalFromString(driverStorage.Addition, storageDriver.GetAddition())
+	if err != nil {
+		log.Warnf(
+			"[mobile_storage_create] addition unmarshal failed mount_path=%s driver=%s err=%v raw_addition=%s",
+			driverStorage.MountPath,
+			driverStorage.Driver,
+			err,
+			driverStorage.Addition,
+		)
+	}
 	if err == nil {
 		if ref, ok := storageDriver.(driver.Reference); ok {
 			if strings.HasPrefix(driverStorage.Remark, "ref:/") {
