@@ -93,14 +93,35 @@ func ListStorages(c *gin.Context) {
 func CreateStorage(c *gin.Context) {
 	var req model.Storage
 	if err := c.ShouldBind(&req); err != nil {
+		log.Warnf("[mobile_storage_create] bind request failed: %v", err)
 		common.ErrorResp(c, err, 400)
 		return
 	}
+	log.Infof(
+		"[mobile_storage_create] request mount_path=%s driver=%s remark=%s addition_len=%d",
+		req.MountPath,
+		req.Driver,
+		req.Remark,
+		len(req.Addition),
+	)
 	if id, err := op.CreateStorage(c.Request.Context(), req); err != nil {
+		log.Warnf(
+			"[mobile_storage_create] failed id=%d mount_path=%s driver=%s err=%v",
+			id,
+			req.MountPath,
+			req.Driver,
+			err,
+		)
 		common.ErrorWithDataResp(c, err, 500, gin.H{
 			"id": id,
 		}, true)
 	} else {
+		log.Infof(
+			"[mobile_storage_create] success id=%d mount_path=%s driver=%s",
+			id,
+			req.MountPath,
+			req.Driver,
+		)
 		common.SuccessResp(c, gin.H{
 			"id": id,
 		})
