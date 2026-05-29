@@ -444,7 +444,10 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
   String _normalizeOpenListPath(String path) {
     final trimmed = path.trim().replaceAll('\\', '/');
     if (trimmed == '/') return '/';
-    final normalized = trimmed.replaceAll(RegExp(r'/+$'), '');
+    final wildcardNormalized = trimmed.endsWith('/*')
+        ? trimmed.substring(0, trimmed.length - 2)
+        : trimmed;
+    final normalized = wildcardNormalized.replaceAll(RegExp(r'/+$'), '');
     if (normalized.isEmpty) return '';
     return normalized.startsWith('/') ? normalized : '/$normalized';
   }
