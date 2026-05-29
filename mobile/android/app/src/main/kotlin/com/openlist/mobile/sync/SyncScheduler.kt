@@ -11,6 +11,7 @@ import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
@@ -278,36 +279,51 @@ object SyncScheduler {
 
     private fun acquireAuthTokenWithPassword(baseUrl: String, password: String): String? {
         return try {
-            val loginUrl = URL("$baseUrl/api/auth/login")
+            val loginUrl = URL("$baseUrl/api/auth/login/hash")
             val conn = loginUrl.openConnection() as HttpURLConnection
             try {
                 conn.requestMethod = "POST"
                 conn.doOutput = true
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
-                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("Accept", "application/json")
+                conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8")
 
                 val loginBody = JSONObject().apply {
                     put("username", "admin")
-                    put("password", password)
+                    put("password", staticHash(password))
+                    put("otp_code", "")
                 }.toString()
 
                 OutputStreamWriter(conn.outputStream).use { it.write(loginBody) }
                 conn.outputStream.close()
 
-                if (conn.responseCode == 200) {
-                    val response = conn.inputStream.bufferedReader().readText()
+                val responseCode = conn.responseCode
+                val response = if (responseCode in 200..299) {
+                    conn.inputStream.bufferedReader().readText()
+                } else {
+                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                }
+                if (responseCode == 200 && response.isNotBlank()) {
                     val json = JSONObject(response)
+                    val apiCode = json.optInt("code", 0)
+                    val message = json.optString("message")
                     val token = json.optJSONObject("data")?.optString("token")
-                    if (!token.isNullOrEmpty()) {
+                    if (apiCode == 200 && !token.isNullOrEmpty()) {
                         if (AppConfig.encryptAdminPassword != password) {
                             AppConfig.encryptAdminPassword = password
                         }
-                        Log.d(TAG, "Auth token acquired for admin API access via $baseUrl")
+                        Log.d(TAG, "Auth token acquired via login/hash for admin API access via $baseUrl")
                         return token
                     }
+                    Log.w(
+                        TAG,
+                        "OpenList login/hash failed via $baseUrl: http=$responseCode apiCode=$apiCode " +
+                            "message=$message tokenEmpty=${token.isNullOrEmpty()}"
+                    )
+                } else {
+                    Log.w(TAG, "OpenList login/hash failed via $baseUrl: http=$responseCode emptyBody=${response.isBlank()}")
                 }
-                Log.w(TAG, "Token login failed via $baseUrl: HTTP ${conn.responseCode}")
             } finally {
                 conn.disconnect()
             }
@@ -330,5 +346,11 @@ object SyncScheduler {
         }
         urls.add("http://127.0.0.1:$DEFAULT_OPENLIST_PORT")
         return urls.toList()
+    }
+
+    private fun staticHash(password: String): String {
+        val input = "$password-https://github.com/alist-org/alist"
+        val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 }

@@ -79,17 +79,29 @@ object OpenList : Event, LogCallback {
         val normalizedPassword = pwd.trim()
         require(normalizedPassword.length >= 4) { "管理员密码至少需要 4 位" }
 
-        Log.d(TAG, "setAdminPassword begin")
-        if (!isRunning()) init()
+        Log.d(TAG, "setAdminPassword begin length=${normalizedPassword.length}")
+        logMobile(LogLevel.INFO, "开始更新 OpenList 管理员密码")
+        val running = isRunning()
+        Log.d(TAG, "setAdminPassword isRunning=$running")
+        if (!running) {
+            logMobile(LogLevel.INFO, "OpenList 未运行，先初始化配置")
+            init()
+        }
 
         Log.d(TAG, "setAdminPassword: $dataDir")
         Openlistlib.setConfigData(dataDir)
 
         Log.d(TAG, "setAdminPassword updating OpenList admin")
+        logMobile(LogLevel.INFO, "正在写入 OpenList 管理员密码")
         Openlistlib.setAdminPassword(normalizedPassword)
         AppConfig.encryptAdminPassword = normalizedPassword
         Log.d(TAG, "setAdminPassword cached OpenList admin password for mobile auth")
+        logMobile(LogLevel.INFO, "OpenList 管理员密码更新流程已返回")
         Log.d(TAG, "setAdminPassword completed")
+    }
+
+    private fun logMobile(level: Int, msg: String) {
+        Logger.log(level, mDateFormatter.format(System.currentTimeMillis()), msg)
     }
 
 

@@ -1,7 +1,6 @@
 package openlistlib
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/cmd"
@@ -26,22 +25,27 @@ func SetConfigNoPrefix(b bool) {
 	flags.NoPrefix = b
 }
 
-func SetAdminPassword(pwd string) error {
+func SetAdminPassword(pwd string) {
 	pwd = strings.TrimSpace(pwd)
 	if len(pwd) < 4 {
-		return fmt.Errorf("admin password must be at least 4 characters")
+		utils.Log.Errorf("[mobile_set_admin_password] password too short: length=%d", len(pwd))
+		return
 	}
 
+	utils.Log.Infof("[mobile_set_admin_password] start length=%d", len(pwd))
 	admin, err := op.GetAdmin()
 	if err != nil {
-		return fmt.Errorf("failed get admin user: %w", err)
+		utils.Log.Errorf("[mobile_set_admin_password] failed get admin user: %+v", err)
+		return
 	}
+	utils.Log.Infof("[mobile_set_admin_password] admin user loaded: username=%s", admin.Username)
 	admin.SetPassword(pwd)
+	utils.Log.Infof("[mobile_set_admin_password] password hash prepared")
 	if err := op.UpdateUser(admin); err != nil {
-		return fmt.Errorf("failed update admin user: %w", err)
+		utils.Log.Errorf("[mobile_set_admin_password] failed update admin user: %+v", err)
+		return
 	}
-	utils.Log.Infof("admin user has been updated:")
-	utils.Log.Infof("username: %s", admin.Username)
+	utils.Log.Infof("[mobile_set_admin_password] admin user updated: username=%s", admin.Username)
 	cmd.DelAdminCacheOnline()
-	return nil
+	utils.Log.Infof("[mobile_set_admin_password] admin cache refresh requested")
 }
