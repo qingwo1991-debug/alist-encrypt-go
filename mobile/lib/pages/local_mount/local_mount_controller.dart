@@ -41,6 +41,19 @@ class LocalMountController extends GetxController {
     update();
   }
 
+  Future<String?> verifyAndStoreAdminPassword(String password) async {
+    try {
+      final success = await _manager.verifyAndStoreAdminPassword(password);
+      if (!success) {
+        return '当前输入的密码无法登录本机 OpenList 管理接口(5244)。请确认这是当前 OpenList 管理员密码；如果密码已经改过，再到 OpenList 页面重置。';
+      }
+      await refreshBackendStatus();
+      return null;
+    } catch (e) {
+      return e.toString();
+    }
+  }
+
   Future<void> loadMounts() async {
     await _manager.loadMounts();
     update();

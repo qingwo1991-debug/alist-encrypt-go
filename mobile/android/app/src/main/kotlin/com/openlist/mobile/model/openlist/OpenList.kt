@@ -79,20 +79,17 @@ object OpenList : Event, LogCallback {
         val normalizedPassword = pwd.trim()
         require(normalizedPassword.length >= 4) { "管理员密码至少需要 4 位" }
 
+        Log.d(TAG, "setAdminPassword begin")
         if (!isRunning()) init()
 
         Log.d(TAG, "setAdminPassword: $dataDir")
         Openlistlib.setConfigData(dataDir)
 
+        Log.d(TAG, "setAdminPassword updating OpenList admin")
         Openlistlib.setAdminPassword(normalizedPassword)
         AppConfig.encryptAdminPassword = normalizedPassword
-
-        val encryptConfigPath = File(dataDir, "encrypt_config.json").absolutePath
-        Openlistlib.initEncryptProxy(encryptConfigPath)
-        Openlistlib.setEncryptAdminPassword(normalizedPassword)
-        check(Openlistlib.verifyEncryptAdminPassword(normalizedPassword)) {
-            "加密代理管理员密码更新失败，请重试"
-        }
+        Log.d(TAG, "setAdminPassword cached OpenList admin password for mobile auth")
+        Log.d(TAG, "setAdminPassword completed")
     }
 
 

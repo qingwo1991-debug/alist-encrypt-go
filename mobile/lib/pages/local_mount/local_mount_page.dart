@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -93,20 +95,143 @@ class _LocalMountPageState extends State<LocalMountPage> {
       color: Colors.orange.shade50,
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(Icons.info_outline, color: Colors.orange),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                status.message,
-                style: const TextStyle(fontSize: 13),
-              ),
+            Row(
+              children: [
+                const Icon(Icons.info_outline, color: Colors.orange),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    status.message,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
             ),
+            if (status == LocalMountBackendStatus.authMissing ||
+                status == LocalMountBackendStatus.authInvalid) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: () => _showAdminPasswordDialog(context),
+                    icon: const Icon(Icons.lock_open),
+                    label: const Text('输入现有密码'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => controller.refreshBackendStatus(),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重新检查'),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _showAdminPasswordDialog(BuildContext context) async {
+    final textController = TextEditingController();
+    var obscureText = true;
+    var isSubmitting = false;
+    String? errorText;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (_, setState) {
+            return AlertDialog(
+              title: const Text('输入 OpenList 管理员密码'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: textController,
+                    enabled: !isSubmitting,
+                    obscureText: obscureText,
+                    decoration: InputDecoration(
+                      labelText: '管理员密码',
+                      helperText: '这里只校验并缓存当前已有密码，不会强制重置。',
+                      errorText: errorText,
+                      suffixIcon: IconButton(
+                        onPressed: isSubmitting
+                            ? null
+                            : () {
+                                setState(() {
+                                  obscureText = !obscureText;
+                                });
+                              },
+                        icon: Icon(
+                          obscureText ? Icons.visibility : Icons.visibility_off,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSubmitting ? null : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: isSubmitting
+                      ? null
+                      : () async {
+                          final password = textController.text.trim();
+                          if (password.length < 4) {
+                            setState(() {
+                              errorText = '管理员密码至少需要 4 位';
+                            });
+                            return;
+                          }
+                          setState(() {
+                            isSubmitting = true;
+                            errorText = null;
+                          });
+                          final error = await controller
+                              .verifyAndStoreAdminPassword(password)
+                              .timeout(
+                                const Duration(seconds: 15),
+                                onTimeout: () => '管理员密码校验超时，请稍后重试。',
+                              );
+                          if (!dialogContext.mounted) return;
+                          if (error == null) {
+                            Navigator.of(dialogContext).pop();
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              const SnackBar(
+                                content: Text('管理员密码校验成功，已可用于本地挂载和同步。'),
+                                backgroundColor: Colors.green,
+                              ),
+                            );
+                            return;
+                          }
+                          setState(() {
+                            isSubmitting = false;
+                            errorText = error;
+                          });
+                        },
+                  child: isSubmitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('校验并保存'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    textController.dispose();
   }
 
   Widget _buildQuickMountSection(BuildContext context, LocalMountController controller) {

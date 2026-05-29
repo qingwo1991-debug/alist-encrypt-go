@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import 'admin_auth_manager.dart';
 import '../contant/native_bridge.dart';
+import 'admin_auth_manager.dart';
 import '../models/local_mount.dart';
 import '../models/sync_task.dart';
 import 'openlist_api_client.dart';
@@ -200,6 +200,23 @@ class LocalMountManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> verifyAndStoreAdminPassword(String password) async {
+    final normalized = password.trim();
+    if (normalized.length < 4) {
+      throw ArgumentError('管理员密码至少需要 4 位');
+    }
+    final token = await NativeBridge.syncTaskApi.acquireAuthTokenByPassword(
+      normalized,
+    );
+    if (token == null || token.isEmpty) {
+      return false;
+    }
+    AdminAuthManager.instance.invalidate();
+    _backendStatus = LocalMountBackendStatus.ready;
+    notifyListeners();
+    return true;
+  }
+
   /// 从原生持久化存储加载所有挂载
   Future<void> loadMounts() async {
     try {
@@ -371,9 +388,9 @@ extension LocalMountBackendStatusMessage on LocalMountBackendStatus {
       case LocalMountBackendStatus.serviceUnavailable:
         return 'OpenList 后台不可用，请先确认本地 5244 服务已启动且可访问。';
       case LocalMountBackendStatus.authMissing:
-        return '未配置管理员密码，请在 OpenList 页面顶部的“设置 Admin 密码”中设置。';
+        return '未录入 OpenList 管理员密码。可直接输入当前密码校验，无需强制重置。';
       case LocalMountBackendStatus.authInvalid:
-        return '管理员密码认证失败，请在 OpenList 页面顶部的“设置 Admin 密码”中重新设置。';
+        return '当前缓存的 OpenList 管理员密码认证失败。请先重新输入现有密码校验；只有密码确实不一致时才需要重置。';
       case LocalMountBackendStatus.ready:
         return 'OpenList 后台和管理员认证均已就绪。';
     }

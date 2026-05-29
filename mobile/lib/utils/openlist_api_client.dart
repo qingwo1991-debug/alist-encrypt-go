@@ -49,7 +49,7 @@ class OpenListApiClient {
     if (token == null || token.isEmpty) {
       throw AuthException(
         AuthFailureReason.notConfigured,
-        '未配置管理员密码，无法调用管理 API。\n请在 OpenList 页面顶部的“设置 Admin 密码”中重新设置。',
+        '未录入 OpenList 管理员密码，无法调用管理 API。\n请先输入当前密码校验；如果密码不一致，再到 OpenList 页面重置。',
       );
     }
     final headers = {'Authorization': 'Bearer $token'};
@@ -64,7 +64,7 @@ class OpenListApiClient {
         _authManager.invalidate();
         throw AuthException(
           AuthFailureReason.invalidCredentials,
-          '管理员密码认证失败，无法调用管理 API。\n请在 OpenList 页面顶部的“设置 Admin 密码”中重新设置。',
+          'OpenList 管理员密码认证失败，无法调用管理 API。\n请重新输入正确密码；如果当前密码确实已变更，再到 OpenList 页面重置。',
         );
       }
       rethrow;

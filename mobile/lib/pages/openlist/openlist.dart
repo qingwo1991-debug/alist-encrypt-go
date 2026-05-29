@@ -21,7 +21,9 @@ class OpenListScreen extends StatelessWidget {
 
   Future<String?> _updateAdminPassword(String pwd) async {
     try {
+      debugPrint('[OpenListScreen] setAdminPwd start');
       await Android().setAdminPwd(pwd);
+      debugPrint('[OpenListScreen] setAdminPwd success');
       AdminAuthManager.instance.invalidate();
       if (Get.isRegistered<LocalMountController>()) {
         await Get.find<LocalMountController>().refreshBackendStatus();
@@ -33,6 +35,7 @@ class OpenListScreen extends StatelessWidget {
       ));
       return null;
     } catch (e) {
+      debugPrint('[OpenListScreen] setAdminPwd error: $e');
       return e.toString();
     }
   }
