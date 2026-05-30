@@ -26,6 +26,7 @@ type ProxyServer struct {
 	probeClient         *http.Client
 	streamClient        *http.Client
 	transport           *http.Transport
+	streamTransport     *http.Transport
 	h2cTransport        *http2.Transport // H2C Transport (如果启用)
 	server              *http.Server
 	running             bool
@@ -209,10 +210,15 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			KeepAlive: 60 * time.Second, // TCP KeepAlive，防止连接被中间设备断开
 		}).DialContext,
 	}
+	streamTransport := transport.Clone()
+	streamTransport.ResponseHeaderTimeout = 0
 
 	// 配置 HTTP/2 over TLS 支持
 	if err := http2.ConfigureTransport(transport); err != nil {
 		log.Warnf("[%s] Failed to configure HTTP/2: %v, falling back to HTTP/1.1", internal.TagServer, err)
+	}
+	if err := http2.ConfigureTransport(streamTransport); err != nil {
+		log.Warnf("[%s] Failed to configure stream HTTP/2: %v, falling back to HTTP/1.1", internal.TagServer, err)
 	}
 
 	var httpClient, probeClient, streamClient *http.Client
@@ -266,7 +272,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	} else {
 		httpClient.Transport = transport
 		probeClient.Transport = transport
-		streamClient.Transport = transport
+		streamClient.Transport = streamTransport
 	}
 
 	selStore := NewMemoryStrategyStore()
@@ -283,6 +289,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	server := &ProxyServer{
 		config:             config,
 		transport:          transport,
+		streamTransport:    streamTransport,
 		h2cTransport:       h2cTransport,
 		httpClient:         httpClient,
 		probeClient:        probeClient,
@@ -545,6 +552,10 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	if p.transport != nil {
 		p.transport.ResponseHeaderTimeout = p.upstreamTimeout() + 2*time.Second
 		p.transport.Proxy = newProxyResolver(config)
+	}
+	if p.streamTransport != nil {
+		p.streamTransport.ResponseHeaderTimeout = 0
+		p.streamTransport.Proxy = newProxyResolver(config)
 	}
 	log.Infof("[%s] Proxy Config updated successfully", internal.TagConfig)
 }
