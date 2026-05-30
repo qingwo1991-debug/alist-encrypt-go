@@ -138,7 +138,7 @@ class SyncWorker(
         val authToken = SyncScheduler.acquireAuthToken()
         if (authToken.isNullOrEmpty()) {
             logSync(traceId, taskId, "auth", "未获取到管理认证 token，任务终止", LogLevel.ERROR)
-            return Result.failure(
+            return@withContext Result.failure(
                 workDataOf(
                     "taskId" to taskId,
                     "error" to "未取得管理认证 token，请先在 OpenList 页面校验当前管理员密码",
@@ -452,7 +452,7 @@ class SyncWorker(
         }
     }
 
-    private fun uploadFileAsTask(
+    private suspend fun uploadFileAsTask(
         file: File,
         remotePath: String,
         authToken: String,
@@ -588,7 +588,7 @@ class SyncWorker(
         }
     }
 
-    private fun waitForUploadTaskComplete(
+    private suspend fun waitForUploadTaskComplete(
         uploadTaskId: String,
         file: File,
         remotePath: String,
