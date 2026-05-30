@@ -239,9 +239,10 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     override fun setEncryptAdminPassword(password: String) {
         Log.d(TAG, "setEncryptAdminPassword")
         try {
-            Openlistlib.setEncryptAdminPassword(password)
-            // 持久化密码供 SyncWorker 认证使用
-            AppConfig.encryptAdminPassword = password
+            // 兼容旧接口：移动端不再维护单独的 Encrypt AdminPassword。
+            // 所有管理员密码入口统一指向 OpenList 本体管理员密码。
+            Openlistlib.setAdminPassword(password)
+            AppConfig.encryptAdminPassword = password.trim()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set admin password", e)
             throw e
@@ -250,7 +251,7 @@ class EncryptProxyBridge(private val context: Context) : GeneratedApi.EncryptPro
     
     override fun verifyEncryptAdminPassword(password: String): Boolean {
         return try {
-            Openlistlib.verifyEncryptAdminPassword(password)
+            Openlistlib.verifyAdminPassword(password)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to verify admin password", e)
             false

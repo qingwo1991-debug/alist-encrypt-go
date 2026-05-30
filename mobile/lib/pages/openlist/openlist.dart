@@ -13,6 +13,7 @@ import 'package:get/get.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../contant/native_bridge.dart';
 import '../../generated/l10n.dart';
 import '../../utils/admin_auth_manager.dart';
 import '../local_mount/local_mount_controller.dart';
@@ -21,82 +22,10 @@ import 'log_list_view.dart';
 class OpenListScreen extends StatelessWidget {
   const OpenListScreen({Key? key}) : super(key: key);
 
-  Future<String?> _updateOpenListPort(int port) async {
-    if (port < 1 || port > 65535) {
-      return '端口必须在 1-65535 之间';
-    }
-    try {
-      await Android().setOpenListHttpPort(port);
-      final running = await Android().isRunning();
-      if (running) {
-        await ServiceManager.instance.restartService();
-      }
-      Get.showSnackbar(GetSnackBar(
-        title: 'OpenList 端口已更新',
-        message: running ? '服务已自动重启，新端口为 $port。' : '已保存新端口 $port，下次启动服务时生效。',
-        duration: const Duration(seconds: 2),
-      ));
-      return null;
-    } catch (e) {
-      return e.toString();
-    }
-  }
-
-  Future<void> _showPortDialog(BuildContext context) async {
-    final currentPort = await Android().getOpenListHttpPort();
-    final controller = TextEditingController(text: currentPort.toString());
-    if (!context.mounted) return;
-    showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('OpenList 监听端口'),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            labelText: '端口',
-            hintText: '5244',
-            helperText: '修改后会自动重启 OpenList 服务',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: Text(S.of(dialogContext).cancel),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final port = int.tryParse(controller.text.trim());
-              if (port == null) {
-                Get.showSnackbar(const GetSnackBar(
-                  message: '请输入有效端口',
-                  duration: Duration(seconds: 2),
-                ));
-                return;
-              }
-              final error = await _updateOpenListPort(port);
-              if (error == null) {
-                if (dialogContext.mounted) {
-                  Navigator.of(dialogContext).pop();
-                }
-              } else {
-                Get.showSnackbar(GetSnackBar(
-                  message: error,
-                  duration: const Duration(seconds: 2),
-                ));
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<String?> _updateAdminPassword(String pwd) async {
     try {
       debugPrint('[OpenListScreen] setAdminPwd start');
-      await Android().setAdminPwd(pwd);
+      await NativeBridge.android.setAdminPwd(pwd);
       debugPrint('[OpenListScreen] setAdminPwd success');
       AdminAuthManager.instance.invalidate();
       if (Get.isRegistered<LocalMountController>()) {
@@ -133,11 +62,6 @@ class OpenListScreen extends StatelessWidget {
             title: Obx(() => Text("OpenList - ${ui.openlistVersion.value}")),
             actions: [
               IconButton(
-                tooltip: '设置监听端口',
-                onPressed: () => _showPortDialog(context),
-                icon: const Icon(Icons.settings_ethernet),
-              ),
-              IconButton(
                 tooltip: S.current.setAdminPassword,
                 onPressed: () {
                   showDialog(
@@ -164,7 +88,7 @@ class OpenListScreen extends StatelessWidget {
               IconButton(
                 tooltip: S.of(context).desktopShortcut,
                 onPressed: () async  {
-                  Android().addShortcut();
+                  await NativeBridge.android.addShortcut();
                 },
                 icon: const Icon(Icons.add_home),
               ),
@@ -328,7 +252,7 @@ class OpenListController extends GetxController {
         }, 
         (log) => addLog(log)));
     
-    Android().getOpenListVersion().then((value) => openlistVersion.value = value);
+    NativeBridge.android.getOpenListVersion().then((value) => openlistVersion.value = value);
     
     // 获取初始状态
     ServiceManager.instance.checkServiceStatus().then((isRunning) {

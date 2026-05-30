@@ -300,10 +300,29 @@ object SyncScheduler {
 
     private fun acquireAuthTokenWithPassword(password: String): String? {
         ensureOpenListReady()
+        tryAcquireLocalAdminToken(password)?.let { return it }
         for (baseUrl in openListBaseUrls()) {
             acquireAuthTokenWithPassword(baseUrl, password)?.let { return it }
         }
         return null
+    }
+
+    private fun tryAcquireLocalAdminToken(password: String): String? {
+        return try {
+            val token = Openlistlib.acquireAdminTokenByPassword(password)
+            if (!token.isNullOrBlank()) {
+                if (AppConfig.encryptAdminPassword != password) {
+                    AppConfig.encryptAdminPassword = password
+                }
+                appLog(LogLevel.INFO, "本地挂载认证成功：本地直连校验通过")
+                token
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            appLog(LogLevel.WARN, "本地挂载认证本地直连异常：${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 
     private fun acquireAuthTokenWithPassword(baseUrl: String, password: String): String? {
