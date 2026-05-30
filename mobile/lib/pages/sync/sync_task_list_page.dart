@@ -190,35 +190,37 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                 if (task.lastError != null && task.lastError!.isNotEmpty)
                   _buildInfoRow('最后错误', task.lastError!, isError: true),
                 const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  runSpacing: 8,
                   children: [
-                    TextButton.icon(
+                    OutlinedButton.icon(
                       icon: const Icon(Icons.history),
                       label: const Text('历史'),
                       onPressed: () => _openHistory(task),
                     ),
-                    TextButton.icon(
+                    OutlinedButton.icon(
                       icon: const Icon(Icons.cleaning_services_outlined),
                       label: const Text('清历史'),
                       onPressed: () => _confirmClearTaskHistory(task),
                     ),
-                    TextButton.icon(
+                    FilledButton.tonalIcon(
                       icon: const Icon(Icons.play_arrow),
                       label: const Text('立即执行'),
                       onPressed: () => _runNow(task),
                     ),
-                    TextButton.icon(
+                    OutlinedButton.icon(
                       icon: const Icon(Icons.restart_alt),
                       label: const Text('重传'),
                       onPressed: () => _confirmRerunFromScratch(task),
                     ),
-                    TextButton.icon(
+                    OutlinedButton.icon(
                       icon: const Icon(Icons.edit),
                       label: const Text('编辑'),
                       onPressed: () => _openEditPage(task),
                     ),
-                    TextButton.icon(
+                    OutlinedButton.icon(
                       icon: const Icon(Icons.delete, color: Colors.red),
                       label: const Text('删除'),
                       onPressed: () => _confirmDelete(task),

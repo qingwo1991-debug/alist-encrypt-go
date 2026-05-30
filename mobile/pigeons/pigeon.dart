@@ -42,6 +42,8 @@ abstract class NativeCommon {
   void toast(String msg);
 
   void longToast(String msg);
+
+  void writeAppLog(int level, String msg);
 }
 
 @HostApi()

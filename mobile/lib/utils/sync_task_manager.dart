@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../contant/native_bridge.dart';
+import '../utils/app_logger.dart';
 import 'admin_auth_manager.dart';
 import '../models/local_mount.dart';
 import '../models/sync_task.dart';
@@ -160,6 +161,16 @@ class SyncTaskManager extends ChangeNotifier {
       debugPrint('Failed to clear sync history for $taskId: $e');
       rethrow;
     }
+
+    final index = _tasks.indexWhere((t) => t.id == taskId);
+    if (index >= 0) {
+      _tasks[index]
+        ..lastSyncTime = null
+        ..lastSyncFileCount = null
+        ..lastError = null;
+      await _saveTasks();
+      notifyListeners();
+    }
   }
 
   Future<void> clearAllHistory() async {
@@ -169,6 +180,15 @@ class SyncTaskManager extends ChangeNotifier {
       debugPrint('Failed to clear all sync history: $e');
       rethrow;
     }
+
+    for (final task in _tasks) {
+      task
+        ..lastSyncTime = null
+        ..lastSyncFileCount = null
+        ..lastError = null;
+    }
+    await _saveTasks();
+    notifyListeners();
   }
 
   Future<void> rerunTaskFromScratch(String taskId) async {
@@ -259,13 +279,16 @@ class LocalMountManager extends ChangeNotifier {
   }
 
   Future<void> refreshBackendStatus() async {
+    final traceId = AppLogger.newTraceId('mount-backend');
     if (_apiClient == null) {
+      await AppLogger.warn('[mount][trace=$traceId] backend-check skipped: api client not initialized');
       _backendStatus = LocalMountBackendStatus.serviceUnavailable;
       notifyListeners();
       return;
     }
     final isServiceAlive = await _apiClient!.ping();
     if (!isServiceAlive) {
+      await AppLogger.warn('[mount][trace=$traceId] backend-check failed: service unavailable');
       _backendStatus = LocalMountBackendStatus.serviceUnavailable;
       notifyListeners();
       return;
@@ -275,6 +298,9 @@ class LocalMountManager extends ChangeNotifier {
     final hadCachedToken = authManager.hasValidCachedToken;
     final token = await authManager.getToken();
     if (token == null || token.isEmpty) {
+      await AppLogger.warn(
+        '[mount][trace=$traceId] backend-check auth not ready: hadCachedToken=$hadCachedToken',
+      );
       _backendStatus = hadCachedToken
           ? LocalMountBackendStatus.authInvalid
           : LocalMountBackendStatus.authMissing;
@@ -282,22 +308,28 @@ class LocalMountManager extends ChangeNotifier {
       return;
     }
 
+    await AppLogger.info('[mount][trace=$traceId] backend-check ready');
     _backendStatus = LocalMountBackendStatus.ready;
     notifyListeners();
   }
 
   Future<bool> verifyAndStoreAdminPassword(String password) async {
+    final traceId = AppLogger.newTraceId('mount-auth');
     final normalized = password.trim();
     if (normalized.length < 4) {
+      await AppLogger.warn('[mount][trace=$traceId] password verify rejected: too short');
       throw ArgumentError('管理员密码至少需要 4 位');
     }
+    await AppLogger.info('[mount][trace=$traceId] password verify start');
     final token = await NativeBridge.syncTaskApi.acquireAuthTokenByPassword(
       normalized,
     );
     if (token == null || token.isEmpty) {
+      await AppLogger.warn('[mount][trace=$traceId] password verify failed: token empty');
       return false;
     }
     AdminAuthManager.instance.invalidate();
+    await AppLogger.info('[mount][trace=$traceId] password verify success');
     _backendStatus = LocalMountBackendStatus.ready;
     notifyListeners();
     return true;
@@ -328,12 +360,19 @@ class LocalMountManager extends ChangeNotifier {
   ///
   /// 成功时 mount 会带有 storageId，isSynced 变为 true
   Future<AddMountResult> addMount(LocalMount mount) async {
+    final traceId = AppLogger.newTraceId('mount-create', entityId: mount.id);
     if (_apiClient == null || !isBackendReady) {
+      await AppLogger.warn(
+        '[mount][trace=$traceId][mountId=${mount.id}] create blocked: backendStatus=${_backendStatus.name}',
+      );
       return AddMountResult.apiError(_backendStatus.message);
     }
 
     // 调用 OpenList API 创建存储
     try {
+      await AppLogger.info(
+        '[mount][trace=$traceId][mountId=${mount.id}] create start name=${mount.name} path=${mount.path}',
+      );
       final mountPoint = await _nextMountPath(mount.name);
       final result = await _apiClient!.createLocalStorage(
         localPath: mount.path,
@@ -352,16 +391,28 @@ class LocalMountManager extends ChangeNotifier {
           _mounts.add(synced);
           await _saveMounts();
           notifyListeners();
+          await AppLogger.info(
+            '[mount][trace=$traceId][mountId=${mount.id}] create success storageId=$storageId mountPath=$mountPoint',
+          );
           debugPrint('[LocalMountManager] Mount synced to OpenList: id=$storageId');
           return AddMountResult.success(synced);
         }
       }
+      await AppLogger.warn(
+        '[mount][trace=$traceId][mountId=${mount.id}] create failed: unexpected api response',
+      );
       debugPrint('[LocalMountManager] Create storage returned null/unexpected');
       return AddMountResult.apiError('创建存储失败：API 返回异常');
     } on ApiException catch (e) {
+      await AppLogger.warn(
+        '[mount][trace=$traceId][mountId=${mount.id}] create api error code=${e.code} message=${e.message}',
+      );
       debugPrint('[LocalMountManager] Create storage api error: code=${e.code} message=${e.message} data=${e.data}');
       return AddMountResult.apiError('创建存储失败：${e.message}');
     } catch (e) {
+      await AppLogger.error(
+        '[mount][trace=$traceId][mountId=${mount.id}] create exception $e',
+      );
       debugPrint('[LocalMountManager] Create storage error: $e');
       return AddMountResult.apiError('创建存储失败: $e');
     }
@@ -369,20 +420,40 @@ class LocalMountManager extends ChangeNotifier {
 
   /// 删除本地挂载（会实际调用 OpenList API 删除存储）
   Future<bool> deleteMount(String mountId) async {
+    final traceId = AppLogger.newTraceId('mount-delete', entityId: mountId);
     final idx = _mounts.indexWhere((m) => m.id == mountId);
     if (idx < 0) return false;
     final mount = _mounts[idx];
+    await AppLogger.info(
+      '[mount][trace=$traceId][mountId=${mount.id}] delete start synced=${mount.isSynced} storageId=${mount.storageId}',
+    );
 
     // 如果已同步到 OpenList，先调用删除 API
     if (mount.isSynced && _apiClient != null) {
       try {
         final success = await _apiClient!.deleteStorage(mount.storageId!);
         if (!success) {
-          debugPrint('[LocalMountManager] Failed to delete OpenList storage (API returned false)');
-          return false;
+          final remoteStorage = await _apiClient!.getStorage(mount.storageId!);
+          if (remoteStorage == null) {
+            await AppLogger.warn(
+              '[mount][trace=$traceId][mountId=${mount.id}] remote storage missing, remove local stale mount only',
+            );
+          } else {
+            await AppLogger.warn(
+              '[mount][trace=$traceId][mountId=${mount.id}] delete failed: api returned false storageId=${mount.storageId}',
+            );
+            debugPrint('[LocalMountManager] Failed to delete OpenList storage (API returned false)');
+            return false;
+          }
         }
+        await AppLogger.info(
+          '[mount][trace=$traceId][mountId=${mount.id}] remote delete success storageId=${mount.storageId}',
+        );
         debugPrint('[LocalMountManager] Deleted OpenList storage id=${mount.storageId}');
       } catch (e) {
+        await AppLogger.error(
+          '[mount][trace=$traceId][mountId=${mount.id}] delete exception $e',
+        );
         debugPrint('[LocalMountManager] Failed to delete OpenList storage: $e');
         return false;
       }
@@ -392,11 +463,13 @@ class LocalMountManager extends ChangeNotifier {
     _mounts.removeAt(idx);
     await _saveMounts();
     notifyListeners();
+    await AppLogger.info('[mount][trace=$traceId][mountId=${mount.id}] delete local config success');
     return true;
   }
 
   /// 更新本地挂载
   Future<void> updateMount(LocalMount updated) async {
+    final traceId = AppLogger.newTraceId('mount-update', entityId: updated.id);
     final index = _mounts.indexWhere((m) => m.id == updated.id);
     if (index == -1) return;
     final current = _mounts[index];
@@ -408,6 +481,9 @@ class LocalMountManager extends ChangeNotifier {
 
       final remoteStorage = await _apiClient!.getStorage(current.storageId!);
       if (remoteStorage == null) {
+        await AppLogger.warn(
+          '[mount][trace=$traceId][mountId=${updated.id}] update failed: remote storage missing',
+        );
         throw StateError('未找到对应的 OpenList 存储，无法更新挂载信息。');
       }
 
@@ -415,6 +491,9 @@ class LocalMountManager extends ChangeNotifier {
         ..['remark'] = updated.name;
       final ok = await _apiClient!.updateStorage(updatePayload);
       if (!ok) {
+        await AppLogger.warn(
+          '[mount][trace=$traceId][mountId=${updated.id}] update failed: api returned false',
+        );
         throw StateError('OpenList 存储更新失败。');
       }
     }
@@ -422,6 +501,9 @@ class LocalMountManager extends ChangeNotifier {
     _mounts[index] = updated;
     await _saveMounts();
     notifyListeners();
+    await AppLogger.info(
+      '[mount][trace=$traceId][mountId=${updated.id}] update success name=${updated.name}',
+    );
   }
 
   Future<String> _nextMountPath(String name) async {
