@@ -84,6 +84,7 @@ declare global {
   const routerBack: typeof import('../src/hooks/use-self-router.js')['routerBack']
   const routerPush: typeof import('../src/hooks/use-self-router.js')['routerPush']
   const routerReplace: typeof import('../src/hooks/use-self-router.js')['routerReplace']
+  const runDirSyncReq: typeof import('../src/api/user.js')['runDirSyncReq']
   const saveAlistConfigReq: typeof import('../src/api/user.js')['saveAlistConfigReq']
   const saveProxyRoutingConfigReq: typeof import('../src/api/user.js')['saveProxyRoutingConfigReq']
   const saveSchemeConfigReq: typeof import('../src/api/user.js')['saveSchemeConfigReq']

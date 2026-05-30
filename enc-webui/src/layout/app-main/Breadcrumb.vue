@@ -74,13 +74,24 @@ watch(
 <style lang="scss" scoped>
 .app-breadcrumb.el-breadcrumb {
   display: inline-block;
-  font-size: 14px;
-  line-height: 50px;
+  font-size: 13px;
+  line-height: 1;
   margin-left: 8px;
+
+  :deep(.el-breadcrumb__inner),
+  :deep(.el-breadcrumb__separator) {
+    color: var(--el-text-color-secondary);
+  }
+
+  :deep(.el-breadcrumb__inner.is-link) {
+    color: var(--el-text-color-regular);
+    font-weight: 500;
+  }
 
   .no-redirect {
     color: var(--breadcrumb-no-redirect);
     cursor: text;
+    font-weight: 600;
   }
 }
 </style>

@@ -1,60 +1,59 @@
 <!--suppress ALL -->
 <template>
-  <div class="login-container columnCC">
-    <el-form ref="refLoginForm" class="login-form" :model="subForm" :rules="formRules">
-      <div class="title-container">
-        <h3 class="title text-center">{{ settings.title }}</h3>
-      </div>
-      <el-form-item prop="username" :rules="formRules.isNotNull('usename不能为空')">
-        <div class="rowSC">
-          <span class="svg-container">
-            <svg-icon icon-class="user" />
-          </span>
-          <el-input v-model="subForm.username" placeholder="用户名(admin)" />
-          <!--占位-->
-          <div class="show-pwd" />
-        </div>
-      </el-form-item>
-      <!--<el-form-item prop="password" :rules="formRules.passwordValid">-->
-      <el-form-item prop="password" :rules="formRules.isNotNull('密码不能为空')">
-        <div class="rowSC flex-1">
-          <span class="svg-container">
-            <svg-icon icon-class="password" />
-          </span>
-          <el-input
-            :key="passwordType"
-            ref="refPassword"
-            v-model="subForm.password"
-            :type="passwordType"
-            name="password"
-            placeholder="password"
-            @keyup.enter="handleLogin"
-          />
-          <span class="show-pwd" @click="showPwd">
-            <svg-icon :icon-class="passwordType === 'password' ? 'eye' : 'eye-open'" />
-          </span>
-        </div>
-      </el-form-item>
-      <div class="tip-message">{{ tipMessage }}</div>
-      <el-button :loading="subLoading" type="primary" class="login-btn" size="default" @click.prevent="handleLogin">
-        Login
-      </el-button>
-    </el-form>
+  <div class="login-container">
+    <div class="login-container__glow login-container__glow--left" />
+    <div class="login-container__glow login-container__glow--right" />
+    <div class="login-panel">
+      <div class="page-eyebrow">Secure Gateway</div>
+      <h3 class="login-panel__title">{{ settings.title }}</h3>
+      <p class="login-panel__subtitle">统一的深色控制台入口，为 Go 代理服务提供更稳健清晰的登录体验。</p>
+
+      <el-form ref="refLoginForm" class="login-form" :model="subForm" :rules="formRules">
+        <el-form-item prop="username" :rules="formRules.isNotNull('usename不能为空')">
+          <div class="login-field">
+            <span class="svg-container">
+              <svg-icon icon-class="user" />
+            </span>
+            <el-input v-model="subForm.username" placeholder="用户名(admin)" />
+          </div>
+        </el-form-item>
+        <el-form-item prop="password" :rules="formRules.isNotNull('密码不能为空')">
+          <div class="login-field">
+            <span class="svg-container">
+              <svg-icon icon-class="password" />
+            </span>
+            <el-input
+              :key="passwordType"
+              ref="refPassword"
+              v-model="subForm.password"
+              :type="passwordType"
+              name="password"
+              placeholder="password"
+              @keyup.enter="handleLogin"
+            />
+            <span class="show-pwd" @click="showPwd">
+              <svg-icon :icon-class="passwordType === 'password' ? 'eye' : 'eye-open'" />
+            </span>
+          </div>
+        </el-form-item>
+        <div class="tip-message">{{ tipMessage }}</div>
+        <el-button :loading="subLoading" type="primary" class="login-btn" size="default" @click.prevent="handleLogin">
+          Login
+        </el-button>
+      </el-form>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { nextTick, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useBasicStore } from '@/store/basic'
 import { elMessage, useElement } from '@/hooks/use-element'
 import { loginReq } from '@/api/user'
 
-/* listen router change and set the query  */
 const { settings } = useBasicStore()
-//element valid
 const formRules = useElement().formRules
-//form
 const subForm = reactive({
   username: 'admin',
   password: ''
@@ -83,13 +82,8 @@ watch(
   { immediate: true }
 )
 
-/*
- *  login relative
- * */
-let subLoading = ref(false)
-//tip message
-let tipMessage = ref('')
-//sub form
+const subLoading = ref(false)
+const tipMessage = ref('')
 const refLoginForm = ref(null)
 const handleLogin = () => {
   refLoginForm.value?.validate((valid) => {
@@ -114,17 +108,11 @@ const loginFunc = () => {
       subLoading.value = false
     })
 }
-/*
- *  password show or hidden
- * */
+
 const passwordType = ref('password')
 const refPassword = ref(null)
 const showPwd = () => {
-  if (passwordType.value === 'password') {
-    passwordType.value = ''
-  } else {
-    passwordType.value = 'password'
-  }
+  passwordType.value = passwordType.value === 'password' ? '' : 'password'
   nextTick(() => {
     refPassword.value.focus()
   })
@@ -132,83 +120,108 @@ const showPwd = () => {
 </script>
 
 <style lang="scss" scoped>
-$bg: #2d3a4b;
-$dark_gray: #889aa4;
-$light_gray: #eee;
 .login-container {
-  height: 100vh;
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: hidden;
+}
+
+.login-container__glow {
+  position: absolute;
+  width: 420px;
+  height: 420px;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.32;
+}
+
+.login-container__glow--left {
+  top: -120px;
+  left: -120px;
+  background: rgba(91, 140, 255, 0.32);
+}
+
+.login-container__glow--right {
+  right: -100px;
+  bottom: -140px;
+  background: rgba(56, 88, 186, 0.28);
+}
+
+.login-panel {
+  position: relative;
+  z-index: 1;
+  width: min(460px, 100%);
+  padding: 32px;
+  border-radius: 28px;
+  border: 1px solid rgba(145, 167, 255, 0.16);
+  background: linear-gradient(180deg, rgba(27, 35, 58, 0.86), rgba(17, 23, 39, 0.94));
+  box-shadow: var(--app-shadow-lg);
+  backdrop-filter: blur(24px);
+}
+
+.login-panel__title {
+  margin-top: 12px;
+  font-size: 30px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: var(--el-text-color-primary);
+}
+
+.login-panel__subtitle {
+  margin-top: 12px;
+  margin-bottom: 28px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+}
+
+.login-field {
+  display: flex;
+  align-items: center;
   width: 100%;
-  background-color: #2d3a4b;
-  .login-form {
-    margin-bottom: 20vh;
-    width: 360px;
-  }
-  .title-container {
-    .title {
-      font-size: 22px;
-      color: #eee;
-      margin: 0px auto 25px auto;
-      text-align: center;
-      font-weight: bold;
-    }
-  }
 }
 
 .svg-container {
-  padding-left: 6px;
-  color: $dark_gray;
-  text-align: center;
-  width: 30px;
+  width: 32px;
+  color: var(--el-text-color-secondary);
 }
 
-//错误提示信息
 .tip-message {
-  color: #e4393c;
-  height: 30px;
-  margin-top: -12px;
+  min-height: 24px;
+  margin-top: -6px;
+  margin-bottom: 8px;
   font-size: 12px;
+  color: #ff6f91;
 }
 
-//登录按钮
 .login-btn {
   width: 100%;
-  margin-bottom: 30px;
 }
+
 .show-pwd {
-  width: 50px;
-  font-size: 16px;
-  color: $dark_gray;
-  cursor: pointer;
+  width: 40px;
   text-align: center;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
 }
 </style>
 
 <style lang="scss">
-//css 样式重置 增加个前缀避免全局污染
 .login-container {
-  .el-input__wrapper {
-    background-color: transparent;
-    box-shadow: none;
-  }
   .el-form-item {
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(0, 0, 0, 0.1);
-    border-radius: 5px;
-    color: #454545;
+    margin-bottom: 18px;
   }
-  .el-input input {
+
+  .el-form-item__content {
+    display: block;
+  }
+
+  .el-input__wrapper {
+    box-shadow: none;
     background: transparent;
-    border: 0px;
-    -webkit-appearance: none;
-    border-radius: 0px;
-    padding: 10px 5px 10px 15px;
-    color: #fff;
-    height: 42px; //此处调整item的高度
-    caret-color: #fff;
-  }
-  //hiden the input border
-  .el-input__inner {
-    box-shadow: none !important;
   }
 }
 </style>

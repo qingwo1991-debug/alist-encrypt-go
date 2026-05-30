@@ -1,105 +1,174 @@
 <template>
-  <div class="scroll-y">
-    <h3>Webdav服务配置</h3>
-    <br />
-    <el-dialog v-model="dialogFormVisible" title="配置信息" style="min-width: 320px">
-      <div class="scroll-y">
-        <el-form :model="configFormTemp">
-          <el-form-item prop="username" label="服务名称">
-            <el-input v-model="configFormTemp.name" style="max-width: 260px" placeholder="127.0.0.1" />
-          </el-form-item>
-          <el-form-item prop="username" label="服务器">
-            <el-input v-model="configFormTemp.serverHost" style="max-width: 260px" placeholder="127.0.0.1" />
-          </el-form-item>
-          <el-form-item prop="password" label="端口">
-            <el-input v-model="configFormTemp.serverPort" style="max-width: 260px" placeholder="5244" />
-          </el-form-item>
-          <el-form-item prop="password" label="主目录">
-            <el-input v-model="configFormTemp.path" style="max-width: 260px" placeholder="5244" />
-            <span color="gray" style="font-size: 12px; margin-left: 12px">修改后重启生效</span>
-          </el-form-item>
-          <el-form-item prop="enable" label="开启">
-            <el-switch
-              v-model="configFormTemp.enable"
-              class="ml-2"
-              style="margin-bottom: 5px; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949"
-            />
-          </el-form-item>
-          <el-form-item label="密码设置">
-            <el-button type="success" @click="addPasswd">添加</el-button>
-          </el-form-item>
-          <div v-for="(item, index) in configFormTemp.passwdList" :key="item.id">
-            <el-radio-group v-model="item.encType" style="margin: 0 25px" size="small">
-              <!-- <el-radio label="mix" border>MIX</el-radio> -->
-              <el-radio label="rc4" border>RC4</el-radio>
-              <el-radio label="aesctr" border>AES-CTR(新)</el-radio>
-              <el-radio label="chacha20" border>ChaCha20</el-radio>
-            </el-radio-group>
-            开启
-            <el-switch v-model="item.enable" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
-            <el-button type="danger" style="margin: 5px 20px" :icon="Delete" circle @click="delPasswd(index)" />
-            <el-form-item label="密码">
-              <el-input v-model="item.password" style="max-width: 260px; margin-right: 10px" placeholder="12341234" />
-            </el-form-item>
-            <el-form-item label="文件名">
-              加密
-              <el-switch
-                v-model="item.encName"
-                class="ml-2"
-                style="margin-right: 10px; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949"
-              />
-              后缀
-              <el-input v-model="item.encSuffix" style="max-width: 150px; margin-left: 10px" placeholder=".bin / 默认原文件名后缀" />
-            </el-form-item>
-            <el-form-item label="备注">
-              <el-input v-model="item.describe" style="max-width: 260px; margin-right: 10px" placeholder="备注描述" />
-            </el-form-item>
-            <el-form-item label="路径">
-              <el-input v-model="item.encPath" style="max-width: 350px; margin-right: 10px" placeholder="多个路径逗号，隔开" />
-            </el-form-item>
+  <div class="webdav-page scroll-y">
+    <div class="admin-page webdav-shell">
+      <section class="page-hero">
+        <div class="page-hero__content">
+          <div class="page-eyebrow">WebDAV Gateway</div>
+          <div class="page-title">WebDAV 服务配置</div>
+          <div class="page-subtitle">
+            统一管理多个 WebDAV 服务实例、密码规则和目录映射，保持与主服务配置一致的卡片结构和操作节奏。
           </div>
-        </el-form>
-        <span class="dialog-footer">
+          <div class="hero-pills">
+            <div class="hero-pill">
+              <div class="hero-pill__label">已配置服务</div>
+              <div class="hero-pill__value">{{ configList.length }}</div>
+              <div class="hero-pill__meta">支持多实例并行管理。</div>
+            </div>
+            <div class="hero-pill">
+              <div class="hero-pill__label">已启用服务</div>
+              <div class="hero-pill__value">{{ enabledCount }}</div>
+              <div class="hero-pill__meta">运行状态来自当前配置列表。</div>
+            </div>
+            <div class="hero-pill">
+              <div class="hero-pill__label">密码规则</div>
+              <div class="hero-pill__value">{{ passwordRuleCount }}</div>
+              <div class="hero-pill__meta">多路径、多算法配置统一维护。</div>
+            </div>
+          </div>
+        </div>
+        <div class="page-actions">
+          <el-button type="primary" @click="addConfig">新增配置</el-button>
+        </div>
+      </section>
+
+      <section class="panel-card">
+        <div class="panel-card__header">
+          <div>
+            <div class="panel-card__title">服务列表</div>
+            <div class="panel-card__subtitle">卡片化展示实例地址、状态和加密规则，便于快速定位与编辑。</div>
+          </div>
+          <div class="muted-text">新增后重启生效</div>
+        </div>
+
+        <div v-if="configList.length" class="service-grid">
+          <div v-for="config in configList" :key="config.id" class="service-card">
+            <div class="service-card__header">
+              <div>
+                <div class="service-card__title">{{ config.name }}</div>
+                <div class="service-card__meta">{{ config.describe || 'WebDAV 服务' }}</div>
+              </div>
+              <el-switch v-model="config.enable" @change="updateWebdavConfig(config)" />
+            </div>
+
+            <div class="service-card__body">
+              <div class="service-card__row"><span>服务器</span><strong>{{ config.serverHost }}</strong></div>
+              <div class="service-card__row"><span>端口</span><strong>{{ config.serverPort }}</strong></div>
+              <div class="service-card__row"><span>主目录</span><strong>{{ config.path }}</strong></div>
+              <div class="service-card__row"><span>密码规则</span><strong>{{ config.passwdList?.length || 0 }}</strong></div>
+            </div>
+
+            <div class="service-card__actions">
+              <el-button type="primary" plain @click="editConfig(config)">编辑</el-button>
+              <el-button type="danger" plain @click="delWebdavConfig(config.id)">删除</el-button>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="empty-state">暂无 WebDAV 服务配置，点击右上角开始新增。</div>
+      </section>
+    </div>
+
+    <el-dialog v-model="dialogFormVisible" title="WebDAV 配置" width="min(960px, 92vw)">
+      <div class="dialog-shell">
+        <section class="panel-card panel-card--soft">
+          <div class="panel-card__header">
+            <div>
+              <div class="panel-card__title">基础连接</div>
+              <div class="panel-card__subtitle">定义实例名称、地址、端口和服务根路径。</div>
+            </div>
+          </div>
+
+          <el-form :model="configFormTemp" label-width="88px">
+            <div class="form-grid">
+              <el-form-item label="服务名称">
+                <el-input v-model="configFormTemp.name" placeholder="webdav" />
+              </el-form-item>
+              <el-form-item label="服务器">
+                <el-input v-model="configFormTemp.serverHost" placeholder="127.0.0.1" />
+              </el-form-item>
+              <el-form-item label="端口">
+                <el-input v-model="configFormTemp.serverPort" placeholder="5244" />
+              </el-form-item>
+              <el-form-item label="主目录">
+                <el-input v-model="configFormTemp.path" placeholder="/webdav/*" />
+              </el-form-item>
+            </div>
+            <el-form-item label="描述">
+              <el-input v-model="configFormTemp.describe" placeholder="webdav 服务" />
+            </el-form-item>
+            <el-form-item label="启用">
+              <el-switch v-model="configFormTemp.enable" />
+              <span class="helper-text">修改目录映射后重启服务生效。</span>
+            </el-form-item>
+          </el-form>
+        </section>
+
+        <section class="panel-card">
+          <div class="panel-card__header">
+            <div>
+              <div class="panel-card__title">密码规则</div>
+              <div class="panel-card__subtitle">按路径配置加密算法、文件名策略和备注说明。</div>
+            </div>
+            <el-button type="success" @click="addPasswd">添加规则</el-button>
+          </div>
+
+          <div class="stack-grid">
+            <div v-for="(item, index) in configFormTemp.passwdList" :key="item.id" class="passwd-card">
+              <div class="passwd-card__header">
+                <div>
+                  <div class="passwd-card__title">规则 {{ index + 1 }}</div>
+                  <div class="passwd-card__meta">多目录可用逗号分隔，支持文件名加密和后缀策略。</div>
+                </div>
+                <el-button type="danger" :icon="Delete" circle @click="delPasswd(index)" />
+              </div>
+
+              <el-form label-width="70px">
+                <el-form-item label="算法">
+                  <el-radio-group v-model="item.encType" size="small">
+                    <el-radio label="rc4" border>RC4</el-radio>
+                    <el-radio label="aesctr" border>AES-CTR</el-radio>
+                    <el-radio label="chacha20" border>ChaCha20</el-radio>
+                  </el-radio-group>
+                  <span class="helper-inline">启用</span>
+                  <el-switch v-model="item.enable" />
+                </el-form-item>
+                <div class="form-grid">
+                  <el-form-item label="密码">
+                    <el-input v-model="item.password" placeholder="123456" />
+                  </el-form-item>
+                  <el-form-item label="备注">
+                    <el-input v-model="item.describe" placeholder="my video" />
+                  </el-form-item>
+                  <el-form-item label="后缀">
+                    <el-input v-model="item.encSuffix" placeholder=".bin / 默认原文件名后缀" />
+                  </el-form-item>
+                  <el-form-item label="路径">
+                    <el-input v-model="item.encPath" placeholder="/dav/encrypt/*" />
+                  </el-form-item>
+                </div>
+                <el-form-item label="文件名">
+                  <span class="helper-inline">加密</span>
+                  <el-switch v-model="item.encName" />
+                </el-form-item>
+              </el-form>
+            </div>
+          </div>
+        </section>
+
+        <div class="page-actions dialog-actions">
           <el-button @click="dialogFormVisible = false">取消</el-button>
-          <el-button type="primary" @click="saveWebdavConfig()">保存</el-button>
-        </span>
+          <el-button type="primary" @click="saveWebdavConfig()">保存配置</el-button>
+        </div>
       </div>
     </el-dialog>
-    <!-- 列表展示 -->
-    <div>
-      <el-card v-for="config in configList" :key="config.id" style="width: 250px; margin: 10px; float: left" class="">
-        <div class="card-header" style="height: 35px">
-          <el-switch
-            v-model="config.enable"
-            @click="updateWebdavConfig(config)"
-            class="ml-2"
-            style="float: right; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949"
-          />
-          <span style="margin-top: 10px">{{ config.name }}</span>
-        </div>
-        <div class="dark">服务: {{ config.serverHost }}</div>
-        <div>端口: {{ config.serverPort }}</div>
-        <div>路径: {{ config.path }}</div>
-        <div>描述: {{ config.describe }}</div>
-        <br />
-        <el-button type="danger" size="small" @click="delWebdavConfig(config.id)">删除</el-button>
-        <el-button type="primary" size="small" @click="editConfig(config)">编辑</el-button>
-      </el-card>
-    </div>
-    <div style="clear: both">
-      <el-button type="success" @click="addConfig">添加配置</el-button>
-      <span color="gray" style="font-size: 12px; margin-left: 12px">新增后重启生效</span>
-    </div>
   </div>
 </template>
+
 <script setup>
-import { ref } from 'vue'
-import { useRoute } from 'vue-router'
-import { useConfigStore } from '@/store/config'
-import { useBasicStore } from '@/store/basic'
+import { computed, reactive, ref } from 'vue'
 import { delWebdavConfigReq, getWebdavConfigReq, saveWebdavConfigReq, updateWebdavConfigReq } from '@/api/user'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { Check, Delete, Edit, Message, Search, Star, CirclePlus } from '@element-plus/icons-vue'
+import { Delete } from '@element-plus/icons-vue'
 
 const dialogFormVisible = ref(false)
 const configList = reactive([])
@@ -119,17 +188,23 @@ const configTemp = {
       password: '123456',
       encType: 'aesctr',
       enable: false,
-      encName: false, // encrypt file name
-      encSuffix: '', //
+      encName: false,
+      encSuffix: '',
       describe: 'my video',
       encPath: '/aliyun/encrypt/*'
     }
   ]
 }
-Object.assign(configFormTemp, configTemp)
 
-const refSearchForm = ref()
-// 添加密码配置
+const resetConfigTemp = () => {
+  Object.assign(configFormTemp, JSON.parse(JSON.stringify(configTemp)))
+}
+
+resetConfigTemp()
+
+const enabledCount = computed(() => configList.filter((item) => item.enable).length)
+const passwordRuleCount = computed(() => configList.reduce((sum, item) => sum + (item.passwdList?.length || 0), 0))
+
 const addPasswd = () => {
   configFormTemp.passwdList.push({
     id: Math.random(),
@@ -149,19 +224,17 @@ const delPasswd = (index) => {
 
 const editConfig = (config) => {
   dialogFormVisible.value = true
-  Object.assign(configFormTemp, config)
+  Object.assign(configFormTemp, JSON.parse(JSON.stringify(config)))
 }
 
 const addConfig = () => {
   dialogFormVisible.value = true
-  Object.assign(configFormTemp, configTemp)
+  resetConfigTemp()
 }
 
 const updateWebdavConfig = async (config) => {
   const result = await updateWebdavConfigReq(config)
-  dialogFormVisible.value = false
   refreshConfigList(result)
-  return
 }
 
 const saveWebdavConfig = async () => {
@@ -173,7 +246,6 @@ const saveWebdavConfig = async () => {
   }
   dialogFormVisible.value = false
   refreshConfigList(result)
-  return
 }
 
 const delWebdavConfig = async (id) => {
@@ -189,10 +261,9 @@ const refreshConfigList = async (result) => {
   const res = result || (await getWebdavConfigReq())
   configList.splice(0, configList.length)
   res.data.forEach((element) => {
-    const passwdList = element.passwdList
+    const passwdList = element.passwdList || []
     for (const passwdInfo of passwdList) {
       passwdInfo.id = Math.random()
-      // passwdInfo.encPath = passwdInfo.encPath.reduce((a, b) => `${a},${b}`)
     }
     configList.push(element)
   })
@@ -202,3 +273,111 @@ onMounted(async () => {
   refreshConfigList()
 })
 </script>
+
+<style scoped lang="scss">
+.webdav-page {
+  padding: 6px 0 30px;
+}
+
+.webdav-shell {
+  max-width: 1320px;
+  margin: 0 auto;
+}
+
+.service-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 18px;
+}
+
+.service-card,
+.passwd-card {
+  border: 1px solid var(--app-border-color);
+  border-radius: var(--app-radius-lg);
+  background: linear-gradient(180deg, rgba(24, 31, 53, 0.82), rgba(16, 21, 36, 0.92));
+  box-shadow: var(--app-shadow-md);
+}
+
+.service-card {
+  padding: 18px;
+}
+
+.service-card__header,
+.passwd-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.service-card__title,
+.passwd-card__title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--el-text-color-primary);
+}
+
+.service-card__meta,
+.passwd-card__meta,
+.empty-state {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-secondary);
+}
+
+.service-card__body {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.service-card__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--app-radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--el-text-color-regular);
+}
+
+.service-card__row strong {
+  color: var(--el-text-color-primary);
+}
+
+.service-card__actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.dialog-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+}
+
+.passwd-card {
+  padding: 18px;
+}
+
+.helper-inline {
+  margin: 0 10px 0 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+:deep(.el-form-item__content) {
+  gap: 10px;
+}
+
+@media (max-width: 768px) {
+  .service-card__actions {
+    flex-direction: column;
+  }
+}
+</style>

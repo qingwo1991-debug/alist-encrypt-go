@@ -18,8 +18,8 @@ defineProps({
   width: 1em;
   height: 1em;
   position: relative;
-  right: 3px;
   font-size: var(--sidebar-el-icon-size);
   text-align: left !important;
+  margin-right: 2px;
 }
 </style>

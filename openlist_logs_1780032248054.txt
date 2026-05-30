@@ -1,0 +1,213 @@
+OpenList Logs - Exported at 2026-05-29T13:24:08.053814
+============================================================
+
+[ERROR] 05-29 13:19:30
+init logrus...
+
+[WARN] 05-29 13:19:30
+not enable search
+
+[ERROR] 05-29 13:19:30
+reading config file: /data/user/0/com.openlist.encrypt/files/data/config.json
+
+[ERROR] 05-29 13:19:30
+load config from env with prefix: OPENLIST_
+
+[ERROR] 05-29 13:19:30
+[config] Config loaded successfully
+
+[ERROR] 05-29 13:19:30
+[server] Encrypt proxy manager initialized
+
+[ERROR] 05-29 13:19:30
+total memory: 11117MB, available: 2527MB
+
+[ERROR] 05-29 13:19:30
+min free memory: 1024MB
+
+[ERROR] 05-29 13:19:30
+max block limit: 64MB
+
+[ERROR] 05-29 13:19:30
+auto memory limit: 4MB
+
+[ERROR] 05-29 13:19:30
+init logrus...
+
+[ERROR] 05-29 13:19:30
+[config] Init path /移动云盘156/encrypt/* -> regex pattern: ^/移动云盘156/encrypt(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /移动云盘192/encrypt/* -> regex pattern: ^/移动云盘192/encrypt(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /156天翼云盘/天翼云盘/encrypt/* -> regex pattern: ^/156天翼云盘/天翼云盘/encrypt(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /156联通云盘/encrypt/* -> regex pattern: ^/156联通云盘/encrypt(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /豆包云/encrypt/* -> regex pattern: ^/豆包云/encrypt(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /谷歌云盘1992/* -> regex pattern: ^/谷歌云盘1992(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /谷歌云盘1991/* -> regex pattern: ^/谷歌云盘1991(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[config] Init path /156天翼云盘个人/encrypt/* -> regex pattern: ^/156天翼云盘个人/encrypt(/.*)?$
+
+[ERROR] 05-29 13:19:30
+[server] H2C (HTTP/2 Cleartext) enabled for backend connections
+
+[WARN] 05-29 13:19:30
+[server] H2C connection test failed quickly: Get "http://127.0.0.1:5244/ping": dial tcp 127.0.0.1:5244: connect: connection refused, falling back to HTTP/1.1
+
+[WARN] 05-29 13:19:30
+not enable search
+
+[ERROR] 05-29 13:19:30
+[server] Encrypt proxy server started
+
+[ERROR] 05-29 13:19:30
+[server] Encrypt proxy server starting on port 5344
+
+[ERROR] 05-29 13:19:30
+reading config file: /data/user/0/com.openlist.encrypt/files/data/config.json
+
+[ERROR] 05-29 13:19:30
+load config from env with prefix: OPENLIST_
+
+[ERROR] 05-29 13:19:30
+total memory: 11117MB, available: 2467MB
+
+[ERROR] 05-29 13:19:30
+min free memory: 1024MB
+
+[ERROR] 05-29 13:19:30
+max block limit: 64MB
+
+[ERROR] 05-29 13:19:30
+auto memory limit: 4MB
+
+[ERROR] 05-29 13:19:30
+init logrus...
+
+[WARN] 05-29 13:19:30
+not enable search
+
+[WARN] 05-29 13:19:30
+init offline download tool aria2 failed: failed get aria2 version: Post "http://localhost:6800/jsonrpc": dial tcp 127.0.0.1:6800: connect: connection refused
+
+[ERROR] 05-29 13:19:30
+init offline download tool SimpleHttp success: ok
+
+[ERROR] 05-29 13:19:30
+init offline download tool PikPak success: ok
+
+[ERROR] 05-29 13:19:30
+init offline download tool ThunderBrowser success: ok
+
+[ERROR] 05-29 13:19:30
+init offline download tool ThunderX success: ok
+
+[ERROR] 05-29 13:19:30
+init offline download tool 115 Cloud success: ok
+
+[WARN] 05-29 13:19:30
+init offline download tool qBittorrent failed: Post "http://localhost:8080/api/v2/auth/login": dial tcp 127.0.0.1:8080: connect: connection refused
+
+[ERROR] 05-29 13:19:30
+init offline download tool Thunder success: ok
+
+[WARN] 05-29 13:19:30
+init offline download tool Transmission failed: failed get transmission version: can't get session values: 'session-get' rpc method failed: failed to execute HTTP request: Post "http://localhost:9091/transmission/rpc": dial tcp 127.0.0.1:9091: connect: connection refused
+
+[ERROR] 05-29 13:19:30
+init offline download tool 115 Open success: ok
+
+[ERROR] 05-29 13:19:30
+init offline download tool 123Pan success: ok
+
+[ERROR] 05-29 13:19:30
+init offline download tool 123 Open success: ok
+
+[ERROR] 05-29 13:19:30
+start HTTP server @ 0.0.0.0:5244
+
+[ERROR] 05-29 13:19:30
+[req-0650aa] [ping] [request] GET /ping status=200 duration=137.813µs
+
+[ERROR] 05-29 13:19:31
+success load storage: [/移动云盘156], driver: [139Yun], order: [0]
+
+[ERROR] 05-29 13:19:31
+reading config file: /data/user/0/com.openlist.encrypt/files/data/config.json
+
+[ERROR] 05-29 13:19:31
+load config from env with prefix: OPENLIST_
+
+[ERROR] 05-29 13:19:31
+total memory: 11117MB, available: 2510MB
+
+[ERROR] 05-29 13:19:31
+min free memory: 1024MB
+
+[ERROR] 05-29 13:19:31
+max block limit: 64MB
+
+[ERROR] 05-29 13:19:31
+auto memory limit: 4MB
+
+[ERROR] 05-29 13:19:31
+init logrus...
+
+[WARN] 05-29 13:19:31
+not enable search
+
+[ERROR] 05-29 13:19:45
+开始更新 OpenList 管理员密码
+
+[ERROR] 05-29 13:19:45
+正在写入 OpenList 管理员密码
+
+[ERROR] 05-29 13:19:45
+[mobile_set_admin_password] start length=17
+
+[ERROR] 05-29 13:19:45
+[mobile_set_admin_password] admin user loaded: username=admin
+
+[ERROR] 05-29 13:19:45
+[mobile_set_admin_password] password hash prepared
+
+[ERROR] 05-29 13:19:45
+[mobile_set_admin_password] admin user updated: username=admin
+
+[ERROR] 05-29 13:19:45
+[mobile_set_admin_password] admin cache refresh requested
+
+[ERROR] 05-29 13:19:45
+OpenList 管理员密码更新流程已返回
+
+[ERROR] 05-29 13:22:38
+[server] Forcing database sync (WAL checkpoint mode=PASSIVE timeout=2s)...
+
+[ERROR] 05-29 13:22:38
+[server] Database sync completed successfully
+
+[ERROR] 05-29 13:22:38
+[server] Forcing database sync (WAL checkpoint mode=PASSIVE timeout=2s)...
+
+[ERROR] 05-29 13:22:38
+[server] Database sync completed successfully
+
+[ERROR] 05-29 13:23:49
+[req-00df43] [ping] [request] GET /ping status=200 duration=60.209µs
+
+[ERROR] 05-29 13:23:49
+[req-16206e] [api:/encrypt] [request] GET /api/encrypt/v2/config status=200 duration=250.782µs
+
+[ERROR] 05-29 13:23:49
+[req-6bfe45] [api:/encrypt] [request] GET /api/encrypt/v2/config/schema status=200 duration=116.042µs
+

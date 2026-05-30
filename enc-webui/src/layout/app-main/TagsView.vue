@@ -221,22 +221,30 @@ const { visible, top, left, selectedTag } = toRefs(state)
   background: var(--tags-view-background);
   border-bottom: 1px solid var(--tags-view-border-bottom);
   box-shadow: var(--tags-view-box-shadow);
+  backdrop-filter: blur(18px);
+  padding: 6px 14px 0;
   .tags-view-wrapper {
     .tags-view-item {
       display: inline-block;
       position: relative;
       cursor: pointer;
-      height: 27px;
-      line-height: 26px;
+      height: 34px;
+      line-height: 32px;
       border: 1px solid var(--tags-view-item-border-color);
       color: var(--tags-view-item-color);
       background: var(--tags-view-item-background);
-      padding: 0 8px;
+      padding: 0 12px;
       font-size: 12px;
-      margin-left: 5px;
-      margin-top: 3px;
+      margin-left: 8px;
+      margin-top: 0;
+      border-radius: 999px;
+      transition: all 0.18s ease;
       &:first-of-type {
-        margin-left: 10px;
+        margin-left: 0;
+      }
+      &:hover {
+        color: var(--el-text-color-primary);
+        border-color: rgba(145, 167, 255, 0.24);
       }
       &:last-of-type {
         margin-right: 15px;
