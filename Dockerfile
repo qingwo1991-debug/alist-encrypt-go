@@ -1,3 +1,14 @@
+# Frontend build stage
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app/enc-webui
+
+COPY enc-webui/package.json enc-webui/package-lock.json ./
+RUN npm ci
+
+COPY enc-webui/ ./
+RUN npm run build
+
 # Build stage
 FROM golang:1.24-alpine AS builder
 
@@ -12,6 +23,9 @@ RUN go mod download
 # Copy source
 COPY . .
 
+# Sync freshly built frontend assets into the embedded web directory before compiling Go.
+COPY --from=frontend-builder /app/enc-webui/dist/ /app/web/public/
+
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /alist-encrypt-go ./cmd/server
 
@@ -24,9 +38,6 @@ WORKDIR /app
 
 # Copy binary
 COPY --from=builder /alist-encrypt-go .
-
-# Copy web static files (frontend UI)
-COPY --from=builder /app/web/public ./web/public
 
 # Copy configs (includes config.example.json and proxy_domain_dict.seed.json)
 COPY --from=builder /app/configs/ ./configs/
