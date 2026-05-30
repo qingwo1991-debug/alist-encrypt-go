@@ -1200,6 +1200,7 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 	if uploadClient == nil {
 		uploadClient = p.httpClient
 	}
+	p.debugf("upload", "%s Using stream upload client for %s", internal.LogPrefix(ctx, internal.TagUpload), filePath)
 	resp, err := uploadClient.Do(req)
 	if err != nil {
 		log.Errorf("%s FsPut request failed: %v", internal.LogPrefix(ctx, internal.TagUpload), err)
