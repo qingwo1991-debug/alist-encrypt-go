@@ -275,7 +275,7 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
     File? backupFile;
     try {
       final file = File(_filePath);
-      final canonicalPort = await Android().getOpenListHttpPort();
+      final canonicalPort = await NativeBridge.android.getOpenListHttpPort();
       final scheme = decodedConfig['scheme'] is Map<String, dynamic>
           ? Map<String, dynamic>.from(decodedConfig['scheme'] as Map<String, dynamic>)
           : <String, dynamic>{};
