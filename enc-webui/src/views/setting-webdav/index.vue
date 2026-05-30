@@ -294,7 +294,7 @@ onMounted(async () => {
 .passwd-card {
   border: 1px solid var(--app-border-color);
   border-radius: var(--app-radius-lg);
-  background: linear-gradient(180deg, rgba(24, 31, 53, 0.82), rgba(16, 21, 36, 0.92));
+  background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-md);
 }
 
@@ -338,7 +338,7 @@ onMounted(async () => {
   gap: 12px;
   padding: 10px 12px;
   border-radius: var(--app-radius-sm);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--app-surface-muted);
   color: var(--el-text-color-regular);
 }
 

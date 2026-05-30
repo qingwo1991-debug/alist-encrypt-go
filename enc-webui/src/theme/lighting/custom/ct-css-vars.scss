@@ -1,67 +1,114 @@
 html.lighting-theme {
-  /*element-plus section */
-  //--el-menu-active-color: #409eff;
-  //--el-menu-text-color: #bfcbd9;
-  //--el-menu-hover-text-color: var(--el-color-primary);
-  //--el-menu-bg-color: #304156;
-  //--el-menu-hover-bg-color: #263445;
-  //--el-menu-item-height: 56px;
-  --el-menu-border-color: none;
-  /*layout section*/
-  //layout
-  --layout-border-left-color: #ddd;
-  //Breadcrumb
-  --breadcrumb-no-redirect: #97a8be;
-  //Hamburger
-  --hamburger-color: #2b2f3a;
-  --hamburger-width: 20px;
-  --hamburger-height: 20px;
-  //Sidebar
-  --sidebar-el-icon-size: 20px;
-  --sidebar-logo-background: #fff;
-  --sidebar-logo-color: #ff9901;
-  --sidebar-logo-width: 32px;
-  --sidebar-logo-height: 32px;
-  --sidebar-logo-title-color: #2b2f3a;
-  --side-bar-width: 210px;
-  --side-bar-border-right-color: #eee;
-  //TagsView
-  --tags-view-background: #fff;
-  --tags-view-border-bottom: #d8dce5;
-  --tags-view-box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.12), 0 0 3px 0 rgba(0, 0, 0, 0.04);
-  --tags-view-item-background: #fff;
-  --tags-view-item-border-color: #d8dce5;
-  --tags-view-item-color: #495060;
-  --tag-view-height: 32px;
-  --tags-view-item-active-background: #42b983;
-  --tags-view-item-active-color: #fff;
-  --tags-view-item-active-border-color: #42b983;
-  --tags-view-contextmenu-background: #fff;
-  --tags-view-contextmenu-color: #333;
-  --tags-view-contextmenu-box-shadow: 2px 2px 3px 0 rgba(0, 0, 0, 0.3);
-  --tags-view-contextmenu-hover-background: #eee;
-  //close-icon
-  --tags-view-close-icon-hover-background: #b4bccc;
-  --tags-view-close-icon-hover-color: #fff;
-  //AppMain.vue
-  --app-main-padding: 10px;
-  --app-main-background: #fff;
-  //Navbar.vue
-  --nav-bar-height: 50px;
-  --nav-bar-background: #fff;
-  --nav-bar-box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
-  --nav-bar-right-menu-background: #fff;
+  color-scheme: light;
 
-  //transition 动画
-  //侧边栏切换动画时长
-  --sideBar-switch-duration: 0.2s;
-  //logo切换动画时长
-  --logo-switch-duration: 0.5s;
-  //页面动画时长
+  --el-color-primary: #5477cf;
+  --el-color-primary-light-3: #7390db;
+  --el-color-primary-light-5: #94aae5;
+  --el-color-primary-light-7: #bccbef;
+  --el-color-primary-dark-2: #4566bb;
+  --el-color-success: #4ea685;
+  --el-color-warning: #bf8650;
+  --el-color-danger: #c7657c;
+  --el-color-info: #7d879f;
+
+  --app-backdrop: #eef2f8;
+  --app-backdrop-secondary: #e6ebf4;
+  --app-surface: rgba(255, 255, 255, 0.82);
+  --app-surface-strong: #ffffff;
+  --app-surface-soft: rgba(249, 251, 255, 0.9);
+  --app-surface-muted: rgba(237, 242, 250, 0.9);
+  --app-border-color: rgba(84, 119, 207, 0.12);
+  --app-border-strong: rgba(84, 119, 207, 0.2);
+  --app-shadow-lg: 0 18px 40px rgba(73, 92, 129, 0.12);
+  --app-shadow-md: 0 10px 24px rgba(73, 92, 129, 0.08);
+  --app-glow-primary: 0 0 0 1px rgba(84, 119, 207, 0.18), 0 8px 20px rgba(84, 119, 207, 0.12);
+  --app-radius-xl: 20px;
+  --app-radius-lg: 16px;
+  --app-radius-md: 14px;
+  --app-radius-sm: 10px;
+  --app-radius-xs: 8px;
+  --app-gap-lg: 24px;
+  --app-gap-md: 18px;
+  --app-gap-sm: 12px;
+
+  --el-text-color-primary: #22304a;
+  --el-text-color-regular: #4f5f7c;
+  --el-text-color-secondary: #76839e;
+  --el-text-color-placeholder: #98a3b7;
+  --el-text-color-disabled: #b0b9c9;
+  --el-fill-color-blank: transparent;
+  --el-bg-color: transparent;
+  --el-bg-color-page: transparent;
+  --el-bg-color-overlay: rgba(255, 255, 255, 0.95);
+  --el-border-color: rgba(84, 119, 207, 0.12);
+  --el-border-color-light: rgba(84, 119, 207, 0.1);
+  --el-border-color-lighter: rgba(84, 119, 207, 0.08);
+  --el-border-color-extra-light: rgba(84, 119, 207, 0.06);
+  --el-border-color-dark: rgba(84, 119, 207, 0.18);
+  --el-mask-color: rgba(230, 236, 246, 0.48);
+
+  --el-card-bg-color: var(--app-surface);
+  --el-menu-active-color: #22304a;
+  --el-menu-text-color: #5f6f8a;
+  --el-menu-hover-text-color: #22304a;
+  --el-menu-bg-color: transparent;
+  --el-menu-hover-bg-color: transparent;
+  --el-menu-item-height: 52px;
+  --el-menu-border-color: transparent;
+  --el-fill-color-light: rgba(84, 119, 207, 0.04);
+  --el-fill-color-lighter: rgba(84, 119, 207, 0.025);
+  --el-fill-color-dark: rgba(233, 238, 247, 0.9);
+  --el-fill-color-darker: rgba(224, 231, 243, 0.96);
+  --el-fill-color-darkest: rgba(210, 219, 235, 1);
+  --el-disabled-bg-color: rgba(84, 119, 207, 0.04);
+  --el-disabled-text-color: #9aa6bb;
+  --el-disabled-border-color: rgba(84, 119, 207, 0.08);
+  --el-input-bg-color: rgba(245, 248, 253, 0.95);
+  --el-input-border-color: rgba(84, 119, 207, 0.12);
+  --el-input-hover-border-color: rgba(84, 119, 207, 0.24);
+  --el-input-focus-border-color: #5477cf;
+
+  --layout-border-left-color: rgba(84, 119, 207, 0.08);
+  --breadcrumb-no-redirect: #64748f;
+  --hamburger-color: #22304a;
+  --hamburger-width: 18px;
+  --hamburger-height: 18px;
+  --sidebar-el-icon-size: 18px;
+  --sidebar-logo-background: transparent;
+  --sidebar-logo-color: #6e8edb;
+  --sidebar-logo-width: 26px;
+  --sidebar-logo-height: 26px;
+  --sidebar-logo-title-color: #22304a;
+  --side-bar-width: 248px;
+  --side-bar-border-right-color: rgba(84, 119, 207, 0.08);
+
+  --tags-view-background: rgba(255, 255, 255, 0.72);
+  --tags-view-border-bottom: rgba(84, 119, 207, 0.06);
+  --tags-view-box-shadow: none;
+  --tags-view-item-background: rgba(84, 119, 207, 0.04);
+  --tags-view-item-border-color: rgba(84, 119, 207, 0.1);
+  --tags-view-item-color: #5c6c87;
+  --tag-view-height: 48px;
+  --tags-view-item-active-background: rgba(84, 119, 207, 0.12);
+  --tags-view-item-active-color: #22304a;
+  --tags-view-item-active-border-color: rgba(84, 119, 207, 0.2);
+  --tags-view-contextmenu-background: rgba(255, 255, 255, 0.98);
+  --tags-view-contextmenu-color: #22304a;
+  --tags-view-contextmenu-box-shadow: var(--app-shadow-lg);
+  --tags-view-contextmenu-hover-background: rgba(84, 119, 207, 0.08);
+  --tags-view-close-icon-hover-background: rgba(84, 119, 207, 0.1);
+  --tags-view-close-icon-hover-color: #22304a;
+
+  --app-main-padding: 22px;
+  --app-main-background: transparent;
+  --nav-bar-height: 76px;
+  --nav-bar-background: rgba(255, 255, 255, 0.74);
+  --nav-bar-box-shadow: none;
+  --nav-bar-right-menu-background: transparent;
+
+  --sideBar-switch-duration: 0.24s;
+  --logo-switch-duration: 0.35s;
   --page-transform-duration: 0.2s;
-  //面包屑导航动画时长
   --breadcrumb-change-duration: 0.2s;
-
-  //进度条颜色
-  --pregress-bar-color: #409eff;
+  --pregress-bar-color: #5477cf;
 }

@@ -25,7 +25,7 @@
             <router-link to="/">
               <el-dropdown-item>{{ langTitle('Home') }}</el-dropdown-item>
             </router-link>
-            <a target="_blank" href="https://github.com/jzfai/vue3-admin-template">
+            <a target="_blank" href="https://github.com/qingwo1991-debug/alist-encrypt-go">
               <el-dropdown-item>{{ langTitle('Github') }}</el-dropdown-item>
             </a>
             <!--<el-dropdown-item>修改密码</el-dropdown-item>-->
@@ -122,7 +122,7 @@ const loginOut = () => {
   padding: 10px 12px 10px 16px;
   border-radius: var(--app-radius-md);
   border: 1px solid var(--app-border-color);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--app-surface-soft);
   box-shadow: var(--app-shadow-md);
   position: relative;
   cursor: pointer;
@@ -153,8 +153,8 @@ const loginOut = () => {
   width: 42px;
   height: 42px;
   border-radius: 14px;
-  background: linear-gradient(180deg, #6a9aff 0%, #4f81f6 100%);
-  color: #f6f8ff;
+  background: linear-gradient(180deg, var(--el-color-primary-light-3) 0%, var(--el-color-primary) 100%);
+  color: #fff;
   font-size: 16px;
   font-weight: 700;
   box-shadow: var(--app-glow-primary);

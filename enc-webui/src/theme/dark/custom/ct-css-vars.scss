@@ -2,28 +2,28 @@ html.dark {
   color-scheme: dark;
 
   /* brand */
-  --el-color-primary: #5b8cff;
-  --el-color-primary-light-3: #79a4ff;
-  --el-color-primary-light-5: #9ab8ff;
-  --el-color-primary-light-7: #bfd2ff;
-  --el-color-primary-dark-2: #3f73f0;
-  --el-color-success: #52d6a2;
-  --el-color-warning: #ffb55f;
-  --el-color-danger: #ff6f91;
-  --el-color-info: #8b95bf;
+  --el-color-primary: #6c8ee6;
+  --el-color-primary-light-3: #86a4ee;
+  --el-color-primary-light-5: #a6bcf3;
+  --el-color-primary-light-7: #cad6f8;
+  --el-color-primary-dark-2: #5577d3;
+  --el-color-success: #5fbf9f;
+  --el-color-warning: #d6a15a;
+  --el-color-danger: #dc758c;
+  --el-color-info: #8691b3;
 
   /* surfaces */
-  --app-backdrop: #12172d;
-  --app-backdrop-secondary: #18203b;
-  --app-surface: rgba(26, 32, 53, 0.86);
-  --app-surface-strong: #1a2035;
-  --app-surface-soft: rgba(34, 42, 70, 0.78);
-  --app-surface-muted: rgba(20, 27, 45, 0.72);
-  --app-border-color: rgba(145, 167, 255, 0.14);
-  --app-border-strong: rgba(145, 167, 255, 0.22);
+  --app-backdrop: #101522;
+  --app-backdrop-secondary: #161d2c;
+  --app-surface: rgba(27, 33, 46, 0.9);
+  --app-surface-strong: #1b212e;
+  --app-surface-soft: rgba(33, 40, 56, 0.82);
+  --app-surface-muted: rgba(18, 24, 36, 0.74);
+  --app-border-color: rgba(157, 173, 213, 0.12);
+  --app-border-strong: rgba(157, 173, 213, 0.2);
   --app-shadow-lg: 0 18px 40px rgba(7, 12, 27, 0.28);
   --app-shadow-md: 0 10px 24px rgba(7, 12, 27, 0.2);
-  --app-glow-primary: 0 0 0 1px rgba(91, 140, 255, 0.26), 0 12px 30px rgba(91, 140, 255, 0.2);
+  --app-glow-primary: 0 0 0 1px rgba(108, 142, 230, 0.24), 0 10px 24px rgba(108, 142, 230, 0.16);
   --app-radius-xl: 20px;
   --app-radius-lg: 16px;
   --app-radius-md: 14px;
@@ -34,54 +34,54 @@ html.dark {
   --app-gap-sm: 12px;
 
   /* typography */
-  --el-text-color-primary: #f6f8ff;
-  --el-text-color-regular: #c5d0f7;
-  --el-text-color-secondary: #8f9bc7;
-  --el-text-color-placeholder: #69749f;
-  --el-text-color-disabled: #5d678f;
+  --el-text-color-primary: #eef2fb;
+  --el-text-color-regular: #c6cee0;
+  --el-text-color-secondary: #8f99af;
+  --el-text-color-placeholder: #69728a;
+  --el-text-color-disabled: #5a6276;
   --el-fill-color-blank: transparent;
   --el-bg-color: transparent;
   --el-bg-color-page: transparent;
-  --el-bg-color-overlay: rgba(17, 22, 38, 0.96);
-  --el-border-color: rgba(145, 167, 255, 0.14);
-  --el-border-color-light: rgba(145, 167, 255, 0.12);
-  --el-border-color-lighter: rgba(145, 167, 255, 0.1);
-  --el-border-color-extra-light: rgba(145, 167, 255, 0.08);
-  --el-border-color-dark: rgba(145, 167, 255, 0.2);
+  --el-bg-color-overlay: rgba(20, 24, 33, 0.96);
+  --el-border-color: rgba(157, 173, 213, 0.12);
+  --el-border-color-light: rgba(157, 173, 213, 0.1);
+  --el-border-color-lighter: rgba(157, 173, 213, 0.08);
+  --el-border-color-extra-light: rgba(157, 173, 213, 0.06);
+  --el-border-color-dark: rgba(157, 173, 213, 0.18);
   --el-mask-color: rgba(5, 9, 20, 0.55);
 
   /* element-plus section */
   --el-card-bg-color: var(--app-surface);
   --el-menu-active-color: #f6f8ff;
-  --el-menu-text-color: #aab7e8;
+  --el-menu-text-color: #aeb8cd;
   --el-menu-hover-text-color: #f6f8ff;
   --el-menu-bg-color: transparent;
   --el-menu-hover-bg-color: transparent;
   --el-menu-item-height: 52px;
   --el-menu-border-color: transparent;
-  --el-fill-color-light: rgba(255, 255, 255, 0.04);
-  --el-fill-color-lighter: rgba(255, 255, 255, 0.02);
+  --el-fill-color-light: rgba(255, 255, 255, 0.035);
+  --el-fill-color-lighter: rgba(255, 255, 255, 0.018);
   --el-fill-color-dark: rgba(10, 14, 28, 0.6);
   --el-fill-color-darker: rgba(7, 11, 22, 0.8);
   --el-fill-color-darkest: rgba(4, 7, 15, 0.9);
   --el-disabled-bg-color: rgba(255, 255, 255, 0.04);
   --el-disabled-text-color: #7180b2;
   --el-disabled-border-color: rgba(145, 167, 255, 0.08);
-  --el-input-bg-color: rgba(13, 18, 33, 0.55);
-  --el-input-border-color: rgba(145, 167, 255, 0.16);
-  --el-input-hover-border-color: rgba(145, 167, 255, 0.34);
-  --el-input-focus-border-color: #5b8cff;
+  --el-input-bg-color: rgba(14, 18, 28, 0.58);
+  --el-input-border-color: rgba(157, 173, 213, 0.14);
+  --el-input-hover-border-color: rgba(108, 142, 230, 0.28);
+  --el-input-focus-border-color: #6c8ee6;
   --el-fill-color-blank: transparent;
 
   /* layout */
   --layout-border-left-color: rgba(145, 167, 255, 0.12);
-  --breadcrumb-no-redirect: #9aa9dc;
+  --breadcrumb-no-redirect: #a0acc6;
   --hamburger-color: #f6f8ff;
   --hamburger-width: 18px;
   --hamburger-height: 18px;
   --sidebar-el-icon-size: 18px;
   --sidebar-logo-background: transparent;
-  --sidebar-logo-color: #8eb3ff;
+  --sidebar-logo-color: #9ab2ed;
   --sidebar-logo-width: 26px;
   --sidebar-logo-height: 26px;
   --sidebar-logo-title-color: #f6f8ff;
@@ -89,18 +89,18 @@ html.dark {
   --side-bar-border-right-color: rgba(145, 167, 255, 0.1);
 
   /* tags */
-  --tags-view-background: rgba(16, 22, 39, 0.78);
-  --tags-view-border-bottom: rgba(145, 167, 255, 0.08);
+  --tags-view-background: rgba(17, 22, 33, 0.76);
+  --tags-view-border-bottom: rgba(157, 173, 213, 0.06);
   --tags-view-box-shadow: none;
-  --tags-view-item-background: rgba(255, 255, 255, 0.04);
-  --tags-view-item-border-color: rgba(145, 167, 255, 0.12);
-  --tags-view-item-color: #b6c4ef;
+  --tags-view-item-background: rgba(255, 255, 255, 0.035);
+  --tags-view-item-border-color: rgba(157, 173, 213, 0.1);
+  --tags-view-item-color: #b7c0d4;
   --tag-view-height: 48px;
-  --tags-view-item-active-background: rgba(91, 140, 255, 0.2);
-  --tags-view-item-active-color: #f6f8ff;
-  --tags-view-item-active-border-color: rgba(91, 140, 255, 0.4);
+  --tags-view-item-active-background: rgba(108, 142, 230, 0.16);
+  --tags-view-item-active-color: #eef2fb;
+  --tags-view-item-active-border-color: rgba(108, 142, 230, 0.28);
   --tags-view-contextmenu-background: rgba(17, 22, 38, 0.98);
-  --tags-view-contextmenu-color: #dbe4ff;
+  --tags-view-contextmenu-color: #d7deee;
   --tags-view-contextmenu-box-shadow: var(--app-shadow-lg);
   --tags-view-contextmenu-hover-background: rgba(91, 140, 255, 0.14);
   --tags-view-close-icon-hover-background: rgba(255, 255, 255, 0.08);
@@ -110,7 +110,7 @@ html.dark {
   --app-main-padding: 22px;
   --app-main-background: transparent;
   --nav-bar-height: 76px;
-  --nav-bar-background: rgba(21, 28, 48, 0.72);
+  --nav-bar-background: rgba(22, 28, 40, 0.78);
   --nav-bar-box-shadow: none;
   --nav-bar-right-menu-background: transparent;
 
