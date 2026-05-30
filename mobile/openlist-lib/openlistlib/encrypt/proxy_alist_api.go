@@ -757,6 +757,10 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 			}
 			if data, ok := result["data"].(map[string]interface{}); ok {
 				rawURL, _ := data["raw_url"].(string)
+				rawURL = rewriteLoopbackRawURLForRequest(r, rawURL)
+				if rawURL != "" {
+					data["raw_url"] = rawURL
+				}
 				size, _ := data["size"].(float64)
 				provider, _ := data["provider"].(string)
 				sign, _ := data["sign"].(string)

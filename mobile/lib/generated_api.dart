@@ -623,6 +623,28 @@ class Android {
     }
   }
 
+  Future<void> setOpenListHttpPort(int port) async {
+    const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.Android.setOpenListHttpPort';
+    final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(<Object?>[port]) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
+
   Future<bool> isRunning() async {
     const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.Android.isRunning';
     final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(

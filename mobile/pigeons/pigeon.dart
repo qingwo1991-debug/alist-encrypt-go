@@ -54,6 +54,8 @@ abstract class Android {
 
   int getOpenListHttpPort();
 
+  void setOpenListHttpPort(int port);
+
   bool isRunning();
 
   String getOpenListVersion();

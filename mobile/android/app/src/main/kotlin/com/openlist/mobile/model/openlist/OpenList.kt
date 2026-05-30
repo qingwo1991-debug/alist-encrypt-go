@@ -186,4 +186,15 @@ object OpenList : Event, LogCallback {
     fun getHttpPort(): Int {
         return OpenListConfigManager.config().scheme.httpPort
     }
+
+    fun setHttpPort(port: Int) {
+        require(port in 1..65535) { "监听端口必须在 1-65535 之间" }
+
+        val config = OpenListConfigManager.config()
+        OpenListConfigManager.update(
+            config.copy(
+                scheme = config.scheme.copy(httpPort = port)
+            )
+        )
+    }
 }
