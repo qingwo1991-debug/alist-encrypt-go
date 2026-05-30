@@ -518,6 +518,28 @@ class NativeCommon {
       return;
     }
   }
+
+  Future<void> writeAppLog(int level, String msg) async {
+    const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.NativeCommon.writeAppLog';
+    final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(<Object?>[level, msg]) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
 }
 
 class Android {

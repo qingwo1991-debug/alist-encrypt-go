@@ -295,6 +295,7 @@ object SyncScheduler {
     }
 
     private fun acquireAuthTokenWithPassword(password: String): String? {
+        ensureOpenListReady()
         for (baseUrl in openListBaseUrls()) {
             acquireAuthTokenWithPassword(baseUrl, password)?.let { return it }
         }
@@ -358,10 +359,65 @@ object SyncScheduler {
             } finally {
                 conn.disconnect()
             }
+            acquireAuthTokenWithPlainLogin(baseUrl, password)?.let { return it }
             null
         } catch (e: Exception) {
             appLog(LogLevel.WARN, "本地挂载认证异常：${e.javaClass.simpleName}: ${e.message}")
             Log.w(TAG, "Failed to acquire auth token via $baseUrl: ${e.message}")
+            null
+        }
+    }
+
+    private fun acquireAuthTokenWithPlainLogin(baseUrl: String, password: String): String? {
+        return try {
+            val loginUrl = URL("$baseUrl/api/auth/login")
+            val conn = loginUrl.openConnection() as HttpURLConnection
+            try {
+                appLog(LogLevel.INFO, "本地挂载认证回退：$baseUrl/api/auth/login")
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                conn.setRequestProperty("Accept", "application/json")
+                conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8")
+
+                val loginBody = JSONObject().apply {
+                    put("username", "admin")
+                    put("password", password)
+                    put("otp_code", "")
+                }.toString()
+                OutputStreamWriter(conn.outputStream).use { it.write(loginBody) }
+                conn.outputStream.close()
+
+                val responseCode = conn.responseCode
+                val response = if (responseCode in 200..299) {
+                    conn.inputStream.bufferedReader().readText()
+                } else {
+                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                }
+                if (responseCode == 200 && response.isNotBlank()) {
+                    val json = JSONObject(response)
+                    val apiCode = json.optInt("code", 0)
+                    val message = json.optString("message")
+                    val token = json.optJSONObject("data")?.optString("token")
+                    if (apiCode == 200 && !token.isNullOrEmpty()) {
+                        if (AppConfig.encryptAdminPassword != password) {
+                            AppConfig.encryptAdminPassword = password
+                        }
+                        appLog(LogLevel.INFO, "本地挂载认证成功：OpenList 明文登录校验通过")
+                        return token
+                    }
+                    appLog(
+                        LogLevel.WARN,
+                        "本地挂载认证回退失败：http=$responseCode apiCode=$apiCode message=$message tokenEmpty=${token.isNullOrEmpty()}"
+                    )
+                }
+            } finally {
+                conn.disconnect()
+            }
+            null
+        } catch (e: Exception) {
+            appLog(LogLevel.WARN, "本地挂载认证回退异常：${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -378,6 +434,16 @@ object SyncScheduler {
         }
         urls.add("http://127.0.0.1:$DEFAULT_OPENLIST_PORT")
         return urls.toList()
+    }
+
+    private fun ensureOpenListReady() {
+        try {
+            if (!OpenList.isRunning()) {
+                OpenList.startup()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to ensure OpenList ready before auth: ${e.message}")
+        }
     }
 
     private fun staticHash(password: String): String {

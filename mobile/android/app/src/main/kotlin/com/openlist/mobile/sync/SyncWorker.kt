@@ -55,6 +55,7 @@ class SyncWorker(
         val taskId = inputData.getString(KEY_TASK_ID) ?: return@withContext Result.failure()
         val taskJson = inputData.getString(KEY_TASK_JSON) ?: return@withContext Result.failure()
         val context = applicationContext
+        val traceId = buildTraceId(taskId)
 
         val taskConfig: SyncTaskConfig
         try {
@@ -66,10 +67,12 @@ class SyncWorker(
         }
 
         publishProgress(phase = "PREPARING")
+        logSync(traceId, taskId, "prepare", "任务开始 name=${taskConfig.name}")
 
         // 1. 校验存储权限
         if (!hasStorageAccess()) {
             Log.w(TAG, "No storage access for task $taskId")
+            logSync(traceId, taskId, "prepare", "缺少本地存储访问权限", LogLevel.ERROR)
             recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("缺少本地存储访问权限"))
             return@withContext Result.failure()
         }
@@ -78,11 +81,13 @@ class SyncWorker(
         ensureRuntimeReady()
         if (!isProxyAlive()) {
             Log.w(TAG, "Encrypt proxy not alive for task $taskId")
+            logSync(traceId, taskId, "prepare", "加密代理服务不可用", LogLevel.ERROR)
             recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("加密代理服务不可用"))
             return@withContext Result.failure()
         }
         if (!isAlistAlive()) {
             Log.w(TAG, "OpenList not alive for task $taskId")
+            logSync(traceId, taskId, "prepare", "OpenList 服务(${currentOpenListPort()})不可用", LogLevel.ERROR)
             recordHistory(
                 context,
                 taskId,
@@ -99,6 +104,7 @@ class SyncWorker(
         // 2.1. 强制要求目标路径在已启用加密路径内，避免明文上传后误删本地文件
         if (!isEncryptedTargetPath(taskConfig.targetPath)) {
             Log.w(TAG, "Target path is not covered by enabled encrypt paths: ${taskConfig.targetPath}")
+            logSync(traceId, taskId, "prepare", "目标路径未配置为加密路径: ${taskConfig.targetPath}", LogLevel.ERROR)
             recordHistory(
                 context,
                 taskId,
@@ -112,20 +118,13 @@ class SyncWorker(
             return@withContext Result.failure()
         }
 
-        // 2.5. 获取认证 token（唯一来源：SyncScheduler.acquireAuthToken）
+        // 2.5. 获取认证 token（可选）。
+        // 有管理员密码时优先携带认证；未配置时继续尝试匿名上传，避免把“本地挂载密码校验”误当成媒体备份前置条件。
         val authToken = SyncScheduler.acquireAuthToken()
         if (authToken.isNullOrEmpty()) {
-            recordHistory(
-                context,
-                taskId,
-                0,
-                0,
-                0,
-                0,
-                1,
-                listOf("未获取到管理认证 token，请先在 OpenList 页面校验当前管理员密码")
-            )
-            return@withContext Result.failure()
+            logSync(traceId, taskId, "auth", "未获取到管理认证 token，将尝试匿名上传", LogLevel.WARN)
+        } else {
+            logSync(traceId, taskId, "auth", "已获取管理认证 token")
         }
 
         // 3. 扫描源目录
@@ -141,6 +140,7 @@ class SyncWorker(
         val filesToUpload = mutableListOf<File>()
         val excludeNames = taskConfig.excludeFolders.map { it.trimEnd('/') }.toSet()
         collectFiles(sourceDir, taskConfig.fileExtensions, excludeNames, filesToUpload)
+        logSync(traceId, taskId, "scan", "扫描完成 total=${filesToUpload.size} source=${taskConfig.sourcePath}")
         publishProgress(
             phase = "SCANNING",
             scannedFiles = filesToUpload.size,
@@ -165,6 +165,12 @@ class SyncWorker(
             )
         }
         val skippedCount = filesToUpload.size - newOrModified.size
+        logSync(
+            traceId,
+            taskId,
+            "scan",
+            "增量筛选完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount",
+        )
         publishProgress(
             phase = "READY",
             scannedFiles = filesToUpload.size,
@@ -205,7 +211,14 @@ class SyncWorker(
                     uploadedFiles = successCount,
                     failedFiles = failureCount,
                 )
-                uploadFile(file, remotePath, authToken)
+                val progressBefore = buildProgressPercent(successCount, failureCount, newOrModified.size)
+                logSync(
+                    traceId,
+                    taskId,
+                    "upload",
+                    "上传开始 progress=$progressBefore remotePath=$remotePath file=${file.name} size=${file.length()}",
+                )
+                uploadFile(file, remotePath, authToken, traceId, taskId, successCount, failureCount, newOrModified.size, remotePath)
 
                 // 记录同步成功
                 SyncRecordStore.markSynced(
@@ -221,6 +234,8 @@ class SyncWorker(
                 )
                 syncedFiles.add(file)
                 successCount++
+                val progressAfter = buildProgressPercent(successCount, failureCount, newOrModified.size)
+                logSync(traceId, taskId, "upload", "上传成功 progress=$progressAfter remotePath=$remotePath file=${file.name}")
                 publishProgress(
                     phase = "UPLOADING",
                     currentFile = file.name,
@@ -235,6 +250,8 @@ class SyncWorker(
                 failureCount++
                 val errorMsg = "${file.name}: ${e.message}"
                 errors.add(errorMsg)
+                val progressAfter = buildProgressPercent(successCount, failureCount, newOrModified.size)
+                logSync(traceId, taskId, "upload", "上传失败 progress=$progressAfter file=${file.name} error=${e.message}", LogLevel.ERROR)
                 publishProgress(
                     phase = "UPLOADING",
                     currentFile = file.name,
@@ -267,9 +284,11 @@ class SyncWorker(
                 try {
                     if (file.exists()) {
                         file.delete()
+                        logSync(traceId, taskId, "cleanup", "已删除本地源文件 file=${file.absolutePath}")
                         Log.d(TAG, "Deleted synced file: ${file.absolutePath}")
                     }
                 } catch (e: Exception) {
+                    logSync(traceId, taskId, "cleanup", "删除本地源文件失败 file=${file.absolutePath} error=${e.message}", LogLevel.WARN)
                     Log.e(TAG, "Failed to delete ${file.absolutePath}: ${e.message}")
                 }
             }
@@ -283,6 +302,13 @@ class SyncWorker(
             skippedFiles = skippedCount,
             uploadedFiles = successCount,
             failedFiles = failureCount,
+        )
+        logSync(
+            traceId,
+            taskId,
+            "complete",
+            "任务完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount success=$successCount failure=$failureCount progress=100%",
+            if (failureCount > 0) LogLevel.WARN else LogLevel.INFO,
         )
         if (failureCount > 0) {
             Result.success() // 主流程完成，单文件失败不影响
@@ -384,15 +410,26 @@ class SyncWorker(
         }
     }
 
-    private fun uploadFile(file: File, remotePath: String, authToken: String?) {
+    private fun uploadFile(
+        file: File,
+        remotePath: String,
+        authToken: String?,
+        traceId: String,
+        taskId: String,
+        successCount: Int,
+        failureCount: Int,
+        totalPending: Int,
+        displayPath: String,
+    ) {
         val url = URL("${proxyBaseUrl()}/api/fs/put")
         val conn = url.openConnection() as HttpURLConnection
         try {
             appLog(LogLevel.INFO, "媒体备份上传开始：remotePath=$remotePath local=${file.name} size=${file.length()}")
             conn.requestMethod = "PUT"
             conn.doOutput = true
-            conn.connectTimeout = 30000
-            conn.readTimeout = 300000 // 5 min for large files
+            conn.connectTimeout = 60000
+            conn.readTimeout = 3600000 // 60 min for large files
+            conn.setFixedLengthStreamingMode(file.length())
             val encodedPath = android.net.Uri.encode(remotePath)
             conn.setRequestProperty("File-Path", encodedPath)
             conn.setRequestProperty("Content-Length", file.length().toString())
@@ -424,6 +461,16 @@ class SyncWorker(
                     LogLevel.WARN,
                     "媒体备份上传失败：remotePath=$remotePath http=$responseCode body=${compactBody(responseBody)}"
                 )
+                if ((responseCode == 401 || responseCode == 403) && authToken.isNullOrEmpty()) {
+                    logSync(
+                        traceId,
+                        taskId,
+                        "upload",
+                        "上传被拒绝 progress=${buildProgressPercent(successCount, failureCount, totalPending)} remotePath=$displayPath reason=auth-required",
+                        LogLevel.WARN,
+                    )
+                    throw Exception("上传目标需要认证，请先在 OpenList 页面校验当前管理员密码")
+                }
                 throw Exception("HTTP $responseCode: $responseBody")
             }
 
@@ -558,6 +605,22 @@ class SyncWorker(
 
     private fun appLog(level: Int, msg: String) {
         Logger.log(level, logDateFormatter.format(System.currentTimeMillis()), msg)
+    }
+
+    private fun logSync(traceId: String, taskId: String, step: String, msg: String, level: Int = LogLevel.INFO) {
+        appLog(level, "[sync][trace=$traceId][task=$taskId][step=$step] $msg")
+    }
+
+    private fun buildProgressPercent(successCount: Int, failureCount: Int, totalPending: Int): String {
+        if (totalPending <= 0) return "0%"
+        val completed = successCount + failureCount
+        val percent = ((completed.toDouble() / totalPending.toDouble()) * 100.0).toInt().coerceIn(0, 100)
+        return "$percent%"
+    }
+
+    private fun buildTraceId(taskId: String): String {
+        val suffix = if (taskId.length > 8) taskId.takeLast(8) else taskId
+        return "sync-$suffix-${java.lang.Long.toString(System.currentTimeMillis(), 36)}"
     }
 
     private fun recordHistory(

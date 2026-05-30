@@ -20,29 +20,69 @@ class LogListView extends StatefulWidget {
 }
 
 class _LogListViewState extends State<LogListView> {
+  final TextEditingController _filterController = TextEditingController();
+  String _filter = '';
+
+  @override
+  void dispose() {
+    _filterController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ListView.builder(
-      itemCount: widget.logs.length,
-      controller: widget.controller,
-      // 性能优化：添加 cacheExtent 提前缓存不可见区域的 Widget
-      cacheExtent: 500,
-      // 性能优化：设置固定高度，减少布局计算开销
-      itemExtent: 72,
-      itemBuilder: (context, index) {
-        final log = widget.logs[index];
-        return ListTile(
-          dense: true,
-          // 性能优化：使用普通 Text 替代 SelectableText，减少组件开销
-          title: Text(
-            log.content,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+    final keyword = _filter.trim().toLowerCase();
+    final logs = keyword.isEmpty
+        ? widget.logs
+        : widget.logs.where((log) {
+            final haystack = '${log.time} ${log.content}'.toLowerCase();
+            return haystack.contains(keyword);
+          }).toList();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+          child: TextField(
+            controller: _filterController,
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.search),
+              hintText: '按 traceId / taskId / mountId / 关键字过滤',
+              suffixIcon: _filter.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _filterController.clear();
+                        setState(() => _filter = '');
+                      },
+                    ),
+            ),
+            onChanged: (value) => setState(() => _filter = value),
           ),
-          subtitle: Text(log.time),
-          leading: LogLevelView(level: log.level),
-        );
-      },
+        ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: logs.length,
+            controller: widget.controller,
+            cacheExtent: 500,
+            itemExtent: 72,
+            itemBuilder: (context, index) {
+              final log = logs[index];
+              return ListTile(
+                dense: true,
+                title: Text(
+                  log.content,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(log.time),
+                leading: LogLevelView(level: log.level),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }
