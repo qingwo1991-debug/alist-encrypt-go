@@ -9,6 +9,7 @@ import com.openlist.mobile.model.openlist.Logger
 import com.openlist.mobile.model.openlist.OpenList
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import openlistlib.Openlistlib
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
