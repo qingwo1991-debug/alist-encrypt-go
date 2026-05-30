@@ -142,13 +142,13 @@ const showPwd = () => {
 .login-container__glow--left {
   top: -120px;
   left: -120px;
-  background: rgba(91, 140, 255, 0.32);
+  background: color-mix(in srgb, var(--el-color-primary) 34%, transparent);
 }
 
 .login-container__glow--right {
   right: -100px;
   bottom: -140px;
-  background: rgba(56, 88, 186, 0.28);
+  background: color-mix(in srgb, var(--el-color-primary-dark-2) 30%, transparent);
 }
 
 .login-panel {
@@ -157,8 +157,8 @@ const showPwd = () => {
   width: min(460px, 100%);
   padding: 32px;
   border-radius: 28px;
-  border: 1px solid rgba(145, 167, 255, 0.16);
-  background: linear-gradient(180deg, rgba(27, 35, 58, 0.86), rgba(17, 23, 39, 0.94));
+  border: 1px solid var(--app-border-color);
+  background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-lg);
   backdrop-filter: blur(24px);
 }

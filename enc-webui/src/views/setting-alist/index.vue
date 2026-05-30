@@ -980,8 +980,8 @@ onUnmounted(() => {
   min-height: 42px;
   padding: 0 18px;
   border-radius: 999px;
-  border: 1px solid rgba(91, 140, 255, 0.18);
-  background: linear-gradient(135deg, rgba(57, 79, 133, 0.68) 0%, rgba(30, 42, 73, 0.88) 100%);
+  border: 1px solid var(--app-border-color);
+  background: linear-gradient(135deg, var(--app-surface-soft) 0%, var(--app-surface) 100%);
   color: var(--el-text-color-primary);
   font-size: 15px;
   font-weight: 700;
@@ -989,7 +989,8 @@ onUnmounted(() => {
 }
 
 .section-banner--accent {
-  background: linear-gradient(135deg, rgba(91, 140, 255, 0.82) 0%, rgba(55, 93, 201, 0.92) 100%);
+  background: linear-gradient(135deg, var(--el-color-primary-light-3) 0%, var(--el-color-primary) 100%);
+  color: #fff;
 }
 
 .section-body {
@@ -1024,7 +1025,7 @@ onUnmounted(() => {
 .log-panel {
   border: 1px solid var(--app-border-color);
   border-radius: var(--app-radius-lg);
-  background: linear-gradient(180deg, rgba(23, 30, 50, 0.82), rgba(15, 20, 35, 0.92));
+  background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-md);
 }
 

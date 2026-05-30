@@ -13,8 +13,8 @@ body {
   font-size: 14px;
   font-family: Inter, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   background:
-    radial-gradient(circle at top left, rgba(91, 140, 255, 0.18), transparent 28%),
-    radial-gradient(circle at top right, rgba(56, 88, 186, 0.2), transparent 30%),
+    radial-gradient(circle at top left, rgba(108, 142, 230, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(84, 119, 207, 0.12), transparent 30%),
     linear-gradient(180deg, var(--app-backdrop, #12172d) 0%, var(--app-backdrop-secondary, #18203b) 100%);
   color: var(--el-text-color-primary);
 }
@@ -109,7 +109,7 @@ body::before {
   padding: 28px 30px;
   border-radius: var(--app-radius-xl);
   border: 1px solid var(--app-border-color);
-  background: linear-gradient(160deg, rgba(40, 50, 84, 0.78), rgba(19, 25, 42, 0.92));
+  background: linear-gradient(160deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-lg);
   backdrop-filter: blur(18px);
 }
@@ -169,7 +169,7 @@ body::before {
 .info-card {
   border-radius: var(--app-radius-lg);
   border: 1px solid var(--app-border-color);
-  background: linear-gradient(180deg, rgba(31, 39, 65, 0.82), rgba(18, 24, 40, 0.9));
+  background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-md);
   backdrop-filter: blur(14px);
 }
@@ -237,7 +237,7 @@ body::before {
 }
 
 .panel-card--soft {
-  background: linear-gradient(180deg, rgba(26, 34, 57, 0.76), rgba(16, 21, 36, 0.88));
+  background: linear-gradient(180deg, var(--app-surface-muted), var(--app-surface));
 }
 
 .panel-card__header {
@@ -291,7 +291,8 @@ body::before {
   color: #8ca7ff;
 }
 
-html.dark {
+html.dark,
+html.lighting-theme {
   .el-menu {
     border-right: none;
   }
@@ -312,8 +313,8 @@ html.dark {
 
   .el-menu-item.is-active,
   .el-sub-menu.is-active > .el-sub-menu__title {
-    background: linear-gradient(180deg, rgba(91, 140, 255, 0.2), rgba(62, 98, 192, 0.18));
-    border: 1px solid rgba(91, 140, 255, 0.28);
+    background: linear-gradient(180deg, rgba(108, 142, 230, 0.14), rgba(108, 142, 230, 0.1));
+    border: 1px solid rgba(108, 142, 230, 0.2);
     color: var(--el-text-color-primary);
     box-shadow: var(--app-glow-primary);
   }
@@ -331,7 +332,7 @@ html.dark {
   .el-dropdown__popper .el-dropdown-menu,
   .el-picker-panel {
     border: 1px solid var(--app-border-color);
-    background: linear-gradient(180deg, rgba(26, 33, 56, 0.92), rgba(17, 22, 38, 0.96));
+    background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
     box-shadow: var(--app-shadow-lg);
     backdrop-filter: blur(18px);
   }
@@ -365,20 +366,20 @@ html.dark {
   .el-select .el-input__wrapper,
   .el-date-editor .el-input__wrapper {
     border-radius: var(--app-radius-sm);
-    background: rgba(10, 15, 28, 0.45);
-    border: 1px solid rgba(145, 167, 255, 0.12);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), inset 0 -8px 18px rgba(7, 10, 21, 0.2);
+    background: var(--el-input-bg-color);
+    border: 1px solid var(--el-input-border-color);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -8px 18px rgba(7, 10, 21, 0.06);
   }
 
   .el-input__wrapper:hover,
   .el-textarea__inner:hover {
-    border-color: rgba(145, 167, 255, 0.26);
+    border-color: var(--el-input-hover-border-color);
   }
 
   .el-input__wrapper.is-focus,
   .el-textarea__inner:focus {
-    box-shadow: 0 0 0 1px rgba(91, 140, 255, 0.3), 0 0 0 4px rgba(91, 140, 255, 0.12);
-    border-color: rgba(91, 140, 255, 0.5);
+    box-shadow: 0 0 0 1px rgba(108, 142, 230, 0.24), 0 0 0 4px rgba(108, 142, 230, 0.1);
+    border-color: var(--el-input-focus-border-color);
   }
 
   .el-input__inner,
@@ -395,8 +396,8 @@ html.dark {
 
   .el-button {
     border-radius: var(--app-radius-sm);
-    border-color: rgba(145, 167, 255, 0.16);
-    background: linear-gradient(180deg, rgba(43, 54, 88, 0.9), rgba(26, 33, 56, 0.98));
+    border-color: var(--app-border-color);
+    background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
     color: var(--el-text-color-primary);
     box-shadow: var(--app-shadow-md);
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
@@ -404,40 +405,58 @@ html.dark {
 
   .el-button:hover {
     transform: translateY(-1px);
-    border-color: rgba(145, 167, 255, 0.3);
-    background: linear-gradient(180deg, rgba(54, 67, 106, 0.96), rgba(31, 39, 66, 1));
+    border-color: var(--app-border-strong);
+    background: linear-gradient(180deg, var(--app-surface-strong), var(--app-surface-soft));
   }
 
   .el-button--primary {
-    border-color: rgba(91, 140, 255, 0.34);
-    background: linear-gradient(180deg, #6a9aff 0%, #4f81f6 100%);
+    border-color: rgba(108, 142, 230, 0.22);
+    background: linear-gradient(180deg, var(--el-color-primary-light-3) 0%, var(--el-color-primary) 100%);
     box-shadow: var(--app-glow-primary);
+    color: #fff;
   }
 
   .el-button--warning {
-    background: linear-gradient(180deg, rgba(255, 181, 95, 0.92), rgba(233, 145, 41, 0.92));
-    border-color: rgba(255, 181, 95, 0.3);
-    color: #141b30;
+    background: linear-gradient(180deg, var(--el-color-warning) 0%, #b88247 100%);
+    border-color: rgba(191, 134, 80, 0.18);
+    color: #fff;
   }
 
   .el-button--success {
-    background: linear-gradient(180deg, rgba(82, 214, 162, 0.92), rgba(46, 179, 128, 0.92));
-    border-color: rgba(82, 214, 162, 0.26);
-    color: #102337;
+    background: linear-gradient(180deg, var(--el-color-success) 0%, #468f75 100%);
+    border-color: rgba(95, 191, 159, 0.18);
+    color: #fff;
   }
 
   .el-button--danger {
-    background: linear-gradient(180deg, rgba(255, 111, 145, 0.92), rgba(232, 76, 116, 0.92));
-    border-color: rgba(255, 111, 145, 0.24);
+    background: linear-gradient(180deg, var(--el-color-danger) 0%, #b95f75 100%);
+    border-color: rgba(220, 117, 140, 0.18);
+    color: #fff;
   }
 
   .el-button.is-plain {
-    background: rgba(255, 255, 255, 0.04);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .el-button--primary.is-plain,
+  .el-button--warning.is-plain,
+  .el-button--success.is-plain,
+  .el-button--danger.is-plain {
+    color: var(--el-text-color-primary);
+    border-color: var(--app-border-strong);
+    background: var(--app-surface-soft);
+  }
+
+  .el-button--warning.is-plain:hover,
+  .el-button--warning.is-plain:focus {
+    color: var(--el-text-color-primary);
+    border-color: rgba(191, 134, 80, 0.32);
+    background: rgba(191, 134, 80, 0.12);
   }
 
   .el-switch {
-    --el-switch-off-color: rgba(255, 255, 255, 0.12);
-    --el-switch-on-color: #5b8cff;
+    --el-switch-off-color: rgba(127, 138, 160, 0.22);
+    --el-switch-on-color: var(--el-color-primary);
   }
 
   .el-switch__core {
@@ -446,7 +465,7 @@ html.dark {
   }
 
   .el-switch.is-checked .el-switch__core {
-    box-shadow: 0 0 0 1px rgba(91, 140, 255, 0.3), 0 0 16px rgba(91, 140, 255, 0.32);
+    box-shadow: 0 0 0 1px rgba(108, 142, 230, 0.24), 0 0 14px rgba(108, 142, 230, 0.16);
   }
 
   .el-collapse {
@@ -459,7 +478,7 @@ html.dark {
     overflow: hidden;
     border: 1px solid var(--app-border-color);
     border-radius: var(--app-radius-lg);
-    background: rgba(15, 21, 37, 0.42);
+    background: var(--app-surface-muted);
   }
 
   .el-collapse-item__header {

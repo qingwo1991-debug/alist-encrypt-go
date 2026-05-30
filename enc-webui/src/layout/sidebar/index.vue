@@ -74,8 +74,8 @@ const activeMenu = computed(() => {
   margin: 14px;
   padding: 14px;
   border-radius: var(--app-radius-lg);
-  border: 1px solid rgba(145, 167, 255, 0.14);
-  background: linear-gradient(180deg, rgba(33, 42, 70, 0.88), rgba(18, 24, 40, 0.96));
+  border: 1px solid var(--app-border-color);
+  background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-md);
 }
 
@@ -91,8 +91,8 @@ const activeMenu = computed(() => {
   width: 42px;
   height: 42px;
   border-radius: 14px;
-  background: linear-gradient(180deg, #6a9aff 0%, #4f81f6 100%);
-  color: #f6f8ff;
+  background: linear-gradient(180deg, var(--el-color-primary-light-3) 0%, var(--el-color-primary) 100%);
+  color: #fff;
   font-size: 16px;
   font-weight: 700;
 }

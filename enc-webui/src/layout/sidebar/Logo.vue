@@ -55,8 +55,8 @@ const { title, logo } = toRefs(state)
     width: 100%;
     padding: 12px 14px;
     border-radius: var(--app-radius-lg);
-    border: 1px solid rgba(145, 167, 255, 0.12);
-    background: linear-gradient(180deg, rgba(36, 45, 76, 0.85), rgba(18, 24, 40, 0.95));
+    border: 1px solid var(--app-border-color);
+    background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
     box-shadow: var(--app-shadow-md);
     & .sidebar-logo {
       fill: currentColor;

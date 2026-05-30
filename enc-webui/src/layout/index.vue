@@ -52,13 +52,13 @@ resizeHandler()
 .layout-wrapper__glow--left {
   top: -120px;
   left: -120px;
-  background: rgba(91, 140, 255, 0.22);
+  background: color-mix(in srgb, var(--el-color-primary) 32%, transparent);
 }
 
 .layout-wrapper__glow--right {
   top: 20%;
   right: -140px;
-  background: rgba(56, 88, 186, 0.2);
+  background: color-mix(in srgb, var(--el-color-primary-dark-2) 28%, transparent);
 }
 
 .main-container {
@@ -71,7 +71,7 @@ resizeHandler()
 .sidebar-container {
   transition: width var(--sideBar-switch-duration);
   width: var(--side-bar-width) !important;
-  background: linear-gradient(180deg, rgba(18, 24, 42, 0.94), rgba(12, 17, 31, 0.96));
+  background: linear-gradient(180deg, var(--app-surface-strong), var(--app-surface));
   height: 100%;
   position: fixed;
   font-size: 0;
@@ -81,7 +81,7 @@ resizeHandler()
   z-index: 1001;
   overflow: hidden;
   border-right: 1px solid var(--side-bar-border-right-color);
-  box-shadow: 18px 0 48px rgba(6, 10, 22, 0.28);
+  box-shadow: 18px 0 48px rgba(40, 52, 80, 0.12);
 }
 .closeSidebar {
   .sidebar-container {
