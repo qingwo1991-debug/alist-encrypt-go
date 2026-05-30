@@ -819,6 +819,22 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// 对所有 fs/get 与 fs/link 响应统一处理 loopback raw_url，避免局域网远程访问拿到 127.0.0.1/localhost。
+	var finalResult map[string]interface{}
+	if err := json.Unmarshal(respBody, &finalResult); err == nil {
+		if data, ok := finalResult["data"].(map[string]interface{}); ok {
+			if rawURL, ok := data["raw_url"].(string); ok {
+				if rewritten := rewriteLoopbackRawURLForRequest(r, rawURL); rewritten != rawURL && rewritten != "" {
+					data["raw_url"] = rewritten
+					finalResult["data"] = data
+					if updatedBody, marshalErr := json.Marshal(finalResult); marshalErr == nil {
+						respBody = updatedBody
+					}
+				}
+			}
+		}
+	}
+
 	// 返回响应
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(respStatusCode)
