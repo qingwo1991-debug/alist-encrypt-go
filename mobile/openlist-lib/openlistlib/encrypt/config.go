@@ -26,8 +26,8 @@ func DefaultConfig() *ProxyConfig {
 		AlistPort:                       5244,
 		AlistHttps:                      false,
 		ProxyPort:                       5344,
-		UpstreamTimeoutSeconds:          8,
-		ProbeTimeoutSeconds:             3,
+		UpstreamTimeoutSeconds:          60,
+		ProbeTimeoutSeconds:             5,
 		ProbeBudgetSeconds:              5,
 		UpstreamBackoffSeconds:          20,
 		EnableLocalBypass:               true,
@@ -139,7 +139,7 @@ func (m *ConfigManager) Load() error {
 	rawRangeCompatMinFailures := config.RangeCompatMinFailures
 	rawRangeSkipMaxBytes := config.RangeSkipMaxBytes
 	if config.UpstreamTimeoutSeconds <= 0 {
-		config.UpstreamTimeoutSeconds = 15
+		config.UpstreamTimeoutSeconds = 60
 	}
 	if config.ProbeTimeoutSeconds <= 0 {
 		config.ProbeTimeoutSeconds = 5
@@ -344,7 +344,7 @@ func (m *ConfigManager) SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSec
 	defer m.mutex.Unlock()
 
 	if upstreamTimeoutSeconds <= 0 {
-		upstreamTimeoutSeconds = 15
+		upstreamTimeoutSeconds = 60
 	}
 	if probeTimeoutSeconds <= 0 {
 		probeTimeoutSeconds = 5

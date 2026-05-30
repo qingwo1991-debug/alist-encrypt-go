@@ -187,7 +187,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		streamBufferSize = effectiveKB * 1024
 	}
 
-	upstreamTimeout := time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 15, 2, 120)) * time.Second
+	upstreamTimeout := time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600)) * time.Second
 	probeTimeout := time.Duration(clampSeconds(config.ProbeTimeoutSeconds, 5, 1, 30)) * time.Second
 
 	proxyFunc := newProxyResolver(config)

@@ -1181,7 +1181,7 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 		})
 	}
 
-	req, err := http.NewRequest(r.Method, targetURL, body)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1196,7 +1196,11 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	resp, err := p.httpClient.Do(req)
+	uploadClient := p.streamClient
+	if uploadClient == nil {
+		uploadClient = p.httpClient
+	}
+	resp, err := uploadClient.Do(req)
 	if err != nil {
 		log.Errorf("%s FsPut request failed: %v", internal.LogPrefix(ctx, internal.TagUpload), err)
 		http.Error(w, err.Error(), http.StatusBadGateway)

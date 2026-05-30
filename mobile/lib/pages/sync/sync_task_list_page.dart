@@ -172,6 +172,14 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                     _describeStatus(status),
                     isError: _isFailedStatus(status),
                   ),
+                if (status != null && (status['currentUploadTaskId']?.toString().isNotEmpty ?? false))
+                  _buildInfoRow('上传任务ID', status['currentUploadTaskId'].toString()),
+                if (status != null && status['currentUploadTaskProgress'] != null)
+                  _buildInfoRow('上传任务进度', '${status['currentUploadTaskProgress']}%'),
+                if (status != null && (status['currentUploadTaskStatus']?.toString().isNotEmpty ?? false))
+                  _buildInfoRow('上传任务状态', status['currentUploadTaskStatus'].toString()),
+                if (status != null && (status['currentUploadTaskError']?.toString().isNotEmpty ?? false))
+                  _buildInfoRow('上传任务错误', status['currentUploadTaskError'].toString(), isError: true),
                 if (status != null && _hasRuntimeProgress(status))
                   _buildRuntimeProgress(status),
                 if (status != null && status['lastHistoryEntry'] is Map)
@@ -199,6 +207,11 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                       icon: const Icon(Icons.history),
                       label: const Text('历史'),
                       onPressed: () => _openHistory(task),
+                    ),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.info_outline),
+                      label: const Text('详情'),
+                      onPressed: () => _showStatusDetails(task, status),
                     ),
                     OutlinedButton.icon(
                       icon: const Icon(Icons.cleaning_services_outlined),
@@ -286,6 +299,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         status['pendingFiles'] != null ||
         status['uploadedFiles'] != null ||
         status['failedFiles'] != null ||
+        status['currentUploadTaskId'] != null ||
         status['currentFile'] != null;
   }
 
@@ -309,6 +323,10 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
           _buildInfoRow('当前阶段', phase),
           if (currentFile != null && currentFile.isNotEmpty)
             _buildInfoRow('当前文件', currentFile),
+          if (status['currentUploadTaskId'] != null)
+            _buildInfoRow('OpenList任务', status['currentUploadTaskId'].toString()),
+          if (status['currentUploadTaskProgress'] != null)
+            _buildInfoRow('任务进度', '${status['currentUploadTaskProgress']}%'),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -447,11 +465,86 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         return '等待上传';
       case 'UPLOADING':
         return '上传中';
+      case 'UPLOADING_TASK':
+        return '等待 OpenList 上传任务完成';
+      case 'UPLOAD_TASK_FAILED':
+        return 'OpenList 上传任务失败';
       case 'COMPLETED':
         return '已完成';
       default:
         return '未知';
     }
+  }
+
+  Future<void> _showStatusDetails(SyncTask task, Map<String, dynamic>? status) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${task.name} - 运行详情'),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildDialogRow('任务ID', task.id),
+                _buildDialogRow('当前阶段', _describePhase(status?['currentPhase']?.toString())),
+                _buildDialogRow('当前文件', status?['currentFile']?.toString() ?? '-'),
+                _buildDialogRow('OpenList上传任务ID', status?['currentUploadTaskId']?.toString() ?? '-'),
+                _buildDialogRow(
+                  'OpenList上传任务进度',
+                  status?['currentUploadTaskProgress'] != null
+                      ? '${status!['currentUploadTaskProgress']}%'
+                      : '-',
+                ),
+                _buildDialogRow('OpenList上传任务状态', status?['currentUploadTaskStatus']?.toString() ?? '-'),
+                _buildDialogRow('OpenList上传任务错误', status?['currentUploadTaskError']?.toString() ?? '-'),
+                _buildDialogRow('扫描数', '${status?['scannedFiles'] ?? '-'}'),
+                _buildDialogRow('待传数', '${status?['pendingFiles'] ?? '-'}'),
+                _buildDialogRow('跳过数', '${status?['skippedFiles'] ?? '-'}'),
+                _buildDialogRow('成功数', '${status?['uploadedFiles'] ?? '-'}'),
+                _buildDialogRow('失败数', '${status?['failedFiles'] ?? '-'}'),
+                _buildDialogRow('最后错误', task.lastError?.isNotEmpty == true ? task.lastError! : '-'),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDialogRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 132,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: Theme.of(context).hintColor,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _confirmDelete(SyncTask task) {
