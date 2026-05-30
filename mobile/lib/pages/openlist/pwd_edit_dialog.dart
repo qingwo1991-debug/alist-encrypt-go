@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
 import '../../generated/l10n.dart';
 
 class PwdEditDialog extends StatefulWidget {
@@ -66,7 +65,11 @@ class _PwdEditDialogState extends State<PwdEditDialog>
       ),
       actions: [
         TextButton(
-          onPressed: _isSubmitting ? null : () {Get.back();},
+          onPressed: _isSubmitting
+              ? null
+              : () {
+                  Navigator.of(context).pop();
+                },
           child: Text(S.of(context).cancel),
         ),
         FilledButton(
@@ -91,7 +94,7 @@ class _PwdEditDialogState extends State<PwdEditDialog>
             if (!mounted) return;
 
             if (error == null) {
-              Get.back();
+              Navigator.of(context).pop();
               return;
             }
 
