@@ -28,8 +28,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   final _proxyPortController = TextEditingController(text: '5344');
 
   // 网络策略
-  final _upstreamTimeoutController = TextEditingController(text: '8');
-  final _probeTimeoutController = TextEditingController(text: '3');
+  final _upstreamTimeoutController = TextEditingController(text: '60');
+  final _probeTimeoutController = TextEditingController(text: '5');
   final _probeBudgetController = TextEditingController(text: '5');
   final _upstreamBackoffController = TextEditingController(text: '20');
   bool _enableLocalBypass = true;
@@ -109,9 +109,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _alistHttps = config['alistHttps'] ?? false;
           _proxyPortController.text = (config['proxyPort'] ?? 5344).toString();
           _upstreamTimeoutController.text =
-              (config['upstreamTimeoutSeconds'] ?? 8).toString();
+              (config['upstreamTimeoutSeconds'] ?? 60).toString();
           _probeTimeoutController.text =
-              (config['probeTimeoutSeconds'] ?? 3).toString();
+              (config['probeTimeoutSeconds'] ?? 5).toString();
           _probeBudgetController.text =
               (config['probeBudgetSeconds'] ?? 5).toString();
           _upstreamBackoffController.text =
@@ -289,8 +289,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
 
       // 保存网络策略
       await NativeBridge.encryptProxy.setEncryptNetworkPolicy(
-        int.tryParse(_upstreamTimeoutController.text) ?? 8,
-        int.tryParse(_probeTimeoutController.text) ?? 3,
+        int.tryParse(_upstreamTimeoutController.text) ?? 60,
+        int.tryParse(_probeTimeoutController.text) ?? 5,
         int.tryParse(_probeBudgetController.text) ?? 5,
         int.tryParse(_upstreamBackoffController.text) ?? 20,
         _enableLocalBypass,

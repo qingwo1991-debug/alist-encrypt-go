@@ -19,6 +19,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -49,7 +50,22 @@ class SyncWorker(
         const val DEFAULT_ALIST_BASE_URL = "http://127.0.0.1:5244"
         const val DEFAULT_PROXY_PORT = 5344L
         private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
+        private const val TASK_POLL_INTERVAL_MS = 3000L
     }
+
+    private data class UploadTaskSubmission(
+        val taskId: String,
+        val progress: Double,
+        val status: String,
+    )
+
+    private data class UploadTaskSnapshot(
+        val id: String,
+        val state: Int,
+        val progress: Double,
+        val status: String,
+        val error: String,
+    )
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val taskId = inputData.getString(KEY_TASK_ID) ?: return@withContext Result.failure()
@@ -118,14 +134,18 @@ class SyncWorker(
             return@withContext Result.failure()
         }
 
-        // 2.5. 获取认证 token（可选）。
-        // 有管理员密码时优先携带认证；未配置时继续尝试匿名上传，避免把“本地挂载密码校验”误当成媒体备份前置条件。
+        // 2.5. 获取认证 token。媒体加密备份依赖 OpenList 管理认证，不再回退匿名上传。
         val authToken = SyncScheduler.acquireAuthToken()
         if (authToken.isNullOrEmpty()) {
-            logSync(traceId, taskId, "auth", "未获取到管理认证 token，将尝试匿名上传", LogLevel.WARN)
-        } else {
-            logSync(traceId, taskId, "auth", "已获取管理认证 token")
+            logSync(traceId, taskId, "auth", "未获取到管理认证 token，任务终止", LogLevel.ERROR)
+            return Result.failure(
+                workDataOf(
+                    "taskId" to taskId,
+                    "error" to "未取得管理认证 token，请先在 OpenList 页面校验当前管理员密码",
+                ),
+            )
         }
+        logSync(traceId, taskId, "auth", "已获取管理认证 token")
 
         // 3. 扫描源目录
         val sourceDir = File(taskConfig.sourcePath)
@@ -205,6 +225,10 @@ class SyncWorker(
                 publishProgress(
                     phase = "UPLOADING",
                     currentFile = file.name,
+                    currentUploadTaskId = null,
+                    currentUploadTaskProgress = null,
+                    currentUploadTaskStatus = null,
+                    currentUploadTaskError = null,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
                     skippedFiles = skippedCount,
@@ -218,7 +242,17 @@ class SyncWorker(
                     "upload",
                     "上传开始 progress=$progressBefore remotePath=$remotePath file=${file.name} size=${file.length()}",
                 )
-                uploadFile(file, remotePath, authToken, traceId, taskId, successCount, failureCount, newOrModified.size, remotePath)
+                uploadFileAsTask(
+                    file = file,
+                    remotePath = remotePath,
+                    authToken = authToken,
+                    traceId = traceId,
+                    taskId = taskId,
+                    successCount = successCount,
+                    failureCount = failureCount,
+                    totalPending = newOrModified.size,
+                    displayPath = remotePath,
+                )
 
                 // 记录同步成功
                 SyncRecordStore.markSynced(
@@ -239,6 +273,10 @@ class SyncWorker(
                 publishProgress(
                     phase = "UPLOADING",
                     currentFile = file.name,
+                    currentUploadTaskId = null,
+                    currentUploadTaskProgress = null,
+                    currentUploadTaskStatus = null,
+                    currentUploadTaskError = null,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
                     skippedFiles = skippedCount,
@@ -255,6 +293,10 @@ class SyncWorker(
                 publishProgress(
                     phase = "UPLOADING",
                     currentFile = file.name,
+                    currentUploadTaskId = null,
+                    currentUploadTaskProgress = null,
+                    currentUploadTaskStatus = null,
+                    currentUploadTaskError = e.message,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
                     skippedFiles = skippedCount,
@@ -410,10 +452,10 @@ class SyncWorker(
         }
     }
 
-    private fun uploadFile(
+    private fun uploadFileAsTask(
         file: File,
         remotePath: String,
-        authToken: String?,
+        authToken: String,
         traceId: String,
         taskId: String,
         successCount: Int,
@@ -421,6 +463,43 @@ class SyncWorker(
         totalPending: Int,
         displayPath: String,
     ) {
+        val submission = submitUploadTask(file, remotePath, authToken)
+        logSync(
+            traceId,
+            taskId,
+            "upload",
+            "上传任务已提交 progress=${buildProgressPercent(successCount, failureCount, totalPending)} remotePath=$displayPath uploadTaskId=${submission.taskId} taskProgress=${submission.progress.toInt()}% status=${submission.status}",
+        )
+        publishProgress(
+            phase = "UPLOADING_TASK",
+            currentFile = file.name,
+            currentUploadTaskId = submission.taskId,
+            currentUploadTaskProgress = submission.progress.toInt().coerceIn(0, 100),
+            currentUploadTaskStatus = submission.status,
+            currentUploadTaskError = null,
+            pendingFiles = totalPending,
+            uploadedFiles = successCount,
+            failedFiles = failureCount,
+        )
+        waitForUploadTaskComplete(
+            uploadTaskId = submission.taskId,
+            file = file,
+            remotePath = remotePath,
+            authToken = authToken,
+            traceId = traceId,
+            taskId = taskId,
+            successCount = successCount,
+            failureCount = failureCount,
+            totalPending = totalPending,
+            displayPath = displayPath,
+        )
+    }
+
+    private fun submitUploadTask(
+        file: File,
+        remotePath: String,
+        authToken: String,
+    ): UploadTaskSubmission {
         val url = URL("${proxyBaseUrl()}/api/fs/put")
         val conn = url.openConnection() as HttpURLConnection
         try {
@@ -433,10 +512,10 @@ class SyncWorker(
             val encodedPath = android.net.Uri.encode(remotePath)
             conn.setRequestProperty("File-Path", encodedPath)
             conn.setRequestProperty("Content-Length", file.length().toString())
-            // 如果配置了管理员密码，携带认证 token
-            if (!authToken.isNullOrEmpty()) {
-                conn.setRequestProperty("Authorization", authToken)
-            }
+            conn.setRequestProperty("As-Task", "true")
+            conn.setRequestProperty("Connection", "close")
+            conn.setRequestProperty("Content-Type", "application/octet-stream")
+            conn.setRequestProperty("Authorization", authToken)
 
             // Write file body
             FileInputStream(file).use { input ->
@@ -461,16 +540,6 @@ class SyncWorker(
                     LogLevel.WARN,
                     "媒体备份上传失败：remotePath=$remotePath http=$responseCode body=${compactBody(responseBody)}"
                 )
-                if ((responseCode == 401 || responseCode == 403) && authToken.isNullOrEmpty()) {
-                    logSync(
-                        traceId,
-                        taskId,
-                        "upload",
-                        "上传被拒绝 progress=${buildProgressPercent(successCount, failureCount, totalPending)} remotePath=$displayPath reason=auth-required",
-                        LogLevel.WARN,
-                    )
-                    throw Exception("上传目标需要认证，请先在 OpenList 页面校验当前管理员密码")
-                }
                 throw Exception("HTTP $responseCode: $responseBody")
             }
 
@@ -495,13 +564,179 @@ class SyncWorker(
                     else "API code $apiCode: $responseBody"
                 )
             }
+            val taskJson = json?.optJSONObject("data")?.optJSONObject("task")
+                ?: json?.optJSONObject("data")
+            val submittedTaskId = taskJson?.optString("id").orEmpty()
+            if (submittedTaskId.isBlank()) {
+                appLog(
+                    LogLevel.WARN,
+                    "媒体备份上传失败：remotePath=$remotePath 未返回 upload task id body=${compactBody(responseBody)}"
+                )
+                throw Exception("上传任务提交成功但未返回 task id")
+            }
             appLog(
                 LogLevel.INFO,
-                "媒体备份上传成功：remotePath=$remotePath http=$responseCode apiCode=$apiCode message=$message"
+                "媒体备份上传任务提交成功：remotePath=$remotePath http=$responseCode apiCode=$apiCode message=$message taskId=$submittedTaskId"
+            )
+            return UploadTaskSubmission(
+                taskId = submittedTaskId,
+                progress = taskJson?.optDouble("progress", 0.0) ?: 0.0,
+                status = taskJson?.optString("status").orEmpty(),
             )
         } finally {
             conn.disconnect()
         }
+    }
+
+    private fun waitForUploadTaskComplete(
+        uploadTaskId: String,
+        file: File,
+        remotePath: String,
+        authToken: String,
+        traceId: String,
+        taskId: String,
+        successCount: Int,
+        failureCount: Int,
+        totalPending: Int,
+        displayPath: String,
+    ) {
+        val timeoutMs = estimateTaskTimeoutMs(file.length())
+        val startedAt = System.currentTimeMillis()
+        var lastProgressBucket = -1
+        var lastStatus = ""
+        while (true) {
+            val elapsedMs = System.currentTimeMillis() - startedAt
+            if (elapsedMs > timeoutMs) {
+                throw Exception("上传任务超时: uploadTaskId=$uploadTaskId elapsed=${elapsedMs / 1000}s")
+            }
+            val snapshot = getUploadTaskSnapshot(uploadTaskId, authToken)
+            val progressBucket = snapshot.progress.toInt()
+            if (progressBucket != lastProgressBucket || snapshot.status != lastStatus) {
+                lastProgressBucket = progressBucket
+                lastStatus = snapshot.status
+                logSync(
+                    traceId,
+                    taskId,
+                    "upload-task",
+                    "任务追踪 progress=${buildProgressPercent(successCount, failureCount, totalPending)} remotePath=$displayPath uploadTaskId=$uploadTaskId taskState=${snapshot.state} taskProgress=${progressBucket}% taskStatus=${snapshot.status.ifBlank { "-" }}",
+                )
+                publishProgress(
+                    phase = "UPLOADING_TASK",
+                    currentFile = file.name,
+                    currentUploadTaskId = uploadTaskId,
+                    currentUploadTaskProgress = progressBucket.coerceIn(0, 100),
+                    currentUploadTaskStatus = snapshot.status,
+                    currentUploadTaskError = if (snapshot.error.isBlank()) null else snapshot.error,
+                    pendingFiles = totalPending,
+                    uploadedFiles = successCount,
+                    failedFiles = failureCount,
+                )
+            }
+            when (snapshot.state) {
+                2 -> {
+                    appLog(
+                        LogLevel.INFO,
+                        "媒体备份上传完成：remotePath=$remotePath uploadTaskId=$uploadTaskId taskProgress=${snapshot.progress.toInt()}%"
+                    )
+                    clearSucceededUploadTasks(authToken)
+                    return
+                }
+                4, 5, 6, 7 -> {
+                    publishProgress(
+                        phase = "UPLOAD_TASK_FAILED",
+                        currentFile = file.name,
+                        currentUploadTaskId = uploadTaskId,
+                        currentUploadTaskProgress = snapshot.progress.toInt().coerceIn(0, 100),
+                        currentUploadTaskStatus = snapshot.status,
+                        currentUploadTaskError = snapshot.error.ifBlank { "unknown" },
+                        pendingFiles = totalPending,
+                        uploadedFiles = successCount,
+                        failedFiles = failureCount + 1,
+                    )
+                    throw Exception(
+                        "上传任务失败: uploadTaskId=$uploadTaskId state=${snapshot.state} status=${snapshot.status} error=${snapshot.error}"
+                    )
+                }
+            }
+            Thread.sleep(TASK_POLL_INTERVAL_MS)
+        }
+    }
+
+    private fun getUploadTaskSnapshot(
+        uploadTaskId: String,
+        authToken: String,
+    ): UploadTaskSnapshot {
+        val encodedTid = URLEncoder.encode(uploadTaskId, Charsets.UTF_8.name())
+        val url = URL("${proxyBaseUrl()}/api/task/upload/info?tid=$encodedTid")
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("Authorization", authToken)
+            conn.setRequestProperty("Connection", "close")
+            val responseCode = conn.responseCode
+            val responseBody = try {
+                if (responseCode in 200..299) {
+                    conn.inputStream?.bufferedReader()?.readText().orEmpty()
+                } else {
+                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                }
+            } catch (_: Exception) {
+                ""
+            }
+            if (responseCode >= 400) {
+                throw Exception("HTTP $responseCode: $responseBody")
+            }
+            val json = JSONObject(responseBody)
+            val apiCode = json.optInt("code", -1)
+            if (apiCode != 200) {
+                throw Exception("API code $apiCode: ${json.optString("message")}")
+            }
+            val data = json.optJSONObject("data")
+                ?: throw Exception("task info data missing")
+            return UploadTaskSnapshot(
+                id = data.optString("id"),
+                state = data.optInt("state", -1),
+                progress = data.optDouble("progress", 0.0),
+                status = data.optString("status"),
+                error = data.optString("error"),
+            )
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun clearSucceededUploadTasks(authToken: String) {
+        val url = URL("${proxyBaseUrl()}/api/task/upload/clear_succeeded")
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 10000
+            conn.readTimeout = 20000
+            conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("Authorization", authToken)
+            conn.setRequestProperty("Connection", "close")
+            val responseCode = conn.responseCode
+            if (responseCode !in 200..299) {
+                val responseBody = conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                appLog(LogLevel.WARN, "清理成功上传任务失败：http=$responseCode body=${compactBody(responseBody)}")
+            }
+        } catch (e: Exception) {
+            appLog(LogLevel.WARN, "清理成功上传任务异常：${e.message}")
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun estimateTaskTimeoutMs(fileSize: Long): Long {
+        val sizeMb = fileSize.toDouble() / 1024.0 / 1024.0
+        val uploadSpeedMbps = 50.0
+        val uploadSpeedMBps = uploadSpeedMbps / 8.0
+        val estimatedSeconds = ((sizeMb / uploadSpeedMBps) * 1.5 + 120.0).toLong()
+        val minSeconds = 3600L
+        return maxOf(minSeconds, estimatedSeconds) * 1000L
     }
 
     private fun ensureRuntimeReady() {
@@ -581,6 +816,10 @@ class SyncWorker(
     private suspend fun publishProgress(
         phase: String,
         currentFile: String? = null,
+        currentUploadTaskId: String? = null,
+        currentUploadTaskProgress: Int? = null,
+        currentUploadTaskStatus: String? = null,
+        currentUploadTaskError: String? = null,
         scannedFiles: Int? = null,
         pendingFiles: Int? = null,
         skippedFiles: Int? = null,
@@ -590,6 +829,10 @@ class SyncWorker(
         val builder = Data.Builder()
             .putString("phase", phase)
         currentFile?.let { builder.putString("currentFile", it) }
+        currentUploadTaskId?.let { builder.putString("currentUploadTaskId", it) }
+        currentUploadTaskProgress?.let { builder.putInt("currentUploadTaskProgress", it) }
+        currentUploadTaskStatus?.let { builder.putString("currentUploadTaskStatus", it) }
+        currentUploadTaskError?.let { builder.putString("currentUploadTaskError", it) }
         scannedFiles?.let { builder.putInt("scannedFiles", it) }
         pendingFiles?.let { builder.putInt("pendingFiles", it) }
         skippedFiles?.let { builder.putInt("skippedFiles", it) }

@@ -100,9 +100,9 @@ func (p *ProxyServer) debugf(module string, format string, args ...interface{}) 
 }
 
 func (p *ProxyServer) upstreamTimeout() time.Duration {
-	secs := 15
+	secs := 60
 	if p != nil && p.config != nil {
-		secs = clampSeconds(p.config.UpstreamTimeoutSeconds, 15, 2, 120)
+		secs = clampSeconds(p.config.UpstreamTimeoutSeconds, 60, 5, 600)
 	}
 	return time.Duration(secs) * time.Second
 }

@@ -224,6 +224,10 @@ object SyncScheduler {
             oneTimeState = oneTimeState,
             currentPhase = activeProgress?.getString("phase"),
             currentFile = activeProgress?.getString("currentFile"),
+            currentUploadTaskId = activeProgress?.getString("currentUploadTaskId"),
+            currentUploadTaskProgress = activeProgress?.getInt("currentUploadTaskProgress", -1)?.takeIf { it >= 0 },
+            currentUploadTaskStatus = activeProgress?.getString("currentUploadTaskStatus"),
+            currentUploadTaskError = activeProgress?.getString("currentUploadTaskError"),
             scannedFiles = activeProgress?.getInt("scannedFiles", -1)?.takeIf { it >= 0 },
             pendingFiles = activeProgress?.getInt("pendingFiles", -1)?.takeIf { it >= 0 },
             skippedFiles = activeProgress?.getInt("skippedFiles", -1)?.takeIf { it >= 0 },
@@ -310,8 +314,8 @@ object SyncScheduler {
                 appLog(LogLevel.INFO, "本地挂载认证开始：$baseUrl/api/auth/login/hash")
                 conn.requestMethod = "POST"
                 conn.doOutput = true
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
                 conn.setRequestProperty("Accept", "application/json")
                 conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8")
 
@@ -376,8 +380,8 @@ object SyncScheduler {
                 appLog(LogLevel.INFO, "本地挂载认证回退：$baseUrl/api/auth/login")
                 conn.requestMethod = "POST"
                 conn.doOutput = true
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
                 conn.setRequestProperty("Accept", "application/json")
                 conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8")
 
