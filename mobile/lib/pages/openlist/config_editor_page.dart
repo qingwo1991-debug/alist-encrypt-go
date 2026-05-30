@@ -248,10 +248,15 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
   /// Returns true if save was successful, false otherwise
   Future<bool> _saveConfigFile() async {
     final text = _controller.text.trim();
+    late final Map<String, dynamic> decodedConfig;
     
     // Validate JSON format before saving
     try {
-      jsonDecode(text);
+      final decoded = jsonDecode(text);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('config.json 顶层必须是 JSON 对象');
+      }
+      decodedConfig = decoded;
     } on FormatException catch (e) {
       if (mounted) {
         final match = RegExp(r'line (\d+)').firstMatch(e.message);
@@ -270,6 +275,14 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
     File? backupFile;
     try {
       final file = File(_filePath);
+      final canonicalPort = await Android().getOpenListHttpPort();
+      final scheme = decodedConfig['scheme'] is Map<String, dynamic>
+          ? Map<String, dynamic>.from(decodedConfig['scheme'] as Map<String, dynamic>)
+          : <String, dynamic>{};
+      final previousPort = scheme['http_port'];
+      scheme['http_port'] = canonicalPort;
+      decodedConfig['scheme'] = scheme;
+      final normalizedText = const JsonEncoder.withIndent('  ').convert(decodedConfig);
       
       // Create backup before saving
       if (await file.exists()) {
@@ -281,11 +294,14 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       await file.parent.create(recursive: true);
       
       // Write new config
-      await file.writeAsString(text);
+      await file.writeAsString(normalizedText);
+      _controller.text = normalizedText;
       
       if (mounted) {
         Get.showSnackbar(GetSnackBar(
-          message: S.of(context).saved,
+          message: previousPort != canonicalPort
+              ? '已保存；监听端口已按 OpenList 页面设置收敛为 $canonicalPort'
+              : S.of(context).saved,
           duration: const Duration(seconds: 2),
         ));
       }

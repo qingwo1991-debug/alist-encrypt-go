@@ -68,6 +68,19 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
       appBar: AppBar(
         title: const Text('媒体加密备份'),
         actions: [
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'clear_all_history') {
+                _confirmClearAllHistory();
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'clear_all_history',
+                child: Text('清空全部历史'),
+              ),
+            ],
+          ),
           IconButton(
             icon: const Icon(Icons.add),
             onPressed: () => _openEditPage(null),
@@ -184,6 +197,11 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                       icon: const Icon(Icons.history),
                       label: const Text('历史'),
                       onPressed: () => _openHistory(task),
+                    ),
+                    TextButton.icon(
+                      icon: const Icon(Icons.cleaning_services_outlined),
+                      label: const Text('清历史'),
+                      onPressed: () => _confirmClearTaskHistory(task),
                     ),
                     TextButton.icon(
                       icon: const Icon(Icons.play_arrow),
@@ -446,9 +464,21 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
             child: const Text('取消'),
           ),
           FilledButton(
-            onPressed: () {
-              _manager.deleteTask(task.id);
-              Navigator.pop(ctx);
+            onPressed: () async {
+              await _manager.deleteTask(task.id);
+              if (mounted) {
+                setState(() {
+                  _statusByTaskId.remove(task.id);
+                });
+              }
+              if (ctx.mounted) {
+                Navigator.pop(ctx);
+              }
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('已删除任务 "${task.name}"')),
+                );
+              }
             },
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             child: const Text('删除'),
@@ -456,5 +486,79 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         ],
       ),
     );
+  }
+
+  Future<void> _confirmClearTaskHistory(SyncTask task) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空历史记录'),
+        content: Text('确定要清空任务 "${task.name}" 的全部历史记录吗？这不会删除任务配置。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _manager.clearTaskHistory(task.id);
+      await _refreshStatuses();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已清空任务 "${task.name}" 的历史记录')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('清空历史失败: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _confirmClearAllHistory() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空全部历史'),
+        content: const Text('确定要清空所有媒体备份任务的历史记录吗？这不会删除任务配置。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('清空全部'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _manager.clearAllHistory();
+      await _refreshStatuses();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已清空全部历史记录')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('清空全部历史失败: $e')),
+        );
+      }
+    }
   }
 }

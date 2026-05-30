@@ -160,4 +160,18 @@ object SyncRecordStore {
         container.records.entries.removeIf { it.value.taskId == taskId }
         save(context, container)
     }
+
+    @Synchronized
+    fun clearHistory(context: Context, taskId: String) {
+        val container = load(context)
+        container.history.removeAll { it.taskId == taskId }
+        save(context, container)
+    }
+
+    @Synchronized
+    fun clearAllHistory(context: Context) {
+        val container = load(context)
+        container.history.clear()
+        save(context, container)
+    }
 }
