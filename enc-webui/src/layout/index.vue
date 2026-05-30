@@ -1,5 +1,7 @@
 <template>
   <div :class="classObj" class="layout-wrapper">
+    <div class="layout-wrapper__glow layout-wrapper__glow--left" />
+    <div class="layout-wrapper__glow layout-wrapper__glow--right" />
     <!--left side-->
     <Sidebar v-if="settings.showLeftMenu" class="sidebar-container" />
     <!--right container-->
@@ -29,16 +31,47 @@ resizeHandler()
 </script>
 
 <style lang="scss" scoped>
+.layout-wrapper {
+  position: relative;
+  min-height: 100%;
+  background: transparent;
+}
+
+.layout-wrapper__glow {
+  position: fixed;
+  inset: auto;
+  width: 360px;
+  height: 360px;
+  border-radius: 50%;
+  pointer-events: none;
+  filter: blur(80px);
+  opacity: 0.42;
+  z-index: 0;
+}
+
+.layout-wrapper__glow--left {
+  top: -120px;
+  left: -120px;
+  background: rgba(91, 140, 255, 0.22);
+}
+
+.layout-wrapper__glow--right {
+  top: 20%;
+  right: -140px;
+  background: rgba(56, 88, 186, 0.2);
+}
+
 .main-container {
   min-height: 100%;
   transition: margin-left var(--sideBar-switch-duration);
   margin-left: var(--side-bar-width);
   position: relative;
+  z-index: 1;
 }
 .sidebar-container {
   transition: width var(--sideBar-switch-duration);
   width: var(--side-bar-width) !important;
-  background-color: var(--el-menu-bg-color);
+  background: linear-gradient(180deg, rgba(18, 24, 42, 0.94), rgba(12, 17, 31, 0.96));
   height: 100%;
   position: fixed;
   font-size: 0;
@@ -47,14 +80,15 @@ resizeHandler()
   left: 0;
   z-index: 1001;
   overflow: hidden;
-  border-right: 0.5px solid var(--side-bar-border-right-color);
+  border-right: 1px solid var(--side-bar-border-right-color);
+  box-shadow: 18px 0 48px rgba(6, 10, 22, 0.28);
 }
 .closeSidebar {
   .sidebar-container {
-    width: 54px !important;
+    width: 84px !important;
   }
   .main-container {
-    margin-left: 54px !important;
+    margin-left: 84px !important;
   }
 }
 .hideSidebar {

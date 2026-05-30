@@ -83,6 +83,7 @@
     "routerBack": true,
     "routerPush": true,
     "routerReplace": true,
+    "runDirSyncReq": true,
     "saveAlistConfigReq": true,
     "saveProxyRoutingConfigReq": true,
     "saveSchemeConfigReq": true,

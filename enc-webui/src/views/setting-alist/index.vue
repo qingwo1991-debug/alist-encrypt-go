@@ -1,10 +1,44 @@
 <template>
   <div class="setting-alist-page scroll-y">
     <div class="setting-alist-shell">
-      <div class="page-header">
-        <div>
-          <h3>Alist 服务配置</h3>
-          <p>把常用配置收拢到可展开的分组里，预热日志默认隐藏，避免一打开就是长页。</p>
+      <div class="page-hero">
+        <div class="page-hero__content">
+          <div class="page-eyebrow">Service Control</div>
+          <div class="page-title">服务配置</div>
+          <div class="page-subtitle">
+            Alist 代理、WebDAV 预热、在线加密和观测能力统一收拢到一套控制面板里，保持配置清晰、状态可见、操作路径稳定。
+          </div>
+          <div class="hero-pills">
+            <div class="hero-pill">
+              <div class="hero-pill__label">Proxy Endpoint</div>
+              <div class="hero-pill__value">{{ alistConfigForm.serverHost || '未配置' }}</div>
+              <div class="hero-pill__meta">端口 {{ alistConfigForm.serverPort || '-' }} · {{ alistConfigForm.https ? 'HTTPS' : 'HTTP' }}</div>
+            </div>
+            <div class="hero-pill">
+              <div class="hero-pill__label">Scan Identity</div>
+              <div class="hero-pill__value">{{ alistConfigForm.scanUsername || '未设置' }}</div>
+              <div class="hero-pill__meta">优先级低于授权头，适合预热与预览。</div>
+            </div>
+            <div class="hero-pill">
+              <div class="hero-pill__label">Warm Queue</div>
+              <div class="hero-pill__value">{{ probeStats.queueLen }}/{{ probeStats.queueCap }}</div>
+              <div class="hero-pill__meta">最后更新 {{ probeStats.updatedAt || '-' }}</div>
+            </div>
+          </div>
+          <div class="section-tabs">
+            <div class="section-tab section-tab--active">
+              <div class="section-tab__title">Alist 服务配置</div>
+              <div class="section-tab__desc">连接、解密、预热和观测的主控制台。</div>
+            </div>
+            <div class="section-tab">
+              <div class="section-tab__title">WebDAV</div>
+              <div class="section-tab__desc">与服务配置保持同一套卡片和表单语言。</div>
+            </div>
+            <div class="section-tab">
+              <div class="section-tab__title">在线加密</div>
+              <div class="section-tab__desc">统一入口和状态表达，避免信息孤岛。</div>
+            </div>
+          </div>
         </div>
         <div class="page-actions">
           <el-button type="primary" @click="saveAlistConfig">保存服务配置</el-button>
@@ -13,7 +47,7 @@
         </div>
       </div>
 
-      <el-form ref="refSearchForm" :label-position="labelPosition" label-width="92px" :model="alistConfigForm" class="setting-form">
+      <el-form ref="refSearchForm" :label-position="labelPosition" label-width="92px" :model="alistConfigForm" class="setting-form panel-card panel-card--soft">
         <el-collapse v-model="expandedSections" class="setting-collapse">
           <el-collapse-item name="connection">
             <template #title>
@@ -28,15 +62,15 @@
                 <el-input v-model="alistConfigForm.serverPort" style="max-width: 280px" placeholder="5244" />
               </el-form-item>
               <el-form-item label="HTTPS">
-                <el-switch v-model="alistConfigForm.https" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                <el-switch v-model="alistConfigForm.https" class="ml-2" />
                 <span class="helper-text">默认 HTTP</span>
               </el-form-item>
               <el-form-item label="后端 H2C">
-                <el-switch v-model="alistConfigForm.enableH2c" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                <el-switch v-model="alistConfigForm.enableH2c" class="ml-2" />
                 <span class="helper-text">代理连接后端 Alist 时启用 h2c</span>
               </el-form-item>
               <el-form-item label="代理 H2C">
-                <el-switch v-model="alistConfigForm.proxyH2c" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                <el-switch v-model="alistConfigForm.proxyH2c" class="ml-2" />
                 <span class="helper-text">客户端连接代理时启用 h2c</span>
               </el-form-item>
             </div>
@@ -48,7 +82,7 @@
             </template>
             <div class="section-body">
               <el-form-item label="长期映射">
-                <el-switch v-model="alistConfigForm.enableSizeMap" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                <el-switch v-model="alistConfigForm.enableSizeMap" class="ml-2" />
                 <span class="helper-text">缓存文件大小映射，减少探测请求</span>
               </el-form-item>
               <el-form-item label="映射 TTL">
@@ -56,7 +90,7 @@
                 <span class="helper-text">分钟</span>
               </el-form-item>
               <el-form-item label="Range 兼容">
-                <el-switch v-model="alistConfigForm.enableRangeCompatCache" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                <el-switch v-model="alistConfigForm.enableRangeCompatCache" class="ml-2" />
                 <span class="helper-text">记录不支持 Range 的上游并降级</span>
               </el-form-item>
               <el-form-item label="降级阈值">
@@ -80,7 +114,7 @@
                 <span class="helper-text">分钟（0=默认 30），超过后自动重新获取 raw_url</span>
               </el-form-item>
               <el-form-item label="并行解密">
-                <el-switch v-model="alistConfigForm.enableParallelDecrypt" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                <el-switch v-model="alistConfigForm.enableParallelDecrypt" class="ml-2" />
                 <span class="helper-text">大文件分片并行解密</span>
               </el-form-item>
               <el-form-item label="并发数">
@@ -367,14 +401,14 @@
                       <el-radio label="chacha20" border>ChaCha20</el-radio>
                     </el-radio-group>
                     <span class="helper-inline">开启</span>
-                    <el-switch v-model="item.enable" class="ml-2" style="--el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                    <el-switch v-model="item.enable" class="ml-2" />
                   </el-form-item>
                   <el-form-item label="密码">
                     <el-input v-model="item.password" style="max-width: 280px" placeholder="12341234" />
                   </el-form-item>
                   <el-form-item label="文件名">
                     <span class="helper-inline">加密</span>
-                    <el-switch v-model="item.encName" class="ml-2" style="margin-right: 10px; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949" />
+                    <el-switch v-model="item.encName" class="ml-2" style="margin-right: 10px" />
                     <span class="helper-inline">后缀</span>
                     <el-input v-model="item.encSuffix" style="max-width: 180px; margin-left: 10px" placeholder=".bin / 默认原文件名后缀" />
                   </el-form-item>
@@ -920,47 +954,19 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .setting-alist-page {
-  padding: 18px;
-  color: #e8f0ff;
-  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  padding: 6px 0 30px;
+  color: var(--el-text-color-primary);
 }
 
 .setting-alist-shell {
-  max-width: 1240px;
+  max-width: 1320px;
   margin: 0 auto;
+  display: grid;
+  gap: 24px;
+}
+
+.setting-form {
   padding: 24px;
-  border-radius: 24px;
-  background: linear-gradient(180deg, rgba(34, 49, 73, 0.96) 0%, rgba(24, 37, 57, 0.96) 100%);
-  box-shadow: 0 18px 48px rgba(3, 10, 24, 0.32);
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  align-items: flex-start;
-  margin-bottom: 24px;
-
-  h3 {
-    margin: 0 0 8px;
-    font-size: 28px;
-    font-weight: 700;
-    color: #f4f7ff;
-  }
-
-  p {
-    margin: 0;
-    color: #aebfda;
-    line-height: 1.7;
-    font-size: 13px;
-  }
-}
-
-.page-actions,
-.footer-actions {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
 }
 
 .setting-collapse {
@@ -972,42 +978,36 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   min-height: 42px;
-  padding: 0 16px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #17335b 0%, #0f5a8b 100%);
-  color: #f5f8ff;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(91, 140, 255, 0.18);
+  background: linear-gradient(135deg, rgba(57, 79, 133, 0.68) 0%, rgba(30, 42, 73, 0.88) 100%);
+  color: var(--el-text-color-primary);
   font-size: 15px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
 }
 
 .section-banner--accent {
-  background: linear-gradient(135deg, #24569d 0%, #0f78aa 100%);
+  background: linear-gradient(135deg, rgba(91, 140, 255, 0.82) 0%, rgba(55, 93, 201, 0.92) 100%);
 }
 
 .section-body {
-  padding: 18px 8px 12px;
+  padding: 18px 4px 12px;
   display: grid;
   gap: 18px;
 }
 
-.helper-text {
-  margin-left: 12px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: #a8bbd8;
-}
-
 .helper-inline {
   margin-left: 12px;
-  color: #bdd0eb;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
 .info-block {
   font-size: 12px;
   line-height: 1.9;
-  color: #b3c6e3;
+  color: var(--el-text-color-regular);
 }
 
 .metric-grid,
@@ -1022,9 +1022,10 @@ onUnmounted(() => {
 .summary-card,
 .passwd-card,
 .log-panel {
-  border: 1px solid rgba(125, 154, 201, 0.18);
-  border-radius: 16px;
-  background: rgba(11, 20, 35, 0.42);
+  border: 1px solid var(--app-border-color);
+  border-radius: var(--app-radius-lg);
+  background: linear-gradient(180deg, rgba(23, 30, 50, 0.82), rgba(15, 20, 35, 0.92));
+  box-shadow: var(--app-shadow-md);
 }
 
 .metric-card,
@@ -1035,14 +1036,14 @@ onUnmounted(() => {
 .metric-card__title,
 .summary-card__title {
   margin-bottom: 10px;
-  color: #f4f7ff;
+  color: var(--el-text-color-primary);
   font-size: 14px;
   font-weight: 700;
 }
 
 .metric-card__content,
 .summary-card {
-  color: #b8c9e4;
+  color: var(--el-text-color-regular);
   font-size: 12px;
   line-height: 1.9;
 }
@@ -1057,7 +1058,7 @@ onUnmounted(() => {
   gap: 16px;
   align-items: center;
   padding: 14px 16px;
-  border-bottom: 1px solid rgba(125, 154, 201, 0.15);
+  border-bottom: 1px solid var(--app-border-color);
 }
 
 .log-panel__body {
@@ -1065,21 +1066,21 @@ onUnmounted(() => {
 }
 
 .empty-log {
-  color: #9fb2cf;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
 .record-item {
   padding: 10px 0;
-  border-bottom: 1px dashed rgba(173, 190, 216, 0.16);
-  color: #bbcae4;
+  border-bottom: 1px dashed rgba(145, 167, 255, 0.12);
+  color: var(--el-text-color-regular);
   font-size: 12px;
   line-height: 1.85;
 }
 
 .record-tag {
   margin-left: 8px;
-  color: #90bbe8;
+  color: #8ca7ff;
 }
 
 .passwd-list {
@@ -1096,11 +1097,14 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
-  color: #f4f7ff;
+  color: var(--el-text-color-primary);
 }
 
 .footer-actions {
   margin-top: 18px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 :deep(.el-collapse-item__header) {
@@ -1134,21 +1138,20 @@ onUnmounted(() => {
 }
 
 :deep(.el-form-item__label) {
-  color: #dce7fb;
+  color: var(--el-text-color-primary);
   font-weight: 600;
 }
 
 :deep(.el-input__wrapper),
 :deep(.el-textarea__inner) {
-  background: rgba(8, 16, 29, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(126, 156, 205, 0.18);
+  width: 100%;
 }
 
 :deep(.el-input__inner),
 :deep(.el-textarea__inner),
 :deep(.el-radio__label),
 :deep(.el-checkbox__label) {
-  color: #eef4ff;
+  color: var(--el-text-color-primary);
 }
 
 :deep(.el-pagination) {
@@ -1157,16 +1160,16 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
-  .page-header {
-    flex-direction: column;
-  }
-
   .setting-alist-shell {
-    padding: 18px;
+    gap: 18px;
   }
 
   .section-body {
     padding: 16px 0 8px;
+  }
+
+  .setting-form {
+    padding: 18px;
   }
 }
 </style>

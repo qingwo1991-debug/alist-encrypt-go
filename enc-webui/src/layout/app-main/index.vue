@@ -1,17 +1,19 @@
 <template>
   <div class="app-main" :class="{ 'show-tag-view': settings.showTagsView }">
-    <router-view v-slot="{ Component }">
-      <!--has transition  setting by settings.mainNeedAnimation-->
-      <transition v-if="settings.mainNeedAnimation" name="fade-transform" mode="out-in">
-        <keep-alive :include="cachedViews">
+    <div class="app-main__inner">
+      <router-view v-slot="{ Component }">
+        <!--has transition  setting by settings.mainNeedAnimation-->
+        <transition v-if="settings.mainNeedAnimation" name="fade-transform" mode="out-in">
+          <keep-alive :include="cachedViews">
+            <component :is="Component" :key="key" />
+          </keep-alive>
+        </transition>
+        <!-- no transition -->
+        <keep-alive v-else :include="cachedViews">
           <component :is="Component" :key="key" />
         </keep-alive>
-      </transition>
-      <!-- no transition -->
-      <keep-alive v-else :include="cachedViews">
-        <component :is="Component" :key="key" />
-      </keep-alive>
-    </router-view>
+      </router-view>
+    </div>
   </div>
 </template>
 
@@ -123,10 +125,12 @@ watch(
 <style scoped lang="scss">
 .app-main {
   padding: var(--app-main-padding);
-  /*50 = navbar  */
   position: relative;
-  overflow: hidden;
+  overflow: auto;
   background-color: var(--app-main-background);
+}
+.app-main__inner {
+  min-height: 100%;
 }
 .show-tag-view {
   height: calc(100vh - #{var(--nav-bar-height)} - #{var(--tag-view-height)}) !important;

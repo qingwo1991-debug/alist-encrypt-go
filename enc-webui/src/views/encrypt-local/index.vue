@@ -1,54 +1,63 @@
 <template>
-  <div class="scroll-y">
-    <h3>本地加解密</h3>
-    <div v-lang class="mt-30px font-bold mb-10px">使用说明：</div>
-    <div v-lang class="">此本地加密的功能是把encrypt所在的系统中的文件夹进行加密，选择要加密文件夹的路径，然后点击 加密\解密 按钮即可</div>
-    <div v-lang class="">常见使用场景是在windows打开这个encrypt.exe，启动服务后，即可针对windows中的文件夹进行加密</div>
+  <div class="encrypt-local-page scroll-y">
+    <div class="admin-page encrypt-local-shell">
+      <section class="page-hero">
+        <div class="page-hero__content">
+          <div class="page-eyebrow">Local Encryptor</div>
+          <div class="page-title">本地加解密</div>
+          <div class="page-subtitle">
+            适合在运行 `encrypt.exe` 或本地代理程序的主机上，对文件夹内容进行批量加密或解密，并保持和后台控制台统一的输入节奏。
+          </div>
+        </div>
+      </section>
 
-    <!--条件搜索-->
-    <el-form ref="refSearchForm" :label-position="labelPosition" label-width="75px" :model="folderForm">
-      <div v-lang class="mt-30px font-bold mb-10px">密码设置</div>
-      <el-form-item label="操作">
-        <el-radio-group v-model="folderForm.operation" size="small">
-          <!-- <el-radio label="mix" border>MIX</el-radio> -->
-          <el-radio label="enc" border>加密</el-radio>
-          <el-radio label="dec" border>解密</el-radio>
-        </el-radio-group>
-      </el-form-item>
-      <el-form-item label="算法">
-        <el-radio-group v-model="folderForm.encType" size="small">
-          <!-- <el-radio label="mix" border>MIX</el-radio> -->
-          <el-radio label="aesctr" border>AES-CTR</el-radio>
-          <el-radio label="rc4" border>RC4</el-radio>
-          <el-radio label="chacha20" border>ChaCha20</el-radio>
-        </el-radio-group>
-      </el-form-item>
-      <el-form-item label="密码">
-        <el-input v-model="folderForm.password" style="max-width: 260px; margin-right: 10px" placeholder="12341234" />
-      </el-form-item>
-      <el-form-item label="文件名">
-        加密
-        <el-switch
-          v-model="folderForm.encName"
-          class="ml-2"
-          style="margin-right: 10px; --el-switch-on-color: #13ce66; --el-switch-off-color: #ff4949"
-        />
-        后缀
-        <el-input v-model="folderForm.encSuffix" style="max-width: 150px; margin-left: 10px" placeholder=".bin / 默认原文件名后缀" />
-      </el-form-item>
-      <el-form-item label="文件夹">
-        <el-input v-model="folderForm.folderPath" style="max-width: 260px; margin-right: 10px" placeholder="/home/my-video" />
-        <!-- <el-button type="success" size="small" style="margin-left: 10px" @click="checkFoldName('item')">选择</el-button> -->
-      </el-form-item>
-      <el-form-item label="输出">
-        <el-input v-model="folderForm.outPath" style="max-width: 260px; margin-right: 10px" placeholder="/home/outPath" />
-        <!-- <el-button type="success" size="small" style="margin-left: 10px" @click="checkFoldName('item')">选择</el-button> -->
-      </el-form-item>
-      <el-form-item>
-        <el-button v-if="folderForm.operation == 'enc'" type="primary" @click="encryptFile">加密</el-button>
-        <el-button v-if="folderForm.operation == 'dec'" type="success" @click="encryptFile">解密</el-button>
-      </el-form-item>
-    </el-form>
+      <section class="panel-card">
+        <div class="panel-card__header">
+          <div>
+            <div class="panel-card__title">任务配置</div>
+            <div class="panel-card__subtitle">选择操作类型、算法、密码和输入输出目录后即可执行。</div>
+          </div>
+        </div>
+
+        <el-form ref="refSearchForm" :label-position="labelPosition" label-width="75px" :model="folderForm">
+          <el-form-item label="操作">
+            <el-radio-group v-model="folderForm.operation" size="small">
+              <el-radio label="enc" border>加密</el-radio>
+              <el-radio label="dec" border>解密</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="算法">
+            <el-radio-group v-model="folderForm.encType" size="small">
+              <el-radio label="aesctr" border>AES-CTR</el-radio>
+              <el-radio label="rc4" border>RC4</el-radio>
+              <el-radio label="chacha20" border>ChaCha20</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <div class="form-grid">
+            <el-form-item label="密码">
+              <el-input v-model="folderForm.password" placeholder="12341234" />
+            </el-form-item>
+            <el-form-item label="后缀">
+              <el-input v-model="folderForm.encSuffix" placeholder=".bin / 默认原文件名后缀" />
+            </el-form-item>
+            <el-form-item label="文件夹">
+              <el-input v-model="folderForm.folderPath" placeholder="/home/my-video" />
+            </el-form-item>
+            <el-form-item label="输出">
+              <el-input v-model="folderForm.outPath" placeholder="/home/outPath" />
+            </el-form-item>
+          </div>
+          <el-form-item label="文件名">
+            <span class="helper-inline">加密</span>
+            <el-switch v-model="folderForm.encName" class="ml-2" />
+          </el-form-item>
+          <div class="page-actions">
+            <el-button v-if="folderForm.operation == 'enc'" type="primary" @click="encryptFile">加密</el-button>
+            <el-button v-if="folderForm.operation == 'dec'" type="success" @click="encryptFile">解密</el-button>
+          </div>
+        </el-form>
+      </section>
+    </div>
   </div>
 </template>
 <script setup>
@@ -101,3 +110,19 @@ const encryptFile = () => {
   })
 }
 </script>
+
+<style scoped lang="scss">
+.encrypt-local-page {
+  padding: 6px 0 30px;
+}
+
+.encrypt-local-shell {
+  max-width: 1320px;
+  margin: 0 auto;
+}
+
+.helper-inline {
+  margin-right: 12px;
+  color: var(--el-text-color-secondary);
+}
+</style>
