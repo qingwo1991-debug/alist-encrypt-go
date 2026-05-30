@@ -49,6 +49,11 @@ class _SyncHistoryPageState extends State<SyncHistoryPage> {
         title: Text('${widget.taskName} - 同步历史'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.delete_sweep_outlined),
+            tooltip: '清空当前任务历史',
+            onPressed: _confirmClearHistory,
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _loadHistory,
           ),
@@ -195,5 +200,40 @@ class _SyncHistoryPageState extends State<SyncHistoryPage> {
         style: TextStyle(color: color, fontSize: 13, fontWeight: FontWeight.w500),
       ),
     );
+  }
+
+  Future<void> _confirmClearHistory() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空历史记录'),
+        content: Text('确定要清空任务 "${widget.taskName}" 的全部历史记录吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _manager.clearTaskHistory(widget.taskId);
+      await _loadHistory();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('历史记录已清空')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('清空历史失败: $e')),
+      );
+    }
   }
 }

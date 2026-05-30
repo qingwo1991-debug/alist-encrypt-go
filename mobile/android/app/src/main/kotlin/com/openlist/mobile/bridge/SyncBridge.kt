@@ -166,6 +166,32 @@ class SyncBridge(private val context: Context) {
                     }
                 }
 
+            // clearSyncTaskHistory
+            BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.clearSyncTaskHistory", codec)
+                .setMessageHandler { message, reply ->
+                    try {
+                        val args = message as List<*>
+                        val taskId = args[0] as String
+                        SyncRecordStore.clearHistory(bridge.context, taskId)
+                        reply.reply(listOf(null))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "clearSyncTaskHistory error", e)
+                        reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    }
+                }
+
+            // clearAllSyncTaskHistory
+            BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.clearAllSyncTaskHistory", codec)
+                .setMessageHandler { _, reply ->
+                    try {
+                        SyncRecordStore.clearAllHistory(bridge.context)
+                        reply.reply(listOf(null))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "clearAllSyncTaskHistory error", e)
+                        reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    }
+                }
+
             // acquireAuthToken
             BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.acquireAuthToken", codec)
                 .setMessageHandler { _, reply ->

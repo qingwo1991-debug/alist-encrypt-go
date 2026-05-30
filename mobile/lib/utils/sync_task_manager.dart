@@ -116,6 +116,12 @@ class SyncTaskManager extends ChangeNotifier {
     } catch (e) {
       debugPrint('Failed to clear sync records for $taskId: $e');
     }
+
+    try {
+      await NativeBridge.syncTaskApi.clearSyncTaskHistory(taskId);
+    } catch (e) {
+      debugPrint('Failed to clear sync history for $taskId: $e');
+    }
   }
 
   /// 立即执行同步任务
@@ -144,6 +150,24 @@ class SyncTaskManager extends ChangeNotifier {
         ..lastError = null;
       await _saveTasks();
       notifyListeners();
+    }
+  }
+
+  Future<void> clearTaskHistory(String taskId) async {
+    try {
+      await NativeBridge.syncTaskApi.clearSyncTaskHistory(taskId);
+    } catch (e) {
+      debugPrint('Failed to clear sync history for $taskId: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> clearAllHistory() async {
+    try {
+      await NativeBridge.syncTaskApi.clearAllSyncTaskHistory();
+    } catch (e) {
+      debugPrint('Failed to clear all sync history: $e');
+      rethrow;
     }
   }
 
@@ -451,7 +475,7 @@ extension LocalMountBackendStatusMessage on LocalMountBackendStatus {
       case LocalMountBackendStatus.checking:
         return '正在检查 OpenList 后台状态，请稍后重试。';
       case LocalMountBackendStatus.serviceUnavailable:
-        return 'OpenList 后台不可用，请先确认本地 5244 服务已启动且可访问。';
+        return 'OpenList 后台不可用，请先确认本地服务已启动且当前监听端口可访问。';
       case LocalMountBackendStatus.authMissing:
         return '未录入 OpenList 管理员密码。可直接输入当前密码校验，无需强制重置。';
       case LocalMountBackendStatus.authInvalid:

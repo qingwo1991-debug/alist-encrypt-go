@@ -83,7 +83,16 @@ class SyncWorker(
         }
         if (!isAlistAlive()) {
             Log.w(TAG, "OpenList not alive for task $taskId")
-            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("OpenList 服务(5244)不可用"))
+            recordHistory(
+                context,
+                taskId,
+                0,
+                0,
+                0,
+                0,
+                1,
+                listOf("OpenList 服务(${currentOpenListPort()})不可用")
+            )
             return@withContext Result.failure()
         }
 
@@ -106,7 +115,16 @@ class SyncWorker(
         // 2.5. 获取认证 token（唯一来源：SyncScheduler.acquireAuthToken）
         val authToken = SyncScheduler.acquireAuthToken()
         if (authToken.isNullOrEmpty()) {
-            recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("未获取到管理认证 token，请先配置管理员密码"))
+            recordHistory(
+                context,
+                taskId,
+                0,
+                0,
+                0,
+                0,
+                1,
+                listOf("未获取到管理认证 token，请先在 OpenList 页面校验当前管理员密码")
+            )
             return@withContext Result.failure()
         }
 
@@ -467,6 +485,14 @@ class SyncWorker(
         }
         val port = if (configuredPort > 0) configuredPort else DEFAULT_PROXY_PORT
         return "http://127.0.0.1:$port"
+    }
+
+    private fun currentOpenListPort(): Int {
+        return try {
+            OpenList.getHttpPort()
+        } catch (_: Exception) {
+            5244
+        }
     }
 
     private fun isEncryptedTargetPath(targetPath: String): Boolean {

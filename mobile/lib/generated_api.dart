@@ -1634,6 +1634,50 @@ class SyncTaskApi {
     }
   }
 
+  Future<void> clearSyncTaskHistory(String taskId) async {
+    const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.SyncTaskApi.clearSyncTaskHistory';
+    final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(<Object?>[taskId]) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
+
+  Future<void> clearAllSyncTaskHistory() async {
+    const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.SyncTaskApi.clearAllSyncTaskHistory';
+    final BasicMessageChannel<Object?> __pigeon_channel = BasicMessageChannel<Object?>(
+      __pigeon_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: __pigeon_binaryMessenger,
+    );
+    final List<Object?>? __pigeon_replyList =
+        await __pigeon_channel.send(null) as List<Object?>?;
+    if (__pigeon_replyList == null) {
+      throw _createConnectionError(__pigeon_channelName);
+    } else if (__pigeon_replyList.length > 1) {
+      throw PlatformException(
+        code: __pigeon_replyList[0]! as String,
+        message: __pigeon_replyList[1] as String?,
+        details: __pigeon_replyList[2],
+      );
+    } else {
+      return;
+    }
+  }
+
   /// 获取管理 API 认证 token（唯一来源：SyncScheduler.acquireAuthToken）
   Future<String?> acquireAuthToken() async {
     const String __pigeon_channelName = 'dev.flutter.pigeon.openlist_mobile.SyncTaskApi.acquireAuthToken';
