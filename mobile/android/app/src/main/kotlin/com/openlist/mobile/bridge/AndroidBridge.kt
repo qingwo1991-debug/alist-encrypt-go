@@ -52,6 +52,10 @@ class AndroidBridge(private val context: Context) : GeneratedApi.Android {
         return OpenList.getHttpPort().toLong()
     }
 
+    override fun setOpenListHttpPort(port: Long) {
+        OpenList.setHttpPort(port.toInt())
+    }
+
     override fun isRunning() = OpenListService.isRunning
 
 

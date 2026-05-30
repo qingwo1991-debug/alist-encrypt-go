@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -4679,4 +4680,51 @@ func rewriteProxyRedirectLocation(r *http.Request, upstreamBaseURL, location str
 		rewritten += "#" + parsedLoc.Fragment
 	}
 	return origin + rewritten
+}
+
+func rewriteLoopbackRawURLForRequest(r *http.Request, rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || r == nil {
+		return rawURL
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return rawURL
+	}
+
+	hostName := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if hostName != "127.0.0.1" && hostName != "localhost" && hostName != "::1" {
+		return rawURL
+	}
+
+	requestHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if requestHost == "" {
+		requestHost = strings.TrimSpace(r.Host)
+	}
+	if requestHost == "" {
+		return rawURL
+	}
+
+	requestHostName := requestHost
+	requestHostPort := ""
+	if h, p, err := net.SplitHostPort(requestHost); err == nil {
+		requestHostName = h
+		requestHostPort = p
+	}
+	requestHostName = strings.Trim(strings.TrimSpace(requestHostName), "[]")
+	if requestHostName == "" || requestHostName == "127.0.0.1" || requestHostName == "localhost" || requestHostName == "::1" {
+		return rawURL
+	}
+
+	targetPort := parsed.Port()
+	if targetPort == "" {
+		targetPort = requestHostPort
+	}
+	if targetPort != "" {
+		parsed.Host = net.JoinHostPort(requestHostName, targetPort)
+	} else {
+		parsed.Host = requestHostName
+	}
+	return parsed.String()
 }
