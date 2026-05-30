@@ -163,6 +163,12 @@ cp -r enc-webui/dist/* web/public/
 go build -o alist-encrypt-go ./cmd/server
 ```
 
+说明：
+
+- `go build` 生成的管理后台资源来自编译时嵌入的 `web/public`。
+- Docker 镜像现在会在构建阶段自动执行前端打包并同步到 `web/public`，不再依赖手工复制。
+- 仅在本地直接执行 `go build` 时，才需要先手工把 `enc-webui/dist/*` 复制到 `web/public/`。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |

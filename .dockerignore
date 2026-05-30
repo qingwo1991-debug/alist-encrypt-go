@@ -1,0 +1,15 @@
+.git
+.github
+implementation_plan.md
+openlist_logs_*.txt
+
+enc-webui/node_modules
+enc-webui/dist
+enc-webui/dist-nominify
+enc-webui/ts-out-dir
+
+mobile/**/node_modules
+mobile/**/build
+
+tmp
+*.log
