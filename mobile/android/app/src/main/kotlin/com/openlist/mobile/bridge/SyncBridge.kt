@@ -7,6 +7,7 @@ import android.util.Log
 import com.openlist.mobile.config.AppConfig
 import com.openlist.mobile.sync.SyncRecordStore
 import com.openlist.mobile.sync.SyncScheduler
+import com.openlist.mobile.sync.SyncSourceCleaner
 import io.flutter.plugin.common.BasicMessageChannel
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.StandardMessageCodec
@@ -26,6 +27,7 @@ class SyncBridge(private val context: Context) {
         private const val TAG = "SyncBridge"
         private const val CHANNEL_PREFIX = "dev.flutter.pigeon.openlist_mobile.SyncTaskApi"
         private val authExecutor = Executors.newSingleThreadExecutor()
+        private val syncExecutor = Executors.newSingleThreadExecutor()
         private val mainHandler = Handler(Looper.getMainLooper())
 
         fun setUp(binaryMessenger: BinaryMessenger, bridge: SyncBridge) {
@@ -189,6 +191,22 @@ class SyncBridge(private val context: Context) {
                     } catch (e: Exception) {
                         Log.e(TAG, "clearAllSyncTaskHistory error", e)
                         reply.reply(listOf(e.javaClass.simpleName, e.message, null))
+                    }
+                }
+
+            // cleanUploadedSourceFiles
+            BasicMessageChannel<Any>(binaryMessenger, "$CHANNEL_PREFIX.cleanUploadedSourceFiles", codec)
+                .setMessageHandler { message, reply ->
+                    syncExecutor.execute {
+                        try {
+                            val args = message as List<*>
+                            val taskId = args[0] as String
+                            val summary = SyncSourceCleaner.cleanUploadedSourceFiles(bridge.context, taskId)
+                            replyOnMain(reply, listOf(summary.toUserMessage()))
+                        } catch (e: Exception) {
+                            Log.e(TAG, "cleanUploadedSourceFiles error", e)
+                            replyOnMain(reply, listOf(e.javaClass.simpleName, e.message, null))
+                        }
                     }
                 }
 

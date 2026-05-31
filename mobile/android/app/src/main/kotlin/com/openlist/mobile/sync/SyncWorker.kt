@@ -67,6 +67,13 @@ class SyncWorker(
         val error: String,
     )
 
+    private data class RemoteFileProbe(
+        val exists: Boolean,
+        val size: Long?,
+        val isDir: Boolean,
+        val message: String,
+    )
+
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val taskId = inputData.getString(KEY_TASK_ID) ?: return@withContext Result.failure()
         val taskJson = inputData.getString(KEY_TASK_JSON) ?: return@withContext Result.failure()
@@ -172,10 +179,15 @@ class SyncWorker(
             return@withContext Result.success()
         }
 
-        // 5. 过滤已同步文件（增量判断）
-        val newOrModified = filesToUpload.filter { file ->
+        // 5. 过滤已同步文件（增量判断 + 远端兜底校验）
+        val newOrModified = mutableListOf<File>()
+        var skippedByLocalRecord = 0
+        var skippedByRemotePresence = 0
+        val cleanupCandidates = linkedSetOf<String>()
+
+        filesToUpload.forEach { file ->
             val remotePath = buildRemotePath(taskConfig, sourceDir, file)
-            !SyncRecordStore.isAlreadySynced(
+            val alreadySyncedLocally = SyncRecordStore.isAlreadySynced(
                 context,
                 taskId,
                 file.absolutePath,
@@ -183,13 +195,65 @@ class SyncWorker(
                 file.lastModified(),
                 remotePath
             )
+
+            val remoteProbe = probeRemoteFile(remotePath, authToken)
+            if (remoteProbe.exists && !remoteProbe.isDir && remoteProbe.size == file.length()) {
+                if (!alreadySyncedLocally) {
+                    SyncRecordStore.markSynced(
+                        context,
+                        SyncRecord(
+                            taskId = taskId,
+                            filePath = file.absolutePath,
+                            fileSize = file.length(),
+                            lastModified = file.lastModified(),
+                            syncedAt = System.currentTimeMillis(),
+                            remotePath = remotePath
+                        )
+                    )
+                    skippedByRemotePresence++
+                    logSync(
+                        traceId,
+                        taskId,
+                        "scan",
+                        "远端已存在同尺寸文件，补记同步记录 remotePath=$remotePath file=${file.name} size=${file.length()}",
+                    )
+                } else {
+                    skippedByLocalRecord++
+                }
+                if (taskConfig.deleteAfterSync) {
+                    cleanupCandidates.add(file.absolutePath)
+                }
+                return@forEach
+            }
+
+            if (alreadySyncedLocally) {
+                logSync(
+                    traceId,
+                    taskId,
+                    "scan",
+                    "本地同步记录已存在但远端缺失或尺寸不匹配，重新上传 remotePath=$remotePath file=${file.name} probe=${remoteProbe.message}",
+                    LogLevel.WARN,
+                )
+            }
+
+            if (remoteProbe.exists && !remoteProbe.isDir && remoteProbe.size != null && remoteProbe.size != file.length()) {
+                logSync(
+                    traceId,
+                    taskId,
+                    "scan",
+                    "远端存在同路径但尺寸不同，继续上传 remotePath=$remotePath localSize=${file.length()} remoteSize=${remoteProbe.size}",
+                    LogLevel.WARN,
+                )
+            }
+
+            newOrModified.add(file)
         }
-        val skippedCount = filesToUpload.size - newOrModified.size
+        val skippedCount = skippedByLocalRecord + skippedByRemotePresence
         logSync(
             traceId,
             taskId,
             "scan",
-            "增量筛选完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount",
+            "增量筛选完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount localRecord=$skippedByLocalRecord remoteExists=$skippedByRemotePresence",
         )
         publishProgress(
             phase = "READY",
@@ -199,25 +263,14 @@ class SyncWorker(
         )
 
         if (newOrModified.isEmpty()) {
-            Log.d(TAG, "All files already synced for task $taskId")
-            recordHistory(
-                context,
-                taskId,
-                filesToUpload.size,
-                0,
-                skippedCount,
-                0,
-                0,
-                emptyList()
-            )
-            return@withContext Result.success()
+            Log.d(TAG, "No new or modified files to upload for task $taskId")
         }
 
         // 6. 逐个上传
         var successCount = 0
         var failureCount = 0
         val errors = mutableListOf<String>()
-        val syncedFiles = mutableListOf<File>()
+        val uploadSucceededFiles = mutableListOf<File>()
 
         for (file in newOrModified) {
             try {
@@ -266,7 +319,7 @@ class SyncWorker(
                         remotePath = remotePath
                     )
                 )
-                syncedFiles.add(file)
+                uploadSucceededFiles.add(file)
                 successCount++
                 val progressAfter = buildProgressPercent(successCount, failureCount, newOrModified.size)
                 logSync(traceId, taskId, "upload", "上传成功 progress=$progressAfter remotePath=$remotePath file=${file.name}")
@@ -308,7 +361,41 @@ class SyncWorker(
             }
         }
 
-        // 7. 写入历史
+        // 7. 如启用 deleteAfterSync，删除已确认在云端存在的文件
+        var cleanupFailureCount = 0
+        val cleanupErrors = mutableListOf<String>()
+        if (taskConfig.deleteAfterSync) {
+            uploadSucceededFiles.forEach { file -> cleanupCandidates.add(file.absolutePath) }
+            for (filePath in cleanupCandidates) {
+                val file = File(filePath)
+                try {
+                    if (!file.exists()) {
+                        continue
+                    }
+                    val deleted = file.delete()
+                    if (deleted || !file.exists()) {
+                        logSync(traceId, taskId, "cleanup", "已删除本地源文件 file=${file.absolutePath}")
+                        Log.d(TAG, "Deleted synced file: ${file.absolutePath}")
+                    } else {
+                        cleanupFailureCount++
+                        val cleanupError = "删除本地源文件失败 file=${file.absolutePath}: delete() returned false"
+                        cleanupErrors.add(cleanupError)
+                        logSync(traceId, taskId, "cleanup", cleanupError, LogLevel.WARN)
+                        Log.w(TAG, cleanupError)
+                    }
+                } catch (e: Exception) {
+                    cleanupFailureCount++
+                    val cleanupError = "删除本地源文件失败 file=${file.absolutePath} error=${e.message}"
+                    cleanupErrors.add(cleanupError)
+                    logSync(traceId, taskId, "cleanup", cleanupError, LogLevel.WARN)
+                    Log.e(TAG, "Failed to delete ${file.absolutePath}: ${e.message}")
+                }
+            }
+        }
+
+        val totalFailureCount = failureCount + cleanupFailureCount
+
+        // 8. 写入历史
         recordHistory(
             context,
             taskId,
@@ -316,25 +403,9 @@ class SyncWorker(
             newOrModified.size,
             skippedCount,
             successCount,
-            failureCount,
-            errors
+            totalFailureCount,
+            errors + cleanupErrors
         )
-
-        // 8. 如启用 deleteAfterSync，仅删除已成功上传的文件
-        if (taskConfig.deleteAfterSync) {
-            for (file in syncedFiles) {
-                try {
-                    if (file.exists()) {
-                        file.delete()
-                        logSync(traceId, taskId, "cleanup", "已删除本地源文件 file=${file.absolutePath}")
-                        Log.d(TAG, "Deleted synced file: ${file.absolutePath}")
-                    }
-                } catch (e: Exception) {
-                    logSync(traceId, taskId, "cleanup", "删除本地源文件失败 file=${file.absolutePath} error=${e.message}", LogLevel.WARN)
-                    Log.e(TAG, "Failed to delete ${file.absolutePath}: ${e.message}")
-                }
-            }
-        }
 
         // 9. Worker 返回 success/failure 取决于是否完成主流程（不论单文件失败）
         publishProgress(
@@ -343,16 +414,16 @@ class SyncWorker(
             pendingFiles = newOrModified.size,
             skippedFiles = skippedCount,
             uploadedFiles = successCount,
-            failedFiles = failureCount,
+            failedFiles = totalFailureCount,
         )
         logSync(
             traceId,
             taskId,
             "complete",
-            "任务完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount success=$successCount failure=$failureCount progress=100%",
-            if (failureCount > 0) LogLevel.WARN else LogLevel.INFO,
+            "任务完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount success=$successCount uploadFailure=$failureCount cleanupFailure=$cleanupFailureCount progress=100%",
+            if (totalFailureCount > 0) LogLevel.WARN else LogLevel.INFO,
         )
-        if (failureCount > 0) {
+        if (totalFailureCount > 0) {
             Result.success() // 主流程完成，单文件失败不影响
         } else {
             Result.success()
@@ -703,6 +774,77 @@ class SyncWorker(
                 status = data.optString("status"),
                 error = data.optString("error"),
             )
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun probeRemoteFile(
+        remotePath: String,
+        authToken: String,
+    ): RemoteFileProbe {
+        val url = URL("${proxyBaseUrl()}/api/fs/get")
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8")
+            conn.setRequestProperty("Authorization", authToken)
+            conn.setRequestProperty("Connection", "close")
+            val requestBody = JSONObject().apply {
+                put("path", remotePath)
+                put("password", "")
+            }.toString()
+            conn.outputStream.use { it.write(requestBody.toByteArray(Charsets.UTF_8)) }
+
+            val responseCode = conn.responseCode
+            val responseBody = try {
+                if (responseCode in 200..299) {
+                    conn.inputStream?.bufferedReader()?.readText().orEmpty()
+                } else {
+                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                }
+            } catch (_: Exception) {
+                ""
+            }
+
+            if (responseCode >= 400 || responseBody.isBlank()) {
+                return RemoteFileProbe(
+                    exists = false,
+                    size = null,
+                    isDir = false,
+                    message = "http=$responseCode"
+                )
+            }
+
+            val json = try {
+                JSONObject(responseBody)
+            } catch (_: Exception) {
+                return RemoteFileProbe(false, null, false, "invalid-json")
+            }
+            val apiCode = json.optInt("code", -1)
+            if (apiCode != 200) {
+                return RemoteFileProbe(
+                    exists = false,
+                    size = null,
+                    isDir = false,
+                    message = json.optString("message").ifBlank { "api=$apiCode" }
+                )
+            }
+            val data = json.optJSONObject("data")
+                ?: return RemoteFileProbe(false, null, false, "missing-data")
+            val size = if (data.has("size") && !data.isNull("size")) data.optLong("size") else null
+            return RemoteFileProbe(
+                exists = true,
+                size = size,
+                isDir = data.optBoolean("is_dir", false),
+                message = "ok"
+            )
+        } catch (e: Exception) {
+            return RemoteFileProbe(false, null, false, e.message ?: "probe-failed")
         } finally {
             conn.disconnect()
         }

@@ -203,6 +203,9 @@ abstract class SyncTaskApi {
   /// 获取同步任务历史记录 JSON
   String getSyncTaskHistory(String taskId);
 
+  /// 手动清理本地已备份源文件（仅删除云端已存在且尺寸一致的文件）
+  String cleanUploadedSourceFiles(String taskId);
+
   /// 获取管理 API 认证 token（唯一来源：SyncScheduler.acquireAuthToken）
   String? acquireAuthToken();
 

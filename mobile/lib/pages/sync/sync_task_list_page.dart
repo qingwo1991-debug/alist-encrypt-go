@@ -17,6 +17,7 @@ class SyncTaskListPage extends StatefulWidget {
 class _SyncTaskListPageState extends State<SyncTaskListPage> {
   final SyncTaskManager _manager = SyncTaskManager();
   final Map<String, Map<String, dynamic>> _statusByTaskId = {};
+  final Set<String> _cleaningTaskIds = <String>{};
   Timer? _statusTimer;
 
   @override
@@ -217,6 +218,19 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                       icon: const Icon(Icons.cleaning_services_outlined),
                       label: const Text('清历史'),
                       onPressed: () => _confirmClearTaskHistory(task),
+                    ),
+                    OutlinedButton.icon(
+                      icon: _cleaningTaskIds.contains(task.id)
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.delete_sweep_outlined),
+                      label: const Text('清理已备份'),
+                      onPressed: _cleaningTaskIds.contains(task.id)
+                          ? null
+                          : () => _confirmCleanUploadedSourceFiles(task),
                     ),
                     FilledButton.tonalIcon(
                       icon: const Icon(Icons.play_arrow),
@@ -436,6 +450,52 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('重传失败: $e')),
         );
+      }
+    }
+  }
+
+  Future<void> _confirmCleanUploadedSourceFiles(SyncTask task) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清理已备份源文件'),
+        content: Text(
+          '将重新扫描任务“${task.name}”的本地文件，并删除那些在云端已存在且尺寸一致的源文件，用于释放手机空间。此操作不会删除云端文件，是否继续？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('开始清理'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() {
+      _cleaningTaskIds.add(task.id);
+    });
+    try {
+      final result = await _manager.cleanUploadedSourceFiles(task.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result)),
+      );
+      await _reloadTasks();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('清理失败: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _cleaningTaskIds.remove(task.id);
+        });
       }
     }
   }
