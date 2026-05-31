@@ -196,6 +196,10 @@ class SyncTaskManager extends ChangeNotifier {
     await runTaskNow(taskId);
   }
 
+  Future<String> cleanUploadedSourceFiles(String taskId) async {
+    return NativeBridge.syncTaskApi.cleanUploadedSourceFiles(taskId);
+  }
+
   /// 获取同步任务状态（JSON）
   Future<Map<String, dynamic>?> getTaskStatus(String taskId) async {
     try {
