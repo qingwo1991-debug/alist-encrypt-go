@@ -35,6 +35,7 @@ object SyncScheduler {
     private const val TAG = "SyncScheduler"
     private const val WORK_NAME_PREFIX = "sync_task_"
     private const val WORK_NAME_ONETIME_PREFIX = "sync_task_onetime_"
+    private const val WORK_NAME_CLEANUP_PREFIX = "sync_task_cleanup_"
     private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
 
     /**
@@ -142,15 +143,60 @@ object SyncScheduler {
         Log.d(TAG, "Enqueued one-time sync for task $taskId")
     }
 
+    fun runCleanupNow(context: Context, taskId: String) {
+        val tasksJson = AppConfig.syncTasksJson
+        val tasks = try {
+            Json { ignoreUnknownKeys = true }
+                .decodeFromString<List<SyncTaskConfig>>(tasksJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse tasks for cleanup: $taskId", e)
+            return
+        }
+
+        val task = tasks.find { it.id == taskId } ?: run {
+            Log.w(TAG, "Task $taskId not found for cleanup")
+            return
+        }
+
+        val workName = WORK_NAME_CLEANUP_PREFIX + taskId
+        WorkManager.getInstance(context).cancelUniqueWork(workName)
+
+        val constraints = buildConstraints(task.wifiOnly)
+        val inputData = Data.Builder()
+            .putString(SyncCleanupWorker.KEY_TASK_ID, taskId)
+            .putString(SyncCleanupWorker.KEY_TASK_JSON, task.toJsonString())
+            .build()
+
+        val cleanupWork = OneTimeWorkRequestBuilder<SyncCleanupWorker>()
+            .setConstraints(constraints)
+            .setInputData(inputData)
+            .setBackoffCriteria(
+                BackoffPolicy.EXPONENTIAL,
+                5, TimeUnit.MINUTES
+            )
+            .build()
+
+        WorkManager.getInstance(context)
+            .enqueueUniqueWork(
+                workName,
+                ExistingWorkPolicy.REPLACE,
+                cleanupWork
+            )
+
+        Log.d(TAG, "Enqueued cleanup work for task $taskId")
+    }
+
     /**
      * 取消同步任务调度
      */
     fun cancel(context: Context, taskId: String) {
         val periodicName = WORK_NAME_PREFIX + taskId
         val onetimeName = WORK_NAME_ONETIME_PREFIX + taskId
+        val cleanupName = WORK_NAME_CLEANUP_PREFIX + taskId
         WorkManager.getInstance(context).apply {
             cancelUniqueWork(periodicName)
             cancelUniqueWork(onetimeName)
+            cancelUniqueWork(cleanupName)
         }
         Log.d(TAG, "Cancelled sync scheduling for task $taskId")
     }
@@ -161,10 +207,12 @@ object SyncScheduler {
     fun getStatus(context: Context, taskId: String): String {
         val periodicName = WORK_NAME_PREFIX + taskId
         val onetimeName = WORK_NAME_ONETIME_PREFIX + taskId
+        val cleanupName = WORK_NAME_CLEANUP_PREFIX + taskId
         val workManager = WorkManager.getInstance(context)
 
         var periodicState = "NOT_SCHEDULED"
         var oneTimeState = "NONE"
+        var cleanupState = "NONE"
         var activeProgress: Data? = null
 
         // 检查 PeriodicWork
@@ -199,6 +247,21 @@ object SyncScheduler {
             oneTimeState = "UNKNOWN"
         }
 
+        try {
+            val cleanupWorkInfo = workManager
+                .getWorkInfosForUniqueWork(cleanupName)
+                .get()
+            if (cleanupWorkInfo.isNotEmpty()) {
+                val info = cleanupWorkInfo[0]
+                cleanupState = info.state.name
+                if (!info.progress.keyValueMap.isEmpty()) {
+                    activeProgress = info.progress
+                }
+            }
+        } catch (_: Exception) {
+            cleanupState = "UNKNOWN"
+        }
+
         // 读取任务配置中的 lastSyncTime / lastSyncFileCount / lastError
         var lastSyncTime: Long? = null
         var lastSyncFileCount: Int? = null
@@ -223,6 +286,7 @@ object SyncScheduler {
             taskId = taskId,
             periodicState = periodicState,
             oneTimeState = oneTimeState,
+            cleanupState = cleanupState,
             currentPhase = activeProgress?.getString("phase"),
             currentFile = activeProgress?.getString("currentFile"),
             currentUploadTaskId = activeProgress?.getString("currentUploadTaskId"),

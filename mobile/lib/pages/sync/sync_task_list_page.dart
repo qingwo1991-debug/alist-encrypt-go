@@ -17,7 +17,6 @@ class SyncTaskListPage extends StatefulWidget {
 class _SyncTaskListPageState extends State<SyncTaskListPage> {
   final SyncTaskManager _manager = SyncTaskManager();
   final Map<String, Map<String, dynamic>> _statusByTaskId = {};
-  final Set<String> _cleaningTaskIds = <String>{};
   Timer? _statusTimer;
 
   @override
@@ -220,17 +219,9 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                       onPressed: () => _confirmClearTaskHistory(task),
                     ),
                     OutlinedButton.icon(
-                      icon: _cleaningTaskIds.contains(task.id)
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.delete_sweep_outlined),
+                      icon: const Icon(Icons.delete_sweep_outlined),
                       label: const Text('清理已备份'),
-                      onPressed: _cleaningTaskIds.contains(task.id)
-                          ? null
-                          : () => _confirmCleanUploadedSourceFiles(task),
+                      onPressed: () => _confirmCleanUploadedSourceFiles(task),
                     ),
                     FilledButton.tonalIcon(
                       icon: const Icon(Icons.play_arrow),
@@ -476,39 +467,39 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
     );
     if (confirmed != true) return;
 
-    setState(() {
-      _cleaningTaskIds.add(task.id);
-    });
     try {
       final result = await _manager.cleanUploadedSourceFiles(task.id);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(result)),
       );
-      await _reloadTasks();
+      await _refreshStatuses();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('清理失败: $e')),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _cleaningTaskIds.remove(task.id);
-        });
-      }
     }
   }
 
   bool _isFailedStatus(Map<String, dynamic> status) {
+    final cleanupState = status['cleanupState']?.toString() ?? '';
     final oneTimeState = status['oneTimeState']?.toString() ?? '';
     final periodicState = status['periodicState']?.toString() ?? '';
-    return oneTimeState == 'FAILED' || periodicState == 'FAILED';
+    return cleanupState == 'FAILED' ||
+        oneTimeState == 'FAILED' ||
+        periodicState == 'FAILED';
   }
 
   String _describeStatus(Map<String, dynamic> status) {
+    final cleanupState = status['cleanupState']?.toString() ?? 'NONE';
     final oneTimeState = status['oneTimeState']?.toString() ?? 'NONE';
     final periodicState = status['periodicState']?.toString() ?? 'UNKNOWN';
+    if (cleanupState != 'NONE' &&
+        cleanupState != 'SUCCEEDED' &&
+        cleanupState != 'CANCELLED') {
+      return '清理任务: $cleanupState';
+    }
     if (oneTimeState != 'NONE') {
       return '立即任务: $oneTimeState';
     }
@@ -531,6 +522,16 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         return 'OpenList 上传任务失败';
       case 'COMPLETED':
         return '已完成';
+      case 'CLEANUP_PREPARING':
+        return '准备清理';
+      case 'CLEANUP_SCANNING':
+        return '扫描可清理文件';
+      case 'CLEANUP_DELETING':
+        return '清理本地源文件';
+      case 'CLEANUP_COMPLETED':
+        return '清理完成';
+      case 'CLEANUP_FAILED':
+        return '清理失败';
       default:
         return '未知';
     }
@@ -550,6 +551,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
               children: [
                 _buildDialogRow('任务ID', task.id),
                 _buildDialogRow('当前阶段', _describePhase(status?['currentPhase']?.toString())),
+                _buildDialogRow('清理任务状态', status?['cleanupState']?.toString() ?? '-'),
                 _buildDialogRow('当前文件', status?['currentFile']?.toString() ?? '-'),
                 _buildDialogRow('OpenList上传任务ID', status?['currentUploadTaskId']?.toString() ?? '-'),
                 _buildDialogRow(
