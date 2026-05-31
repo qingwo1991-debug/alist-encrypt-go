@@ -31,16 +31,38 @@ object SyncSourceCleaner {
         }
     }
 
+    data class CleanupProgress(
+        val phase: String,
+        val currentFile: String? = null,
+        val scannedFiles: Int? = null,
+        val pendingFiles: Int? = null,
+        val skippedFiles: Int? = null,
+        val uploadedFiles: Int? = null,
+        val failedFiles: Int? = null,
+        val currentUploadTaskStatus: String? = null,
+        val currentUploadTaskError: String? = null,
+    )
+
     private data class RemoteFileProbe(
         val exists: Boolean,
         val size: Long?,
         val isDir: Boolean,
     )
 
-    fun cleanUploadedSourceFiles(context: Context, taskId: String): CleanupSummary {
-        val task = loadTask(taskId) ?: throw IllegalArgumentException("未找到任务: $taskId")
+    fun cleanUploadedSourceFiles(
+        context: Context,
+        taskId: String,
+        taskJson: String? = null,
+        onProgress: ((CleanupProgress) -> Unit)? = null,
+    ): CleanupSummary {
+        val task = if (taskJson.isNullOrBlank()) {
+            loadTask(taskId)
+        } else {
+            SyncTaskConfig.fromJsonString(taskJson)
+        } ?: throw IllegalArgumentException("未找到任务: $taskId")
         val traceId = buildTraceId(taskId)
 
+        onProgress?.invoke(CleanupProgress(phase = "CLEANUP_PREPARING"))
         ensureRuntimeReady()
         val authToken = SyncScheduler.acquireAuthToken()
             ?: throw IllegalStateException("未取得管理认证 token，请先在 OpenList 页面校验当前管理员密码")
@@ -53,15 +75,40 @@ object SyncSourceCleaner {
         val filesToCheck = mutableListOf<File>()
         val excludeNames = task.excludeFolders.map { it.trimEnd('/') }.toSet()
         collectFiles(sourceDir, task.fileExtensions, excludeNames, filesToCheck)
+        onProgress?.invoke(
+            CleanupProgress(
+                phase = "CLEANUP_SCANNING",
+                scannedFiles = filesToCheck.size,
+                pendingFiles = 0,
+                skippedFiles = 0,
+                uploadedFiles = 0,
+                failedFiles = 0,
+                currentUploadTaskStatus = "已扫描 ${filesToCheck.size} 个文件",
+            )
+        )
 
         var remoteMatched = 0
         var deleted = 0
         var failed = 0
+        var skipped = 0
 
         filesToCheck.forEach { file ->
             val remotePath = buildRemotePath(task, sourceDir, file)
             val remoteProbe = probeRemoteFile(remotePath, authToken)
             if (!remoteProbe.exists || remoteProbe.isDir || remoteProbe.size != file.length()) {
+                skipped++
+                onProgress?.invoke(
+                    CleanupProgress(
+                        phase = "CLEANUP_DELETING",
+                        currentFile = file.name,
+                        scannedFiles = filesToCheck.size,
+                        pendingFiles = remoteMatched,
+                        skippedFiles = skipped,
+                        uploadedFiles = deleted,
+                        failedFiles = failed,
+                        currentUploadTaskStatus = "云端未命中，跳过",
+                    )
+                )
                 return@forEach
             }
 
@@ -79,6 +126,18 @@ object SyncSourceCleaner {
             )
 
             if (!file.exists()) {
+                onProgress?.invoke(
+                    CleanupProgress(
+                        phase = "CLEANUP_DELETING",
+                        currentFile = file.name,
+                        scannedFiles = filesToCheck.size,
+                        pendingFiles = remoteMatched,
+                        skippedFiles = skipped,
+                        uploadedFiles = deleted,
+                        failedFiles = failed,
+                        currentUploadTaskStatus = "本地文件已不存在",
+                    )
+                )
                 return@forEach
             }
 
@@ -92,11 +151,48 @@ object SyncSourceCleaner {
             if (removed || !file.exists()) {
                 deleted++
                 log(traceId, taskId, "cleanup", "手动清理已删除本地源文件 file=${file.absolutePath}")
+                onProgress?.invoke(
+                    CleanupProgress(
+                        phase = "CLEANUP_DELETING",
+                        currentFile = file.name,
+                        scannedFiles = filesToCheck.size,
+                        pendingFiles = remoteMatched,
+                        skippedFiles = skipped,
+                        uploadedFiles = deleted,
+                        failedFiles = failed,
+                        currentUploadTaskStatus = "已删除本地源文件",
+                    )
+                )
             } else {
                 failed++
                 log(traceId, taskId, "cleanup", "手动清理删除失败 file=${file.absolutePath}: delete() returned false", LogLevel.WARN)
+                onProgress?.invoke(
+                    CleanupProgress(
+                        phase = "CLEANUP_DELETING",
+                        currentFile = file.name,
+                        scannedFiles = filesToCheck.size,
+                        pendingFiles = remoteMatched,
+                        skippedFiles = skipped,
+                        uploadedFiles = deleted,
+                        failedFiles = failed,
+                        currentUploadTaskStatus = "删除失败",
+                        currentUploadTaskError = "delete() returned false",
+                    )
+                )
             }
         }
+
+        onProgress?.invoke(
+            CleanupProgress(
+                phase = "CLEANUP_COMPLETED",
+                scannedFiles = filesToCheck.size,
+                pendingFiles = remoteMatched,
+                skippedFiles = skipped,
+                uploadedFiles = deleted,
+                failedFiles = failed,
+                currentUploadTaskStatus = "清理完成",
+            )
+        )
 
         return CleanupSummary(
             scanned = filesToCheck.size,
