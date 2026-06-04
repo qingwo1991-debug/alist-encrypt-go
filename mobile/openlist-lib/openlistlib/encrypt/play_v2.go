@@ -494,6 +494,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			meta.CiphertextSize = fileSize + meta.HeaderLen
 		}
 	}
+	startPos, endPos, hasRange = parseRange(clientRangeHeader, fileSize)
 
 	var encryptor FlowEncryptor
 	if meta.IsV2() {
