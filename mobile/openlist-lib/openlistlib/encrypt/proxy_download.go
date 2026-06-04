@@ -493,7 +493,12 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 			targetForMeta = p.getAlistURL() + actualURLPath
 		}
 		meta := p.inspectEncryptedContent(ctx, targetForMeta, req.Header, encPath, fileSize)
+		originalSize := fileSize
 		fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
+		if meta.IsV2() {
+			log.Infof("%s handleDownload: v2 meta target=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d fileSize=%d->%d",
+				internal.LogPrefix(ctx, internal.TagDecrypt), targetForMeta, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
+		}
 
 		var encryptor FlowEncryptor
 		if meta.IsV2() {

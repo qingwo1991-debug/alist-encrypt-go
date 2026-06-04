@@ -344,6 +344,8 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			if hasRange && strategy == StreamStrategyRange {
 				upstreamRangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
 			}
+			log.Infof("V2 redirect meta: url=%s clientRange=%q upstreamRange=%q headerLen=%d cipherSize=%d plainSize=%d",
+				info.RedirectURL, clientRangeHeader, upstreamRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
 		}
 	}
 
@@ -479,7 +481,12 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		return &StreamOutcome{StatusCode: statusCode}
 	}
 
+	originalSize := fileSize
 	fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
+	if meta.IsV2() {
+		log.Infof("V2 redirect normalized size: url=%s contentRange=%q fileSize=%d->%d cipherSize=%d plainSize=%d",
+			info.RedirectURL, resp.Header.Get("Content-Range"), originalSize, fileSize, meta.CiphertextSize, meta.PlainSize)
+	}
 	startPos, endPos, hasRange = parseRange(clientRangeHeader, fileSize)
 
 	var encryptor FlowEncryptor

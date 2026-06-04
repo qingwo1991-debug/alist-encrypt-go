@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func uploadMetaKey(target string) string {
@@ -96,6 +98,8 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 		meta.PlainSize = total
 	}
 	if parsed, ok, err := ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
+		log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
+			target, parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
 		return parsed
 	}
 	return meta

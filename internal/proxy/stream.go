@@ -1138,7 +1138,20 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
+	originalSize := fileSize
 	fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
+	if meta.IsV2() {
+		log.Info().
+			Str("target_url", targetURL).
+			Str("client_range", rangeHeader).
+			Str("upstream_content_range", resp.Header.Get("Content-Range")).
+			Int64("file_size_before", originalSize).
+			Int64("file_size_after", fileSize).
+			Int64("ciphertext_size", meta.CiphertextSize).
+			Int64("plaintext_size", meta.PlainSize).
+			Int64("header_len", meta.HeaderLen).
+			Msg("Normalized V2 playback sizes")
+	}
 	if fileSize == 0 {
 		result.Err = errors.NewDecryptionError("file size required for decrypt stream")
 		return result

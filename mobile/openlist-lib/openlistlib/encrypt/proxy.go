@@ -4524,7 +4524,12 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				filePath, clientRangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
 			meta := p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+			originalSize := fileSize
 			fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
+			if meta.IsV2() {
+				log.Infof("WebDAV decrypt v2 meta: path=%s target=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d fileSize=%d->%d",
+					filePath, targetURL, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
+			}
 			var encryptor FlowEncryptor
 			if meta.IsV2() {
 				encryptor, err = NewCipherV2(EncryptionType(encPath.EncType), encPath.Password, fileSize, meta.NonceField)
