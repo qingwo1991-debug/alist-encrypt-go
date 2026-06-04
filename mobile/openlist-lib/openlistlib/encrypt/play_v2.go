@@ -479,21 +479,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		return &StreamOutcome{StatusCode: statusCode}
 	}
 
-	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != fileSize {
-		if meta.IsV2() && total > meta.HeaderLen {
-			fileSize = total - meta.HeaderLen
-			meta.CiphertextSize = total
-			meta.PlainSize = fileSize
-		} else {
-			fileSize = total
-		}
-	}
-	if meta.IsV2() {
-		meta.PlainSize = fileSize
-		if meta.CiphertextSize == 0 {
-			meta.CiphertextSize = fileSize + meta.HeaderLen
-		}
-	}
+	fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
 	startPos, endPos, hasRange = parseRange(clientRangeHeader, fileSize)
 
 	var encryptor FlowEncryptor

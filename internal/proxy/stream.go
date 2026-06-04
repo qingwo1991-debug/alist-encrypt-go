@@ -1138,26 +1138,10 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
-	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != fileSize {
-		if meta.IsV2() && total > meta.HeaderLen {
-			fileSize = total - meta.HeaderLen
-			meta.CiphertextSize = total
-			meta.PlainSize = fileSize
-		} else {
-			fileSize = total
-		}
-	}
+	fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
 	if fileSize == 0 {
 		result.Err = errors.NewDecryptionError("file size required for decrypt stream")
 		return result
-	}
-	if meta.IsV2() {
-		meta.PlainSize = fileSize
-		if meta.CiphertextSize == 0 {
-			meta.CiphertextSize = fileSize + meta.HeaderLen
-		}
-	} else if meta.PlainSize == 0 {
-		meta.PlainSize = fileSize
 	}
 
 	// Create decryption stream
@@ -1617,6 +1601,40 @@ func discardBytes(r io.Reader, n int64) error {
 	}
 	_, err := io.CopyN(io.Discard, r, n)
 	return err
+}
+
+func normalizePlainFileSize(fileSize int64, meta *encryption.ContentMeta, contentRange string) int64 {
+	if meta == nil {
+		return fileSize
+	}
+	if total := parseContentRangeTotal(contentRange); total > 0 {
+		if meta.IsV2() {
+			meta.CiphertextSize = total
+			if total > meta.HeaderLen {
+				meta.PlainSize = total - meta.HeaderLen
+				return meta.PlainSize
+			}
+		}
+		if fileSize == 0 || total != fileSize {
+			fileSize = total
+		}
+	}
+	if meta.IsV2() {
+		if meta.CiphertextSize == 0 && fileSize > 0 {
+			meta.CiphertextSize = fileSize
+		}
+		if meta.PlainSize <= 0 && meta.CiphertextSize > meta.HeaderLen {
+			meta.PlainSize = meta.CiphertextSize - meta.HeaderLen
+		}
+		if meta.PlainSize > 0 {
+			return meta.PlainSize
+		}
+		return fileSize
+	}
+	if meta.PlainSize == 0 {
+		meta.PlainSize = fileSize
+	}
+	return fileSize
 }
 
 func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string, allowLoose bool) string {
