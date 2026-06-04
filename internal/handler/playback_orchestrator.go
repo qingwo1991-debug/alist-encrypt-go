@@ -60,16 +60,24 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	metaLoaded := false
 	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
-			meta := encryption.ContentMeta{
-				EncType:        encryption.EncType(req.PasswdInfo.EncType),
-				Version:        info.ContentVersion,
-				HeaderLen:      info.HeaderLen,
-				PlainSize:      info.Size,
-				CiphertextSize: info.CiphertextSize,
+			if info.ContentVersion != encryption.ContentVersionV2 {
+				meta := encryption.ContentMeta{
+					EncType:        encryption.EncType(req.PasswdInfo.EncType),
+					Version:        info.ContentVersion,
+					HeaderLen:      info.HeaderLen,
+					PlainSize:      info.Size,
+					CiphertextSize: info.CiphertextSize,
+				}
+				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
+				req.Request = r
+				metaLoaded = true
+			} else {
+				log.Info().
+					Str("category", "playback").
+					Str("consumer_scenario", req.ConsumerScenario).
+					Str("path", req.Path).
+					Msg("Skipping cached V2 playback meta without nonce; forcing reprobe")
 			}
-			r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
-			req.Request = r
-			metaLoaded = true
 		}
 	}
 	if !metaLoaded {
