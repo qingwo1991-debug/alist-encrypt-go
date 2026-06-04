@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -47,6 +48,15 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	w := req.ResponseWriter
 	r := req.Request
 	fileSize := req.InitialSize
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+
+	metaLoaded := false
 	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
 			meta := encryption.ContentMeta{
@@ -58,15 +68,18 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			}
 			r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
 			req.Request = r
+			metaLoaded = true
 		}
 	}
-
-	authHeaders := make(http.Header)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		authHeaders.Set("Authorization", auth)
-	}
-	if cookie := r.Header.Get("Cookie"); cookie != "" {
-		authHeaders.Set("Cookie", cookie)
+	if !metaLoaded {
+		if inspectedMeta, ok := inspectPlaybackContentMeta(req, authHeaders, fileSize); ok {
+			r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
+			req.Request = r
+			if inspectedMeta.PlainSize > 0 {
+				fileSize = inspectedMeta.PlainSize
+			}
+			cachePlaybackContentMeta(req, inspectedMeta)
+		}
 	}
 
 	if fileSize == 0 && req.SizeResolver != nil {
@@ -283,6 +296,64 @@ func shouldRetryFreshResolve(failureReason string, firstFrameHint bool, consumer
 	default:
 		return !firstFrameHint
 	}
+}
+
+func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Header, fallbackSize int64) (encryption.ContentMeta, bool) {
+	if req.StreamProxy == nil || req.PasswdInfo == nil || !req.PasswdInfo.Enable || strings.TrimSpace(req.TargetURL) == "" {
+		return encryption.ContentMeta{}, false
+	}
+	switch req.ConsumerScenario {
+	case consumerScenarioRedirect, consumerScenarioWebDAV:
+	default:
+		return encryption.ContentMeta{}, false
+	}
+	meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), req.TargetURL, authHeaders, req.PasswdInfo, fallbackSize)
+	if meta.EncType == "" {
+		meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
+	}
+	if meta.IsV2() && meta.PlainSize > 0 {
+		log.Info().
+			Str("category", "playback").
+			Str("consumer_scenario", req.ConsumerScenario).
+			Str("path", req.Path).
+			Str("target_url", req.TargetURL).
+			Int64("ciphertext_size", meta.CiphertextSize).
+			Int64("plaintext_size", meta.PlainSize).
+			Int64("header_len", meta.HeaderLen).
+			Msg("Inspected V2 playback content meta")
+		return meta, true
+	}
+	return encryption.ContentMeta{}, false
+}
+
+func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.ContentMeta) {
+	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || !meta.IsV2() || meta.PlainSize <= 0 {
+		return
+	}
+	info := &dao.FileInfo{
+		Path:              req.FileItem.DisplayPath,
+		Name:              req.FileItem.FileName,
+		Size:              meta.PlainSize,
+		CiphertextSize:    meta.TotalCiphertextSize(),
+		ContentVersion:    meta.Version,
+		HeaderLen:         meta.HeaderLen,
+		RawURL:            req.TargetURL,
+		UpstreamFetchedAt: time.Now(),
+	}
+	if existing, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && existing != nil {
+		if info.Name == "" {
+			info.Name = existing.Name
+		}
+		if strings.TrimSpace(existing.RawURL) != "" {
+			info.RawURL = existing.RawURL
+		}
+		if !existing.UpstreamFetchedAt.IsZero() {
+			info.UpstreamFetchedAt = existing.UpstreamFetchedAt
+		}
+		info.Sign = existing.Sign
+		info.IsDir = existing.IsDir
+	}
+	_ = req.FileDAO.Set(info)
 }
 
 func logDecryptFailure(req decryptPlaybackRequest, strategy proxy.StreamStrategy, failureReason string, freshRetry bool) {
