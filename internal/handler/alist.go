@@ -803,10 +803,14 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, encryptedPath string, ciphertextSize int64, passwdInfo *config.PasswdInfo) encryption.ContentMeta {
-	meta := h.streamProxy.InspectEncryptedContent(r.Context(), rawURL, r.Header, passwdInfo, ciphertextSize)
-	if meta.IsV2() && meta.PlainSize > 0 {
-		return meta
+	authVariants := buildProbeAuthVariants(h.cfg, r.Header)
+	for _, headers := range authVariants {
+		meta := h.streamProxy.InspectEncryptedContent(r.Context(), rawURL, headers, passwdInfo, ciphertextSize)
+		if meta.IsV2() && meta.PlainSize > 0 {
+			return meta
+		}
 	}
+	meta := encryption.LegacyContentMeta(encryption.EncType(passwdInfo.EncType), ciphertextSize)
 	if h == nil || h.cfg == nil || strings.TrimSpace(encryptedPath) == "" {
 		return meta
 	}
@@ -815,8 +819,8 @@ func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, e
 		return meta
 	}
 	candidates := []string{
-		httputil.BuildTargetURLWithQuery(alistURL, "/d"+encryptedPath, ""),
 		httputil.BuildTargetURLWithQuery(alistURL, "/dav"+encryptedPath, ""),
+		httputil.BuildTargetURLWithQuery(alistURL, "/d"+encryptedPath, ""),
 	}
 	seen := map[string]struct{}{rawURL: {}}
 	for _, candidate := range candidates {
@@ -828,10 +832,12 @@ func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, e
 			continue
 		}
 		seen[candidate] = struct{}{}
-		fallback := h.streamProxy.InspectEncryptedContent(r.Context(), candidate, r.Header, passwdInfo, ciphertextSize)
-		if fallback.IsV2() && fallback.PlainSize > 0 {
-			trace.Logf(r.Context(), "get", "Detected V2 content via fallback probe target=%s plain=%d cipher=%d", candidate, fallback.PlainSize, fallback.CiphertextSize)
-			return fallback
+		for _, headers := range authVariants {
+			fallback := h.streamProxy.InspectEncryptedContent(r.Context(), candidate, headers, passwdInfo, ciphertextSize)
+			if fallback.IsV2() && fallback.PlainSize > 0 {
+				trace.Logf(r.Context(), "get", "Detected V2 content via fallback probe target=%s plain=%d cipher=%d", candidate, fallback.PlainSize, fallback.CiphertextSize)
+				return fallback
+			}
 		}
 	}
 	return meta

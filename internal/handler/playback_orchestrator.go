@@ -313,11 +313,12 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 		alistURL := strings.TrimSpace(req.Config.GetAlistURL())
 		if alistURL != "" {
 			candidateURLs = append(candidateURLs,
-				httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
 				httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
+				httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
 			)
 		}
 	}
+	authVariants := buildProbeAuthVariants(req.Config, authHeaders)
 	seen := make(map[string]struct{}, len(candidateURLs))
 	for _, candidateURL := range candidateURLs {
 		candidateURL = strings.TrimSpace(candidateURL)
@@ -328,21 +329,23 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 			continue
 		}
 		seen[candidateURL] = struct{}{}
-		meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), candidateURL, authHeaders, req.PasswdInfo, fallbackSize)
-		if meta.EncType == "" {
-			meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
-		}
-		if meta.IsV2() && meta.PlainSize > 0 {
-			log.Info().
-				Str("category", "playback").
-				Str("consumer_scenario", req.ConsumerScenario).
-				Str("path", req.Path).
-				Str("target_url", candidateURL).
-				Int64("ciphertext_size", meta.CiphertextSize).
-				Int64("plaintext_size", meta.PlainSize).
-				Int64("header_len", meta.HeaderLen).
-				Msg("Inspected V2 playback content meta")
-			return meta, true
+		for _, headers := range authVariants {
+			meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
+			if meta.EncType == "" {
+				meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
+			}
+			if meta.IsV2() && meta.PlainSize > 0 {
+				log.Info().
+					Str("category", "playback").
+					Str("consumer_scenario", req.ConsumerScenario).
+					Str("path", req.Path).
+					Str("target_url", candidateURL).
+					Int64("ciphertext_size", meta.CiphertextSize).
+					Int64("plaintext_size", meta.PlainSize).
+					Int64("header_len", meta.HeaderLen).
+					Msg("Inspected V2 playback content meta")
+				return meta, true
+			}
 		}
 		log.Info().
 			Str("category", "playback").

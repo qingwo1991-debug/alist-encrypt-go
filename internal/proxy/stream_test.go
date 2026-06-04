@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -159,6 +160,76 @@ func TestSniffDecryptedRejectsHighEntropyShortSample(t *testing.T) {
 	}
 	if reader != nil {
 		t.Fatal("expected nil reader when sample is rejected")
+	}
+}
+
+func TestInspectEncryptedContentFollowsRedirectForV2Probe(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	plain := bytes.Repeat([]byte("redirect-v2-plain"), 32)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case "http://openalist:5244/dav/demo.bin":
+			if got := r.Header.Get("Authorization"); got != "Basic test" {
+				t.Fatalf("authorization=%q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header: http.Header{
+					"Location": []string{"https://cdn.example/demo.bin"},
+				},
+				Body:    io.NopCloser(strings.NewReader("")),
+				Request: r,
+			}, nil
+		case "https://cdn.example/demo.bin":
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Fatalf("redirected probe should strip auth, got %q", got)
+			}
+			if got := r.Header.Get("Range"); got != "bytes=0-31" {
+				t.Fatalf("range=%q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range": []string{"bytes 0-31/" + strconv.Itoa(len(ciphertext))},
+					"Content-Length": []string{"32"},
+				},
+				Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+				Request: r,
+			}, nil
+		default:
+			t.Fatalf("unexpected url: %s", r.URL.String())
+			return nil, nil
+		}
+	})
+
+	headers := make(http.Header)
+	headers.Set("Authorization", "Basic test")
+	meta := sp.InspectEncryptedContent(context.Background(), "http://openalist:5244/dav/demo.bin", headers, passwd, int64(len(ciphertext)))
+	if !meta.IsV2() {
+		t.Fatalf("expected v2 meta, got version=%d", meta.Version)
+	}
+	if meta.PlainSize != int64(len(plain)) {
+		t.Fatalf("plain size=%d want=%d", meta.PlainSize, len(plain))
 	}
 }
 
