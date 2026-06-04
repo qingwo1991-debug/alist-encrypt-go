@@ -76,6 +76,8 @@ type ProxyServer struct {
 	streamHTTPStats     upstreamHTTPStats
 	playFirstCount      uint64
 	strategySelector    *StrategySelector
+	uploadMetaMu        sync.Mutex
+	uploadMeta          map[string]uploadMetaEntry
 }
 
 func (p *ProxyServer) ensureRuntimeCaches() {
@@ -303,6 +305,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		storageDriverMap:   make(map[string]string),
 		providerCatalog:    make(map[string]string),
 		providerSourceMask: make(map[string]int),
+		uploadMeta:         make(map[string]uploadMetaEntry),
 		cleanupDone:        make(chan struct{}),
 		metaSyncDone:       make(chan struct{}),
 	}

@@ -3933,6 +3933,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	if r.Body != nil {
 		body = r.Body
 	}
+	var uploadMeta ContentMeta
 
 	// 3. 处理 PUT 加密上传
 	if r.Method == "PUT" && encPath != nil {
@@ -3950,12 +3951,50 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 
 		if contentLength > 0 {
-			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+			startOffset := parseUploadStartOffset(r.Header.Get("Content-Range"))
+			if startOffset > 0 {
+				uploadMeta, _ = p.getUploadMeta(filePath)
+				if !uploadMeta.IsV2() {
+					uploadMeta = p.inspectEncryptedContent(ctx, targetURL, r.Header, encPath, contentLength)
+				}
 			}
-			body = NewEncryptReader(r.Body, encryptor)
+			if startOffset > 0 && uploadMeta.IsV2() {
+				encryptor, err := NewCipherV2(EncryptionType(encPath.EncType), encPath.Password, uploadMeta.PlainSize, uploadMeta.NonceField)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := encryptor.SetPosition(startOffset); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				body = NewEncryptReader(r.Body, encryptor)
+			} else if startOffset == 0 {
+				contentEnc, err := NewLatestContentEncryptor(encPath.Password, string(encPath.EncType), contentLength)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				body, err = contentEnc.EncryptReader(r.Body, 0)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				uploadMeta = contentEnc.Meta
+				p.putUploadMeta(filePath, uploadMeta)
+			} else {
+				encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := encryptor.SetPosition(startOffset); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				body = NewEncryptReader(r.Body, encryptor)
+				uploadMeta = LegacyContentMeta(EncryptionType(encPath.EncType), contentLength)
+			}
 
 			// 缓存原始文件信息（与 alist-encrypt 一致：上传前缓存，便于 rclone 的 PROPFIND）
 			originalFileName := path.Base(filePath)
@@ -4000,6 +4039,10 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	if r.Method == "PUT" && uploadMeta.IsV2() {
+		startOffset := parseUploadStartOffset(r.Header.Get("Content-Range"))
+		rewriteUploadHeadersForV2(req, uploadMeta, startOffset, r.Header.Get("Content-Range"))
+	}
 
 	// 4. 处理 Destination 头 (COPY/MOVE)
 	if (r.Method == "COPY" || r.Method == "MOVE") && r.Header.Get("Destination") != "" {
@@ -4039,6 +4082,10 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if r.Method == "GET" && clientRangeHeader != "" {
+		if encPath != nil {
+			meta := p.inspectEncryptedContent(r.Context(), targetURL, r.Header, encPath, 0)
+			upstreamRangeHeader = buildUpstreamRangeHeader(upstreamRangeHeader, meta)
+		}
 		if upstreamRangeHeader == "" {
 			req.Header.Del("Range")
 		} else {
@@ -4476,7 +4523,28 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
 				filePath, clientRangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
-			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
+			meta := p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+			if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != fileSize {
+				if meta.IsV2() && total > meta.HeaderLen {
+					fileSize = total - meta.HeaderLen
+					meta.CiphertextSize = total
+					meta.PlainSize = fileSize
+				} else {
+					fileSize = total
+				}
+			}
+			if meta.IsV2() {
+				meta.PlainSize = fileSize
+				if meta.CiphertextSize == 0 {
+					meta.CiphertextSize = fileSize + meta.HeaderLen
+				}
+			}
+			var encryptor FlowEncryptor
+			if meta.IsV2() {
+				encryptor, err = NewCipherV2(EncryptionType(encPath.EncType), encPath.Password, fileSize, meta.NonceField)
+			} else {
+				encryptor, err = NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
+			}
 			if err != nil {
 				// 无法创建解密器(如未知算法)，直接透传
 				log.Warnf("Failed to create encryptor for download: %v", err)
@@ -4523,13 +4591,29 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 						http.Error(w, "range skip exceeds limit", http.StatusRequestedRangeNotSatisfiable)
 						return
 					}
-					if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
+					discardLen := startPos
+					if meta.IsV2() {
+						discardLen += meta.HeaderLen
+					}
+					if _, err := io.CopyN(io.Discard, resp.Body, discardLen); err != nil {
 						log.Warnf("WebDAV decrypt: skip encrypted prefix failed: %v", err)
 					}
 					encryptor.SetPosition(startPos)
 				}
+			} else if meta.IsV2() && !upstreamIsRange {
+				if err := discardBytes(resp.Body, meta.HeaderLen); err != nil {
+					log.Warnf("WebDAV decrypt: discard v2 header failed: %v", err)
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
 			}
 
+			if meta.IsV2() && upstreamIsRange && clientRangeHeader != "" {
+				if _, end, ok := parseRange(clientRangeHeader, fileSize); ok {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, end, fileSize))
+					w.Header().Set("Content-Length", strconv.FormatInt(end-startPos+1, 10))
+				}
+			}
 			decryptReader := NewDecryptReader(resp.Body, encryptor)
 			w.WriteHeader(statusCode)
 			copyWithBuffer(w, decryptReader)

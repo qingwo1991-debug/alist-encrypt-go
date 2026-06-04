@@ -334,6 +334,18 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	clientRangeHeader := r.Header.Get("Range")
 	upstreamRangeHeader := clientRangeHeader
 	startPos, endPos, hasRange := parseRange(clientRangeHeader, fileSize)
+	meta := LegacyContentMeta(EncryptionType(info.PasswdInfo.EncType), fileSize)
+	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil {
+		meta = p.inspectEncryptedContent(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize)
+		if meta.IsV2() {
+			if meta.PlainSize > 0 {
+				fileSize = meta.PlainSize
+			}
+			if hasRange && strategy == StreamStrategyRange {
+				upstreamRangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
+			}
+		}
+	}
 
 	if hasRange {
 		if strategy == StreamStrategyChunked || strategy == StreamStrategyFull {
@@ -430,15 +442,6 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
-	if upstreamIsRange && strategy == StreamStrategyRange {
-		if cr := resp.Header.Get("Content-Range"); cr != "" {
-			w.Header().Set("Content-Range", cr)
-		}
-		if cl := resp.Header.Get("Content-Length"); cl != "" {
-			w.Header().Set("Content-Length", cl)
-		}
-	}
-
 	// Decrypt filename in header
 	lastUrl := r.URL.Query().Get("lastUrl")
 	if lastUrl != "" && info.PasswdInfo != nil && info.PasswdInfo.EncName {
@@ -476,12 +479,34 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		return &StreamOutcome{StatusCode: statusCode}
 	}
 
-	encryptor, err := NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, fileSize)
+	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != fileSize {
+		if meta.IsV2() && total > meta.HeaderLen {
+			fileSize = total - meta.HeaderLen
+			meta.CiphertextSize = total
+			meta.PlainSize = fileSize
+		} else {
+			fileSize = total
+		}
+	}
+	if meta.IsV2() {
+		meta.PlainSize = fileSize
+		if meta.CiphertextSize == 0 {
+			meta.CiphertextSize = fileSize + meta.HeaderLen
+		}
+	}
+
+	var encryptor FlowEncryptor
+	if meta.IsV2() {
+		encryptor, err = NewCipherV2(EncryptionType(info.PasswdInfo.EncType), info.PasswdInfo.Password, fileSize, meta.NonceField)
+	} else {
+		encryptor, err = NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, fileSize)
+	}
 	if err != nil {
 		return &StreamOutcome{Err: err, FailureReason: "decrypt_validation_failed", Retryable: false}
 	}
 
 	var readerToStream io.Reader = resp.Body
+	upstreamShiftedRange := meta.IsV2() && strategy == StreamStrategyRange && buildUpstreamRangeHeader(clientRangeHeader, meta) != clientRangeHeader
 
 	if clientRangeHeader != "" {
 		if strategy == StreamStrategyRange {
@@ -530,6 +555,19 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+	}
+
+	if hasRange && strategy == StreamStrategyRange {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(endPos-startPos+1, 10))
+	} else if !hasRange {
+		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+	}
+
+	if meta.IsV2() && !(upstreamShiftedRange && upstreamIsRange) {
+		if err := discardBytes(readerToStream, meta.HeaderLen); err != nil {
+			return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true}
+		}
 	}
 
 	decryptReader := NewDecryptReader(readerToStream, encryptor)

@@ -98,7 +98,7 @@ func TestPlayV2ResolveAndStream(t *testing.T) {
 	defer p.closeLocalStore()
 
 	resolveBody := []byte(`{"path":"/enc/demo-video.mp4"}`)
-	resolveReq := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/play/resolve", bytes.NewReader(resolveBody))
+	resolveReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/play/resolve", bytes.NewReader(resolveBody))
 	resolveReq.Header.Set("Content-Type", "application/json")
 	resolveResp := httptest.NewRecorder()
 	p.handlePlayResolve(resolveResp, resolveReq)
@@ -184,7 +184,7 @@ func TestPlayV2RedirectFallsBackToRawUpstream4xxWhenEnabled(t *testing.T) {
 		OriginalURL: "/enc/demo.mp4",
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/redirect/"+key+"?decode=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
 	rr := httptest.NewRecorder()
 	newPlayOrchestrator(p).ServeRedirect(rr, req)
 
@@ -259,7 +259,7 @@ func TestPlayV2RedirectRangePreserves206Headers(t *testing.T) {
 		OriginalURL: "/enc/demo.mp4",
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/redirect/"+key+"?decode=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
 	req.Header.Set("Range", "bytes=0-")
 	rr := httptest.NewRecorder()
 	newPlayOrchestrator(p).ServeRedirect(rr, req)
@@ -341,7 +341,7 @@ func TestPlayV2DoesNotOverwriteStartedResponseOnStreamFailure(t *testing.T) {
 		OriginalURL: "/enc/demo.mp4",
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "http://proxy.local/redirect/"+key+"?decode=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
 	req.Header.Set("Range", "bytes=0-")
 	rr := httptest.NewRecorder()
 	newPlayOrchestrator(p).ServeRedirect(rr, req)
