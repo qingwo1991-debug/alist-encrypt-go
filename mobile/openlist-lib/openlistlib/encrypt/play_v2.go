@@ -335,8 +335,18 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	upstreamRangeHeader := clientRangeHeader
 	startPos, endPos, hasRange := parseRange(clientRangeHeader, fileSize)
 	meta := LegacyContentMeta(EncryptionType(info.PasswdInfo.EncType), fileSize)
-	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil {
-		meta = p.inspectEncryptedContent(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize)
+	if info.ContentVersion == ContentVersionV2 && len(info.NonceField) == 16 {
+		meta = ContentMeta{
+			EncType:        EncryptionType(info.PasswdInfo.EncType),
+			Version:        info.ContentVersion,
+			HeaderLen:      info.HeaderLen,
+			PlainSize:      info.FileSize,
+			CiphertextSize: info.CiphertextSize,
+			NonceField:     cloneNonceField(info.NonceField),
+		}
+	}
+	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil && (!meta.IsV2() || len(meta.NonceField) != 16) {
+		meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, info.EncryptedPath)
 		if meta.IsV2() {
 			if meta.PlainSize > 0 {
 				fileSize = meta.PlainSize

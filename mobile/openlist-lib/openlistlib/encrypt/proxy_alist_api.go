@@ -762,6 +762,15 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 					data["raw_url"] = rawURL
 				}
 				size, _ := data["size"].(float64)
+				ciphertextSize := int64(size)
+				meta := LegacyContentMeta(EncryptionType(encPath.EncType), ciphertextSize)
+				if rawURL != "" {
+					meta = p.inspectEncryptedContentWithFallback(ctx, rawURL, r.Header, encPath, ciphertextSize, filePath)
+					if meta.IsV2() && meta.PlainSize > 0 {
+						size = float64(meta.PlainSize)
+						data["size"] = size
+					}
+				}
 				provider, _ := data["provider"].(string)
 				sign, _ := data["sign"].(string)
 				isDir, _ := data["is_dir"].(bool)
@@ -772,12 +781,16 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 				log.Infof("%s handleFsGet: path=%s, size=%v, rawURL=%s", internal.LogPrefix(ctx, internal.TagProxy), originalPath, size, rawURL)
 
 				p.storeFileCache(originalPath, &FileInfo{
-					Name:   path.Base(originalPath),
-					Size:   int64(size),
-					IsDir:  isDir,
-					Path:   originalPath,
-					RawURL: rawURL,
-					Sign:   sign,
+					Name:           path.Base(originalPath),
+					Size:           int64(size),
+					CiphertextSize: meta.TotalCiphertextSize(),
+					ContentVersion: meta.Version,
+					HeaderLen:      meta.HeaderLen,
+					NonceField:     cloneNonceField(meta.NonceField),
+					IsDir:          isDir,
+					Path:           originalPath,
+					RawURL:         rawURL,
+					Sign:           sign,
 				})
 
 				// 如果开启了文件名加密，将加密名转换为显示名
@@ -792,12 +805,17 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 				// 创建重定向缓存（使用带 TTL 的缓存方法）
 				key := generateRedirectKey()
 				p.storeRedirectCache(key, &RedirectInfo{
-					RedirectURL: rawURL,
-					PasswdInfo:  encPath,
-					FileSize:    int64(size),
-					OriginalURL: originalPath,
-					Provider:    provider,
-					Driver:      driver,
+					RedirectURL:    rawURL,
+					PasswdInfo:     encPath,
+					FileSize:       int64(size),
+					CiphertextSize: meta.TotalCiphertextSize(),
+					ContentVersion: meta.Version,
+					HeaderLen:      meta.HeaderLen,
+					NonceField:     cloneNonceField(meta.NonceField),
+					OriginalURL:    originalPath,
+					EncryptedPath:  filePath,
+					Provider:       provider,
+					Driver:         driver,
 				})
 
 				// 修改返回的 URL

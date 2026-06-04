@@ -775,6 +775,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 					CiphertextSize: ciphertextSize,
 					ContentVersion: meta.Version,
 					HeaderLen:      meta.HeaderLen,
+					NonceField:     append([]byte(nil), meta.NonceField...),
 					IsDir:          false,
 					RawURL:         rawURL,
 					Sign:           func() string { v, _ := data["sign"].(string); return v }(),
@@ -875,6 +876,7 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 		TargetURL:        targetURL,
 		FileName:         path.Base(displayPath),
 		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
+		PasswdInfo:       passwdInfo,
 	}
 	authHeaders := make(http.Header)
 	if auth := r.Header.Get("Authorization"); auth != "" {

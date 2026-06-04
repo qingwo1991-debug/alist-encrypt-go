@@ -520,7 +520,12 @@ type RedirectInfo struct {
 	RedirectURL string       `json:"redirectUrl"` // 实际重定向目标
 	PasswdInfo  *EncryptPath `json:"passwdInfo"`  // 加密配置
 	FileSize    int64        `json:"fileSize"`    // 文件大小
+	CiphertextSize int64     `json:"ciphertextSize,omitempty"`
+	ContentVersion int       `json:"contentVersion,omitempty"`
+	HeaderLen      int64     `json:"headerLen,omitempty"`
+	NonceField     []byte    `json:"nonceField,omitempty"`
 	OriginalURL string       `json:"originalUrl"` // 原始请求URL
+	EncryptedPath string     `json:"encryptedPath,omitempty"`
 	Headers     http.Header  `json:"headers"`     // 原始请求头
 	Provider    string       `json:"provider,omitempty"`
 	Driver      string       `json:"driver,omitempty"`
@@ -645,13 +650,17 @@ type ProxyConfig struct {
 
 // FileInfo 文件信息
 type FileInfo struct {
-	Name     string `json:"name"`
-	Size     int64  `json:"size"`
-	IsDir    bool   `json:"is_dir"`
-	Modified string `json:"modified"`
-	Path     string `json:"path"`
-	RawURL   string `json:"raw_url"`
-	Sign     string `json:"sign"`
+	Name           string `json:"name"`
+	Size           int64  `json:"size"`
+	CiphertextSize int64  `json:"ciphertext_size,omitempty"`
+	ContentVersion int    `json:"content_version,omitempty"`
+	HeaderLen      int64  `json:"header_len,omitempty"`
+	NonceField     []byte `json:"nonce_field,omitempty"`
+	IsDir          bool   `json:"is_dir"`
+	Modified       string `json:"modified"`
+	Path           string `json:"path"`
+	RawURL         string `json:"raw_url"`
+	Sign           string `json:"sign"`
 }
 
 var (
@@ -4382,12 +4391,13 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 
 			// 缓存重定向信息
 			redirectInfo := &RedirectInfo{
-				RedirectURL: location,
-				PasswdInfo:  encPath,
-				FileSize:    fileSize,
-				OriginalURL: r.URL.String(),
-				Headers:     r.Header.Clone(),
-				Driver:      driver,
+				RedirectURL:   location,
+				PasswdInfo:    encPath,
+				FileSize:      fileSize,
+				OriginalURL:   r.URL.String(),
+				EncryptedPath: targetURLPath,
+				Headers:       r.Header.Clone(),
+				Driver:        driver,
 			}
 			p.storeRedirectCache(redirectKey, redirectInfo)
 
@@ -4523,10 +4533,51 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
 				filePath, clientRangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
-			meta := p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+			meta := LegacyContentMeta(EncryptionType(encPath.EncType), fileSize)
+			if cached, ok := p.loadFileCache(filePath); ok && cached != nil && cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
+				meta = ContentMeta{
+					EncType:        EncryptionType(encPath.EncType),
+					Version:        cached.ContentVersion,
+					HeaderLen:      cached.HeaderLen,
+					PlainSize:      cached.Size,
+					CiphertextSize: cached.CiphertextSize,
+					NonceField:     cloneNonceField(cached.NonceField),
+				}
+			} else {
+				encProbePath := targetURLPath
+				if strings.HasPrefix(encProbePath, "/dav") {
+					encProbePath = strings.TrimPrefix(encProbePath, "/dav")
+				}
+				meta = p.inspectEncryptedContentWithFallback(r.Context(), targetURL, req.Header, encPath, fileSize, encProbePath)
+			}
 			originalSize := fileSize
 			fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
 			if meta.IsV2() {
+				p.storeFileCache(filePath, &FileInfo{
+					Name:           path.Base(filePath),
+					Size:           meta.PlainSize,
+					CiphertextSize: meta.TotalCiphertextSize(),
+					ContentVersion: meta.Version,
+					HeaderLen:      meta.HeaderLen,
+					NonceField:     cloneNonceField(meta.NonceField),
+					IsDir:          false,
+					Path:           filePath,
+					RawURL:         targetURL,
+				})
+				if strings.HasPrefix(filePath, "/dav/") {
+					noDav := strings.TrimPrefix(filePath, "/dav")
+					p.storeFileCache(noDav, &FileInfo{
+						Name:           path.Base(noDav),
+						Size:           meta.PlainSize,
+						CiphertextSize: meta.TotalCiphertextSize(),
+						ContentVersion: meta.Version,
+						HeaderLen:      meta.HeaderLen,
+						NonceField:     cloneNonceField(meta.NonceField),
+						IsDir:          false,
+						Path:           noDav,
+						RawURL:         targetURL,
+					})
+				}
 				log.Infof("WebDAV decrypt v2 meta: path=%s target=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d fileSize=%d->%d",
 					filePath, targetURL, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
 			}
