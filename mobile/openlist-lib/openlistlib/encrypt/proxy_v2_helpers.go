@@ -70,13 +70,14 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", ContentHeaderSize()-1))
 	req.Header.Set("Accept-Encoding", "identity")
-	for key, values := range authHeaders {
-		if strings.EqualFold(key, "Host") {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
+	if auth := authHeaders.Get("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if cookie := authHeaders.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if ua := authHeaders.Get("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", ua)
 	}
 	resp, err := p.streamClient.Do(req)
 	if err != nil {

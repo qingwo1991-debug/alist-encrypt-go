@@ -278,6 +278,107 @@ func TestPlayV2RedirectRangePreserves206Headers(t *testing.T) {
 	}
 }
 
+func TestPlayV2RedirectRangePreserves206HeadersForV2(t *testing.T) {
+	password := "123456"
+	fileSize := int64(4096)
+	plain := bytes.Repeat([]byte("C"), int(fileSize))
+	contentEnc, err := NewLatestContentEncryptor(password, string(EncTypeAESCTR), fileSize)
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	reader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	redirectURL := "http://upstream.local/range-v2"
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort: 5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  EncTypeAESCTR,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Range") == "bytes=0-31" {
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Range":  []string{"bytes 0-31/4128"},
+						"Content-Length": []string{"32"},
+						"Content-Type":   []string{"application/octet-stream"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+					Request: req,
+				}, nil
+			}
+			if req.Header.Get("Range") == "bytes=32-" {
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Range":  []string{"bytes 32-4127/4128"},
+						"Content-Length": []string{"4096"},
+						"Content-Type":   []string{"video/mp4"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[32:])),
+					Request: req,
+				}, nil
+			}
+			t.Fatalf("unexpected range header: %q", req.Header.Get("Range"))
+			return nil, nil
+		}),
+	}
+
+	key := "range-key-v2"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: redirectURL,
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  EncTypeAESCTR,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:    int64(len(ciphertext)),
+		OriginalURL: "/enc/demo.mp4",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=0-")
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 0-4095/4096" {
+		t.Fatalf("content-range=%q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "4096" {
+		t.Fatalf("content-length=%q", got)
+	}
+	if got := rr.Body.Bytes(); !bytes.Equal(got, plain) {
+		t.Fatalf("decrypted body mismatch: got=%d", len(got))
+	}
+}
+
 func TestPlayV2DoesNotOverwriteStartedResponseOnStreamFailure(t *testing.T) {
 	password := "123456"
 	encType := EncTypeAESCTR
