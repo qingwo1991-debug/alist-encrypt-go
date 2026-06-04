@@ -325,12 +325,13 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 
 			// 缓存重定向信息
 			redirectInfo := &RedirectInfo{
-				RedirectURL: location,
-				PasswdInfo:  encPath,
-				FileSize:    fileSize,
-				OriginalURL: r.URL.String(),
-				Headers:     r.Header.Clone(),
-				Driver:      driver,
+				RedirectURL:   location,
+				PasswdInfo:    encPath,
+				FileSize:      fileSize,
+				OriginalURL:   r.URL.String(),
+				EncryptedPath: actualURLPath,
+				Headers:       r.Header.Clone(),
+				Driver:        driver,
 			}
 			p.storeRedirectCache(redirectKey, redirectInfo)
 
@@ -492,10 +493,37 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		if strings.TrimSpace(targetForMeta) == "" {
 			targetForMeta = p.getAlistURL() + actualURLPath
 		}
-		meta := p.inspectEncryptedContent(ctx, targetForMeta, req.Header, encPath, fileSize)
+		meta := LegacyContentMeta(EncryptionType(encPath.EncType), fileSize)
+		if cached, ok := p.loadFileCache(filePath); ok && cached != nil && cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
+			meta = ContentMeta{
+				EncType:        EncryptionType(encPath.EncType),
+				Version:        cached.ContentVersion,
+				HeaderLen:      cached.HeaderLen,
+				PlainSize:      cached.Size,
+				CiphertextSize: cached.CiphertextSize,
+				NonceField:     cloneNonceField(cached.NonceField),
+			}
+		} else {
+			encProbePath := actualURLPath
+			if strings.HasPrefix(encProbePath, "/d") {
+				encProbePath = strings.TrimPrefix(encProbePath, "/d")
+			}
+			meta = p.inspectEncryptedContentWithFallback(ctx, targetForMeta, req.Header, encPath, fileSize, encProbePath)
+		}
 		originalSize := fileSize
 		fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
 		if meta.IsV2() {
+			p.storeFileCache(filePath, &FileInfo{
+				Name:           path.Base(filePath),
+				Size:           meta.PlainSize,
+				CiphertextSize: meta.TotalCiphertextSize(),
+				ContentVersion: meta.Version,
+				HeaderLen:      meta.HeaderLen,
+				NonceField:     cloneNonceField(meta.NonceField),
+				IsDir:          false,
+				Path:           filePath,
+				RawURL:         targetForMeta,
+			})
 			log.Infof("%s handleDownload: v2 meta target=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d fileSize=%d->%d",
 				internal.LogPrefix(ctx, internal.TagDecrypt), targetForMeta, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
 		}

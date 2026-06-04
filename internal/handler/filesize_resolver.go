@@ -129,6 +129,7 @@ type FileItem struct {
 	FileName         string
 	PropfindSize     int64
 	CompatStorageKey string
+	PasswdInfo       *config.PasswdInfo
 }
 
 // MinValidFileSize is the minimum size for a valid file (1KB)

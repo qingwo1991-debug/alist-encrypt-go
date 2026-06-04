@@ -60,13 +60,14 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	metaLoaded := false
 	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
-			if info.ContentVersion != encryption.ContentVersionV2 {
+			if info.ContentVersion != encryption.ContentVersionV2 || len(info.NonceField) == 16 {
 				meta := encryption.ContentMeta{
 					EncType:        encryption.EncType(req.PasswdInfo.EncType),
 					Version:        info.ContentVersion,
 					HeaderLen:      info.HeaderLen,
 					PlainSize:      info.Size,
 					CiphertextSize: info.CiphertextSize,
+					NonceField:     append([]byte(nil), info.NonceField...),
 				}
 				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
 				req.Request = r
@@ -377,6 +378,7 @@ func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.Conten
 		CiphertextSize:    meta.TotalCiphertextSize(),
 		ContentVersion:    meta.Version,
 		HeaderLen:         meta.HeaderLen,
+		NonceField:        append([]byte(nil), meta.NonceField...),
 		RawURL:            req.TargetURL,
 		UpstreamFetchedAt: time.Now(),
 	}

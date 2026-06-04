@@ -455,6 +455,30 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		if rawURLResult.RawURL != "" {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
+			if item.file.PasswdInfo != nil && ps.stream != nil {
+				meta := ps.stream.InspectEncryptedContent(context.Background(), rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
+				if meta.IsV2() && meta.PlainSize > 0 {
+					cached := &dao.FileInfo{
+						Path:              item.file.DisplayPath,
+						Name:              item.file.FileName,
+						Size:              meta.PlainSize,
+						CiphertextSize:    meta.TotalCiphertextSize(),
+						ContentVersion:    meta.Version,
+						HeaderLen:         meta.HeaderLen,
+						NonceField:        append([]byte(nil), meta.NonceField...),
+						RawURL:            rawURLResult.RawURL,
+						UpstreamFetchedAt: time.Now(),
+					}
+					if existing, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && existing != nil {
+						if strings.TrimSpace(existing.Name) != "" {
+							cached.Name = existing.Name
+						}
+						cached.Sign = existing.Sign
+						cached.IsDir = existing.IsDir
+					}
+					_ = ps.fileDAO.Set(cached)
+				}
+			}
 		} else if resultState.failureReason == "" && rawURLResult.FailureReason != "" {
 			resultState.failureReason = rawURLResult.FailureReason
 		}

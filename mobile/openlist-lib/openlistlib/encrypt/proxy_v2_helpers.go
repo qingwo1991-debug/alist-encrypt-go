@@ -23,6 +23,15 @@ func uploadMetaKey(target string) string {
 	return parsed.String()
 }
 
+func cloneNonceField(src []byte) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
 func (p *ProxyServer) getUploadMeta(target string) (ContentMeta, bool) {
 	if p == nil {
 		return ContentMeta{}, false
@@ -101,6 +110,45 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 		log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
 			target, parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
 		return parsed
+	}
+	return meta
+}
+
+func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, target string, authHeaders http.Header, encPath *EncryptPath, ciphertextSize int64, encryptedPath string) ContentMeta {
+	meta := p.inspectEncryptedContent(ctx, target, authHeaders, encPath, ciphertextSize)
+	if meta.IsV2() && meta.PlainSize > 0 {
+		return meta
+	}
+	if p == nil || encPath == nil || strings.TrimSpace(encryptedPath) == "" {
+		return meta
+	}
+	alistURL := strings.TrimSpace(p.getAlistURL())
+	if alistURL == "" {
+		return meta
+	}
+	candidates := []string{
+		alistURL + "/dav" + encryptedPath,
+		alistURL + "/d" + encryptedPath,
+	}
+	seen := map[string]struct{}{}
+	if trimmed := strings.TrimSpace(target); trimmed != "" {
+		seen[trimmed] = struct{}{}
+	}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		fallback := p.inspectEncryptedContent(ctx, candidate, authHeaders, encPath, ciphertextSize)
+		if fallback.IsV2() && fallback.PlainSize > 0 {
+			log.Infof("[v2] detected content header via fallback target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
+				candidate, fallback.EncType, fallback.HeaderLen, fallback.CiphertextSize, fallback.PlainSize)
+			return fallback
+		}
 	}
 	return meta
 }

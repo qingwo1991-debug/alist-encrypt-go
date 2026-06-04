@@ -16,6 +16,7 @@ type PathEntry struct {
 	CiphertextSize    int64  // Upstream ciphertext size
 	ContentVersion    int    // 1 legacy, 2 header-based
 	HeaderLen         int64  // Header bytes for v2
+	NonceField        []byte // V2 nonce field for direct decrypt reuse
 	IsDir             bool   // Is directory
 	RawURL            string // Cached upstream direct URL
 	Sign              string // Cached upstream sign

@@ -18,6 +18,7 @@ type FileInfo struct {
 	CiphertextSize    int64     `json:"ciphertext_size"`
 	ContentVersion    int       `json:"content_version"`
 	HeaderLen         int64     `json:"header_len"`
+	NonceField        []byte    `json:"nonce_field,omitempty"`
 	IsDir             bool      `json:"is_dir"`
 	Modified          time.Time `json:"modified"`
 	RawURL            string    `json:"raw_url"`
@@ -81,6 +82,7 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 			CiphertextSize: entry.CiphertextSize,
 			ContentVersion: entry.ContentVersion,
 			HeaderLen:      entry.HeaderLen,
+			NonceField:     append([]byte(nil), entry.NonceField...),
 			IsDir:          entry.IsDir,
 			RawURL:         entry.RawURL,
 			Sign:           entry.Sign,
@@ -120,6 +122,7 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		CiphertextSize:    info.CiphertextSize,
 		ContentVersion:    info.ContentVersion,
 		HeaderLen:         info.HeaderLen,
+		NonceField:        append([]byte(nil), info.NonceField...),
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
 		Sign:              info.Sign,

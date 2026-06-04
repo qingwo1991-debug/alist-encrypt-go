@@ -215,6 +215,9 @@ func TestHandleFsGetRewritesV2CiphertextSizeToPlaintextSize(t *testing.T) {
 	if info.ContentVersion != encryption.ContentVersionV2 {
 		t.Fatalf("content version=%d", info.ContentVersion)
 	}
+	if len(info.NonceField) != 16 {
+		t.Fatalf("nonce length=%d want=16", len(info.NonceField))
+	}
 }
 
 func TestHandleFsGetRewritesV2CiphertextSizeViaLocalFallbackProbe(t *testing.T) {
