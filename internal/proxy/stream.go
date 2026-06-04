@@ -1769,11 +1769,17 @@ func sniffDecrypted(r io.Reader) (io.Reader, bool) {
 	}
 	unique := len(seen)
 
-	// Heuristic: encrypted data has high entropy (many unique bytes, few zeros).
+	// Heuristic: encrypted data has high entropy (high unique ratio, few zeros).
 	// Valid decrypted data has lower entropy (fewer unique bytes, more zeros).
-	if unique > 200 && zeros < 10 {
+	uniqueRatio := 0.0
+	if n > 0 {
+		uniqueRatio = float64(unique) / float64(n)
+	}
+	if (n >= 128 && uniqueRatio >= 0.72 && zeros < 10) || (unique > 200 && zeros < 10) {
 		log.Warn().Int("unique_bytes", unique).Int("zeros", zeros).
-			Int("sample_len", n).Msg("Decrypted data looks encrypted — wrong password or file size?")
+			Int("sample_len", n).
+			Float64("unique_ratio", uniqueRatio).
+			Msg("Decrypted data looks encrypted — wrong password or file size?")
 		return nil, false
 	}
 

@@ -758,7 +758,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				if size, ok := data["size"].(float64); ok {
 					ciphertextSize = int64(size)
 				}
-				meta := h.streamProxy.InspectEncryptedContent(r.Context(), rawURL, r.Header, passwdInfo, ciphertextSize)
+				meta := h.inspectContentMetaWithFallback(r, rawURL, filePath, ciphertextSize, passwdInfo)
 				fileSize := ciphertextSize
 				if meta.IsV2() && meta.PlainSize > 0 {
 					fileSize = meta.PlainSize
@@ -800,6 +800,41 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	}
 
 	RespondJSON(w, resp.StatusCode, respData)
+}
+
+func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, encryptedPath string, ciphertextSize int64, passwdInfo *config.PasswdInfo) encryption.ContentMeta {
+	meta := h.streamProxy.InspectEncryptedContent(r.Context(), rawURL, r.Header, passwdInfo, ciphertextSize)
+	if meta.IsV2() && meta.PlainSize > 0 {
+		return meta
+	}
+	if h == nil || h.cfg == nil || strings.TrimSpace(encryptedPath) == "" {
+		return meta
+	}
+	alistURL := strings.TrimSpace(h.cfg.GetAlistURL())
+	if alistURL == "" {
+		return meta
+	}
+	candidates := []string{
+		httputil.BuildTargetURLWithQuery(alistURL, "/d"+encryptedPath, ""),
+		httputil.BuildTargetURLWithQuery(alistURL, "/dav"+encryptedPath, ""),
+	}
+	seen := map[string]struct{}{rawURL: {}}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		fallback := h.streamProxy.InspectEncryptedContent(r.Context(), candidate, r.Header, passwdInfo, ciphertextSize)
+		if fallback.IsV2() && fallback.PlainSize > 0 {
+			trace.Logf(r.Context(), "get", "Detected V2 content via fallback probe target=%s plain=%d cipher=%d", candidate, fallback.PlainSize, fallback.CiphertextSize)
+			return fallback
+		}
+	}
+	return meta
 }
 
 func (h *AlistHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {
