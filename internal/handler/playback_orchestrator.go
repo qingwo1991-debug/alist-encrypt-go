@@ -12,6 +12,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
@@ -307,21 +308,49 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	default:
 		return encryption.ContentMeta{}, false
 	}
-	meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), req.TargetURL, authHeaders, req.PasswdInfo, fallbackSize)
-	if meta.EncType == "" {
-		meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
+	candidateURLs := []string{req.TargetURL}
+	if req.Config != nil && req.FileItem.EncryptedPath != "" {
+		alistURL := strings.TrimSpace(req.Config.GetAlistURL())
+		if alistURL != "" {
+			candidateURLs = append(candidateURLs,
+				httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
+				httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
+			)
+		}
 	}
-	if meta.IsV2() && meta.PlainSize > 0 {
+	seen := make(map[string]struct{}, len(candidateURLs))
+	for _, candidateURL := range candidateURLs {
+		candidateURL = strings.TrimSpace(candidateURL)
+		if candidateURL == "" {
+			continue
+		}
+		if _, ok := seen[candidateURL]; ok {
+			continue
+		}
+		seen[candidateURL] = struct{}{}
+		meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), candidateURL, authHeaders, req.PasswdInfo, fallbackSize)
+		if meta.EncType == "" {
+			meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
+		}
+		if meta.IsV2() && meta.PlainSize > 0 {
+			log.Info().
+				Str("category", "playback").
+				Str("consumer_scenario", req.ConsumerScenario).
+				Str("path", req.Path).
+				Str("target_url", candidateURL).
+				Int64("ciphertext_size", meta.CiphertextSize).
+				Int64("plaintext_size", meta.PlainSize).
+				Int64("header_len", meta.HeaderLen).
+				Msg("Inspected V2 playback content meta")
+			return meta, true
+		}
 		log.Info().
 			Str("category", "playback").
 			Str("consumer_scenario", req.ConsumerScenario).
 			Str("path", req.Path).
-			Str("target_url", req.TargetURL).
-			Int64("ciphertext_size", meta.CiphertextSize).
-			Int64("plaintext_size", meta.PlainSize).
-			Int64("header_len", meta.HeaderLen).
-			Msg("Inspected V2 playback content meta")
-		return meta, true
+			Str("target_url", candidateURL).
+			Int64("fallback_size", fallbackSize).
+			Msg("Playback content meta inspection did not detect V2")
 	}
 	return encryption.ContentMeta{}, false
 }

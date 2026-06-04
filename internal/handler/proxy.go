@@ -248,9 +248,15 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 	if displayPath != "" {
 		r = r.WithContext(proxy.WithDisplayName(r.Context(), path.Base(displayPath)))
 	}
+	encryptedPath := displayPath
+	if h.fileDAO != nil && displayPath != "" {
+		if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok && strings.TrimSpace(encPath) != "" {
+			encryptedPath = encPath
+		}
+	}
 	fileItem := FileItem{
 		DisplayPath:      displayPath,
-		EncryptedPath:    displayPath,
+		EncryptedPath:    encryptedPath,
 		TargetURL:        info.URL,
 		FileName:         path.Base(displayPath),
 		CompatStorageKey: info.CompatKey,
