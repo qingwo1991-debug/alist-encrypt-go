@@ -192,7 +192,12 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		}
 		if clientRangeHeader != "" {
 			if sendRange {
-				req.Header.Set("Range", clientRangeHeader)
+				rangeHeader := clientRangeHeader
+				if encPath != nil {
+					meta := p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+					rangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
+				}
+				req.Header.Set("Range", rangeHeader)
 			} else {
 				req.Header.Del("Range")
 			}
@@ -483,8 +488,33 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	// 如果需要解密
 	if encPath != nil && fileSize > 0 {
 		log.Infof("%s handleDownload: decrypting with fileSize=%d for path: %s", internal.LogPrefix(ctx, internal.TagDecrypt), fileSize, filePath)
+		targetForMeta := selectedAttempt.fullURL
+		if strings.TrimSpace(targetForMeta) == "" {
+			targetForMeta = p.getAlistURL() + actualURLPath
+		}
+		meta := p.inspectEncryptedContent(ctx, targetForMeta, req.Header, encPath, fileSize)
+		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != fileSize {
+			if meta.IsV2() && total > meta.HeaderLen {
+				fileSize = total - meta.HeaderLen
+				meta.CiphertextSize = total
+				meta.PlainSize = fileSize
+			} else {
+				fileSize = total
+			}
+		}
+		if meta.IsV2() {
+			meta.PlainSize = fileSize
+			if meta.CiphertextSize == 0 {
+				meta.CiphertextSize = fileSize + meta.HeaderLen
+			}
+		}
 
-		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
+		var encryptor FlowEncryptor
+		if meta.IsV2() {
+			encryptor, err = NewCipherV2(EncryptionType(encPath.EncType), encPath.Password, fileSize, meta.NonceField)
+		} else {
+			encryptor, err = NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
+		}
 		if err != nil {
 			log.Errorf("%s handleDownload: failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
 			if p.config != nil && p.config.PlayFirstFallback {
@@ -507,13 +537,31 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 					http.Error(w, "range skip exceeds limit", http.StatusRequestedRangeNotSatisfiable)
 					return
 				}
-				if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
+				discardLen := startPos
+				if meta.IsV2() {
+					discardLen += meta.HeaderLen
+				}
+				if _, err := io.CopyN(io.Discard, resp.Body, discardLen); err != nil {
 					log.Warnf("%s handleDownload: skip encrypted prefix failed: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
 				}
 				encryptor.SetPosition(startPos)
 			}
+		} else if meta.IsV2() && !upstreamIsRange {
+			if err := discardBytes(resp.Body, meta.HeaderLen); err != nil {
+				log.Warnf("%s handleDownload: discard v2 header failed: %v", internal.LogPrefix(ctx, internal.TagDecrypt), err)
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
 		}
 
+		if meta.IsV2() && upstreamIsRange && selectedAttempt.sendRange {
+			if clientRangeHeader != "" {
+				if _, end, ok := parseRange(clientRangeHeader, fileSize); ok {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, end, fileSize))
+					w.Header().Set("Content-Length", strconv.FormatInt(end-startPos+1, 10))
+				}
+			}
+		}
 		decryptReader := NewDecryptReader(resp.Body, encryptor)
 		w.WriteHeader(statusCode)
 		copyWithBuffer(w, decryptReader)

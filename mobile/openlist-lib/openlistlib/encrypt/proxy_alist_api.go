@@ -1119,6 +1119,7 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 
 	targetURL := p.getAlistURL() + apiPath
 	var body io.Reader = r.Body
+	var uploadMeta ContentMeta
 
 	// 获取上传路径
 	filePath := r.Header.Get("File-Path")
@@ -1163,14 +1164,58 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 		if contentLength <= 0 {
 			contentLength = 0
 		}
-
-		encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
-		if err != nil {
-			log.Errorf("%s Failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
+		startOffset := parseUploadStartOffset(r.Header.Get("Content-Range"))
+		if startOffset > 0 {
+			uploadMeta, _ = p.getUploadMeta(filePath)
+			if !uploadMeta.IsV2() {
+				uploadMeta = p.inspectEncryptedContent(ctx, targetURL, r.Header, encPath, contentLength)
+			}
 		}
-		body = NewEncryptReader(r.Body, encryptor)
+		if startOffset > 0 && uploadMeta.IsV2() {
+			encryptor, err := NewCipherV2(EncryptionType(encPath.EncType), encPath.Password, uploadMeta.PlainSize, uploadMeta.NonceField)
+			if err != nil {
+				log.Errorf("%s Failed to create v2 encryptor: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			if err := encryptor.SetPosition(startOffset); err != nil {
+				log.Errorf("%s Failed to set v2 upload offset: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			body = NewEncryptReader(r.Body, encryptor)
+		} else if startOffset == 0 && contentLength > 0 {
+			contentEnc, err := NewLatestContentEncryptor(encPath.Password, string(encPath.EncType), contentLength)
+			if err != nil {
+				log.Errorf("%s Failed to create v2 content encryptor: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			body, err = contentEnc.EncryptReader(r.Body, 0)
+			if err != nil {
+				log.Errorf("%s Failed to create v2 encrypt reader: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			uploadMeta = contentEnc.Meta
+			p.putUploadMeta(filePath, uploadMeta)
+		} else {
+			encryptor, err := NewFlowEncryptor(encPath.Password, encPath.EncType, contentLength)
+			if err != nil {
+				log.Errorf("%s Failed to create encryptor: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			if startOffset > 0 {
+				if err := encryptor.SetPosition(startOffset); err != nil {
+					log.Errorf("%s Failed to set upload offset: %v", internal.LogPrefix(ctx, internal.TagEncrypt), err)
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					return
+				}
+			}
+			body = NewEncryptReader(r.Body, encryptor)
+			uploadMeta = LegacyContentMeta(EncryptionType(encPath.EncType), contentLength)
+		}
 
 		// 缓存文件信息（与 alist-encrypt 一致：上传前缓存，便于 rclone 的 PROPFIND）
 		p.storeFileCache(originalFilePath, &FileInfo{
@@ -1194,6 +1239,10 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 				req.Header.Add(key, value)
 			}
 		}
+	}
+	if encPath != nil && uploadMeta.IsV2() {
+		startOffset := parseUploadStartOffset(r.Header.Get("Content-Range"))
+		rewriteUploadHeadersForV2(req, uploadMeta, startOffset, r.Header.Get("Content-Range"))
 	}
 
 	uploadClient := p.streamClient
