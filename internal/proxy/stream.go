@@ -572,45 +572,84 @@ func (s *StreamProxy) inspectEncryptedContent(ctx context.Context, targetURL str
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req, err := httputil.NewRequest(http.MethodGet, targetURL).
-		WithContext(ctx).
-		Build()
-	if err != nil {
-		return meta
+	currentURL := strings.TrimSpace(targetURL)
+	currentAuth := authHeaders
+	maxHops := 2
+	if s.cfg != nil && s.cfg.AlistServer.RedirectMaxHops > 0 {
+		maxHops = s.cfg.AlistServer.RedirectMaxHops
 	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", encryption.ContentHeaderSize()-1))
-	req.Header.Set("Accept-Encoding", "identity")
-	copyProbeAuthHeaders(req, authHeaders)
+	for hop := 0; hop <= maxHops; hop++ {
+		req, err := httputil.NewRequest(http.MethodGet, currentURL).
+			WithContext(ctx).
+			Build()
+		if err != nil {
+			return meta
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", encryption.ContentHeaderSize()-1))
+		req.Header.Set("Accept-Encoding", "identity")
+		copyProbeAuthHeaders(req, currentAuth)
 
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return meta
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= http.StatusBadRequest {
-		return meta
-	}
-	prefix, err := io.ReadAll(io.LimitReader(resp.Body, encryption.ContentHeaderSize()))
-	if err != nil {
-		return meta
-	}
-	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
-		meta.CiphertextSize = total
-		meta.PlainSize = total
-	} else if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if total, err := strconv.ParseInt(cl, 10, 64); err == nil && total > 0 && resp.StatusCode == http.StatusOK {
+		resp, err := s.client.Do(req)
+		if err != nil {
+			return meta
+		}
+		if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently ||
+			resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect {
+			location := strings.TrimSpace(resp.Header.Get("Location"))
+			resp.Body.Close()
+			if location == "" {
+				return meta
+			}
+			nextURL, err := resolveRedirectTarget(currentURL, location)
+			if err != nil {
+				return meta
+			}
+			currentURL = nextURL
+			currentAuth = make(http.Header)
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= http.StatusBadRequest {
+			return meta
+		}
+		prefix, err := io.ReadAll(io.LimitReader(resp.Body, encryption.ContentHeaderSize()))
+		if err != nil {
+			return meta
+		}
+		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
 			meta.CiphertextSize = total
 			meta.PlainSize = total
+		} else if cl := resp.Header.Get("Content-Length"); cl != "" {
+			if total, err := strconv.ParseInt(cl, 10, 64); err == nil && total > 0 && resp.StatusCode == http.StatusOK {
+				meta.CiphertextSize = total
+				meta.PlainSize = total
+			}
 		}
-	}
-	if parsed, ok, err := encryption.ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
-		return parsed
+		if parsed, ok, err := encryption.ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
+			return parsed
+		}
+		return meta
 	}
 	return meta
 }
 
 func (s *StreamProxy) InspectEncryptedContent(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) encryption.ContentMeta {
 	return s.inspectEncryptedContent(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
+}
+
+func resolveRedirectTarget(baseURL, location string) (string, error) {
+	ref, err := url.Parse(location)
+	if err != nil {
+		return "", err
+	}
+	if ref.IsAbs() {
+		return ref.String(), nil
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	return base.ResolveReference(ref).String(), nil
 }
 
 func buildUpstreamRangeHeader(rangeHeader string, meta encryption.ContentMeta) string {
