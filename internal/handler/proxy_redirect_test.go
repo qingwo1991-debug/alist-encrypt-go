@@ -187,6 +187,18 @@ func TestHandleRedirectRefreshesMetadataBeforeDecrypt(t *testing.T) {
 			w.Header().Set("Content-Length", "1024")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write(ciphertext[:1024])
+		case "/d/enc/real_demo.bin", "/dav/enc/real_demo.bin":
+			switch got := r.Header.Get("Range"); got {
+			case "bytes=0-31":
+				w.Header().Set("Content-Type", "video/mp4")
+				w.Header().Set("Content-Range", "bytes 0-31/4096")
+				w.Header().Set("Content-Length", "32")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(ciphertext[:32])
+				return
+			default:
+				t.Fatalf("Range=%q, want probe range for fallback inspect", got)
+			}
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
