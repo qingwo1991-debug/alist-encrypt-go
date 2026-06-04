@@ -217,6 +217,100 @@ func TestHandleFsGetRewritesV2CiphertextSizeToPlaintextSize(t *testing.T) {
 	}
 }
 
+func TestHandleFsGetRewritesV2CiphertextSizeViaLocalFallbackProbe(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/enc/*"},
+	}
+	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
+	displayPath := "/enc/demo.mp4"
+	encryptedName := converter.ToRealName("demo.mp4")
+	encryptedPath := "/enc/" + encryptedName
+
+	plain := bytes.Repeat([]byte("v2-fallback-"), 128)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	var backendURL string
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get":
+			resp := map[string]interface{}{
+				"code":    200,
+				"message": "success",
+				"data": map[string]interface{}{
+					"name":     encryptedName,
+					"raw_url":  backendURL + "/raw/" + encryptedName,
+					"size":     float64(len(ciphertext)),
+					"provider": "AliyundriveOpen",
+					"is_dir":   false,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		case "/raw/" + encryptedName:
+			// Simulate CDN probe not supporting precise header inspection.
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", "1")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{ciphertext[0]})
+			return
+		case "/d" + encryptedPath, "/dav" + encryptedPath:
+			if got := r.Header.Get("Range"); got != "bytes=0-31" {
+				t.Fatalf("unexpected fallback range: %q", got)
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 0-31/"+strconv.Itoa(len(ciphertext)))
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:32])
+			return
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+			return
+		}
+	}))
+	defer backend.Close()
+	backendURL = backend.URL
+
+	handler, fileDAO := newTestAlistHandler(t, backend.URL, passwd)
+	fileDAO.SetEncPathMapping(displayPath, encryptedPath)
+
+	reqBody, _ := json.Marshal(map[string]interface{}{"path": displayPath})
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/fs/get", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleFsGet(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	data, _ := resp["data"].(map[string]interface{})
+	if got := int64(data["size"].(float64)); got != int64(len(plain)) {
+		t.Fatalf("size=%d want=%d", got, len(plain))
+	}
+}
+
 func jsonResponse(status int, payload map[string]interface{}) *http.Response {
 	body, _ := json.Marshal(payload)
 	return &http.Response{

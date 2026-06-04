@@ -148,6 +148,20 @@ func TestNormalizePlainFileSizeUsesCiphertextTotalForV2(t *testing.T) {
 	}
 }
 
+func TestSniffDecryptedRejectsHighEntropyShortSample(t *testing.T) {
+	sample := make([]byte, 256)
+	for i := range sample {
+		sample[i] = byte(i)
+	}
+	reader, ok := sniffDecrypted(bytes.NewReader(sample))
+	if ok {
+		t.Fatal("expected short high-entropy sample to be rejected")
+	}
+	if reader != nil {
+		t.Fatal("expected nil reader when sample is rejected")
+	}
+}
+
 func TestDecryptRequestUsesDisplayNameFromContext(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)
