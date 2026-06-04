@@ -131,6 +131,23 @@ func TestDecryptRequestForcesIdentityEncoding(t *testing.T) {
 	}
 }
 
+func TestNormalizePlainFileSizeUsesCiphertextTotalForV2(t *testing.T) {
+	meta := encryption.ContentMeta{
+		EncType:        encryption.EncTypeAESCTR,
+		Version:        encryption.ContentVersionV2,
+		HeaderLen:      encryption.ContentHeaderSize(),
+		CiphertextSize: 1833849240,
+	}
+	got := normalizePlainFileSize(1833849240, &meta, "bytes 32-1833849239/1833849240")
+	want := int64(1833849208)
+	if got != want {
+		t.Fatalf("plain size mismatch: got=%d want=%d", got, want)
+	}
+	if meta.PlainSize != want {
+		t.Fatalf("meta plain size mismatch: got=%d want=%d", meta.PlainSize, want)
+	}
+}
+
 func TestDecryptRequestUsesDisplayNameFromContext(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)
