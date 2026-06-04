@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -288,5 +289,119 @@ func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *te
 	warmStateCounts, _ := stats["warm_state_counts"].(map[string]uint64)
 	if warmStateCounts[warmStateInvalid] != 1 {
 		t.Fatalf("invalid warm count=%d, want 1", warmStateCounts[warmStateInvalid])
+	}
+}
+
+func TestExecuteDecryptPlaybackInspectsAndCachesV2MetaWhenMissing(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	sp := proxy.NewStreamProxy(cfg)
+
+	passwd := &config.PasswdInfo{
+		Password: "testpass",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	plain := bytes.Repeat([]byte("v2-plain-"), 128)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	var inspectCalls int
+	var rangeCalls int
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Range") {
+		case "bytes=0-31":
+			inspectCalls++
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 0-31/"+strconv.Itoa(len(ciphertext)))
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:32])
+		case "bytes=32-63":
+			rangeCalls++
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Range", "bytes 32-63/"+strconv.Itoa(len(ciphertext)))
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[32:64])
+		default:
+			t.Fatalf("unexpected range: %q", r.Header.Get("Range"))
+		}
+	}))
+	defer srv.Close()
+
+	fileDAO.Set(&dao.FileInfo{
+		Path:              "/demo.mp4",
+		Name:              "demo.mp4",
+		Size:              int64(len(ciphertext)),
+		RawURL:            srv.URL,
+		UpstreamFetchedAt: time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/d/demo.mp4", nil)
+	req.Header.Set("Range", "bytes=0-31")
+	rr := httptest.NewRecorder()
+
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter:   rr,
+		Request:          req,
+		Config:           cfg,
+		StreamProxy:      sp,
+		FileDAO:          fileDAO,
+		PasswdInfo:       passwd,
+		FileItem:         FileItem{DisplayPath: "/demo.mp4", TargetURL: srv.URL, FileName: "demo.mp4"},
+		TargetURL:        srv.URL,
+		ProviderKey:      ProviderKey(srv.URL, "/demo.mp4"),
+		Path:             "/demo.mp4",
+		InitialSize:      int64(len(ciphertext)),
+		OverridePath:     "/demo.mp4",
+		CompatKey:        "/encrypt",
+		ConsumerScenario: consumerScenarioWebDAV,
+		FailureLogMsg:    "test playback failed",
+	})
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d body=%s", rr.Code, http.StatusPartialContent, rr.Body.String())
+	}
+	if inspectCalls != 1 {
+		t.Fatalf("inspectCalls=%d, want 1", inspectCalls)
+	}
+	if rangeCalls != 1 {
+		t.Fatalf("rangeCalls=%d, want 1", rangeCalls)
+	}
+	body, err := io.ReadAll(rr.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(body, plain[:32]) {
+		t.Fatal("decrypted body mismatch")
+	}
+	info, ok := fileDAO.Get("/demo.mp4")
+	if !ok || info == nil {
+		t.Fatal("expected cached file info")
+	}
+	if info.ContentVersion != encryption.ContentVersionV2 {
+		t.Fatalf("content version=%d, want v2", info.ContentVersion)
+	}
+	if info.Size != int64(len(plain)) {
+		t.Fatalf("plain size=%d want=%d", info.Size, len(plain))
+	}
+	if info.CiphertextSize != int64(len(ciphertext)) {
+		t.Fatalf("ciphertext size=%d want=%d", info.CiphertextSize, len(ciphertext))
 	}
 }
