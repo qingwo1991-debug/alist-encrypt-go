@@ -379,6 +379,225 @@ func TestPlayV2RedirectRangePreserves206HeadersForV2(t *testing.T) {
 	}
 }
 
+func TestPlayV2RedirectIgnoresV1CacheForEncryptedV2Path(t *testing.T) {
+	password := "123456"
+	fileSize := int64(2048)
+	plain := bytes.Repeat([]byte("D"), int(fileSize))
+	contentEnc, err := NewLatestContentEncryptor(password, string(EncTypeAESCTR), fileSize)
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	reader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	redirectURL := "http://upstream.local/v2-with-stale-v1-cache"
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort: 5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  EncTypeAESCTR,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	var ranges []string
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			ranges = append(ranges, req.Header.Get("Range"))
+			switch req.Header.Get("Range") {
+			case "bytes=0-31":
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Range":  []string{"bytes 0-31/2080"},
+						"Content-Length": []string{"32"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+					Request: req,
+				}, nil
+			case "bytes=32-47":
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Range":  []string{"bytes 32-47/2080"},
+						"Content-Length": []string{"16"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[32:48])),
+					Request: req,
+				}, nil
+			default:
+				t.Fatalf("unexpected range header: %q", req.Header.Get("Range"))
+			}
+			return nil, nil
+		}),
+	}
+
+	p.storeFileCache("/enc/demo.mp4", &FileInfo{
+		Name:           "demo.mp4",
+		Size:           int64(len(ciphertext)),
+		ContentVersion: ContentVersionV1,
+		IsDir:          false,
+		Path:           "/enc/demo.mp4",
+	})
+
+	key := "stale-v1-cache-key"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: redirectURL,
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  EncTypeAESCTR,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:      int64(len(ciphertext)),
+		OriginalURL:   "/enc/demo.mp4",
+		EncryptedPath: "/enc/demo.mp4",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=0-15")
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d body=%s ranges=%v", rr.Code, rr.Body.String(), ranges)
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 0-15/2048" {
+		t.Fatalf("content-range=%q", got)
+	}
+	if got := rr.Body.Bytes(); !bytes.Equal(got, plain[:16]) {
+		t.Fatalf("decrypted body mismatch: got=%q", string(got))
+	}
+	if len(ranges) < 2 || ranges[0] != "bytes=0-31" || ranges[1] != "bytes=32-47" {
+		t.Fatalf("expected v2 probe then shifted range, got %v", ranges)
+	}
+}
+
+func TestPlayV2RedirectCapsOpenEndedFirstFrameRange(t *testing.T) {
+	password := "123456"
+	fileSize := int64(3 * 1024 * 1024)
+	plain := bytes.Repeat([]byte("E"), int(fileSize))
+	contentEnc, err := NewLatestContentEncryptor(password, string(EncTypeAESCTR), fileSize)
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	reader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	redirectURL := "http://upstream.local/large-v2"
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort: 5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  EncTypeAESCTR,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	expectedPlainLen := firstFrameOpenRangeBytes
+	expectedUpstreamRange := "bytes=32-" + strconv.FormatInt(32+expectedPlainLen-1, 10)
+	var ranges []string
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			ranges = append(ranges, req.Header.Get("Range"))
+			switch req.Header.Get("Range") {
+			case "bytes=0-31":
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Range":  []string{"bytes 0-31/" + strconv.Itoa(len(ciphertext))},
+						"Content-Length": []string{"32"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+					Request: req,
+				}, nil
+			case expectedUpstreamRange:
+				end := 32 + expectedPlainLen
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Range":  []string{"bytes 32-" + strconv.FormatInt(end-1, 10) + "/" + strconv.Itoa(len(ciphertext))},
+						"Content-Length": []string{strconv.FormatInt(expectedPlainLen, 10)},
+					},
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[32:int(end)])),
+					Request: req,
+				}, nil
+			default:
+				t.Fatalf("unexpected range header: %q", req.Header.Get("Range"))
+			}
+			return nil, nil
+		}),
+	}
+
+	key := "large-v2-key"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: redirectURL,
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  EncTypeAESCTR,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:    int64(len(ciphertext)),
+		OriginalURL: "/enc/large.mp4",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=0-")
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d body_len=%d ranges=%v", rr.Code, rr.Body.Len(), ranges)
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 0-2097151/3145728" {
+		t.Fatalf("content-range=%q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != strconv.FormatInt(expectedPlainLen, 10) {
+		t.Fatalf("content-length=%q", got)
+	}
+	if rr.Body.Len() != int(expectedPlainLen) {
+		t.Fatalf("body len=%d", rr.Body.Len())
+	}
+	if len(ranges) < 2 || ranges[1] != expectedUpstreamRange {
+		t.Fatalf("expected capped shifted upstream range %q, got %v", expectedUpstreamRange, ranges)
+	}
+}
+
 func TestPlayV2DoesNotOverwriteStartedResponseOnStreamFailure(t *testing.T) {
 	password := "123456"
 	encType := EncTypeAESCTR

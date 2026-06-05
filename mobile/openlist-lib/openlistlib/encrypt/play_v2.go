@@ -241,6 +241,100 @@ func isFirstFrameRangeHint(method, rangeHeader string) bool {
 	return false
 }
 
+const firstFrameOpenRangeBytes int64 = 2 * 1024 * 1024
+
+func capOpenEndedFirstFrameRange(method, rangeHeader string, fileSize int64) string {
+	if fileSize <= firstFrameOpenRangeBytes || !isFirstFrameRangeHint(method, rangeHeader) {
+		return rangeHeader
+	}
+	rangeHeader = strings.TrimSpace(rangeHeader)
+	if rangeHeader == "" {
+		return rangeHeader
+	}
+	if rangeHeader != "bytes=0-" {
+		return rangeHeader
+	}
+	end := firstFrameOpenRangeBytes - 1
+	if end >= fileSize {
+		end = fileSize - 1
+	}
+	if end < 0 {
+		return rangeHeader
+	}
+	return fmt.Sprintf("bytes=0-%d", end)
+}
+
+func appendUniquePathVariant(out []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return out
+	}
+	if u, err := url.Parse(value); err == nil && u.Path != "" && (u.Scheme != "" || strings.HasPrefix(value, "/")) {
+		value = u.Path
+	}
+	if decoded, err := url.PathUnescape(value); err == nil {
+		value = decoded
+	}
+	if value == "" {
+		return out
+	}
+	candidates := []string{value}
+	if strings.HasPrefix(value, "/dav/") {
+		candidates = append(candidates, strings.TrimPrefix(value, "/dav"))
+	} else if strings.HasPrefix(value, "dav/") {
+		candidates = append(candidates, "/"+strings.TrimPrefix(value, "dav/"))
+	} else if strings.HasPrefix(value, "/") {
+		candidates = append(candidates, "/dav"+value)
+	} else {
+		candidates = append(candidates, "/"+value, "/dav/"+value)
+	}
+	for _, candidate := range candidates {
+		candidate = normalizeCacheKey(candidate)
+		if candidate == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == candidate {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func playbackCachePathVariants(info *RedirectInfo) []string {
+	var variants []string
+	if info == nil {
+		return variants
+	}
+	variants = appendUniquePathVariant(variants, info.OriginalURL)
+	variants = appendUniquePathVariant(variants, info.EncryptedPath)
+	return variants
+}
+
+func fileInfoContentMeta(cached *FileInfo, encType EncryptionType) (ContentMeta, bool) {
+	if cached == nil || cached.ContentVersion != ContentVersionV2 || len(cached.NonceField) != 16 {
+		return ContentMeta{}, false
+	}
+	cipherSize := cached.CiphertextSize
+	if cipherSize <= 0 && cached.Size > 0 && cached.HeaderLen > 0 {
+		cipherSize = cached.Size + cached.HeaderLen
+	}
+	return ContentMeta{
+		EncType:        encType,
+		Version:        ContentVersionV2,
+		HeaderLen:      cached.HeaderLen,
+		PlainSize:      cached.Size,
+		CiphertextSize: cipherSize,
+		NonceField:     cloneNonceField(cached.NonceField),
+	}, true
+}
+
 func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request, info *RedirectInfo) int64 {
 	fileSize := info.FileSize
 	if fileSize > 0 {
@@ -255,24 +349,10 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 		return fileSize
 	}
 
-	if info.OriginalURL != "" {
-		origPath := info.OriginalURL
-		if u, err := url.Parse(info.OriginalURL); err == nil {
-			origPath = u.Path
-		}
-		pathVariants := []string{
-			origPath,
-			strings.TrimPrefix(origPath, "/dav"),
-			"/dav" + strings.TrimPrefix(origPath, "/dav"),
-		}
-		for _, cachePath := range pathVariants {
-			if cachePath == "" {
-				continue
-			}
-			if cached, ok := p.loadFileCache(cachePath); ok && !cached.IsDir && cached.Size > 0 {
-				fileSize = cached.Size
-				break
-			}
+	for _, cachePath := range playbackCachePathVariants(info) {
+		if cached, ok := p.loadFileCache(cachePath); ok && !cached.IsDir && cached.Size > 0 {
+			fileSize = cached.Size
+			break
 		}
 	}
 	if fileSize > 0 {
@@ -330,7 +410,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 
-	clientRangeHeader := r.Header.Get("Range")
+	clientRangeHeader := capOpenEndedFirstFrameRange(r.Method, r.Header.Get("Range"), fileSize)
 	upstreamRangeHeader := clientRangeHeader
 	startPos, endPos, hasRange := parseRange(clientRangeHeader, fileSize)
 	meta := LegacyContentMeta(EncryptionType(info.PasswdInfo.EncType), fileSize)
@@ -368,27 +448,16 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			displayPath = info.EncryptedPath
 		}
 		cachedMetaLoaded := false
-		if displayPath != "" {
-			for _, cacheKey := range []string{displayPath, strings.TrimPrefix(displayPath, "/dav")} {
-				if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
-					if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
-						meta = ContentMeta{
-							EncType:        EncryptionType(info.PasswdInfo.EncType),
-							Version:        ContentVersionV2,
-							HeaderLen:      cached.HeaderLen,
-							PlainSize:      cached.Size,
-							CiphertextSize: cached.CiphertextSize,
-							NonceField:     cloneNonceField(cached.NonceField),
-						}
-						cachedMetaLoaded = true
-						log.Infof("[v2-cache] loaded V2 meta from cache: path=%s headerLen=%d plainSize=%d cipherSize=%d",
-							cacheKey, cached.HeaderLen, cached.Size, cached.CiphertextSize)
-					} else if cached.ContentVersion == ContentVersionV1 {
-						// V1 file — no need to probe, we already know it's V1
-						cachedMetaLoaded = true
-						log.Infof("[v2-cache] loaded V1 meta from cache: path=%s (skip inspection)", cacheKey)
-					}
+		for _, cacheKey := range playbackCachePathVariants(info) {
+			if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
+				if cachedMeta, ok := fileInfoContentMeta(cached, info.PasswdInfo.EncType); ok {
+					meta = cachedMeta
+					cachedMetaLoaded = true
+					log.Infof("[v2-cache] loaded V2 meta from cache: path=%s headerLen=%d plainSize=%d cipherSize=%d",
+						cacheKey, meta.HeaderLen, meta.PlainSize, meta.CiphertextSize)
 					break
+				} else if cached.ContentVersion == ContentVersionV1 {
+					log.Infof("[v2-cache] ignoring V1 cache for encrypted playback path=%s (will inspect)", cacheKey)
 				}
 			}
 		}
@@ -413,11 +482,8 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 					IsDir:          false,
 					Path:           displayPath,
 				}
-				p.storeFileCache(displayPath, cacheInfo)
-				// Also cache without /dav prefix for cross-path lookups
-				if strings.HasPrefix(displayPath, "/dav/") {
-					noDav := strings.TrimPrefix(displayPath, "/dav")
-					p.storeFileCache(noDav, &FileInfo{
+				for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
+					infoCopy := &FileInfo{
 						Name:           cacheInfo.Name,
 						Size:           cacheInfo.Size,
 						CiphertextSize: cacheInfo.CiphertextSize,
@@ -425,8 +491,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 						HeaderLen:      cacheInfo.HeaderLen,
 						NonceField:     cloneNonceField(cacheInfo.NonceField),
 						IsDir:          false,
-						Path:           noDav,
-					})
+						Path:           cachePath,
+					}
+					p.storeFileCache(cachePath, infoCopy)
 				}
 				log.Infof("[v2-cache] cached inspection result: path=%s version=%d plainSize=%d cipherSize=%d",
 					displayPath, meta.Version, meta.PlainSize, meta.CiphertextSize)

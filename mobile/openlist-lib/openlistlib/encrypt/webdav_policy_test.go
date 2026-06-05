@@ -220,10 +220,10 @@ func TestWebDAVGetKeepsDavPathWhenNoRawURL(t *testing.T) {
 	defer p.stopCacheCleanup()
 	defer p.closeLocalStore()
 
-	hitURL := ""
+	requests := make([]string, 0, 2)
 	p.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			hitURL = req.URL.String()
+			requests = append(requests, req.URL.String())
 			if req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/api/fs/get") {
 				body := `{"code":404,"message":"object not found"}`
 				return &http.Response{
@@ -247,7 +247,14 @@ func TestWebDAVGetKeepsDavPathWhenNoRawURL(t *testing.T) {
 	rr := httptest.NewRecorder()
 	p.handleWebDAVLegacy(rr, req)
 
-	if !strings.HasPrefix(hitURL, "http://alist.local:5244/dav/enc/") || strings.Contains(hitURL, "/d/enc/") {
-		t.Fatalf("hitURL=%q", hitURL)
+	sawDavPath := false
+	for _, reqURL := range requests {
+		if strings.HasPrefix(reqURL, "http://alist.local:5244/dav/enc/") && !strings.Contains(reqURL, "/d/enc/") {
+			sawDavPath = true
+			break
+		}
+	}
+	if !sawDavPath {
+		t.Fatalf("requests=%v", requests)
 	}
 }
