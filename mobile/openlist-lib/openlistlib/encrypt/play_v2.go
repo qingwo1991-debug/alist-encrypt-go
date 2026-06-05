@@ -335,12 +335,20 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	startPos, endPos, hasRange := parseRange(clientRangeHeader, fileSize)
 	meta := LegacyContentMeta(EncryptionType(info.PasswdInfo.EncType), fileSize)
 	if info.ContentVersion == ContentVersionV2 && len(info.NonceField) == 16 {
+		cipherSize := info.CiphertextSize
+		if cipherSize <= 0 {
+			cipherSize = info.FileSize
+		}
+		plainSize := cipherSize - info.HeaderLen
+		if plainSize <= 0 {
+			plainSize = cipherSize
+		}
 		meta = ContentMeta{
 			EncType:        EncryptionType(info.PasswdInfo.EncType),
 			Version:        info.ContentVersion,
 			HeaderLen:      info.HeaderLen,
-			PlainSize:      info.FileSize,
-			CiphertextSize: info.CiphertextSize,
+			PlainSize:      plainSize,
+			CiphertextSize: cipherSize,
 			NonceField:     cloneNonceField(info.NonceField),
 		}
 	}
@@ -426,15 +434,22 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 
 		if meta.IsV2() {
-			if meta.PlainSize > 0 {
-				fileSize = meta.PlainSize
-			}
-			if hasRange && strategy == StreamStrategyRange {
-				upstreamRangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
-			}
-			log.Infof("V2 redirect meta: url=%s clientRange=%q upstreamRange=%q headerLen=%d cipherSize=%d plainSize=%d",
-				info.RedirectURL, clientRangeHeader, upstreamRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
+			log.Infof("V2 redirect meta (inspected): url=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d",
+				info.RedirectURL, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
 		}
+	}
+
+	// Always apply V2 corrections — whether meta came from inspection, cache, or pre-population.
+	// This ensures fileSize is plainSize and upstream range is shifted by headerLen.
+	if meta.IsV2() {
+		if meta.PlainSize > 0 {
+			fileSize = meta.PlainSize
+		}
+		if hasRange && strategy == StreamStrategyRange {
+			upstreamRangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
+		}
+		log.Infof("V2 redirect meta: url=%s clientRange=%q upstreamRange=%q headerLen=%d cipherSize=%d plainSize=%d",
+			info.RedirectURL, clientRangeHeader, upstreamRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
 	}
 
 	if hasRange {
