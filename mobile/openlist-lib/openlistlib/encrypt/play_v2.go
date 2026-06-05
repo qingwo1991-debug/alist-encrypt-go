@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -637,18 +636,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		provider = ProviderKey(info.RedirectURL, "")
 	}
 
-	localKey, _, _, ok := o.proxy.localKeyFromURLs(info.RedirectURL, info.OriginalURL)
-	if !ok {
-		localKey = info.OriginalURL
-	}
-
-	networkType := string(GetNetworkState())
-	var strategies []StreamStrategy
-	if hinted, ok := o.proxy.lookupLocalStrategy(info.RedirectURL, info.OriginalURL); ok {
-		strategies = []StreamStrategy{hinted}
-	} else {
-		strategies = o.proxy.strategySelector.Select(provider)
-	}
+	strategies := o.proxy.strategySelector.Select(provider)
 
 	firstFrameHint := isFirstFrameRangeHint(r.Method, r.Header.Get("Range"))
 
@@ -660,9 +648,6 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		}
 		if outcome.Err == nil && !outcome.Retryable {
 			o.proxy.strategySelector.RecordSuccess(provider, strategy)
-			o.proxy.localStore.AddStrategy(
-				localKey, info.Provider, info.OriginalURL, networkType, strategy, time.Now(),
-			)
 			return outcome
 		}
 		if !outcome.ResponseStarted && outcome.Retryable {

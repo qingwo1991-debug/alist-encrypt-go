@@ -82,3 +82,50 @@ func (s *Store) CountRangeCompatActive(ctx context.Context) (int64, error) {
 	}
 	return count, nil
 }
+
+func (s *Store) ListRangeCompats(ctx context.Context) ([]RangeCompatRecord, error) {
+	if s == nil {
+		return nil, nil
+	}
+	query := "SELECT key_hash, provider_host, storage_key, incompatible, consecutive_failures, consecutive_successes, next_probe_at, last_reason, last_checked_at, updated_at, last_accessed, is_active FROM " + TableName("range_compat") + " WHERE is_active=1"
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []RangeCompatRecord
+	for rows.Next() {
+		var record RangeCompatRecord
+		var incompatible int
+		var isActive int
+		var nextProbeAt sql.NullTime
+		var lastCheckedAt sql.NullTime
+		if err := rows.Scan(
+			&record.KeyHash,
+			&record.ProviderHost,
+			&record.StorageKey,
+			&incompatible,
+			&record.ConsecutiveFailures,
+			&record.ConsecutiveSuccesses,
+			&nextProbeAt,
+			&record.LastReason,
+			&lastCheckedAt,
+			&record.UpdatedAt,
+			&record.LastAccessed,
+			&isActive,
+		); err != nil {
+			return nil, err
+		}
+		record.Incompatible = incompatible == 1
+		record.Active = isActive == 1
+		if nextProbeAt.Valid {
+			record.NextProbeAt = nextProbeAt.Time
+		}
+		if lastCheckedAt.Valid {
+			record.LastCheckedAt = lastCheckedAt.Time
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}

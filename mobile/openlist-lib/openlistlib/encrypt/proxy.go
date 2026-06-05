@@ -2709,11 +2709,6 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 	}
 
 	rangeSuppressedByStrategy := false
-	if clientRangeHeader != "" && startPos < rangePreferUpstreamStartBytes {
-		if strategy, ok := p.lookupLocalStrategy(info.RedirectURL, info.OriginalURL); ok && strategy == StreamStrategyChunked {
-			rangeSuppressedByStrategy = true
-		}
-	}
 	if clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(info.RedirectURL, info.OriginalURL)) {
 		upstreamRangeHeader = ""
 	}
@@ -3921,17 +3916,6 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	}
 
 	rangeSuppressedByStrategy := false
-	if r.Method == "GET" && clientRangeHeader != "" {
-		rangeStart, hasRangeStart := parseRangeStart(clientRangeHeader)
-		if (!hasRangeStart || rangeStart < rangePreferUpstreamStartBytes) && func() bool {
-			if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
-				return true
-			}
-			return false
-		}() {
-			rangeSuppressedByStrategy = true
-		}
-	}
 	if r.Method == "GET" && clientRangeHeader != "" && (rangeSuppressedByStrategy || p.shouldSkipRange(targetURL, filePath)) {
 		upstreamRangeHeader = ""
 	}

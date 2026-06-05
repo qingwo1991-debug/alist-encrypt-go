@@ -2,7 +2,6 @@ package com.openlist.mobile
 
 import android.app.Application
 import android.util.Log
-import com.openlist.mobile.model.openlist.OpenList
 import com.openlist.mobile.utils.ToastUtils.longToast
 import io.flutter.app.FlutterApplication
 
@@ -19,15 +18,6 @@ class App : FlutterApplication() {
         super.onCreate()
 
         app = this
-        
-        // Early initialization of OpenList to prepare for boot startup
-        try {
-            Log.d(TAG, "Performing early OpenList initialization")
-            OpenList.init()
-            Log.d(TAG, "OpenList early initialization completed")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize OpenList early", e)
-        }
         
         // Set global exception handler to catch uncaught exceptions
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->

@@ -3,6 +3,7 @@ package encrypt
 import (
 	"net/url"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
@@ -108,7 +109,39 @@ func (p *ProxyServer) getFileCacheTTL() time.Duration {
 // storeFileCache 存储文件信息到缓存（带 TTL）
 func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	p.ensureRuntimeCaches()
+	if info == nil {
+		return
+	}
 	key := normalizeCacheKey(path)
+	if existing, ok := p.loadFileCache(path); ok && existing != nil {
+		if info.Name == "" {
+			info.Name = existing.Name
+		}
+		if info.Size <= 0 {
+			info.Size = existing.Size
+		}
+		if info.CiphertextSize <= 0 {
+			info.CiphertextSize = existing.CiphertextSize
+		}
+		if info.ContentVersion <= 0 {
+			info.ContentVersion = existing.ContentVersion
+		}
+		if info.HeaderLen <= 0 {
+			info.HeaderLen = existing.HeaderLen
+		}
+		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
+			info.NonceField = cloneNonceField(existing.NonceField)
+		}
+		if !info.IsDir && existing.IsDir {
+			info.IsDir = false
+		}
+		if strings.TrimSpace(info.Path) == "" {
+			info.Path = existing.Path
+		}
+		if strings.TrimSpace(info.RawURL) == "" {
+			info.RawURL = existing.RawURL
+		}
+	}
 	entry := &CachedFileInfo{
 		Info:     info,
 		ExpireAt: time.Now().Add(p.getFileCacheTTL()),
@@ -158,6 +191,50 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 			Path:  filePath,
 		}
 		return info, true
+	}
+	if p != nil && p.localStore != nil && p.config != nil {
+		candidates := []string{filePath}
+		if strings.HasPrefix(filePath, "/dav/") {
+			candidates = append(candidates, strings.TrimPrefix(filePath, "/dav"))
+		}
+		for _, candidate := range candidates {
+			if meta, ok := p.lookupLocalFileMeta(p.getAlistURL(), candidate); ok && meta != nil {
+				rawURL := ""
+				if meta.UpstreamFetchedAt > 0 && time.Since(time.Unix(meta.UpstreamFetchedAt, 0)) <= p.getFileCacheTTL() {
+					rawURL = strings.TrimSpace(meta.RawURL)
+				}
+				info := &FileInfo{
+					Name:           meta.Name,
+					Size:           meta.Size,
+					CiphertextSize: meta.CiphertextSize,
+					ContentVersion: meta.ContentVersion,
+					HeaderLen:      meta.HeaderLen,
+					NonceField:     cloneNonceField(meta.NonceField),
+					IsDir:          false,
+					Path:           candidate,
+					RawURL:         rawURL,
+					Sign:           strings.TrimSpace(meta.Sign),
+				}
+				if info.Name == "" {
+					info.Name = path.Base(candidate)
+				}
+				p.storeFileCache(candidate, info)
+				if candidate != filePath {
+					p.storeFileCache(filePath, &FileInfo{
+						Name:           info.Name,
+						Size:           info.Size,
+						CiphertextSize: info.CiphertextSize,
+						ContentVersion: info.ContentVersion,
+						HeaderLen:      info.HeaderLen,
+						NonceField:     cloneNonceField(info.NonceField),
+						IsDir:          info.IsDir,
+						Path:           filePath,
+						RawURL:         info.RawURL,
+					})
+				}
+				return info, true
+			}
+		}
 	}
 	return nil, false
 }

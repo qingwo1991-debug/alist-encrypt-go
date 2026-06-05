@@ -37,7 +37,13 @@ func (s *Store) ensureSchema(ctx context.Context) error {
   key_hash CHAR(32) NOT NULL,
   provider_host VARCHAR(255) NOT NULL,
   original_path TEXT NOT NULL,
+  encrypted_path TEXT NULL,
+  name VARCHAR(512) NULL,
   size BIGINT NOT NULL,
+  ciphertext_size BIGINT NOT NULL DEFAULT 0,
+  content_version INT NOT NULL DEFAULT 0,
+  header_len BIGINT NOT NULL DEFAULT 0,
+  nonce_field VARBINARY(64) NULL,
   etag VARCHAR(255) NULL,
   content_type VARCHAR(128) NULL,
   status_code INT NOT NULL,
@@ -134,6 +140,12 @@ func (s *Store) migrateSchema(ctx context.Context) error {
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN upstream_fetched_at DATETIME NULL", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN raw_url VARCHAR(2048) NULL", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN sign VARCHAR(512) NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN encrypted_path TEXT NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN name VARCHAR(512) NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN ciphertext_size BIGINT NOT NULL DEFAULT 0", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN content_version INT NOT NULL DEFAULT 0", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN header_len BIGINT NOT NULL DEFAULT 0", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN nonce_field VARBINARY(64) NULL", TableName("file_meta")),
 	}
 	for _, m := range migrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
@@ -206,10 +218,16 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 		return nil
 	}
 	query := fmt.Sprintf(`INSERT INTO %s
-  (key_hash, provider_host, original_path, size, etag, content_type, status_code, raw_url, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
+  (key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, status_code, raw_url, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
   VALUES %s
   ON DUPLICATE KEY UPDATE
+    encrypted_path=VALUES(encrypted_path),
+    name=VALUES(name),
     size=VALUES(size),
+    ciphertext_size=VALUES(ciphertext_size),
+    content_version=VALUES(content_version),
+    header_len=VALUES(header_len),
+    nonce_field=VALUES(nonce_field),
     etag=VALUES(etag),
     content_type=VALUES(content_type),
     status_code=VALUES(status_code),
@@ -218,9 +236,9 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
     last_accessed=VALUES(last_accessed),
     updated_at=VALUES(updated_at),
     upstream_fetched_at=VALUES(upstream_fetched_at),
-    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(13, len(records)))
+    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(19, len(records)))
 
-	args := make([]interface{}, 0, len(records)*13)
+	args := make([]interface{}, 0, len(records)*19)
 	now := time.Now()
 	for _, record := range records {
 		lastAccessed := record.LastAccessed
@@ -239,7 +257,13 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 			record.KeyHash,
 			record.ProviderHost,
 			record.OriginalPath,
+			record.EncryptedPath,
+			record.Name,
 			record.Size,
+			record.CiphertextSize,
+			record.ContentVersion,
+			record.HeaderLen,
+			record.NonceField,
 			record.ETag,
 			record.ContentType,
 			record.StatusCode,

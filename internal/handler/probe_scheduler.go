@@ -460,6 +460,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 				if meta.IsV2() && meta.PlainSize > 0 {
 					cached := &dao.FileInfo{
 						Path:              item.file.DisplayPath,
+						EncryptedPath:     item.file.EncryptedPath,
 						Name:              item.file.FileName,
 						Size:              meta.PlainSize,
 						CiphertextSize:    meta.TotalCiphertextSize(),

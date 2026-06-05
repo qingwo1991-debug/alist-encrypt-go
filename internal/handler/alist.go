@@ -770,6 +770,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				h.enqueueProbeFromList(r, originalPath, fileSize)
 				_ = h.fileDAO.Set(&dao.FileInfo{
 					Path:           originalPath,
+					EncryptedPath:  filePath,
 					Name:           path.Base(originalPath),
 					Size:           fileSize,
 					CiphertextSize: ciphertextSize,

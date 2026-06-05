@@ -205,6 +205,8 @@ func (s *Server) setupRoutes() {
 			protected.Any("/getSchemeConfig", ginWrap(apiHandler.GetSchemeConfig))
 			protected.Any("/saveSchemeConfig", ginWrap(apiHandler.SaveSchemeConfig))
 			protected.Any("/exportFileMeta", ginWrap(apiHandler.ExportFileMeta))
+			protected.Any("/exportStrategy", ginWrap(apiHandler.ExportStrategy))
+			protected.Any("/exportRangeCompat", ginWrap(apiHandler.ExportRangeCompat))
 			protected.Any("/cleanupLegacyBoltDB", ginWrap(apiHandler.CleanupLegacyBoltDB))
 			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
 			protected.Any("/getProxyDomainDictionary", ginWrap(apiHandler.GetProxyDomainDictionary))

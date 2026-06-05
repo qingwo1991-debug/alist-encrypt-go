@@ -15,6 +15,8 @@ type ProviderStrategyState struct {
 	Provider       string                       `json:"provider"`
 	Preferred      proxy.StreamStrategy         `json:"preferred"`
 	Failures       map[proxy.StreamStrategy]int `json:"failures"`
+	CapabilityFailCount int                     `json:"capability_fail_count"`
+	LastValidatedAt    time.Time                `json:"last_validated_at"`
 	SuccessStreak  int                          `json:"success_streak"`
 	CooldownUntil  time.Time                    `json:"cooldown_until"`
 	LastDowngrade  time.Time                    `json:"last_downgrade"`
@@ -76,7 +78,7 @@ func NewStrategySelector(cfg *config.Config, store StrategyStore) (*StrategySele
 
 func (s *StrategySelector) applyDefaults() {
 	if s.cfg.FailToDowngrade <= 0 {
-		s.cfg.FailToDowngrade = 2
+		s.cfg.FailToDowngrade = 5
 	}
 	if s.cfg.SuccessToRecover <= 0 {
 		s.cfg.SuccessToRecover = 5
@@ -138,13 +140,7 @@ func (s *StrategySelector) Select(provider string) []proxy.StreamStrategy {
 		preferred = order[0]
 	}
 
-	// Probe recovery: try higher priority after cooldown + success streak
-	if preferredIndex > 0 && time.Now().After(state.CooldownUntil) && state.SuccessStreak >= s.cfg.SuccessToRecover {
-		probe := order[preferredIndex-1]
-		return dedupeStrategies(append([]proxy.StreamStrategy{probe}, order[preferredIndex:]...))
-	}
-
-	return dedupeStrategies(append([]proxy.StreamStrategy{preferred}, order[preferredIndex+1:]...))
+	return []proxy.StreamStrategy{preferred}
 }
 
 func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamStrategy) {
@@ -152,24 +148,20 @@ func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamS
 	state := s.ensureState(provider)
 	state.TotalSuccesses++
 	state.SuccessStreak++
+	state.CapabilityFailCount = 0
+	state.LastValidatedAt = time.Now()
 	state.LastStrategy = strategy
 	state.LastFailure = ""
-
-	order := s.cfg.ProviderFallbacks
-	preferredIndex := indexOfStrategy(order, state.Preferred)
-	strategyIndex := indexOfStrategy(order, strategy)
 
 	if state.Preferred == "" {
 		state.Preferred = strategy
 	}
-
-	// If probe succeeded, promote to higher priority
-	if strategyIndex != -1 && preferredIndex != -1 && strategyIndex < preferredIndex {
+	if state.Preferred != strategy {
 		prev := state.Preferred
 		state.Preferred = strategy
 		state.SuccessStreak = 1
 		state.CooldownUntil = time.Time{}
-		s.appendEvent(provider, prev, strategy, "recovery_probe_success")
+		s.appendEvent(provider, prev, strategy, "validated_success")
 	}
 
 	_ = s.store.Set(provider, state)
@@ -186,6 +178,7 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 	state.LastStrategy = strategy
 
 	if isNonStrategyFailure(reason) {
+		state.LastValidatedAt = time.Now()
 		_ = s.store.Set(provider, state)
 		return
 	}
@@ -194,6 +187,8 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 		state.Failures = make(map[proxy.StreamStrategy]int)
 	}
 	state.Failures[strategy]++
+	state.CapabilityFailCount++
+	state.LastValidatedAt = time.Now()
 
 	order := s.cfg.ProviderFallbacks
 	preferredIndex := indexOfStrategy(order, state.Preferred)
@@ -203,11 +198,12 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 		preferredIndex = 0
 	}
 
-	if strategy == state.Preferred && state.Failures[strategy] >= s.cfg.FailToDowngrade {
+	if strategy == state.Preferred && state.CapabilityFailCount >= s.cfg.FailToDowngrade {
 		if preferredIndex >= 0 && preferredIndex+1 < len(order) {
 			prev := state.Preferred
 			state.Preferred = order[preferredIndex+1]
 			state.Failures[strategy] = 0
+			state.CapabilityFailCount = 0
 			state.LastDowngrade = time.Now()
 			state.CooldownUntil = time.Now().Add(s.cfg.Cooldown)
 			s.appendEvent(provider, prev, state.Preferred, reason)
@@ -248,7 +244,8 @@ func (s *StrategySelector) appendEvent(provider string, from, to proxy.StreamStr
 
 func isNonStrategyFailure(reason string) bool {
 	switch reason {
-	case "timeout", "network_error", "client_disconnect", "upstream_4xx", "upstream_5xx", "range_invalid":
+	case "timeout", "network_error", "client_disconnect", "upstream_4xx", "upstream_5xx", "range_invalid",
+		"context_canceled", "broken_pipe", "connection_reset", "stream_error", "unknown", "raw_url_empty":
 		return true
 	default:
 		return false

@@ -13,6 +13,7 @@ import com.openlist.mobile.utils.ToastUtils.longToast
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 object OpenList : Event, LogCallback {
     const val TAG = "OpenList"
@@ -27,11 +28,16 @@ object OpenList : Event, LogCallback {
 
 
     fun init() {
+        if (initialized.get()) {
+            return
+        }
         runCatching {
             Openlistlib.setConfigData(dataDir)
             Openlistlib.setConfigLogStd(true)
             Openlistlib.init(this, this)
+            initialized.set(true)
         }.onFailure {
+            initialized.set(false)
             Log.e(TAG, "init:", it)
         }
     }
@@ -148,32 +154,25 @@ object OpenList : Event, LogCallback {
                 Log.d(TAG, "Created data directory: $dataDir")
             }
             
-            // 重新初始化以确保配置正确
             init()
             
-            // 多重检查是否已经在运行，防止重复启动
             if (isRunning()) {
                 Log.w(TAG, "OpenList is already running, skipping startup")
                 return
             }
-            
-            // 再次检查以确保安全
-            Thread.sleep(100) // 短暂等待以避免竞态条件
-            if (isRunning()) {
-                Log.w(TAG, "OpenList started by another thread, skipping startup")
-                return
-            }
-            
+
             Log.d(TAG, "Starting OpenList...")
             Openlistlib.start()
-            
-            // 验证启动是否成功
-            Thread.sleep(1000) // 等待1秒让服务完全启动
-            if (isRunning()) {
-                Log.d(TAG, "OpenList started successfully and confirmed running")
-            } else {
-                Log.w(TAG, "OpenList startup command sent but status check failed")
+
+            val deadlineAt = System.currentTimeMillis() + 5000
+            while (System.currentTimeMillis() < deadlineAt) {
+                if (isRunning()) {
+                    Log.d(TAG, "OpenList started successfully and confirmed running")
+                    return
+                }
+                Thread.sleep(200)
             }
+            Log.w(TAG, "OpenList startup command sent but status check failed")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start OpenList", e)
             throw e
@@ -198,3 +197,4 @@ object OpenList : Event, LogCallback {
         )
     }
 }
+    private val initialized = AtomicBoolean(false)

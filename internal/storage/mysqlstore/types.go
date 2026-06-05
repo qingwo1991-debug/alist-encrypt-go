@@ -47,7 +47,13 @@ type FileMetaRecord struct {
 	KeyHash           string
 	ProviderHost      string
 	OriginalPath      string
+	EncryptedPath     string
+	Name              string
 	Size              int64
+	CiphertextSize    int64
+	ContentVersion    int
+	HeaderLen         int64
+	NonceField        []byte
 	ETag              string
 	ContentType       string
 	RawURL            string

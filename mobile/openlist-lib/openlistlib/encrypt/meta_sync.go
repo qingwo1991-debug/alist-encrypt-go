@@ -64,12 +64,21 @@ type dbExportFileMetaResponse struct {
 	Msg  string `json:"msg"`
 	Data struct {
 		Items []struct {
-			KeyHash      string `json:"KeyHash"`
-			ProviderHost string `json:"ProviderHost"`
-			OriginalPath string `json:"OriginalPath"`
-			Size         int64  `json:"Size"`
-			UpdatedAt    string `json:"UpdatedAt"`
-			LastAccessed string `json:"LastAccessed"`
+			KeyHash           string `json:"KeyHash"`
+			ProviderHost      string `json:"ProviderHost"`
+			OriginalPath      string `json:"OriginalPath"`
+			EncryptedPath     string `json:"EncryptedPath"`
+			Name              string `json:"Name"`
+			Size              int64  `json:"Size"`
+			CiphertextSize    int64  `json:"CiphertextSize"`
+			ContentVersion    int    `json:"ContentVersion"`
+			HeaderLen         int64  `json:"HeaderLen"`
+			NonceField        []byte `json:"NonceField"`
+			RawURL            string `json:"RawURL"`
+			Sign              string `json:"Sign"`
+			UpdatedAt         string `json:"UpdatedAt"`
+			LastAccessed      string `json:"LastAccessed"`
+			UpstreamFetchedAt string `json:"UpstreamFetchedAt"`
 		} `json:"items"`
 		HasMore    bool   `json:"has_more"`
 		NextSince  int64  `json:"next_since"`
@@ -486,12 +495,21 @@ func (p *ProxyServer) syncDBExportMetaEntity(ctx context.Context, cfg dbExportSy
 			updatedAt := parseRFC3339Unix(item.UpdatedAt, nowUnix)
 			lastAccessed := parseRFC3339Unix(item.LastAccessed, updatedAt)
 			payload.Sizes = append(payload.Sizes, LocalSizeRecord{
-				Key:          key,
-				ProviderHost: providerHost,
-				OriginalPath: originalPath,
-				Size:         item.Size,
-				LastAccessed: lastAccessed,
-				UpdatedAt:    updatedAt,
+				Key:               key,
+				ProviderHost:      providerHost,
+				OriginalPath:      originalPath,
+				EncryptedPath:     strings.TrimSpace(item.EncryptedPath),
+				Name:              strings.TrimSpace(item.Name),
+				Size:              item.Size,
+				CiphertextSize:    item.CiphertextSize,
+				ContentVersion:    item.ContentVersion,
+				HeaderLen:         item.HeaderLen,
+				NonceField:        append([]byte(nil), item.NonceField...),
+				RawURL:            strings.TrimSpace(item.RawURL),
+				Sign:              strings.TrimSpace(item.Sign),
+				UpstreamFetchedAt: parseRFC3339Unix(item.UpstreamFetchedAt, updatedAt),
+				LastAccessed:      lastAccessed,
+				UpdatedAt:         updatedAt,
 			})
 		}
 		if len(payload.Sizes) > 0 {
