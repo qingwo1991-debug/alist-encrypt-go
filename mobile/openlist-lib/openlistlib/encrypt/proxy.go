@@ -4447,8 +4447,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					redirectInfo.NonceField = cloneNonceField(cached.NonceField)
 					if cached.CiphertextSize > 0 {
 						redirectInfo.CiphertextSize = cached.CiphertextSize
+					} else if cached.ContentVersion == ContentVersionV2 {
+						// Older cache entries may not store CiphertextSize; derive from FileSize
+						redirectInfo.CiphertextSize = fileSize
 					}
-					log.Infof("WebDAV redirect: pre-populated V2 meta from cache: key=%s version=%d", cacheKey, cached.ContentVersion)
+					log.Infof("WebDAV redirect: pre-populated V2 meta from cache: key=%s version=%d cipherSize=%d plainSize=%d", cacheKey, cached.ContentVersion, redirectInfo.CiphertextSize, cached.Size)
 					break
 				}
 			}
