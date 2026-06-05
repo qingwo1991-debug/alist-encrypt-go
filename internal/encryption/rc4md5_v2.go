@@ -2,11 +2,8 @@ package encryption
 
 import (
 	"crypto/md5"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 func NewRC4MD5V2(password string, plainSize int64, nonceField []byte) (*RC4MD5, error) {
@@ -17,7 +14,7 @@ func NewRC4MD5V2(password string, plainSize int64, nonceField []byte) (*RC4MD5, 
 		password: password,
 		fileSize: plainSize,
 	}
-	baseKey := pbkdf2.Key([]byte(password), []byte("RC4-v2"), pbkdf2IterationsModern, 16, sha256.New)
+	baseKey := cachedV2Key(password, "RC4-v2", nonceField, 16)
 	material := append(append([]byte(nil), baseKey...), nonceField...)
 	hash := md5.Sum(material)
 	r.fileHexKey = hex.EncodeToString(hash[:])

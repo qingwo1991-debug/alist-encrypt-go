@@ -239,6 +239,30 @@ func NewHTTPClient(cfg *config.Config, timeout time.Duration) *http.Client {
 	}
 }
 
+// NewSharedTransport creates an http.RoundTripper that can be shared across
+// multiple http.Client instances with different timeouts, enabling connection
+// pool reuse instead of creating a fresh transport per request.
+func NewSharedTransport(cfg *config.Config) http.RoundTripper {
+	transport := baseTransport(cfg)
+	transport.Proxy = proxyFunc(cfg)
+	if cfg != nil && cfg.Proxy != nil && cfg.Proxy.EnableHTTP2 {
+		http2.ConfigureTransport(transport)
+	}
+	return transport
+}
+
+// NewHTTPClientWithTransport creates an http.Client reusing a shared transport.
+// This enables connection pooling across multiple clients with different timeouts.
+func NewHTTPClientWithTransport(transport http.RoundTripper, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // NewClient creates a new HTTP client with connection pooling
 func NewClient(cfg *config.Config) *Client {
 	proxyCfg := cfg.Proxy

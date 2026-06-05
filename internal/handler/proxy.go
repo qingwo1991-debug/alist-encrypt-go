@@ -33,6 +33,7 @@ type ProxyHandler struct {
 	passwdDAO             *dao.PasswdDAO
 	redirectMap           sync.Map // key -> redirect info
 	client                *proxy.Client
+	shortClient           *http.Client // shared short-timeout client for HEAD/probe ops
 	redirectKeys          []string
 	keysMu                sync.Mutex
 	strategyCache         *StrategyCache
@@ -57,7 +58,6 @@ const maxRedirectEntries = 10000
 type redirectInfo struct {
 	URL         string
 	FileSize    int64
-	Password    string
 	EncType     string
 	EncName     bool
 	DisplayPath string
@@ -126,12 +126,14 @@ func (h *ProxyHandler) prefetchStats() map[string]interface{} {
 
 // NewProxyHandler creates a new proxy handler
 func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore) *ProxyHandler {
+	sharedTransport := proxy.NewSharedTransport(cfg)
 	h := &ProxyHandler{
 		cfg:           cfg,
 		streamProxy:   streamProxy,
 		fileDAO:       fileDAO,
 		passwdDAO:     passwdDAO,
 		client:        proxy.NewClient(cfg),
+		shortClient:   proxy.NewHTTPClientWithTransport(sharedTransport, 10*time.Second),
 		strategyCache: NewStrategyCache(1000),
 		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		strategySel:   selector,
@@ -231,11 +233,16 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Look up password from passwdDAO instead of storing in redirectInfo
 	passwdInfo := &config.PasswdInfo{
-		Password: info.Password,
-		EncType:  info.EncType,
-		EncName:  info.EncName,
-		Enable:   true,
+		EncType: info.EncType,
+		EncName: info.EncName,
+		Enable:  true,
+	}
+	if lookupInfo, found := h.passwdDAO.FindByPath(info.DisplayPath); found && lookupInfo != nil {
+		passwdInfo.Password = lookupInfo.Password
+		passwdInfo.EncType = lookupInfo.EncType
+		passwdInfo.EncName = lookupInfo.EncName
 	}
 	proxy.StripWebDAVHeaders(r)
 	r.Host = ""
@@ -291,12 +298,10 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 
 // RegisterRedirect registers a URL for redirect decryption and returns the key
 func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, passwdInfo *config.PasswdInfo, displayPath string) string {
-	password := ""
 	encType := ""
 	encName := false
 	compatKey := "/"
 	if passwdInfo != nil {
-		password = passwdInfo.Password
 		encType = passwdInfo.EncType
 		encName = passwdInfo.EncName
 		compatKey = buildRangeCompatStorageKey(passwdInfo, displayPath)
@@ -307,7 +312,6 @@ func (h *ProxyHandler) RegisterRedirect(url string, fileSize int64, passwdInfo *
 	h.redirectMap.Store(key, &redirectInfo{
 		URL:         url,
 		FileSize:    fileSize,
-		Password:    password,
 		EncType:     encType,
 		EncName:     encName,
 		DisplayPath: displayPath,
@@ -372,14 +376,11 @@ func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, displayPath stri
 	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok && strings.TrimSpace(encPath) != "" {
 		realPath = encPath
 	} else if info != nil && info.EncName {
-		passwdInfo := &config.PasswdInfo{
-			Password:  info.Password,
-			EncType:   info.EncType,
-			EncName:   info.EncName,
-			Enable:    true,
-			EncSuffix: "",
+		if passwdInfo, found := h.passwdDAO.FindByPath(displayPath); found && passwdInfo != nil {
+			realPath = h.convertRedirectDisplayPath(displayPath, passwdInfo)
+		} else {
+			realPath = displayPath
 		}
-		realPath = h.convertRedirectDisplayPath(displayPath, passwdInfo)
 	}
 	result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, 0)
 	if info != nil {

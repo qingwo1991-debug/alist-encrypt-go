@@ -3,10 +3,7 @@ package encryption
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha256"
 	"fmt"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 func NewAESCTRV2(password string, plainSize int64, nonceField []byte) (*AESCTR, error) {
@@ -17,7 +14,7 @@ func NewAESCTRV2(password string, plainSize int64, nonceField []byte) (*AESCTR, 
 		password: password,
 		fileSize: plainSize,
 	}
-	key := pbkdf2.Key([]byte(password), []byte("AES-CTR-v2"), pbkdf2IterationsModern, 16, sha256.New)
+	key := cachedV2Key(password, "AES-CTR-v2", nonceField, 16)
 	a.key = append([]byte(nil), key...)
 	a.iv = append([]byte(nil), nonceField...)
 	a.sourceIv = append([]byte(nil), nonceField...)

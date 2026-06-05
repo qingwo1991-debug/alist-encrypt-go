@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -268,9 +267,14 @@ func (h *AlistHandler) resolveRemoveNames(dirPath string, names []string, passwd
 
 func (h *AlistHandler) fetchFsListContent(r *http.Request, realPath string) ([]interface{}, error) {
 	const perPage = 1000
+	const maxFetchPages = 100 // Safety limit to prevent unbounded memory consumption
 
 	var all []interface{}
 	for page := 1; ; page++ {
+		if page > maxFetchPages {
+			log.Warn().Int("max_pages", maxFetchPages).Msg("fetchFsListContent reached page limit, stopping pagination")
+			break
+		}
 		reqData := map[string]interface{}{
 			"path":     realPath,
 			"page":     page,
@@ -282,7 +286,7 @@ func (h *AlistHandler) fetchFsListContent(r *http.Request, realPath string) ([]i
 		if err != nil {
 			return nil, err
 		}
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := readLimitedBody(resp, maxProxyResponseBody)
 		resp.Body.Close()
 		if err != nil {
 			return nil, err
@@ -314,18 +318,26 @@ func (h *AlistHandler) fetchFsListContent(r *http.Request, realPath string) ([]i
 }
 
 func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword string, scope int, passwdInfo *config.PasswdInfo) ([]interface{}, int, error) {
+	const (
+		maxSearchDepth = 20   // Maximum directory nesting depth
+		maxSearchItems = 5000 // Maximum total items to process
+	)
+
 	type node struct {
 		displayPath string
 		realPath    string
+		depth       int
 	}
 
 	recursive := scope != 0
 	queue := []node{{
 		displayPath: rootPath,
 		realPath:    rootPath,
+		depth:       0,
 	}}
 	visited := make(map[string]struct{})
 	var matches []interface{}
+	itemsProcessed := 0
 
 	for len(queue) > 0 {
 		current := queue[0]
@@ -334,6 +346,11 @@ func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword st
 			continue
 		}
 		visited[current.realPath] = struct{}{}
+
+		if current.depth > maxSearchDepth {
+			log.Warn().Int("max_depth", maxSearchDepth).Str("path", current.realPath).Msg("searchEncryptedTree reached depth limit, skipping directory")
+			continue
+		}
 
 		currentPasswd, found := h.passwdDAO.PathFindPasswd(current.displayPath)
 		if !found || currentPasswd == nil {
@@ -346,6 +363,12 @@ func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword st
 		}
 
 		for _, item := range content {
+			itemsProcessed++
+			if itemsProcessed > maxSearchItems {
+				log.Warn().Int("max_items", maxSearchItems).Msg("searchEncryptedTree reached item limit, stopping search")
+				return matches, len(matches), nil
+			}
+
 			fileData, ok := item.(map[string]interface{})
 			if !ok {
 				continue
@@ -384,6 +407,7 @@ func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword st
 				queue = append(queue, node{
 					displayPath: childDisplayPath,
 					realPath:    childRealPath,
+					depth:       current.depth + 1,
 				})
 			}
 		}
@@ -423,7 +447,7 @@ func (h *AlistHandler) searchAllEncryptedRoots(r *http.Request, keyword string, 
 
 // HandleFsSearch intercepts /api/fs/search to search by display names for encrypted paths.
 func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
 		return
@@ -490,7 +514,12 @@ func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+		if err != nil {
+			log.Warn().Err(err).Msg("Upstream response body read failed")
+			http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+			return
+		}
 		RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 		return
 	}
@@ -505,7 +534,12 @@ func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+		if err != nil {
+			log.Warn().Err(err).Msg("Upstream response body read failed")
+			http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+			return
+		}
 		RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 		return
 	}
@@ -563,7 +597,7 @@ func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, bo
 
 // HandleFsList intercepts /api/fs/list to handle filename decryption
 func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
 		return
@@ -645,7 +679,7 @@ func (h *AlistHandler) HandleFsLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, apiPath string) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
 		return
@@ -721,7 +755,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read response", http.StatusBadGateway)
 		return
@@ -963,7 +997,7 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 
 // HandleFsRemove handles /api/fs/remove with filename encryption
 func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
 		return
@@ -1019,7 +1053,12 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
 
 	// Clear cache for deleted items on success
 	var respData map[string]interface{}
@@ -1043,7 +1082,7 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 
 // HandleFsRename handles /api/fs/rename with filename encryption
 func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
 		return
@@ -1112,7 +1151,12 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
 
 	// Update cache on successful rename
 	var respData map[string]interface{}
@@ -1150,7 +1194,7 @@ func (h *AlistHandler) HandleFsCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, endpoint string) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
 		return
@@ -1213,7 +1257,12 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
 
 	// Update cache on successful move/copy
 	var respData map[string]interface{}

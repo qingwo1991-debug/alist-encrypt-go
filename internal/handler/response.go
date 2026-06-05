@@ -2,12 +2,67 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/errors"
 )
+
+// maxProxyResponseBody is the default maximum size (10 MB) for buffering upstream responses.
+var maxProxyResponseBody int64 = 10 * 1024 * 1024
+
+// SetMaxProxyResponseBody allows runtime configuration of the response body limit.
+func SetMaxProxyResponseBody(bytes int64) {
+	if bytes > 0 {
+		maxProxyResponseBody = bytes
+	}
+}
+
+// maxAPIRequestBody is the maximum size (1 MB) for JSON API request bodies.
+// File upload bodies are streamed, not buffered, so this only applies to metadata APIs.
+const maxAPIRequestBody = 1 * 1024 * 1024
+
+// readLimitedRequestBody reads r.Body up to maxAPIRequestBody bytes.
+// Returns an error if the body exceeds the limit.
+func readLimitedRequestBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	return readLimitedBodyFromReader(r.Body, maxAPIRequestBody)
+}
+
+// readLimitedBodyFromReader reads from an io.Reader up to maxBytes.
+func readLimitedBodyFromReader(r io.Reader, maxBytes int64) ([]byte, error) {
+	limited := io.LimitReader(r, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("request body exceeds %d bytes limit", maxBytes)
+	}
+	return data, nil
+}
+
+// readLimitedBody reads resp.Body up to maxBytes. If the body exceeds the limit,
+// an error is returned instead of consuming unbounded memory.
+func readLimitedBody(resp *http.Response, maxBytes int64) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, nil
+	}
+	limited := io.LimitReader(resp.Body, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("upstream response body exceeds %d bytes limit (read %d bytes)", maxBytes, len(data))
+	}
+	return data, nil
+}
 
 // APIResponse represents a standard API response
 type APIResponse struct {

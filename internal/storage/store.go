@@ -132,7 +132,6 @@ func (s *Store) GetJSON(bucket []byte, key string, v interface{}) error {
 	if data == nil {
 		return nil
 	}
-	data = append([]byte(nil), data...)
 	return json.Unmarshal(data, v)
 }
 

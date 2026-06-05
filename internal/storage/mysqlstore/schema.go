@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 func (s *Store) ensureSchema(ctx context.Context) error {
@@ -132,7 +134,36 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, dirSyncStatusSQL); err != nil {
 		return err
 	}
-	return s.migrateSchema(ctx)
+	if err := s.migrateSchema(ctx); err != nil {
+		return err
+	}
+	return s.ensureIndexes(ctx)
+}
+
+func (s *Store) ensureIndexes(ctx context.Context) error {
+	indexes := []string{
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_strategy_last_accessed ON %s(last_accessed)", TableName("strategy")),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_file_meta_last_accessed ON %s(last_accessed)", TableName("file_meta")),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_file_meta_provider_path ON %s(provider_host, original_path(255))", TableName("file_meta")),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_range_compat_last_accessed ON %s(last_accessed)", TableName("range_compat")),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_dir_snapshot_scope_key ON %s(scope_key)", TableName("dir_snapshot")),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_dir_snapshot_last_accessed ON %s(last_accessed)", TableName("dir_snapshot")),
+	}
+	for _, idx := range indexes {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			// Ignore "duplicate key name" errors (MySQL error 1061) for idempotency
+			if strings.Contains(err.Error(), "Duplicate key name") || strings.Contains(err.Error(), "1061") {
+				continue
+			}
+			// Also handle MySQL versions that don't support IF NOT EXISTS for indexes
+			if strings.Contains(err.Error(), "already exists") {
+				continue
+			}
+			log.Warn().Err(err).Str("sql", idx).Msg("Index creation failed (non-fatal)")
+			// Continue with other indexes - missing indexes affect performance but not correctness
+		}
+	}
+	return nil
 }
 
 func (s *Store) migrateSchema(ctx context.Context) error {

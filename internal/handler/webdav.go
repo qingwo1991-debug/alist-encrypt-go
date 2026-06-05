@@ -1,10 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/xml"
-	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -37,6 +37,9 @@ type WebDAVHandler struct {
 	metaStore             FileMetaStore
 	probe                 *ProbeScheduler
 	negCache              *negativePathCache
+	sharedTransport       http.RoundTripper // shared transport for connection pooling
+	shortClient           *http.Client      // 10s timeout for HEAD/quick ops
+	stdClient             *http.Client      // 30s timeout for PROPFIND/DELETE/MOVE/COPY
 	finalPassthroughCount uint64
 	sizeConflictCount     uint64
 	strategyFallbackCount uint64
@@ -83,19 +86,24 @@ func (h *WebDAVHandler) Stats() map[string]interface{} {
 
 // NewWebDAVHandler creates a new WebDAV handler
 func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore) *WebDAVHandler {
-	return &WebDAVHandler{
-		cfg:           cfg,
-		streamProxy:   streamProxy,
-		fileDAO:       fileDAO,
-		passwdDAO:     passwdDAO,
-		proxyHandler:  NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
-		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
-		strategySel:   selector,
-		metaStore:     metaStore,
-		probe:         nil,
-		negCache:      newNegativePathCache(getNegativeCacheTTL(cfg)),
+	sharedTransport := proxy.NewSharedTransport(cfg)
+	h := &WebDAVHandler{
+		cfg:             cfg,
+		streamProxy:     streamProxy,
+		fileDAO:         fileDAO,
+		passwdDAO:       passwdDAO,
+		proxyHandler:    NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
+		strategyCache:   NewStrategyCache(1000),
+		sizeResolver:    NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		strategySel:     selector,
+		metaStore:       metaStore,
+		probe:           nil,
+		negCache:        newNegativePathCache(getNegativeCacheTTL(cfg)),
+		sharedTransport: sharedTransport,
+		shortClient:     proxy.NewHTTPClientWithTransport(sharedTransport, 10*time.Second),
+		stdClient:       proxy.NewHTTPClientWithTransport(sharedTransport, 30*time.Second),
 	}
+	return h
 }
 
 // Handle routes WebDAV requests
@@ -132,6 +140,32 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 func (h *WebDAVHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
+}
+
+// getStdClient returns the shared standard-timeout HTTP client,
+// lazily creating one if the handler was constructed without NewWebDAVHandler.
+func (h *WebDAVHandler) getStdClient() *http.Client {
+	if h.stdClient != nil {
+		return h.stdClient
+	}
+	if h.sharedTransport == nil {
+		h.sharedTransport = proxy.NewSharedTransport(h.cfg)
+	}
+	h.stdClient = proxy.NewHTTPClientWithTransport(h.sharedTransport, 30*time.Second)
+	return h.stdClient
+}
+
+// getShortClient returns the shared short-timeout HTTP client,
+// lazily creating one if the handler was constructed without NewWebDAVHandler.
+func (h *WebDAVHandler) getShortClient() *http.Client {
+	if h.shortClient != nil {
+		return h.shortClient
+	}
+	if h.sharedTransport == nil {
+		h.sharedTransport = proxy.NewSharedTransport(h.cfg)
+	}
+	h.shortClient = proxy.NewHTTPClientWithTransport(h.sharedTransport, 10*time.Second)
+	return h.shortClient
 }
 
 func (h *WebDAVHandler) upstreamStalenessThreshold() time.Duration {
@@ -348,8 +382,7 @@ func (h *WebDAVHandler) fetchWebDAVFileSize(r *http.Request, displayPath, realPa
 	if err != nil {
 		return 0
 	}
-	client := proxy.NewHTTPClient(h.cfg, 10*time.Second)
-	resp, err := client.Do(req)
+	resp, err := h.getShortClient().Do(req)
 	if err != nil {
 		return 0
 	}
@@ -473,8 +506,7 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		return
 	}
 
-	client := proxy.NewHTTPClient(h.cfg, getAlistRequestTimeout(h.cfg))
-	resp, err := client.Do(proxyReq)
+	resp, err := h.getStdClient().Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV DELETE failed")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -482,7 +514,12 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
@@ -529,7 +566,12 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realSrcPath)
 
-	body, _ := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
+	if err != nil {
+		log.Warn().Err(err).Msg("Request body read failed")
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	proxyReq, err := httputil.NewRequest(method, targetURL).
 		WithContext(r.Context()).
 		WithBody(body).
@@ -544,8 +586,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		proxyReq.Header.Set("Destination", destination)
 	}
 
-	client := proxy.NewHTTPClient(h.cfg, 30*time.Second)
-	resp, err := client.Do(proxyReq)
+	resp, err := h.getStdClient().Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msgf("WebDAV %s failed", method)
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -553,7 +594,12 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
@@ -581,7 +627,12 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	}
 
 	// Read request body (need to buffer for possible retry)
-	body, _ := io.ReadAll(r.Body)
+	body, err := readLimitedRequestBody(r)
+	if err != nil {
+		log.Warn().Err(err).Msg("Request body read failed")
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	// Determine the actual path to request from Alist
 	// For files with encrypted names, use cached encrypted path
@@ -620,8 +671,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	client := proxy.NewHTTPClient(h.cfg, 30*time.Second)
-	resp, err := client.Do(proxyReq)
+	resp, err := h.getStdClient().Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Msg("WebDAV PROPFIND failed")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
@@ -651,7 +701,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 				CopyHeaders(r).
 				Build()
 			if err == nil {
-				retryResp, err := client.Do(retryReq)
+				retryResp, err := h.getStdClient().Do(retryReq)
 				if err == nil {
 					resp = retryResp
 					if retryResp.StatusCode == http.StatusMultiStatus {
@@ -663,7 +713,12 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
 	upstreamCost := time.Since(startAt)
 
 	// Step 3: Parse and cache file info from PROPFIND response
@@ -709,14 +764,17 @@ func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) []propfin
 		req.Header.Set("Authorization", auth)
 	}
 
-	client := proxy.NewHTTPClient(h.cfg, getAlistRequestTimeout(h.cfg))
-	resp, err := client.Do(req)
+	resp, err := h.getStdClient().Do(req)
 	if err != nil {
 		return nil
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		return nil
+	}
 	if resp.StatusCode == http.StatusNotFound && h.negCache != nil {
 		h.negCache.Block(requestPath)
 		return nil
@@ -1024,37 +1082,262 @@ func isStrictWebDAVRawURLFailure(statusCode int) bool {
 }
 
 // decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response
+// and adjusts getcontentlength for V2 encrypted files (subtract 32-byte header).
+// Uses a single-pass strings.Builder approach to avoid the original double conversion
+// ([]byte -> string -> []byte) and the 7+ intermediate string allocations from
+// sequential per-tag-type passes.
 func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.PasswdInfo) []byte {
-	result := string(body)
-
-	// Decrypt displayname elements: <D:displayname>encryptedName.ext</D:displayname>
-	// Match both <D:displayname> and <displayname> variants
-	displayNamePatterns := []string{
-		`<D:displayname>`, `</D:displayname>`,
-		`<d:displayname>`, `</d:displayname>`,
-		`<displayname>`, `</displayname>`,
+	type tagPair struct {
+		start, end string
+		kind       int // 0=displayname, 1=href, 2=getcontentlength
+	}
+	tags := []tagPair{
+		{`<D:displayname>`, `</D:displayname>`, 0},
+		{`<d:displayname>`, `</d:displayname>`, 0},
+		{`<displayname>`, `</displayname>`, 0},
+		{`<D:href>`, `</D:href>`, 1},
+		{`<d:href>`, `</d:href>`, 1},
+		{`<href>`, `</href>`, 1},
+		{`<D:getcontentlength>`, `</D:getcontentlength>`, 2},
+		{`<d:getcontentlength>`, `</d:getcontentlength>`, 2},
+		{`<getcontentlength>`, `</getcontentlength>`, 2},
 	}
 
-	for i := 0; i < len(displayNamePatterns); i += 2 {
-		startTag := displayNamePatterns[i]
-		endTag := displayNamePatterns[i+1]
-		result = h.decryptXMLElements(result, startTag, endTag, passwdInfo)
+	headerSize := encryption.ContentHeaderSize()
+	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+
+	var b bytes.Buffer
+	b.Grow(len(body))
+	searchPos := 0
+
+	for searchPos < len(body) {
+		bestStart := -1
+		bestEnd := -1
+		bestKind := -1
+		var bestStartTag, bestEndTag string
+
+		for _, t := range tags {
+			if t.kind == 2 && headerSize <= 0 {
+				continue
+			}
+			idx := bytes.Index(body[searchPos:], []byte(t.start))
+			if idx == -1 {
+				continue
+			}
+			absStart := searchPos + idx
+			if bestStart != -1 && absStart >= bestStart {
+				continue
+			}
+			endIdx := bytes.Index(body[absStart+len(t.start):], []byte(t.end))
+			if endIdx == -1 {
+				continue
+			}
+			bestStart = absStart
+			bestEnd = absStart + len(t.start) + endIdx
+			bestKind = t.kind
+			bestStartTag = t.start
+			bestEndTag = t.end
+		}
+
+		if bestStart == -1 {
+			b.Write(body[searchPos:])
+			break
+		}
+
+		b.Write(body[searchPos:bestStart])
+		b.WriteString(bestStartTag)
+		contentStart := bestStart + len(bestStartTag)
+		content := string(body[contentStart:bestEnd])
+
+		switch bestKind {
+		case 0: // displayname
+			if content != "" && content != "/" {
+				decryptedName := encryption.ConvertShowNameWithSuffixOptions(
+					passwdInfo.Password, passwdInfo.EncType, content, passwdInfo.EncSuffix, allowLoose)
+				if decryptedName != "" && decryptedName != content {
+					b.WriteString(decryptedName)
+					b.WriteString(bestEndTag)
+					searchPos = bestEnd + len(bestEndTag)
+					continue
+				}
+			}
+			b.WriteString(content)
+			b.WriteString(bestEndTag)
+
+		case 1: // href
+			if strings.HasPrefix(content, "/dav/") {
+				davPath := strings.TrimPrefix(content, "/dav")
+				decodedPath, err := url.PathUnescape(davPath)
+				if err != nil {
+					decodedPath = davPath
+				}
+				if decodedPath != "/" && decodedPath != "" {
+					fileName := path.Base(decodedPath)
+					if fileName != "" && fileName != "/" && fileName != "." {
+						decryptedName := encryption.ConvertShowNameWithSuffixOptions(
+							passwdInfo.Password, passwdInfo.EncType, fileName, passwdInfo.EncSuffix, allowLoose)
+						if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) && decryptedName != fileName {
+							displayPath := path.Dir(decodedPath) + "/" + decryptedName
+							h.fileDAO.SetEncPathMapping(displayPath, decodedPath)
+							if fileInfo, ok := h.fileDAO.Get(decodedPath); ok {
+								h.fileDAO.SetEncPathMappingWithInfo(
+									displayPath, decodedPath, decryptedName, fileInfo.Size, fileInfo.IsDir)
+							}
+							origName := path.Base(content)
+							decHref := strings.TrimSuffix(content, origName) + decryptedName
+							b.WriteString(decHref)
+							b.WriteString(bestEndTag)
+							searchPos = bestEnd + len(bestEndTag)
+							continue
+						}
+					}
+				}
+			}
+			b.WriteString(content)
+			b.WriteString(bestEndTag)
+
+		case 2: // getcontentlength
+			valStr := strings.TrimSpace(content)
+			size, err := strconv.ParseInt(valStr, 10, 64)
+			if err == nil && size > headerSize {
+				b.WriteString(strconv.FormatInt(size-headerSize, 10))
+				b.WriteString(bestEndTag)
+				searchPos = bestEnd + len(bestEndTag)
+				continue
+			}
+			b.WriteString(content)
+			b.WriteString(bestEndTag)
+		}
+
+		searchPos = bestEnd + len(bestEndTag)
 	}
 
-	// Decrypt href elements: <D:href>/dav/path/encryptedName.ext</D:href>
-	hrefPatterns := []string{
-		`<D:href>`, `</D:href>`,
-		`<d:href>`, `</d:href>`,
-		`<href>`, `</href>`,
+	return b.Bytes()
+}
+
+// adjustPropfindContentLengthForV2 subtracts the V2 header size from getcontentlength
+// in PROPFIND XML response blocks, but only for files confirmed to be V2 format.
+// V1 files store plaintext directly, so their content length must not be adjusted.
+// A file is confirmed as V2 when the file DAO has cached metadata with ContentVersion == 2.
+func (h *WebDAVHandler) adjustPropfindContentLengthForV2(xmlStr string) string {
+	headerSize := encryption.ContentHeaderSize()
+	if headerSize <= 0 {
+		return xmlStr
 	}
 
-	for i := 0; i < len(hrefPatterns); i += 2 {
-		startTag := hrefPatterns[i]
-		endTag := hrefPatterns[i+1]
-		result = h.decryptHrefElements(result, startTag, endTag, passwdInfo)
+	contentLengthVariants := [][2]string{
+		{`<D:getcontentlength>`, `</D:getcontentlength>`},
+		{`<d:getcontentlength>`, `</d:getcontentlength>`},
+		{`<getcontentlength>`, `</getcontentlength>`},
 	}
 
-	return []byte(result)
+	hrefVariants := [][2]string{
+		{`<D:href>`, `</D:href>`},
+		{`<d:href>`, `</d:href>`},
+		{`<href>`, `</href>`},
+	}
+
+	result := xmlStr
+	searchPos := 0
+
+	for {
+		// Find the next <response> or <D:response> block
+		respStart := -1
+		for _, prefix := range []string{"<D:response>", "<d:response>", "<response>"} {
+			idx := strings.Index(result[searchPos:], prefix)
+			if idx == -1 {
+				continue
+			}
+			absIdx := searchPos + idx
+			if respStart == -1 || absIdx < respStart {
+				respStart = absIdx
+			}
+		}
+		if respStart == -1 {
+			break
+		}
+
+		respEnd := -1
+		for _, suffix := range []string{"</D:response>", "</d:response>", "</response>"} {
+			idx := strings.Index(result[respStart:], suffix)
+			if idx == -1 {
+				continue
+			}
+			absIdx := respStart + idx + len(suffix)
+			if respEnd == -1 || absIdx < respEnd {
+				respEnd = absIdx
+			}
+		}
+		if respEnd == -1 {
+			break
+		}
+
+		block := result[respStart:respEnd]
+
+		// Extract href from the block to identify the file
+		filePath := ""
+		for _, hv := range hrefVariants {
+			idx := strings.Index(block, hv[0])
+			if idx == -1 {
+				continue
+			}
+			hrefStart := idx + len(hv[0])
+			hrefEnd := strings.Index(block[hrefStart:], hv[1])
+			if hrefEnd == -1 {
+				continue
+			}
+			href := block[hrefStart : hrefStart+hrefEnd]
+			hrefPath := strings.TrimPrefix(href, "/dav")
+			if decoded, err := url.PathUnescape(hrefPath); err == nil {
+				filePath = decoded
+			} else {
+				filePath = hrefPath
+			}
+			break
+		}
+
+		// Find and adjust getcontentlength within this block only if file is V2
+		for _, variant := range contentLengthVariants {
+			idx := strings.Index(block, variant[0])
+			if idx == -1 {
+				continue
+			}
+			valStart := idx + len(variant[0])
+			valEnd := strings.Index(block[valStart:], variant[1])
+			if valEnd == -1 {
+				continue
+			}
+			valEnd += valStart
+
+			valStr := strings.TrimSpace(block[valStart:valEnd])
+			size, err := strconv.ParseInt(valStr, 10, 64)
+			if err != nil || size <= headerSize {
+				continue
+			}
+
+			// Only adjust if file is confirmed V2 via cached metadata
+			isV2 := false
+			if filePath != "" && h.fileDAO != nil {
+				if fi, ok := h.fileDAO.Get(filePath); ok && fi != nil && fi.ContentVersion == 2 {
+					isV2 = true
+				}
+			}
+			if !isV2 {
+				continue
+			}
+
+			newSize := size - headerSize
+			newValStr := strconv.FormatInt(newSize, 10)
+			absValStart := respStart + valStart
+			absValEnd := respStart + valEnd
+			result = result[:absValStart] + newValStr + result[absValEnd:]
+			break
+		}
+
+		searchPos = respEnd
+	}
+
+	return result
 }
 
 // decryptXMLElements decrypts content between XML tags (for displayname)

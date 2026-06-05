@@ -22,6 +22,7 @@ type Store struct {
 	strategyBuffer    *strategyBuffer
 	fileMetaBuffer    *fileMetaBuffer
 	rangeCompatBuffer *rangeCompatBuffer
+	cancelLoops       context.CancelFunc // cancels background flush/cleanup goroutines
 }
 
 func NewStore(cfg *config.Config) (*Store, error) {
@@ -110,7 +111,11 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		log.Info().Msg("MySQL cleanup disabled")
 	}
 
-	store.startLoops()
+	// Create a cancellable context for background goroutines
+	loopsCtx, loopsCancel := context.WithCancel(context.Background())
+	store.cancelLoops = loopsCancel
+
+	store.startLoops(loopsCtx)
 	return store, nil
 }
 
@@ -118,15 +123,29 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	// Stop background flush/cleanup goroutines
+	if s.cancelLoops != nil {
+		s.cancelLoops()
+	}
+	// Flush all pending write-behind buffers before closing the connection,
+	// otherwise data buffered within the flush interval window will be lost.
+	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.flushBuffers(flushCtx)
 	return s.db.Close()
 }
 
-func (s *Store) startLoops() {
+func (s *Store) startLoops(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(s.flushInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.flushBuffers(context.Background())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.flushBuffers(ctx)
+			}
 		}
 	}()
 
@@ -134,9 +153,17 @@ func (s *Store) startLoops() {
 		go func() {
 			ticker := time.NewTicker(s.cleanupInterval)
 			defer ticker.Stop()
-			for range ticker.C {
-				if err := s.cleanup(context.Background()); err != nil {
-					log.Warn().Err(err).Msg("MySQL cleanup failed")
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := s.cleanup(ctx); err != nil {
+						if ctx.Err() != nil {
+							return // context cancelled, shutting down
+						}
+						log.Warn().Err(err).Msg("MySQL cleanup failed")
+					}
 				}
 			}
 		}()
@@ -147,7 +174,8 @@ func (s *Store) flushBuffers(ctx context.Context) {
 	strategyRecords := s.strategyBuffer.drain()
 	if len(strategyRecords) > 0 {
 		if err := s.upsertStrategies(ctx, strategyRecords); err != nil {
-			log.Warn().Err(err).Int("count", len(strategyRecords)).Msg("MySQL strategy flush failed")
+			log.Warn().Err(err).Int("count", len(strategyRecords)).Msg("MySQL strategy flush failed, re-enqueue")
+			s.strategyBuffer.reEnqueue(strategyRecords)
 		} else {
 			log.Debug().Int("count", len(strategyRecords)).Msg("MySQL strategy flush complete")
 		}
@@ -156,7 +184,8 @@ func (s *Store) flushBuffers(ctx context.Context) {
 	metaRecords := s.fileMetaBuffer.drain()
 	if len(metaRecords) > 0 {
 		if err := s.upsertFileMeta(ctx, metaRecords); err != nil {
-			log.Warn().Err(err).Int("count", len(metaRecords)).Msg("MySQL file meta flush failed")
+			log.Warn().Err(err).Int("count", len(metaRecords)).Msg("MySQL file meta flush failed, re-enqueue")
+			s.fileMetaBuffer.reEnqueue(metaRecords)
 		} else {
 			log.Debug().Int("count", len(metaRecords)).Msg("MySQL file meta flush complete")
 		}
@@ -165,7 +194,8 @@ func (s *Store) flushBuffers(ctx context.Context) {
 	rangeCompatRecords := s.rangeCompatBuffer.drain()
 	if len(rangeCompatRecords) > 0 {
 		if err := s.upsertRangeCompats(ctx, rangeCompatRecords); err != nil {
-			log.Warn().Err(err).Int("count", len(rangeCompatRecords)).Msg("MySQL range compat flush failed")
+			log.Warn().Err(err).Int("count", len(rangeCompatRecords)).Msg("MySQL range compat flush failed, re-enqueue")
+			s.rangeCompatBuffer.reEnqueue(rangeCompatRecords)
 		} else {
 			log.Debug().Int("count", len(rangeCompatRecords)).Msg("MySQL range compat flush complete")
 		}

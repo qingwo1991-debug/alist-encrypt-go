@@ -79,6 +79,11 @@ type ProbeScheduler struct {
 	recentInvalidations    []ProbeInvalidation
 	invalidationCursor     int
 	invalidationCount      int
+
+	// JWT caching to avoid repeated login requests
+	cachedJWT       string
+	cachedJWTExpiry time.Time
+	jwtMu           sync.Mutex
 }
 
 // RawURLFetcher fetches the signed raw_url for a display path from alist fs/get.
@@ -485,6 +490,10 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		}
 		if rawURLResult.StatusCode == http.StatusUnauthorized || rawURLResult.StatusCode == http.StatusForbidden || rawURLResult.StatusCode == http.StatusNotFound {
 			ps.InvalidateWarm(item.file.DisplayPath, "raw_url_upstream_4xx")
+		}
+		// Invalidate JWT cache on 401 to force re-authentication on next probe
+		if rawURLResult.StatusCode == http.StatusUnauthorized {
+			ps.invalidateJWTCache()
 		}
 	}
 	if ps.stream != nil {
@@ -1030,7 +1039,22 @@ func (ps *ProbeScheduler) ensureAuth(headers http.Header) (http.Header, string) 
 	username := ps.cfg.AlistServer.ScanUsername
 	password := ps.cfg.AlistServer.ScanPassword
 	if username != "" && password != "" {
+		// Check cached JWT first (2-hour TTL)
+		ps.jwtMu.Lock()
+		if ps.cachedJWT != "" && time.Now().Before(ps.cachedJWTExpiry) {
+			token := ps.cachedJWT
+			ps.jwtMu.Unlock()
+			headers.Set("Authorization", token)
+			return headers, "scan_jwt_cached"
+		}
+		ps.jwtMu.Unlock()
+
 		if token := fetchAlistJWT(ps.cfg.GetAlistURL(), username, password); token != "" {
+			// Cache the token with 2-hour expiry
+			ps.jwtMu.Lock()
+			ps.cachedJWT = token
+			ps.cachedJWTExpiry = time.Now().Add(2 * time.Hour)
+			ps.jwtMu.Unlock()
 			headers.Set("Authorization", token)
 			return headers, "scan_jwt"
 		}
@@ -1040,6 +1064,15 @@ func (ps *ProbeScheduler) ensureAuth(headers http.Header) (http.Header, string) 
 		return headers, "scan_basic"
 	}
 	return headers, "none"
+}
+
+// invalidateJWTCache clears the cached JWT token, forcing a fresh login on next ensureAuth call.
+// Call this when receiving 401 Unauthorized responses to trigger re-authentication.
+func (ps *ProbeScheduler) invalidateJWTCache() {
+	ps.jwtMu.Lock()
+	ps.cachedJWT = ""
+	ps.cachedJWTExpiry = time.Time{}
+	ps.jwtMu.Unlock()
 }
 
 func fetchAlistJWT(alistURL, username, password string) string {

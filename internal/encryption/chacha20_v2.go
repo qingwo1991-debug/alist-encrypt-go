@@ -1,11 +1,9 @@
 package encryption
 
 import (
-	"crypto/sha256"
 	"fmt"
 
 	"golang.org/x/crypto/chacha20"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 func NewChaCha20V2(password string, plainSize int64, nonceField []byte) (*ChaCha20Cipher, error) {
@@ -16,7 +14,7 @@ func NewChaCha20V2(password string, plainSize int64, nonceField []byte) (*ChaCha
 		password: password,
 		fileSize: plainSize,
 	}
-	key := pbkdf2.Key([]byte(password), []byte("ChaCha20-v2"), pbkdf2IterationsModern, 32, sha256.New)
+	key := cachedV2Key(password, "ChaCha20-v2", nonceField, 32)
 	c.key = append([]byte(nil), key...)
 	c.nonce = append([]byte(nil), nonceField[:12]...)
 	cipherImpl, err := chacha20.NewUnauthenticatedCipher(c.key, c.nonce)

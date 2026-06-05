@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"path"
@@ -354,7 +353,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
 	if err != nil {
 		return 0, nil, nil, 0, err
 	}
