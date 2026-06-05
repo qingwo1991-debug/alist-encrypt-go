@@ -351,7 +351,11 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		} else if strings.HasPrefix(encProbePath, "/d") {
 			encProbePath = strings.TrimPrefix(encProbePath, "/d")
 		}
+		log.Infof("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%.120s encProbePath=%q",
+			info.PasswdInfo.EncType, fileSize, info.RedirectURL, encProbePath)
 		meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, encProbePath)
+		log.Infof("[v2-diag] inspection result: isV2=%v version=%d plainSize=%d cipherSize=%d headerLen=%d",
+			meta.IsV2(), meta.Version, meta.PlainSize, meta.CiphertextSize, meta.HeaderLen)
 		if meta.IsV2() {
 			if meta.PlainSize > 0 {
 				fileSize = meta.PlainSize
