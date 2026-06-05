@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -399,6 +400,168 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 		"next_since":         nextSince,
 		"next_since_rfc3339": nextSinceRFC3339,
 		"next_cursor":        nextCursor,
+	})
+}
+
+func parseExportSinceParams(r *http.Request) time.Time {
+	var updatedAfter time.Time
+	if v := r.URL.Query().Get("since"); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
+			updatedAfter = time.Unix(parsed, 0)
+		}
+	}
+	if updatedAfter.IsZero() {
+		if v := r.URL.Query().Get("updated_after"); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				updatedAfter = t
+			}
+		}
+	}
+	return updatedAfter
+}
+
+func exportLimitAndCursor(r *http.Request) (int, string) {
+	limit := 1000
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			if parsed > 5000 {
+				parsed = 5000
+			}
+			limit = parsed
+		}
+	}
+	return limit, r.URL.Query().Get("cursor")
+}
+
+// ExportStrategy exports strategy metadata for DB_EXPORT sync.
+func (h *APIHandler) ExportStrategy(w http.ResponseWriter, r *http.Request) {
+	if h.mysqlStore == nil {
+		RespondAPIError(w, 500, "mysql not enabled")
+		return
+	}
+	records, err := h.svc.ExportStrategies(r.Context())
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+	updatedAfter := parseExportSinceParams(r)
+	limit, cursor := exportLimitAndCursor(r)
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].UpdatedAt.Equal(records[j].UpdatedAt) {
+			return records[i].KeyHash < records[j].KeyHash
+		}
+		return records[i].UpdatedAt.Before(records[j].UpdatedAt)
+	})
+	items := make([]map[string]interface{}, 0, limit)
+	nextCursor := ""
+	var maxUpdated time.Time
+	started := cursor == ""
+	for _, record := range records {
+		if !updatedAfter.IsZero() && record.UpdatedAt.Before(updatedAfter) {
+			continue
+		}
+		if !started {
+			if record.KeyHash == cursor {
+				started = true
+			}
+			continue
+		}
+		if len(items) >= limit {
+			break
+		}
+		items = append(items, map[string]interface{}{
+			"KeyHash":      record.KeyHash,
+			"ProviderHost": record.ProviderHost,
+			"OriginalPath": record.OriginalPath,
+			"NetworkType":  "any",
+			"Strategy":     record.Preferred,
+			"UpdatedAt":    record.UpdatedAt.UTC().Format(time.RFC3339),
+			"LastAccessed": record.LastAccessed.UTC().Format(time.RFC3339),
+		})
+		if record.UpdatedAt.After(maxUpdated) {
+			maxUpdated = record.UpdatedAt
+		}
+		nextCursor = record.KeyHash
+	}
+	nextSince := int64(0)
+	if !maxUpdated.IsZero() {
+		nextSince = maxUpdated.Unix()
+	}
+	RespondSuccess(w, map[string]interface{}{
+		"items":       items,
+		"has_more":    len(items) == limit,
+		"next_since":  nextSince,
+		"next_cursor": nextCursor,
+		"limit":       limit,
+	})
+}
+
+// ExportRangeCompat exports range compatibility metadata for DB_EXPORT sync.
+func (h *APIHandler) ExportRangeCompat(w http.ResponseWriter, r *http.Request) {
+	if h.mysqlStore == nil {
+		RespondAPIError(w, 500, "mysql not enabled")
+		return
+	}
+	records, err := h.svc.ExportRangeCompats(r.Context())
+	if err != nil {
+		RespondAPIError(w, 500, err.Error())
+		return
+	}
+	updatedAfter := parseExportSinceParams(r)
+	limit, cursor := exportLimitAndCursor(r)
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].UpdatedAt.Equal(records[j].UpdatedAt) {
+			return records[i].KeyHash < records[j].KeyHash
+		}
+		return records[i].UpdatedAt.Before(records[j].UpdatedAt)
+	})
+	items := make([]map[string]interface{}, 0, limit)
+	nextCursor := ""
+	var maxUpdated time.Time
+	started := cursor == ""
+	for _, record := range records {
+		if !updatedAfter.IsZero() && record.UpdatedAt.Before(updatedAfter) {
+			continue
+		}
+		if !started {
+			if record.KeyHash == cursor {
+				started = true
+			}
+			continue
+		}
+		if len(items) >= limit {
+			break
+		}
+		item := map[string]interface{}{
+			"KeyHash":      record.KeyHash,
+			"ProviderHost": record.ProviderHost,
+			"OriginalPath": record.StorageKey,
+			"UpdatedAt":    record.UpdatedAt.UTC().Format(time.RFC3339),
+			"LastAccessed": record.LastAccessed.UTC().Format(time.RFC3339),
+			"LastReason":   record.LastReason,
+		}
+		if !record.NextProbeAt.IsZero() {
+			item["BlockedUntil"] = record.NextProbeAt.UTC().Format(time.RFC3339)
+		}
+		if record.ConsecutiveFailures > 0 {
+			item["Failures"] = record.ConsecutiveFailures
+		}
+		items = append(items, item)
+		if record.UpdatedAt.After(maxUpdated) {
+			maxUpdated = record.UpdatedAt
+		}
+		nextCursor = record.KeyHash
+	}
+	nextSince := int64(0)
+	if !maxUpdated.IsZero() {
+		nextSince = maxUpdated.Unix()
+	}
+	RespondSuccess(w, map[string]interface{}{
+		"items":       items,
+		"has_more":    len(items) == limit,
+		"next_since":  nextSince,
+		"next_cursor": nextCursor,
+		"limit":       limit,
 	})
 }
 

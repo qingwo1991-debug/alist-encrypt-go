@@ -34,6 +34,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import splitties.systemservices.powerManager
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * OpenList后台服务 - 提供OpenList核心功能并实现保活机制
@@ -60,6 +61,8 @@ class OpenListService : Service(), OpenList.Listener {
         @Volatile
         var serviceInstance: OpenListService? = null
             private set
+
+        private val backendStarting = AtomicBoolean(false)
 
         private const val NETWORK_TYPE_LTE_CA = 19
     }
@@ -428,15 +431,15 @@ class OpenListService : Service(), OpenList.Listener {
             Log.d(TAG, "OpenList already running")
             return
         }
+        if (!backendStarting.compareAndSet(false, true)) {
+            Log.d(TAG, "OpenList backend start already in progress")
+            return
+        }
         
         Log.d(TAG, "Initializing and starting OpenList")
         
         mScope.launch(Dispatchers.IO) {
             try {
-                // Initialize OpenList
-                OpenList.init()
-                delay(100)
-                
                 // Start OpenList
                 OpenList.startup()
                 if (!OpenList.isRunning()) {
@@ -461,6 +464,8 @@ class OpenListService : Service(), OpenList.Listener {
                     toast("启动失败: ${e.message}")
                     notifyStatusChanged()
                 }
+            } finally {
+                backendStarting.set(false)
             }
         }
     }

@@ -23,7 +23,7 @@ func (s *Store) GetFileMeta(ctx context.Context, providerKey, originalPath strin
 	providerHost, _ := SplitProviderKey(providerKey)
 	keyHash := KeyHash(providerHost, originalPath)
 
-	query := "SELECT key_hash, provider_host, original_path, size, etag, content_type, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE key_hash = ? AND is_active=1"
+	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, raw_url, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE key_hash = ? AND is_active=1"
 	row := s.db.QueryRowContext(ctx, query, keyHash)
 
 	var record FileMetaRecord
@@ -33,9 +33,17 @@ func (s *Store) GetFileMeta(ctx context.Context, providerKey, originalPath strin
 		&record.KeyHash,
 		&record.ProviderHost,
 		&record.OriginalPath,
+		&record.EncryptedPath,
+		&record.Name,
 		&record.Size,
+		&record.CiphertextSize,
+		&record.ContentVersion,
+		&record.HeaderLen,
+		&record.NonceField,
 		&record.ETag,
 		&record.ContentType,
+		&record.RawURL,
+		&record.Sign,
 		&record.StatusCode,
 		&record.UpdatedAt,
 		&record.LastAccessed,
@@ -83,7 +91,7 @@ func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]File
 		return nil, nil
 	}
 
-	query := "SELECT key_hash, provider_host, original_path, size, etag, content_type, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE is_active=1"
+	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, raw_url, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE is_active=1"
 	args := []interface{}{}
 
 	if filter.ProviderHost != "" {
@@ -134,9 +142,17 @@ func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]File
 			&record.KeyHash,
 			&record.ProviderHost,
 			&record.OriginalPath,
+			&record.EncryptedPath,
+			&record.Name,
 			&record.Size,
+			&record.CiphertextSize,
+			&record.ContentVersion,
+			&record.HeaderLen,
+			&record.NonceField,
 			&record.ETag,
 			&record.ContentType,
+			&record.RawURL,
+			&record.Sign,
 			&record.StatusCode,
 			&record.UpdatedAt,
 			&record.LastAccessed,

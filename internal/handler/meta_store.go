@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"net/url"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 )
 
@@ -33,18 +35,31 @@ func NewMySQLFileMetaWriter(store *mysqlstore.Store) *MySQLFileMetaWriter {
 	return &MySQLFileMetaWriter{store: store}
 }
 
-func (w *MySQLFileMetaWriter) UpsertFileMeta(path string, size int64, rawURL, sign string, upstreamFetchedAt time.Time) error {
+func (w *MySQLFileMetaWriter) UpsertFileMeta(info *dao.FileInfo) error {
 	if w == nil || w.store == nil {
 		return nil
 	}
+	if info == nil {
+		return nil
+	}
+	providerHost := ""
+	if parsed, err := url.Parse(info.RawURL); err == nil {
+		providerHost = parsed.Host
+	}
 	return w.store.UpsertFileMeta(context.Background(), mysqlstore.FileMetaRecord{
-		ProviderHost:      "",
-		OriginalPath:      path,
-		Size:              size,
-		RawURL:            rawURL,
-		Sign:              sign,
+		ProviderHost:      providerHost,
+		OriginalPath:      info.Path,
+		EncryptedPath:     info.EncryptedPath,
+		Name:              info.Name,
+		Size:              info.Size,
+		CiphertextSize:    info.CiphertextSize,
+		ContentVersion:    info.ContentVersion,
+		HeaderLen:         info.HeaderLen,
+		NonceField:        append([]byte(nil), info.NonceField...),
+		RawURL:            info.RawURL,
+		Sign:              info.Sign,
 		LastAccessed:      time.Now(),
-		UpstreamFetchedAt: upstreamFetchedAt,
+		UpstreamFetchedAt: info.UpstreamFetchedAt,
 		Active:            true,
 	})
 }

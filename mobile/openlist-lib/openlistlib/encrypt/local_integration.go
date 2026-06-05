@@ -67,6 +67,17 @@ func (p *ProxyServer) lookupLocalSize(providerURL, originalURL string) (int64, b
 	return p.localStore.GetSize(key)
 }
 
+func (p *ProxyServer) lookupLocalFileMeta(providerURL, originalURL string) (*LocalSizeRecord, bool) {
+	if p == nil || p.localStore == nil {
+		return nil, false
+	}
+	key, _, _, ok := p.localKeyFromURLs(providerURL, originalURL)
+	if !ok {
+		return nil, false
+	}
+	return p.localStore.GetFileMeta(key)
+}
+
 func (p *ProxyServer) lookupLocalStrategy(providerURL, originalURL string) (StreamStrategy, bool) {
 	if p == nil || p.localStore == nil {
 		return "", false

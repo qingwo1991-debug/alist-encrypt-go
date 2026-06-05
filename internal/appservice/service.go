@@ -292,6 +292,20 @@ func (s *Service) ExportFileMeta(ctx context.Context, filter mysqlstore.FileMeta
 	return s.mysqlStore.ListFileMeta(ctx, filter)
 }
 
+func (s *Service) ExportStrategies(ctx context.Context) ([]mysqlstore.StrategyRecord, error) {
+	if s.mysqlStore == nil {
+		return nil, fmt.Errorf("mysql not enabled")
+	}
+	return s.mysqlStore.ListStrategies(ctx)
+}
+
+func (s *Service) ExportRangeCompats(ctx context.Context) ([]mysqlstore.RangeCompatRecord, error) {
+	if s.mysqlStore == nil {
+		return nil, fmt.Errorf("mysql not enabled")
+	}
+	return s.mysqlStore.ListRangeCompats(ctx)
+}
+
 func (s *Service) CleanupLegacyBoltDB() (string, error) {
 	if s.mysqlStore == nil {
 		return "", fmt.Errorf("MySQL 未连接，请先配置 MySQL 后再试")

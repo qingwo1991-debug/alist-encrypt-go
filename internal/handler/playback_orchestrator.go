@@ -373,6 +373,7 @@ func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.Conten
 	}
 	info := &dao.FileInfo{
 		Path:              req.FileItem.DisplayPath,
+		EncryptedPath:     req.FileItem.EncryptedPath,
 		Name:              req.FileItem.FileName,
 		Size:              meta.PlainSize,
 		CiphertextSize:    meta.TotalCiphertextSize(),

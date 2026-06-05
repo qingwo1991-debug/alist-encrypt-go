@@ -13,6 +13,7 @@ import (
 // FileInfo represents cached file information
 type FileInfo struct {
 	Path              string    `json:"path"`
+	EncryptedPath     string    `json:"encrypted_path,omitempty"`
 	Name              string    `json:"name"`
 	Size              int64     `json:"size"`
 	CiphertextSize    int64     `json:"ciphertext_size"`
@@ -43,7 +44,7 @@ type FileSizeEntry struct {
 
 // FileMetaStoreWriter is a minimal interface for writing file metadata to external stores like MySQL.
 type FileMetaStoreWriter interface {
-	UpsertFileMeta(path string, size int64, rawURL, sign string, upstreamFetchedAt time.Time) error
+	UpsertFileMeta(info *FileInfo) error
 }
 
 // FileDAO handles file information caching
@@ -77,6 +78,7 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	if entry, ok := d.pathCache.Get(path); ok {
 		fi := &FileInfo{
 			Path:           entry.DisplayPath,
+			EncryptedPath:  entry.EncryptedPath,
 			Name:           entry.Name,
 			Size:           entry.Size,
 			CiphertextSize: entry.CiphertextSize,
@@ -107,6 +109,42 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 
 // Set stores file info
 func (d *FileDAO) Set(info *FileInfo) error {
+	if existing, ok := d.Get(info.Path); ok && existing != nil {
+		if info.EncryptedPath == "" {
+			info.EncryptedPath = existing.EncryptedPath
+		}
+		if info.Name == "" {
+			info.Name = existing.Name
+		}
+		if info.Size <= 0 {
+			info.Size = existing.Size
+		}
+		if info.CiphertextSize <= 0 {
+			info.CiphertextSize = existing.CiphertextSize
+		}
+		if info.ContentVersion <= 0 {
+			info.ContentVersion = existing.ContentVersion
+		}
+		if info.HeaderLen <= 0 {
+			info.HeaderLen = existing.HeaderLen
+		}
+		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
+			info.NonceField = append([]byte(nil), existing.NonceField...)
+		}
+		if info.RawURL == "" {
+			info.RawURL = existing.RawURL
+		}
+		if info.Sign == "" {
+			info.Sign = existing.Sign
+		}
+		if info.Modified.IsZero() {
+			info.Modified = existing.Modified
+		}
+		if info.UpstreamFetchedAt.IsZero() {
+			info.UpstreamFetchedAt = existing.UpstreamFetchedAt
+		}
+	}
+
 	// Store in unified path cache
 	now := time.Now()
 	upstreamFetchedAt := info.UpstreamFetchedAt
@@ -115,7 +153,7 @@ func (d *FileDAO) Set(info *FileInfo) error {
 	}
 	info.UpstreamFetchedAt = upstreamFetchedAt
 	entry := &PathEntry{
-		EncryptedPath:     info.Path,
+		EncryptedPath:     info.EncryptedPath,
 		DisplayPath:       info.Path,
 		Name:              info.Name,
 		Size:              info.Size,
@@ -128,11 +166,14 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		Sign:              info.Sign,
 		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
 	}
+	if entry.EncryptedPath == "" {
+		entry.EncryptedPath = info.Path
+	}
 	d.pathCache.Set(entry, 24*time.Hour)
 
 	// Persist: prefer MySQL if available, else BoltDB.
 	if d.fileMetaWriter != nil {
-		_ = d.fileMetaWriter.UpsertFileMeta(info.Path, info.Size, info.RawURL, info.Sign, upstreamFetchedAt)
+		_ = d.fileMetaWriter.UpsertFileMeta(info)
 		return nil
 	}
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)

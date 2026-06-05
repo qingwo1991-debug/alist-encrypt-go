@@ -209,16 +209,6 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 			return false
 		}
 		targetURL := p.getAlistURL() + urlPath
-		rangeStart, hasRangeStart := parseRangeStart(clientRangeHeader)
-		if (!hasRangeStart || rangeStart < rangePreferUpstreamStartBytes) &&
-			func() bool {
-				if strategy, ok := p.lookupLocalStrategy(targetURL, filePath); ok && strategy == StreamStrategyChunked {
-					return true
-				}
-				return false
-			}() {
-			return false
-		}
 		if p.shouldSkipRange(targetURL, filePath) {
 			return false
 		}

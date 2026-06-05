@@ -54,7 +54,16 @@ type LocalSizeRecord struct {
 	Key          string `json:"key"`
 	ProviderHost string `json:"provider_host"`
 	OriginalPath string `json:"original_path"`
+	EncryptedPath string `json:"encrypted_path,omitempty"`
+	Name         string `json:"name,omitempty"`
 	Size         int64  `json:"size"`
+	CiphertextSize int64 `json:"ciphertext_size,omitempty"`
+	ContentVersion int   `json:"content_version,omitempty"`
+	HeaderLen    int64  `json:"header_len,omitempty"`
+	NonceField   []byte `json:"nonce_field,omitempty"`
+	RawURL       string `json:"raw_url,omitempty"`
+	Sign         string `json:"sign,omitempty"`
+	UpstreamFetchedAt int64 `json:"upstream_fetched_at,omitempty"`
 	LastAccessed int64  `json:"last_accessed"`
 	UpdatedAt    int64  `json:"updated_at"`
 }
@@ -175,7 +184,16 @@ func initLocalSchema(db *sql.DB) error {
             key TEXT PRIMARY KEY,
             provider_host TEXT NOT NULL,
             original_path TEXT NOT NULL,
+            encrypted_path TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
             size INTEGER NOT NULL,
+            ciphertext_size INTEGER NOT NULL DEFAULT 0,
+            content_version INTEGER NOT NULL DEFAULT 0,
+            header_len INTEGER NOT NULL DEFAULT 0,
+            nonce_field BLOB NULL,
+            raw_url TEXT NOT NULL DEFAULT '',
+            sign TEXT NOT NULL DEFAULT '',
+            upstream_fetched_at INTEGER NOT NULL DEFAULT 0,
             last_accessed INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );`,
@@ -246,11 +264,34 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`INSERT INTO local_db_meta (key, value, updated_at)
-	        VALUES ('schema_version', '3', strftime('%s','now'))
+	        VALUES ('schema_version', '4', strftime('%s','now'))
 	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return migrateLocalSchema(db)
+}
+
+func migrateLocalSchema(db *sql.DB) error {
+	migrations := []string{
+		`ALTER TABLE local_media_size ADD COLUMN encrypted_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE local_media_size ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE local_media_size ADD COLUMN ciphertext_size INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE local_media_size ADD COLUMN content_version INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE local_media_size ADD COLUMN header_len INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE local_media_size ADD COLUMN nonce_field BLOB NULL`,
+		`ALTER TABLE local_media_size ADD COLUMN raw_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE local_media_size ADD COLUMN sign TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE local_media_size ADD COLUMN upstream_fetched_at INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, stmt := range migrations {
+		if _, err := db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
 			return err
 		}
 	}
@@ -314,19 +355,50 @@ func (s *localStore) GetSize(key string) (int64, bool) {
 	return size, true
 }
 
+func (s *localStore) GetFileMeta(key string) (*LocalSizeRecord, bool) {
+	if s == nil || s.db == nil || key == "" {
+		return nil, false
+	}
+	row := s.db.QueryRow(`SELECT provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at
+		FROM local_media_size WHERE key = ?`, key)
+	var rec LocalSizeRecord
+	rec.Key = key
+	if err := row.Scan(
+		&rec.ProviderHost,
+		&rec.OriginalPath,
+		&rec.EncryptedPath,
+		&rec.Name,
+		&rec.Size,
+		&rec.CiphertextSize,
+		&rec.ContentVersion,
+		&rec.HeaderLen,
+		&rec.NonceField,
+		&rec.RawURL,
+		&rec.Sign,
+		&rec.UpstreamFetchedAt,
+		&rec.LastAccessed,
+		&rec.UpdatedAt,
+	); err != nil {
+		return nil, false
+	}
+	return &rec, true
+}
+
 func (s *localStore) GetStrategy(key, networkType string) (StreamStrategy, bool) {
 	if s == nil || s.db == nil || key == "" || networkType == "" {
 		return "", false
 	}
-	row := s.db.QueryRow("SELECT strategy FROM local_media_strategy WHERE key = ? AND network_type = ?", key, strings.ToLower(networkType))
-	var strategy string
-	if err := row.Scan(&strategy); err != nil {
-		return "", false
+	for _, candidate := range []string{strings.ToLower(networkType), "any"} {
+		row := s.db.QueryRow("SELECT strategy FROM local_media_strategy WHERE key = ? AND network_type = ?", key, candidate)
+		var strategy string
+		if err := row.Scan(&strategy); err != nil {
+			continue
+		}
+		if strategy != "" {
+			return StreamStrategy(strategy), true
+		}
 	}
-	if strategy == "" {
-		return "", false
-	}
-	return StreamStrategy(strategy), true
+	return "", false
 }
 
 func (s *localStore) AddSize(key, providerHost, originalPath string, size int64, accessedAt time.Time) {
@@ -462,12 +534,21 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 	}()
 
 	insertSize, err := tx.Prepare(`INSERT INTO local_media_size
-        (key, provider_host, original_path, size, last_accessed, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
         provider_host=excluded.provider_host,
         original_path=excluded.original_path,
+        encrypted_path=excluded.encrypted_path,
+        name=excluded.name,
         size=excluded.size,
+        ciphertext_size=excluded.ciphertext_size,
+        content_version=excluded.content_version,
+        header_len=excluded.header_len,
+        nonce_field=excluded.nonce_field,
+        raw_url=excluded.raw_url,
+        sign=excluded.sign,
+        upstream_fetched_at=excluded.upstream_fetched_at,
         last_accessed=excluded.last_accessed,
         updated_at=excluded.updated_at`)
 	if err != nil {
@@ -493,7 +574,7 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 		ts := record.accessedAt.Unix()
 		switch record.kind {
 		case recordKindSize:
-			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, record.size, ts, ts); err != nil {
+			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, "", "", record.size, 0, 0, 0, nil, "", "", 0, ts, ts); err != nil {
 				return err
 			}
 		case recordKindStrategy:
@@ -510,10 +591,10 @@ func (s *localStore) GetSnapshot(key string) (*LocalSizeRecord, []LocalStrategyR
 	if s == nil || s.db == nil || key == "" {
 		return nil, nil, nil
 	}
-	row := s.db.QueryRow("SELECT provider_host, original_path, size, last_accessed, updated_at FROM local_media_size WHERE key = ?", key)
+	row := s.db.QueryRow("SELECT provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at FROM local_media_size WHERE key = ?", key)
 	var sizeRec LocalSizeRecord
 	sizeRec.Key = key
-	if err := row.Scan(&sizeRec.ProviderHost, &sizeRec.OriginalPath, &sizeRec.Size, &sizeRec.LastAccessed, &sizeRec.UpdatedAt); err != nil {
+	if err := row.Scan(&sizeRec.ProviderHost, &sizeRec.OriginalPath, &sizeRec.EncryptedPath, &sizeRec.Name, &sizeRec.Size, &sizeRec.CiphertextSize, &sizeRec.ContentVersion, &sizeRec.HeaderLen, &sizeRec.NonceField, &sizeRec.RawURL, &sizeRec.Sign, &sizeRec.UpstreamFetchedAt, &sizeRec.LastAccessed, &sizeRec.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil, nil
 		}
@@ -547,13 +628,13 @@ func (s *localStore) ExportAll() (*LocalExport, error) {
 	}
 	data := &LocalExport{}
 
-	rows, err := s.db.Query("SELECT key, provider_host, original_path, size, last_accessed, updated_at FROM local_media_size")
+	rows, err := s.db.Query("SELECT key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at FROM local_media_size")
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var rec LocalSizeRecord
-		if err := rows.Scan(&rec.Key, &rec.ProviderHost, &rec.OriginalPath, &rec.Size, &rec.LastAccessed, &rec.UpdatedAt); err != nil {
+		if err := rows.Scan(&rec.Key, &rec.ProviderHost, &rec.OriginalPath, &rec.EncryptedPath, &rec.Name, &rec.Size, &rec.CiphertextSize, &rec.ContentVersion, &rec.HeaderLen, &rec.NonceField, &rec.RawURL, &rec.Sign, &rec.UpstreamFetchedAt, &rec.LastAccessed, &rec.UpdatedAt); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -603,12 +684,21 @@ func (s *localStore) Import(data *LocalExport) error {
 	}()
 
 	insertSize, err := tx.Prepare(`INSERT INTO local_media_size
-        (key, provider_host, original_path, size, last_accessed, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
         provider_host=excluded.provider_host,
         original_path=excluded.original_path,
+        encrypted_path=excluded.encrypted_path,
+        name=excluded.name,
         size=excluded.size,
+        ciphertext_size=excluded.ciphertext_size,
+        content_version=excluded.content_version,
+        header_len=excluded.header_len,
+        nonce_field=excluded.nonce_field,
+        raw_url=excluded.raw_url,
+        sign=excluded.sign,
+        upstream_fetched_at=excluded.upstream_fetched_at,
         last_accessed=excluded.last_accessed,
         updated_at=excluded.updated_at`)
 	if err != nil {
@@ -647,7 +737,7 @@ func (s *localStore) Import(data *LocalExport) error {
 		if updatedAt <= 0 {
 			updatedAt = now
 		}
-		if _, err := insertSize.Exec(key, rec.ProviderHost, rec.OriginalPath, rec.Size, lastAccessed, updatedAt); err != nil {
+		if _, err := insertSize.Exec(key, rec.ProviderHost, rec.OriginalPath, rec.EncryptedPath, rec.Name, rec.Size, rec.CiphertextSize, rec.ContentVersion, rec.HeaderLen, rec.NonceField, rec.RawURL, rec.Sign, rec.UpstreamFetchedAt, lastAccessed, updatedAt); err != nil {
 			return err
 		}
 	}
