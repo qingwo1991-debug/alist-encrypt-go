@@ -4076,7 +4076,60 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	}
 	if r.Method == "GET" && clientRangeHeader != "" {
 		if encPath != nil {
-			meta := p.inspectEncryptedContent(r.Context(), targetURL, r.Header, encPath, 0)
+			// Check file cache before probing upstream
+			var meta ContentMeta
+			cachedFound := false
+			for _, cacheKey := range []string{filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
+				if cacheKey == "" {
+					continue
+				}
+				if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
+					if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
+						meta = ContentMeta{
+							EncType:        EncryptionType(encPath.EncType),
+							Version:        ContentVersionV2,
+							HeaderLen:      cached.HeaderLen,
+							PlainSize:      cached.Size,
+							CiphertextSize: cached.CiphertextSize,
+							NonceField:     cloneNonceField(cached.NonceField),
+						}
+					} else {
+						meta = LegacyContentMeta(EncryptionType(encPath.EncType), 0)
+					}
+					cachedFound = true
+					break
+				}
+			}
+			if !cachedFound {
+				meta = p.inspectEncryptedContent(r.Context(), targetURL, r.Header, encPath, 0)
+				// Cache the inspection result for future requests
+				if filePath != "" {
+					cacheInfo := &FileInfo{
+						Name:           path.Base(filePath),
+						Size:           meta.PlainSize,
+						CiphertextSize: meta.CiphertextSize,
+						ContentVersion: meta.Version,
+						HeaderLen:      meta.HeaderLen,
+						NonceField:     cloneNonceField(meta.NonceField),
+						IsDir:          false,
+						Path:           filePath,
+					}
+					p.storeFileCache(filePath, cacheInfo)
+					if strings.HasPrefix(filePath, "/dav/") {
+						noDav := strings.TrimPrefix(filePath, "/dav")
+						p.storeFileCache(noDav, &FileInfo{
+							Name:           cacheInfo.Name,
+							Size:           cacheInfo.Size,
+							CiphertextSize: cacheInfo.CiphertextSize,
+							ContentVersion: cacheInfo.ContentVersion,
+							HeaderLen:      cacheInfo.HeaderLen,
+							NonceField:     cloneNonceField(cacheInfo.NonceField),
+							IsDir:          false,
+							Path:           noDav,
+						})
+					}
+				}
+			}
 			upstreamRangeHeader = buildUpstreamRangeHeader(upstreamRangeHeader, meta)
 		}
 		if upstreamRangeHeader == "" {
@@ -4382,6 +4435,22 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				EncryptedPath: targetURLPath,
 				Headers:       r.Header.Clone(),
 				Driver:        driver,
+			}
+			// Pre-populate V2 metadata from file cache so ServeRedirect can skip re-probing
+			for _, cacheKey := range []string{filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
+				if cacheKey == "" {
+					continue
+				}
+				if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
+					redirectInfo.ContentVersion = cached.ContentVersion
+					redirectInfo.HeaderLen = cached.HeaderLen
+					redirectInfo.NonceField = cloneNonceField(cached.NonceField)
+					if cached.CiphertextSize > 0 {
+						redirectInfo.CiphertextSize = cached.CiphertextSize
+					}
+					log.Infof("WebDAV redirect: pre-populated V2 meta from cache: key=%s version=%d", cacheKey, cached.ContentVersion)
+					break
+				}
 			}
 			p.storeRedirectCache(redirectKey, redirectInfo)
 

@@ -351,11 +351,80 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		} else if strings.HasPrefix(encProbePath, "/d") {
 			encProbePath = strings.TrimPrefix(encProbePath, "/d")
 		}
-		log.Infof("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%.120s encProbePath=%q",
-			info.PasswdInfo.EncType, fileSize, info.RedirectURL, encProbePath)
-		meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, encProbePath)
-		log.Infof("[v2-diag] inspection result: isV2=%v version=%d plainSize=%d cipherSize=%d headerLen=%d",
-			meta.IsV2(), meta.Version, meta.PlainSize, meta.CiphertextSize, meta.HeaderLen)
+
+		// --- Check file cache for previously inspected V2 metadata ---
+		// This avoids redundant upstream probes for files we've already inspected
+		// (both V1 and V2 results are cached, per-file, by display path).
+		displayPath := info.OriginalURL
+		if displayPath == "" {
+			displayPath = info.EncryptedPath
+		}
+		cachedMetaLoaded := false
+		if displayPath != "" {
+			for _, cacheKey := range []string{displayPath, strings.TrimPrefix(displayPath, "/dav")} {
+				if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
+					if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
+						meta = ContentMeta{
+							EncType:        EncryptionType(info.PasswdInfo.EncType),
+							Version:        ContentVersionV2,
+							HeaderLen:      cached.HeaderLen,
+							PlainSize:      cached.Size,
+							CiphertextSize: cached.CiphertextSize,
+							NonceField:     cloneNonceField(cached.NonceField),
+						}
+						cachedMetaLoaded = true
+						log.Infof("[v2-cache] loaded V2 meta from cache: path=%s headerLen=%d plainSize=%d cipherSize=%d",
+							cacheKey, cached.HeaderLen, cached.Size, cached.CiphertextSize)
+					} else if cached.ContentVersion == ContentVersionV1 {
+						// V1 file — no need to probe, we already know it's V1
+						cachedMetaLoaded = true
+						log.Infof("[v2-cache] loaded V1 meta from cache: path=%s (skip inspection)", cacheKey)
+					}
+					break
+				}
+			}
+		}
+
+		if !cachedMetaLoaded {
+			log.Infof("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%.120s encProbePath=%q",
+				info.PasswdInfo.EncType, fileSize, info.RedirectURL, encProbePath)
+			meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, encProbePath)
+			log.Infof("[v2-diag] inspection result: isV2=%v version=%d plainSize=%d cipherSize=%d headerLen=%d",
+				meta.IsV2(), meta.Version, meta.PlainSize, meta.CiphertextSize, meta.HeaderLen)
+
+			// --- Cache inspection result for future requests ---
+			// Store both V1 and V2 conclusions so subsequent requests skip the probe entirely.
+			if displayPath != "" {
+				cacheInfo := &FileInfo{
+					Name:           path.Base(displayPath),
+					Size:           meta.PlainSize,
+					CiphertextSize: meta.CiphertextSize,
+					ContentVersion: meta.Version,
+					HeaderLen:      meta.HeaderLen,
+					NonceField:     cloneNonceField(meta.NonceField),
+					IsDir:          false,
+					Path:           displayPath,
+				}
+				p.storeFileCache(displayPath, cacheInfo)
+				// Also cache without /dav prefix for cross-path lookups
+				if strings.HasPrefix(displayPath, "/dav/") {
+					noDav := strings.TrimPrefix(displayPath, "/dav")
+					p.storeFileCache(noDav, &FileInfo{
+						Name:           cacheInfo.Name,
+						Size:           cacheInfo.Size,
+						CiphertextSize: cacheInfo.CiphertextSize,
+						ContentVersion: cacheInfo.ContentVersion,
+						HeaderLen:      cacheInfo.HeaderLen,
+						NonceField:     cloneNonceField(cacheInfo.NonceField),
+						IsDir:          false,
+						Path:           noDav,
+					})
+				}
+				log.Infof("[v2-cache] cached inspection result: path=%s version=%d plainSize=%d cipherSize=%d",
+					displayPath, meta.Version, meta.PlainSize, meta.CiphertextSize)
+			}
+		}
+
 		if meta.IsV2() {
 			if meta.PlainSize > 0 {
 				fileSize = meta.PlainSize

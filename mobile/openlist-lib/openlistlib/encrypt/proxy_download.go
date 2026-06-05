@@ -194,7 +194,24 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 			if sendRange {
 				rangeHeader := clientRangeHeader
 				if encPath != nil {
-					meta := p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+					// Check file cache before probing upstream
+					var meta ContentMeta
+					if cached, ok := p.loadFileCache(filePath); ok && cached != nil && cached.ContentVersion > 0 {
+						if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
+							meta = ContentMeta{
+								EncType:        EncryptionType(encPath.EncType),
+								Version:        ContentVersionV2,
+								HeaderLen:      cached.HeaderLen,
+								PlainSize:      cached.Size,
+								CiphertextSize: cached.CiphertextSize,
+								NonceField:     cloneNonceField(cached.NonceField),
+							}
+						} else {
+							meta = LegacyContentMeta(EncryptionType(encPath.EncType), fileSize)
+						}
+					} else {
+						meta = p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+					}
 					rangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
 				}
 				req.Header.Set("Range", rangeHeader)

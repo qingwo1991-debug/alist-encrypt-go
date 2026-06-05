@@ -76,48 +76,94 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		log.Infof("[v2-inspect] request creation failed: err=%v", err)
+
+	// Redirect-following loop (up to 2 hops), matching Docker's StreamProxy.inspectEncryptedContent.
+	// When probing alist /dav/ or /d/ paths, alist returns 302 → CDN URL.
+	// Without following the redirect, we get HTML (302 body) instead of the actual file bytes.
+	const maxHops = 2
+	currentURL := target
+	currentAuth := authHeaders
+	for hop := 0; hop <= maxHops; hop++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, currentURL, nil)
+		if err != nil {
+			log.Infof("[v2-inspect] request creation failed: err=%v", err)
+			return meta
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", ContentHeaderSize()-1))
+		req.Header.Set("Accept-Encoding", "identity")
+		if currentAuth != nil {
+			if auth := currentAuth.Get("Authorization"); auth != "" {
+				req.Header.Set("Authorization", auth)
+			}
+			if cookie := currentAuth.Get("Cookie"); cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+		}
+		if ua := authHeaders.Get("User-Agent"); ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		resp, err := p.streamClient.Do(req)
+		if err != nil {
+			log.Infof("[v2-inspect] upstream request failed: target=%.120s err=%v", currentURL, err)
+			return meta
+		}
+		// Follow redirects (301/302/307/308) — drop auth after first hop (CDN doesn't need alist auth)
+		if hop < maxHops && (resp.StatusCode == http.StatusMovedPermanently ||
+			resp.StatusCode == http.StatusFound ||
+			resp.StatusCode == http.StatusTemporaryRedirect ||
+			resp.StatusCode == http.StatusPermanentRedirect) {
+			location := strings.TrimSpace(resp.Header.Get("Location"))
+			resp.Body.Close()
+			if location == "" {
+				log.Infof("[v2-inspect] redirect with empty location: target=%.120s status=%d", currentURL, resp.StatusCode)
+				return meta
+			}
+			if !strings.HasPrefix(location, "http://") && !strings.HasPrefix(location, "https://") {
+				// Relative redirect — resolve against current URL
+				base, pErr := url.Parse(currentURL)
+				if pErr == nil {
+					ref, rErr := url.Parse(location)
+					if rErr == nil {
+						currentURL = base.ResolveReference(ref).String()
+					} else {
+						currentURL = location
+					}
+				} else {
+					currentURL = location
+				}
+			} else {
+				currentURL = location
+			}
+			// Drop auth headers after redirect — CDN URLs don't need alist auth
+			currentAuth = nil
+			log.Debugf("[v2-inspect] following redirect hop=%d → %.120s", hop+1, currentURL)
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= http.StatusBadRequest {
+			// Use Debugf for error statuses — 401/403 on internal probe paths (like /d/) is expected
+			// when the proxy lacks alist auth credentials. These are not actionable errors.
+			log.Debugf("[v2-inspect] upstream returned error status: target=%.120s status=%d", currentURL, resp.StatusCode)
+			return meta
+		}
+		prefix, err := io.ReadAll(io.LimitReader(resp.Body, ContentHeaderSize()))
+		if err != nil {
+			log.Infof("[v2-inspect] failed to read prefix bytes: target=%.120s err=%v", currentURL, err)
+			return meta
+		}
+		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
+			meta.CiphertextSize = total
+			meta.PlainSize = total
+		}
+		if parsed, ok, err := ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
+			log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
+				currentURL, parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
+			return parsed
+		} else {
+			log.Infof("[v2-inspect] header not detected: target=%.120s encType=%q prefixLen=%d status=%d contentRange=%q ok=%v parseErr=%v first6=%x",
+				currentURL, encType, len(prefix), resp.StatusCode, resp.Header.Get("Content-Range"), ok, err, prefix[:min(len(prefix), 6)])
+		}
 		return meta
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", ContentHeaderSize()-1))
-	req.Header.Set("Accept-Encoding", "identity")
-	if auth := authHeaders.Get("Authorization"); auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-	if cookie := authHeaders.Get("Cookie"); cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-	if ua := authHeaders.Get("User-Agent"); ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
-	resp, err := p.streamClient.Do(req)
-	if err != nil {
-		log.Infof("[v2-inspect] upstream request failed: target=%.120s err=%v", target, err)
-		return meta
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= http.StatusBadRequest {
-		log.Infof("[v2-inspect] upstream returned error status: target=%.120s status=%d", target, resp.StatusCode)
-		return meta
-	}
-	prefix, err := io.ReadAll(io.LimitReader(resp.Body, ContentHeaderSize()))
-	if err != nil {
-		log.Infof("[v2-inspect] failed to read prefix bytes: target=%.120s err=%v", target, err)
-		return meta
-	}
-	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
-		meta.CiphertextSize = total
-		meta.PlainSize = total
-	}
-	if parsed, ok, err := ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
-		log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
-			target, parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
-		return parsed
-	} else {
-		log.Infof("[v2-inspect] header not detected: target=%.120s encType=%q prefixLen=%d status=%d contentRange=%q ok=%v parseErr=%v first6=%x",
-			target, encType, len(prefix), resp.StatusCode, resp.Header.Get("Content-Range"), ok, err, prefix[:min(len(prefix), 6)])
 	}
 	return meta
 }
