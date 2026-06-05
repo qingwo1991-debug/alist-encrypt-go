@@ -122,6 +122,15 @@ func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, t
 	if p == nil || encPath == nil || strings.TrimSpace(encryptedPath) == "" {
 		return meta
 	}
+	// Defensive: strip any leading /dav or /d prefix so candidates don't double up
+	if strings.HasPrefix(encryptedPath, "/dav") {
+		encryptedPath = strings.TrimPrefix(encryptedPath, "/dav")
+	} else if strings.HasPrefix(encryptedPath, "/d") {
+		encryptedPath = strings.TrimPrefix(encryptedPath, "/d")
+	}
+	if encryptedPath == "" {
+		return meta
+	}
 	alistURL := strings.TrimSpace(p.getAlistURL())
 	if alistURL == "" {
 		return meta
