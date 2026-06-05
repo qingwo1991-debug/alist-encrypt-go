@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/storage"
@@ -173,7 +175,52 @@ func (d *FileDAO) Set(info *FileInfo) error {
 
 	// Persist: prefer MySQL if available, else BoltDB.
 	if d.fileMetaWriter != nil {
-		_ = d.fileMetaWriter.UpsertFileMeta(info)
+		if writeErr := d.fileMetaWriter.UpsertFileMeta(info); writeErr != nil {
+			// Log but don't fail — data is still in the in-memory cache
+			// and will be retried on the next Set() call for the same path.
+			log.Warn().Err(writeErr).Str("path", info.Path).Msg("MySQL file meta write failed (cached in memory)")
+		}
+		return nil
+	}
+	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
+}
+
+// SetComplete stores a fully-populated FileInfo without the read-before-write merge.
+// Use this when the caller guarantees all fields are already set (e.g., when copying
+// from an existing cache entry or assembling from a complete upstream response).
+// This avoids the Get() round-trip that Set() performs to fill in missing fields.
+func (d *FileDAO) SetComplete(info *FileInfo) error {
+	now := time.Now()
+	upstreamFetchedAt := info.UpstreamFetchedAt
+	if upstreamFetchedAt.IsZero() {
+		upstreamFetchedAt = now
+	}
+	info.UpstreamFetchedAt = upstreamFetchedAt
+
+	entry := &PathEntry{
+		EncryptedPath:     info.EncryptedPath,
+		DisplayPath:       info.Path,
+		Name:              info.Name,
+		Size:              info.Size,
+		CiphertextSize:    info.CiphertextSize,
+		ContentVersion:    info.ContentVersion,
+		HeaderLen:         info.HeaderLen,
+		NonceField:        append([]byte(nil), info.NonceField...),
+		IsDir:             info.IsDir,
+		RawURL:            info.RawURL,
+		Sign:              info.Sign,
+		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
+	}
+	if entry.EncryptedPath == "" {
+		entry.EncryptedPath = info.Path
+	}
+	d.pathCache.Set(entry, 24*time.Hour)
+
+	// Persist: prefer MySQL if available, else BoltDB.
+	if d.fileMetaWriter != nil {
+		if writeErr := d.fileMetaWriter.UpsertFileMeta(info); writeErr != nil {
+			log.Warn().Err(writeErr).Str("path", info.Path).Msg("MySQL file meta write failed (cached in memory)")
+		}
 		return nil
 	}
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
@@ -227,9 +274,13 @@ func (d *FileDAO) GetEncPath(displayPath string) (string, bool) {
 
 // DeleteEncPathMapping removes the display path to encrypted path mapping
 func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
-	// Find and delete by display path
+	// Find and delete both encrypted path and display path indexes
 	if entry, ok := d.pathCache.GetByDispPath(displayPath); ok {
 		d.pathCache.Delete(entry.EncryptedPath)
+		// Also delete by display path to clear the reverse index
+		if entry.DisplayPath != "" && entry.DisplayPath != entry.EncryptedPath {
+			d.pathCache.Delete(entry.DisplayPath)
+		}
 	}
 }
 
@@ -301,17 +352,11 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	}
 	d.DeleteFileSize(displayPath)
 	_ = d.store.Delete(storage.BucketFileInfo, displayPath)
+	// Get() already checks both byEncPath and byDispPath maps, so a single
+	// lookup is sufficient. The second GetByDispPath() call in the original
+	// code always returned the same *PathEntry pointer (dual-indexed cache),
+	// making it a redundant double-lookup.
 	if entry, ok := d.pathCache.Get(displayPath); ok && entry != nil {
-		entry.Size = 0
-		entry.RawURL = ""
-		entry.Sign = ""
-		entry.UpstreamFetchedAt = 0
-		d.pathCache.Set(entry, 24*time.Hour)
-		if entry.EncryptedPath != "" && entry.EncryptedPath != displayPath {
-			d.DeleteFileSize(entry.EncryptedPath)
-		}
-	}
-	if entry, ok := d.pathCache.GetByDispPath(displayPath); ok && entry != nil {
 		entry.Size = 0
 		entry.RawURL = ""
 		entry.Sign = ""
@@ -384,6 +429,13 @@ func NewPasswdDAO(store *storage.Store) *PasswdDAO {
 	return &PasswdDAO{
 		cfg:   config.Get(),
 		cache: storage.NewCache(5 * time.Minute),
+	}
+}
+
+// Stop terminates background goroutines owned by the DAO (cache cleanup).
+func (d *PasswdDAO) Stop() {
+	if d.cache != nil {
+		d.cache.Stop()
 	}
 }
 

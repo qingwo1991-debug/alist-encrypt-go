@@ -87,7 +87,7 @@ func (s *Store) ListRangeCompats(ctx context.Context) ([]RangeCompatRecord, erro
 	if s == nil {
 		return nil, nil
 	}
-	query := "SELECT key_hash, provider_host, storage_key, incompatible, consecutive_failures, consecutive_successes, next_probe_at, last_reason, last_checked_at, updated_at, last_accessed, is_active FROM " + TableName("range_compat") + " WHERE is_active=1"
+	query := "SELECT key_hash, provider_host, storage_key, incompatible, consecutive_failures, consecutive_successes, next_probe_at, last_reason, last_checked_at, updated_at, last_accessed, is_active FROM " + TableName("range_compat") + " WHERE is_active=1 LIMIT 10000"
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err

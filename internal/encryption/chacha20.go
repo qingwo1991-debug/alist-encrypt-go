@@ -23,6 +23,15 @@ type ChaCha20Cipher struct {
 	position int64
 }
 
+// SECURITY WARNING (V1 Legacy):
+// This V1 implementation derives the nonce from MD5(fileSize), meaning all files
+// with the same size encrypted under the same password will share the same nonce.
+// For stream ciphers like ChaCha20, nonce reuse under the same key is catastrophic:
+// XORing two ciphertexts reveals the XOR of both plaintexts. PBKDF2 uses only
+// 1000 iterations, far below OWASP 2023 recommendation of 600,000.
+// Additionally, NewUnauthenticatedCipher is used (no AEAD), so ciphertext
+// integrity is not verified. Use V2 (content_v2.go) for new files.
+
 // NewChaCha20 creates a new ChaCha20 cipher instance
 func NewChaCha20(password string, fileSize int64) (*ChaCha20Cipher, error) {
 	c := &ChaCha20Cipher{
@@ -62,21 +71,28 @@ func NewChaCha20(password string, fileSize int64) (*ChaCha20Cipher, error) {
 
 // SetPosition sets the stream position for seeking (video scrubbing support)
 // ChaCha20 supports O(1) random access like AES-CTR
+//
+// Note: ChaCha20's internal block counter is uint32, limiting total addressable
+// keystream to 2^32 * 64 = 256 GiB. Positions beyond this limit are rejected
+// with an error to prevent silent data corruption from counter overflow.
 func (c *ChaCha20Cipher) SetPosition(position int64) error {
 	if position < 0 {
 		return fmt.Errorf("position cannot be negative")
 	}
 
 	// ChaCha20 uses 64-byte blocks, calculate block number
-	blockCount := uint32(position / 64)
+	blockCount := position / 64
 
-	// Recreate cipher and set counter
-	cipher, err := chacha20.NewUnauthenticatedCipher(c.key, c.nonce)
-	if err != nil {
-		return fmt.Errorf("failed to create ChaCha20 cipher: %w", err)
+	// ChaCha20 block counter is uint32 (max 2^32-1 blocks = 256 GiB).
+	// Reject positions that would overflow to prevent silent data corruption.
+	const maxBlockCount int64 = 1<<32 - 1 // 4,294,967,295
+	if blockCount > maxBlockCount {
+		return fmt.Errorf("ChaCha20 position %d exceeds 256 GiB limit (block counter overflow); "+
+			"consider using AES-128-CTR for files larger than 256 GiB", position)
 	}
-	cipher.SetCounter(blockCount)
-	c.cipher = cipher
+
+	// Reset counter on existing cipher (avoids full cipher recreation per seek)
+	c.cipher.SetCounter(uint32(blockCount))
 
 	// Discard partial block bytes
 	offset := position % 64

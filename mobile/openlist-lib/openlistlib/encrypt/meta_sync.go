@@ -37,6 +37,16 @@ var (
 	errDBExportEndpointUnsupported = errors.New("db_export endpoint unsupported")
 )
 
+// isUnauthorizedError checks if an error indicates a 401 Unauthorized response,
+// meaning the cached JWT token is stale and needs to be refreshed.
+func isUnauthorizedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") || strings.Contains(strings.ToLower(msg), "unauthorized")
+}
+
 type dbExportSyncConfig struct {
 	Enabled         bool
 	BaseURL         string
@@ -278,6 +288,43 @@ func (p *ProxyServer) dbExportLogin(ctx context.Context, cfg dbExportSyncConfig)
 		return "", fmt.Errorf("login failed: empty token")
 	}
 	return token, nil
+}
+
+// getCachedDBExportToken returns the cached JWT token if it exists and has not expired.
+// Returns empty string if no valid token is cached.
+func (p *ProxyServer) getCachedDBExportToken() string {
+	if p == nil {
+		return ""
+	}
+	p.dbExportTokenMu.Lock()
+	defer p.dbExportTokenMu.Unlock()
+	if p.dbExportToken == "" || time.Now().After(p.dbExportTokenExpiry) {
+		p.dbExportToken = ""
+		return ""
+	}
+	return p.dbExportToken
+}
+
+// cacheDBExportToken stores a JWT token with the given TTL for reuse across sync cycles.
+func (p *ProxyServer) cacheDBExportToken(token string, ttl time.Duration) {
+	if p == nil || token == "" {
+		return
+	}
+	p.dbExportTokenMu.Lock()
+	defer p.dbExportTokenMu.Unlock()
+	p.dbExportToken = token
+	p.dbExportTokenExpiry = time.Now().Add(ttl)
+}
+
+// invalidateDBExportToken clears the cached JWT token, forcing a fresh login on next cycle.
+func (p *ProxyServer) invalidateDBExportToken() {
+	if p == nil {
+		return
+	}
+	p.dbExportTokenMu.Lock()
+	defer p.dbExportTokenMu.Unlock()
+	p.dbExportToken = ""
+	p.dbExportTokenExpiry = time.Time{}
 }
 
 func (p *ProxyServer) fetchDBExportPage(
@@ -712,21 +759,40 @@ func (p *ProxyServer) syncDBExportMetaOnce(ctx context.Context) {
 	token := ""
 	var err error
 	if cfg.AuthEnabled {
-		token, err = p.dbExportLogin(ctx, cfg)
-		if err != nil {
-			errSummary := sanitizeSyncError(fmt.Errorf("DB_EXPORT sync login failed: %w", err))
-			log.Warnf("[%s] %s", internal.TagCache, errSummary)
-			p.upsertSyncStatus(false, 0, dbExportSyncModeSizeOnlyDegrade, errSummary)
-			return
+		// Reuse cached JWT token to avoid redundant login calls every cycle.
+		// Token is invalidated on 401 errors (see below).
+		token = p.getCachedDBExportToken()
+		if token == "" {
+			token, err = p.dbExportLogin(ctx, cfg)
+			if err != nil {
+				errSummary := sanitizeSyncError(fmt.Errorf("DB_EXPORT sync login failed: %w", err))
+				log.Warnf("[%s] %s", internal.TagCache, errSummary)
+				p.upsertSyncStatus(false, 0, dbExportSyncModeSizeOnlyDegrade, errSummary)
+				return
+			}
+			p.cacheDBExportToken(token, 20*time.Minute) // cache with conservative TTL
 		}
 	}
 
 	metaImported, err := p.syncDBExportMetaEntity(ctx, cfg, token)
 	if err != nil {
-		errSummary := sanitizeSyncError(fmt.Errorf("DB_EXPORT meta sync failed: %w", err))
-		log.Warnf("[%s] %s", internal.TagCache, errSummary)
-		p.upsertSyncStatus(false, 0, dbExportSyncModeSizeOnlyDegrade, errSummary)
-		return
+		// If we get a 401, the cached token is stale. Invalidate and retry login once.
+		if isUnauthorizedError(err) && token != "" {
+			p.invalidateDBExportToken()
+			if cfg.AuthEnabled {
+				if freshToken, loginErr := p.dbExportLogin(ctx, cfg); loginErr == nil {
+					token = freshToken
+					p.cacheDBExportToken(token, 20*time.Minute)
+					metaImported, err = p.syncDBExportMetaEntity(ctx, cfg, token)
+				}
+			}
+		}
+		if err != nil {
+			errSummary := sanitizeSyncError(fmt.Errorf("DB_EXPORT meta sync failed: %w", err))
+			log.Warnf("[%s] %s", internal.TagCache, errSummary)
+			p.upsertSyncStatus(false, 0, dbExportSyncModeSizeOnlyDegrade, errSummary)
+			return
+		}
 	}
 
 	syncMode := dbExportSyncModeFull

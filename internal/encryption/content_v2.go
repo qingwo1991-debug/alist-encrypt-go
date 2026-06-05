@@ -20,6 +20,10 @@ const (
 	contentHeaderReserved = 0
 )
 
+// TODO(V3): Consider using ChaCha20-Poly1305 or AES-GCM (AEAD modes) for
+// authenticated encryption. Current V2 uses plain stream ciphers without
+// integrity verification, making ciphertext tampering undetectable.
+
 func ContentHeaderSize() int64 {
 	return contentHeaderSize
 }
@@ -83,8 +87,8 @@ func BuildV2Header(encType EncType, plainSize int64, nonceField []byte) ([]byte,
 	if !ok {
 		return nil, fmt.Errorf("unsupported v2 content header encType: %s", encType)
 	}
-	if plainSize <= 0 {
-		return nil, fmt.Errorf("plain size must be positive")
+	if plainSize < 0 {
+		return nil, fmt.Errorf("plain size cannot be negative")
 	}
 	if len(nonceField) != 16 {
 		return nil, fmt.Errorf("nonce field must be 16 bytes")
@@ -115,7 +119,7 @@ func ParseContentHeader(encType EncType, prefix []byte, ciphertextSize int64) (C
 		return meta, false, fmt.Errorf("unsupported content version: %d", version)
 	}
 	plainSize := int64(binary.BigEndian.Uint64(prefix[24:32]))
-	if plainSize <= 0 {
+	if plainSize < 0 {
 		return meta, false, fmt.Errorf("invalid plaintext size in content header")
 	}
 	nonceField := append([]byte(nil), prefix[8:24]...)

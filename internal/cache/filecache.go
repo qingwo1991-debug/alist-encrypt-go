@@ -26,6 +26,8 @@ type Cache struct {
 	defaultTTL  time.Duration
 	maxSize     int
 	singleFlight *SingleFlight
+	stopCh      chan struct{}
+	stopped     bool
 }
 
 // NewCache creates a new cache instance
@@ -35,12 +37,24 @@ func NewCache(defaultTTL time.Duration, maxSize int) *Cache {
 		defaultTTL:  defaultTTL,
 		maxSize:     maxSize,
 		singleFlight: NewSingleFlight(),
+		stopCh:      make(chan struct{}),
 	}
 
 	// Start cleanup goroutine
 	go c.cleanup()
 
 	return c
+}
+
+// Stop terminates the background cleanup goroutine.
+// After calling Stop, no further cleanup will occur.
+func (c *Cache) Stop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.stopped {
+		c.stopped = true
+		close(c.stopCh)
+	}
 }
 
 // Get retrieves an item from the cache
@@ -122,38 +136,74 @@ func (c *Cache) GetOrLoad(key string, loader func() (interface{}, error)) (inter
 	return val, err
 }
 
-// evictOne removes one expired or oldest item
+// evictOne removes one expired or oldest item using random sampling for O(1) performance.
+// Instead of scanning the entire map (O(n)), we sample up to 8 random entries and evict
+// the first expired one found, or the oldest among the sample if none are expired.
 func (c *Cache) evictOne() {
-	var oldestKey string
-	var oldestTime int64 = time.Now().UnixNano()
+	const sampleSize = 8
+	n := len(c.items)
+	if n == 0 {
+		return
+	}
 
+	// Fast path: delete first expired entry from a random sample
+	i := 0
 	for key, item := range c.items {
 		if item.IsExpired() {
 			delete(c.items, key)
 			return
 		}
-		if item.Expiration < oldestTime && item.Expiration > 0 {
+		i++
+		if i >= sampleSize {
+			break
+		}
+	}
+
+	// No expired entry in sample — evict the oldest entry among the sample
+	var oldestKey string
+	var oldestTime int64 = time.Now().UnixNano() + 1
+
+	i = 0
+	for key, item := range c.items {
+		if item.Expiration > 0 && item.Expiration < oldestTime {
 			oldestTime = item.Expiration
 			oldestKey = key
+		}
+		i++
+		if i >= sampleSize {
+			break
 		}
 	}
 
 	if oldestKey != "" {
 		delete(c.items, oldestKey)
+		return
+	}
+
+	// All items have zero expiration — evict first entry
+	for key := range c.items {
+		delete(c.items, key)
+		return
 	}
 }
 
 // cleanup periodically removes expired items
 func (c *Cache) cleanup() {
 	ticker := time.NewTicker(time.Minute)
-	for range ticker.C {
-		c.mu.Lock()
-		for key, item := range c.items {
-			if item.IsExpired() {
-				delete(c.items, key)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			for key, item := range c.items {
+				if item.IsExpired() {
+					delete(c.items, key)
+				}
 			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 	}
 }
 

@@ -25,6 +25,16 @@ type AESCTR struct {
 	position int64
 }
 
+// SECURITY WARNING (V1 Legacy):
+// This V1 implementation derives the IV from MD5(fileSize), meaning all files
+// with the same size encrypted under the same password will share the same IV.
+// For AES-CTR, this is a catastrophic nonce reuse: XORing two ciphertexts
+// recovers the XOR of both plaintexts. PBKDF2 uses only 1000 iterations,
+// far below the OWASP 2023 recommendation of 600,000.
+// This exists solely for backward compatibility with the Node.js predecessor.
+// New files should use V2 (content_v2.go) which uses random nonces and
+// 600,000 PBKDF2 iterations.
+
 // NewAESCTR creates a new AES-CTR cipher instance
 func NewAESCTR(password string, fileSize int64) (*AESCTR, error) {
 	a := &AESCTR{
@@ -69,8 +79,7 @@ func (a *AESCTR) SetPosition(position int64) error {
 		return fmt.Errorf("position cannot be negative")
 	}
 
-	// Restore IV from sourceIv (matches OpenList-Encrypt behavior)
-	a.iv = make([]byte, len(a.sourceIv))
+	// Restore IV from sourceIv by copying in place (reuses existing slice to avoid allocation)
 	copy(a.iv, a.sourceIv)
 
 	// Calculate how many 16-byte blocks to skip

@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Retrier struct {
 	Max        time.Duration
 	Jitter     float64 // ±jitter ratio, e.g. 0.25 = ±25%
 	rng        *rand.Rand
+	rngMu      sync.Mutex
 }
 
 // DefaultRetrier creates a standard retrier: 3 retries, 200ms→800ms→2s.
@@ -105,7 +107,9 @@ func (r *Retrier) backoff(attempt int) time.Duration {
 	if backoff > float64(r.Max) {
 		backoff = float64(r.Max)
 	}
-	// Apply jitter
+	// Apply jitter (lock rng since *rand.Rand is not safe for concurrent use)
+	r.rngMu.Lock()
 	jitter := backoff * r.Jitter * (r.rng.Float64()*2 - 1)
+	r.rngMu.Unlock()
 	return time.Duration(backoff + jitter)
 }

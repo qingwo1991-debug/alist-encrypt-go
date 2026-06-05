@@ -25,6 +25,13 @@ type RC4MD5 struct {
 	sbox       [256]byte // RC4 S-box
 }
 
+// DEPRECATION WARNING (V1 Legacy):
+// RC4 has known keystream biases (Royal Holloway attack, RC4 NOMORE attack)
+// and was prohibited in TLS by RFC 7465. This implementation also uses
+// MD5 for key derivation and only 1000 PBKDF2 iterations.
+// This cipher exists solely for backward compatibility with the Node.js predecessor.
+// New files should use AES-CTR V2 or ChaCha20 V2.
+
 // NewRC4MD5 creates a new RC4-MD5 cipher instance
 func NewRC4MD5(password string, fileSize int64) (*RC4MD5, error) {
 	r := &RC4MD5{

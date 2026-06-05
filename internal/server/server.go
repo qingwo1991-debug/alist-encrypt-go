@@ -36,6 +36,7 @@ type Server struct {
 	userDAO     *dao.UserDAO
 	fileDAO     *dao.FileDAO
 	passwdDAO   *dao.PasswdDAO
+	probeCancel context.CancelFunc
 }
 
 // New creates a new server instance
@@ -102,6 +103,17 @@ func (s *Server) setupRoutes() {
 	s.setupWebUIRoutes(r)
 
 	// Create handlers
+	apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler := s.createHandlers()
+
+	// Register all routes
+	s.registerRoutes(r, apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler)
+
+	// Start startup probe goroutine if enabled
+	s.startStartupProbe(webdavHandler)
+}
+
+// createHandlers initializes all request handlers.
+func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *handler.AlistHandler, *handler.WebDAVHandler, *handler.StatsHandler) {
 	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO, s.mysqlStore)
 	strategyStore := handler.StrategyStore(handler.NewMemoryStrategyStore())
 	var metaStore handler.FileMetaStore
@@ -140,39 +152,11 @@ func (s *Server) setupRoutes() {
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
 
-	if s.cfg != nil && s.cfg.AlistServer.EnableStartupProbe {
-		prefixes := s.passwdDAO.GetEncPathPrefixes()
-		go func(paths []string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error().Interface("panic", r).Msg("Startup probe scheduler panicked")
-				}
-			}()
-			if len(paths) == 0 {
-				return
-			}
-			delay := time.Duration(s.cfg.AlistServer.StartupProbeDelaySeconds) * time.Second
-			if delay > 0 {
-				time.Sleep(delay)
-			}
-			interval := time.Duration(s.cfg.AlistServer.StartupProbeIntervalMinutes) * time.Minute
-			if interval <= 0 {
-				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
-				webdavHandler.StartupProbe(context.Background(), paths)
-				log.Info().Msg("Startup probe completed")
-				return
-			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
-				webdavHandler.StartupProbe(context.Background(), paths)
-				log.Info().Msg("Startup probe completed")
-				<-ticker.C
-			}
-		}(prefixes)
-	}
+	return apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler
+}
 
+// registerRoutes registers all HTTP routes on the gin engine.
+func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, proxyHandler *handler.ProxyHandler, alistHandler *handler.AlistHandler, webdavHandler *handler.WebDAVHandler, statsHandler *handler.StatsHandler) {
 	// Handle frontend error collection API
 	r.POST("/integration-front/errorCollection/insert", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 0, "msg": "ok"})
@@ -221,8 +205,12 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// /redirect/:key - 302 redirect decryption
-	r.Any("/redirect/:key", ginWrap(proxyHandler.HandleRedirect))
+	// /redirect/:key - 302 redirect decryption (auth required to prevent unauthorized access)
+	redirectGroup := r.Group("/redirect")
+	redirectGroup.Use(AuthMiddleware(s.cfg.JWTSecret))
+	{
+		redirectGroup.Any("/:key", ginWrap(proxyHandler.HandleRedirect))
+	}
 
 	// /dav/* - WebDAV proxy (supports all WebDAV methods: PROPFIND, MKCOL, etc.)
 	davGroup := r.Group("/dav")
@@ -262,6 +250,57 @@ func (s *Server) setupRoutes() {
 
 	// Catch-all - Proxy to Alist with version injection
 	r.NoRoute(ginWrap(proxyHandler.HandleProxy))
+}
+
+// startStartupProbe launches a background goroutine for startup probing if enabled.
+func (s *Server) startStartupProbe(webdavHandler *handler.WebDAVHandler) {
+	if s.cfg != nil && s.cfg.AlistServer.EnableStartupProbe {
+		prefixes := s.passwdDAO.GetEncPathPrefixes()
+		probeCtx, probeCancel := context.WithCancel(context.Background())
+		s.probeCancel = probeCancel
+		go func(ctx context.Context, paths []string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().Interface("panic", r).Msg("Startup probe scheduler panicked")
+				}
+			}()
+			if len(paths) == 0 {
+				return
+			}
+			delay := time.Duration(s.cfg.AlistServer.StartupProbeDelaySeconds) * time.Second
+			if delay > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+			}
+			interval := time.Duration(s.cfg.AlistServer.StartupProbeIntervalMinutes) * time.Minute
+			if interval <= 0 {
+				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
+				webdavHandler.StartupProbe(ctx, paths)
+				log.Info().Msg("Startup probe completed")
+				return
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
+				webdavHandler.StartupProbe(ctx, paths)
+				log.Info().Msg("Startup probe completed")
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}(probeCtx, prefixes)
+	}
 }
 
 func migrateStrategyStore(cfg *config.Config, store handler.StrategyStore) error {
@@ -357,11 +396,12 @@ func (s *Server) startHTTP() error {
 	}
 
 	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      httpHandler,
-		ReadTimeout:  0, // No timeout for streaming
-		WriteTimeout: 0,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           httpHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0, // No timeout for streaming
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Info().Str("addr", addr).Msg("Starting HTTP server")
@@ -379,12 +419,13 @@ func (s *Server) startHTTPS() error {
 	}
 
 	s.httpsServer = &http.Server{
-		Addr:         addr,
-		Handler:      s.engine,
-		TLSConfig:    tlsConfig,
-		ReadTimeout:  0,
-		WriteTimeout: 0,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           s.engine,
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Enable HTTP/2
@@ -420,10 +461,11 @@ func (s *Server) startUnix() error {
 	}
 
 	server := &http.Server{
-		Handler:      s.engine,
-		ReadTimeout:  0,
-		WriteTimeout: 0,
-		IdleTimeout:  120 * time.Second,
+		Handler:           s.engine,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Info().Str("socket", socketPath).Msg("Starting Unix socket server")
@@ -434,6 +476,11 @@ func (s *Server) startUnix() error {
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Info().Msg("Shutting down server...")
+
+	// Cancel startup probe goroutine
+	if s.probeCancel != nil {
+		s.probeCancel()
+	}
 
 	var lastErr error
 
@@ -451,6 +498,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if err := s.store.Close(); err != nil {
 		lastErr = err
+	}
+
+	// Flush and close MySQL store if active (prevents data loss from write-behind buffers).
+	if s.mysqlStore != nil {
+		if err := s.mysqlStore.Close(); err != nil {
+			lastErr = err
+		}
+	}
+
+	// Stop PasswdDAO background cleanup
+	if s.passwdDAO != nil {
+		s.passwdDAO.Stop()
 	}
 
 	// Clean up Unix socket

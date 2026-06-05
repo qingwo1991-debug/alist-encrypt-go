@@ -119,7 +119,12 @@ func newLocalStore(baseDir string) (*localStore, error) {
 		return nil, err
 	}
 	dbPath := filepath.Join(baseDir, "local_media.db")
-	_ = backupLocalStoreDB(dbPath)
+	// Run backup asynchronously to avoid blocking service startup on large DB copies.
+	go func() {
+		if err := backupLocalStoreDB(dbPath); err != nil {
+			log.Warnf("[%s] local store backup failed: %v", internal.TagCache, err)
+		}
+	}()
 	dsn := dbPath + "?_journal=WAL&_busy_timeout=5000&_foreign_keys=ON"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
@@ -175,7 +180,36 @@ func backupLocalStoreDB(dbPath string) error {
 	if _, err := io.Copy(dst, src); err != nil {
 		return err
 	}
+	// Close dst before cleanup to avoid file lock issues on Windows
+	dst.Close()
+	src.Close()
+
+	// Clean up old backup files, keeping only the 2 most recent.
+	cleanupOldBackups(dir, base, 2)
 	return nil
+}
+
+// cleanupOldBackups removes old .bak-* backup files, keeping only the newest `keep` files.
+func cleanupOldBackups(dir, baseName string, keep int) {
+	pattern := filepath.Join(dir, baseName+".bak-*")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) <= keep {
+		return
+	}
+	// Sort by name descending (timestamp format ensures lexicographic = chronological order).
+	for i := 0; i < len(matches)-1; i++ {
+		for j := i + 1; j < len(matches); j++ {
+			if matches[i] < matches[j] {
+				matches[i], matches[j] = matches[j], matches[i]
+			}
+		}
+	}
+	// Remove all but the newest `keep` files.
+	for _, old := range matches[keep:] {
+		if err := os.Remove(old); err != nil {
+			log.Warnf("[%s] failed to remove old backup %s: %v", internal.TagCache, old, err)
+		}
+	}
 }
 
 func initLocalSchema(db *sql.DB) error {

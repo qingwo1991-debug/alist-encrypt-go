@@ -120,6 +120,16 @@ func (b *RequestBuilder) Build() (*http.Request, error) {
 
 // CopyResponseHeaders copies response headers to the writer, optionally skipping some
 func CopyResponseHeaders(w http.ResponseWriter, resp *http.Response, skip ...string) {
+	// Fast path: no headers to skip — avoid map allocation entirely
+	if len(skip) == 0 {
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		return
+	}
+
 	skipMap := make(map[string]bool)
 	for _, h := range skip {
 		skipMap[h] = true

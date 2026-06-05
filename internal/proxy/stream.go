@@ -26,12 +26,16 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Pre-compiled regex for Content-Disposition rewriting (avoids per-request compilation)
+var contentDispositionRe = regexp.MustCompile(`(?i)filename\*?=[^;]*;?`)
+
 // Buffer pool for streaming - default 512KB buffers for high-bitrate video
-var streamBufferSize = 512 * 1024
+var streamBufferSize int64 = 512 * 1024
 
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		buf := make([]byte, streamBufferSize)
+		size := atomic.LoadInt64(&streamBufferSize)
+		buf := make([]byte, size)
 		return &buf
 	},
 }
@@ -51,13 +55,11 @@ func applyStreamBufferConfig(cfg *config.Config) {
 		return
 	}
 	effectiveKB := clampStreamBufferKB(cfg.AlistServer.StreamBufferKb)
-	streamBufferSize = effectiveKB * 1024
-	bufferPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, streamBufferSize)
-			return &buf
-		},
-	}
+	newSize := int64(effectiveKB * 1024)
+	atomic.StoreInt64(&streamBufferSize, newSize)
+	// No need to replace bufferPool — the pool's New func already reads
+	// atomic.LoadInt64(&streamBufferSize), so new allocations automatically
+	// pick up the updated size. Old buffers remain valid until recycled.
 }
 
 func getBuffer() *[]byte {
@@ -85,7 +87,7 @@ type StreamProxy struct {
 	compatStore      RangeCompatStore
 	redirectRewriter RedirectRewriter
 	rangeStats       *rangeLearningStats
-	playbackHintsMu  sync.Mutex
+	playbackHintsMu  sync.RWMutex
 	playbackHints    map[string]recentPlaybackHint
 	playbackHintHits uint64
 	chunkedHintHits  uint64
@@ -189,21 +191,27 @@ func (s *StreamProxy) hintKeyFor(targetURL, storageKey string) string {
 }
 
 func (s *StreamProxy) recentPlaybackStrategy(targetURL, storageKey string, profile requestRangeProfile) (StreamStrategy, bool) {
-	s.playbackHintsMu.Lock()
-	defer s.playbackHintsMu.Unlock()
+	s.playbackHintsMu.RLock()
 	if s.playbackHints == nil {
+		s.playbackHintsMu.RUnlock()
 		return "", false
 	}
 	key := s.hintKeyFor(targetURL, storageKey)
 	hint, ok := s.playbackHints[key]
 	if !ok {
+		s.playbackHintsMu.RUnlock()
 		return "", false
 	}
 	if time.Since(hint.UpdatedAt) > recentPlaybackHintTTL {
+		s.playbackHintsMu.RUnlock()
+		s.playbackHintsMu.Lock()
 		delete(s.playbackHints, key)
+		s.playbackHintsMu.Unlock()
 		return "", false
 	}
-	return hint.Strategy, true
+	strategy := hint.Strategy
+	s.playbackHintsMu.RUnlock()
+	return strategy, true
 }
 
 // requestRangeProfile classifies a Range request.
@@ -1651,6 +1659,12 @@ func discardBytes(r io.Reader, n int64) error {
 	if n <= 0 {
 		return nil
 	}
+	if n > 4096 {
+		buf := getBuffer()
+		defer putBuffer(buf)
+		_, err := io.CopyBuffer(io.Discard, io.LimitReader(r, n), *buf)
+		return err
+	}
 	_, err := io.CopyN(io.Discard, r, n)
 	return err
 }
@@ -1710,8 +1724,7 @@ func decodeNameFromRequest(passwdInfo *config.PasswdInfo, urlPath string, allowL
 func rewriteContentDisposition(w http.ResponseWriter, showName string) {
 	cd := w.Header().Get("Content-Disposition")
 	if cd != "" {
-		re := regexp.MustCompile(`(?i)filename\*?=[^;]*;?`)
-		cd = re.ReplaceAllString(cd, "")
+		cd = contentDispositionRe.ReplaceAllString(cd, "")
 		cd = strings.TrimSpace(cd)
 		if cd != "" && !strings.HasSuffix(cd, ";") {
 			cd += ";"
@@ -1798,15 +1811,19 @@ func sniffDecrypted(r io.Reader) (io.Reader, bool) {
 	// Count unique byte values and zero bytes.
 	// Encrypted data: ~200+ unique bytes in 512 samples, few zeros.
 	// Valid plaintext: 30-120 unique bytes, many zero bytes (headers, structures).
-	seen := make(map[byte]bool, 256)
+	// Use fixed array instead of map for zero-GC stack allocation.
+	var seen [256]bool
 	zeros := 0
+	unique := 0
 	for _, b := range sample {
-		seen[b] = true
+		if !seen[b] {
+			seen[b] = true
+			unique++
+		}
 		if b == 0 {
 			zeros++
 		}
 	}
-	unique := len(seen)
 
 	// Heuristic: encrypted data has high entropy (high unique ratio, few zeros).
 	// Valid decrypted data has lower entropy (fewer unique bytes, more zeros).

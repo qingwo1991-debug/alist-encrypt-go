@@ -70,7 +70,7 @@ func (s *Store) ListStrategies(ctx context.Context) ([]StrategyRecord, error) {
 	if s == nil {
 		return nil, nil
 	}
-	query := "SELECT key_hash, provider_host, original_path, preferred_strategy, failures_json, success_streak, total_failures, total_successes, cooldown_until, last_downgrade, last_failure, last_strategy, updated_at, last_accessed FROM " + TableName("strategy") + " WHERE is_active=1"
+	query := "SELECT key_hash, provider_host, original_path, preferred_strategy, failures_json, success_streak, total_failures, total_successes, cooldown_until, last_downgrade, last_failure, last_strategy, updated_at, last_accessed FROM " + TableName("strategy") + " WHERE is_active=1 LIMIT 10000"
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err

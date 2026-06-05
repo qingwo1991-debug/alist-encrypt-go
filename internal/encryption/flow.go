@@ -50,6 +50,37 @@ var (
 	passwdOutwardCacheMu sync.RWMutex
 )
 
+// v2KeyCache caches V2 PBKDF2-derived keys (600K iterations) to avoid repeated computation.
+// Key format: "password:encType:hex(nonceField)"
+var (
+	v2KeyCache   = make(map[string]*cacheEntry[[]byte])
+	v2KeyCacheMu sync.RWMutex
+)
+
+// cachedV2Key returns a cached PBKDF2 key for V2 ciphers, computing it only on cache miss.
+func cachedV2Key(password, encType string, nonceField []byte, keyLen int) []byte {
+	cacheKey := password + ":" + encType + ":" + hex.EncodeToString(nonceField)
+
+	v2KeyCacheMu.RLock()
+	if entry, ok := v2KeyCache[cacheKey]; ok && time.Now().Before(entry.expireAt) {
+		v2KeyCacheMu.RUnlock()
+		return entry.value
+	}
+	v2KeyCacheMu.RUnlock()
+
+	key := pbkdf2.Key([]byte(password), []byte(encType), pbkdf2IterationsModern, keyLen, sha256.New)
+	result := append([]byte(nil), key...)
+
+	v2KeyCacheMu.Lock()
+	v2KeyCache[cacheKey] = &cacheEntry[[]byte]{
+		value:    result,
+		expireAt: time.Now().Add(cacheEntryTTL),
+	}
+	v2KeyCacheMu.Unlock()
+
+	return result
+}
+
 // mixBase64Cache caches MixBase64 instances to avoid repeated KSA computation
 // Key format: passwdOutward string
 var (

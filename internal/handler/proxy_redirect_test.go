@@ -59,6 +59,25 @@ func TestRegisterRedirectStoresDisplayPathAndCompatKey(t *testing.T) {
 
 func TestHandleRedirectDecryptsUsingUnifiedPlaybackFlow(t *testing.T) {
 	cfg := config.DefaultConfig()
+
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		EncName:  true,
+		Enable:   true,
+		EncPath:  []string{"/enc/*"},
+	}
+	cfg.AlistServer.PasswdList = []config.PasswdInfo{*passwd}
+
+	// Also update the global config so the PasswdDAO (which uses config.Get())
+	// can look up the password during HandleRedirect.
+	globalCfg := config.Get()
+	origPasswdList := globalCfg.AlistServer.PasswdList
+	globalCfg.AlistServer.PasswdList = []config.PasswdInfo{*passwd}
+	t.Cleanup(func() {
+		globalCfg.AlistServer.PasswdList = origPasswdList
+	})
+
 	handler := newTestProxyHandler(t, cfg)
 
 	fileSize := int64(4096)
@@ -98,13 +117,6 @@ func TestHandleRedirectDecryptsUsingUnifiedPlaybackFlow(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	passwd := &config.PasswdInfo{
-		Password: "123456",
-		EncType:  "aesctr",
-		EncName:  true,
-		Enable:   true,
-		EncPath:  []string{"/enc/*"},
-	}
 	key := handler.RegisterRedirect(upstream.URL, fileSize, passwd, "/enc/demo.mp4")
 
 	req := httptest.NewRequest(http.MethodGet, "/redirect/"+key+"?decode=1", nil)

@@ -19,6 +19,20 @@ import (
 
 // 流式传输优化常量
 
+// ProxyServer is the main mobile proxy server.
+//
+// Lock ordering convention (acquire in this order to prevent deadlocks):
+//   1. mutex (general state)
+//   2. sizeMapMu
+//   3. rangeCompatMu
+//   4. rangeProbeMu
+//   5. upstreamMu
+//   6. routingMu
+//   7. webdavNegativeMu
+//   8. uploadMetaMu
+//   9. dbExportTokenMu
+// Never hold two locks simultaneously unless following this order.
+
 // ProxyServer 加密代理服务器
 type ProxyServer struct {
 	config              *ProxyConfig
@@ -78,24 +92,32 @@ type ProxyServer struct {
 	strategySelector    *StrategySelector
 	uploadMetaMu        sync.Mutex
 	uploadMeta          map[string]uploadMetaEntry
+	// DB export sync JWT token cache: reused across sync cycles to avoid
+	// redundant login calls. Invalidated on 401 errors.
+	dbExportTokenMu     sync.Mutex
+	dbExportToken       string
+	dbExportTokenExpiry time.Time
+	runtimeCachesOnce   sync.Once
 }
 
-func (p *ProxyServer) ensureRuntimeCaches() {
-	if p == nil {
+func (s *ProxyServer) ensureRuntimeCaches() {
+	if s == nil {
 		return
 	}
-	if p.fileCache == nil {
-		p.fileCache = newShardedAnyMap(cacheShardCount)
-	}
-	if p.redirectCache == nil {
-		p.redirectCache = newShardedAnyMap(cacheShardCount)
-	}
-	if p.prefetchRecent == nil {
-		p.prefetchRecent = newShardedAnyMap(cacheShardCount)
-	}
-	if p.webdavNegativeCache == nil {
-		p.webdavNegativeCache = make(map[string]time.Time)
-	}
+	s.runtimeCachesOnce.Do(func() {
+		if s.fileCache == nil {
+			s.fileCache = newShardedAnyMap(cacheShardCount)
+		}
+		if s.redirectCache == nil {
+			s.redirectCache = newShardedAnyMap(cacheShardCount)
+		}
+		if s.prefetchRecent == nil {
+			s.prefetchRecent = newShardedAnyMap(cacheShardCount)
+		}
+		if s.webdavNegativeCache == nil {
+			s.webdavNegativeCache = make(map[string]time.Time)
+		}
+	})
 }
 
 // NewProxyServer 创建代理服务器

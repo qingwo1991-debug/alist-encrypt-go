@@ -37,13 +37,14 @@ func (b *strategyBuffer) upsert(record StrategyRecord) {
 
 func (b *strategyBuffer) drain() []StrategyRecord {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	old := b.items
+	b.items = make(map[string]StrategyRecord)
+	b.mu.Unlock()
 
-	out := make([]StrategyRecord, 0, len(b.items))
-	for _, value := range b.items {
+	out := make([]StrategyRecord, 0, len(old))
+	for _, value := range old {
 		out = append(out, value)
 	}
-	b.items = make(map[string]StrategyRecord)
 	return out
 }
 
@@ -55,13 +56,14 @@ func (b *fileMetaBuffer) upsert(record FileMetaRecord) {
 
 func (b *fileMetaBuffer) drain() []FileMetaRecord {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	old := b.items
+	b.items = make(map[string]FileMetaRecord)
+	b.mu.Unlock()
 
-	out := make([]FileMetaRecord, 0, len(b.items))
-	for _, value := range b.items {
+	out := make([]FileMetaRecord, 0, len(old))
+	for _, value := range old {
 		out = append(out, value)
 	}
-	b.items = make(map[string]FileMetaRecord)
 	return out
 }
 
@@ -73,12 +75,52 @@ func (b *rangeCompatBuffer) upsert(record RangeCompatRecord) {
 
 func (b *rangeCompatBuffer) drain() []RangeCompatRecord {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	old := b.items
+	b.items = make(map[string]RangeCompatRecord)
+	b.mu.Unlock()
 
-	out := make([]RangeCompatRecord, 0, len(b.items))
-	for _, value := range b.items {
+	out := make([]RangeCompatRecord, 0, len(old))
+	for _, value := range old {
 		out = append(out, value)
 	}
-	b.items = make(map[string]RangeCompatRecord)
 	return out
+}
+
+// reEnqueue puts records back into the buffer after a failed flush.
+// Caps the buffer at 10000 records to prevent unbounded growth.
+func (b *strategyBuffer) reEnqueue(records []StrategyRecord) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, r := range records {
+		if len(b.items) >= 10000 {
+			break
+		}
+		b.items[r.KeyHash] = r
+	}
+}
+
+// reEnqueue puts records back into the buffer after a failed flush.
+// Caps the buffer at 10000 records to prevent unbounded growth.
+func (b *fileMetaBuffer) reEnqueue(records []FileMetaRecord) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, r := range records {
+		if len(b.items) >= 10000 {
+			break
+		}
+		b.items[r.KeyHash] = r
+	}
+}
+
+// reEnqueue puts records back into the buffer after a failed flush.
+// Caps the buffer at 10000 records to prevent unbounded growth.
+func (b *rangeCompatBuffer) reEnqueue(records []RangeCompatRecord) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, r := range records {
+		if len(b.items) >= 10000 {
+			break
+		}
+		b.items[r.KeyHash] = r
+	}
 }
