@@ -765,7 +765,30 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 				ciphertextSize := int64(size)
 				meta := LegacyContentMeta(EncryptionType(encPath.EncType), ciphertextSize)
 				if rawURL != "" {
-					meta = p.inspectEncryptedContentWithFallback(ctx, rawURL, r.Header, encPath, ciphertextSize, filePath)
+					// Check file cache before probing upstream
+					cachedMetaFound := false
+					for _, cacheKey := range []string{originalPath, filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
+						if cacheKey == "" {
+							continue
+						}
+						if cached, ok := p.loadFileCache(cacheKey); ok && cached != nil && cached.ContentVersion > 0 {
+							if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
+								meta = ContentMeta{
+									EncType:        EncryptionType(encPath.EncType),
+									Version:        ContentVersionV2,
+									HeaderLen:      cached.HeaderLen,
+									PlainSize:      cached.Size,
+									CiphertextSize: cached.CiphertextSize,
+									NonceField:     cloneNonceField(cached.NonceField),
+								}
+							}
+							cachedMetaFound = true
+							break
+						}
+					}
+					if !cachedMetaFound {
+						meta = p.inspectEncryptedContentWithFallback(ctx, rawURL, r.Header, encPath, ciphertextSize, filePath)
+					}
 					if meta.IsV2() && meta.PlainSize > 0 {
 						size = float64(meta.PlainSize)
 						data["size"] = size
