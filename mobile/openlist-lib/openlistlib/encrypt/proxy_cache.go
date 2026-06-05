@@ -117,19 +117,19 @@ func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 		if info.Name == "" {
 			info.Name = existing.Name
 		}
-		if info.Size <= 0 {
+		if info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2) {
 			info.Size = existing.Size
 		}
-		if info.CiphertextSize <= 0 {
+		if info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
 			info.CiphertextSize = existing.CiphertextSize
 		}
-		if info.ContentVersion <= 0 {
+		if info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
 			info.ContentVersion = existing.ContentVersion
 		}
-		if info.HeaderLen <= 0 {
+		if info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
 			info.HeaderLen = existing.HeaderLen
 		}
-		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
+		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
 			info.NonceField = cloneNonceField(existing.NonceField)
 		}
 		if !info.IsDir && existing.IsDir {

@@ -155,10 +155,17 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 		if req == nil || req.URL == nil {
 			return nil, nil
 		}
+		if config == nil {
+			return envProxyFunc(req)
+		}
 		mode := normalizeRoutingMode(config.RoutingMode)
 		host := req.URL.Hostname()
 		provider := req.Header.Get("X-Encrypt-Provider")
 		driver := req.Header.Get("X-Encrypt-Driver")
+
+		if config.EnableLocalBypass && isLocalOrPrivateHost(host) {
+			return nil, nil
+		}
 
 		if mode != routingModeOff {
 			if action, ok := matchRoutingRules(config, provider, driver); ok {
@@ -178,9 +185,6 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 			}
 		}
 
-		if config != nil && config.EnableLocalBypass && isLocalOrPrivateHost(host) {
-			return nil, nil
-		}
 		return envProxyFunc(req)
 	}
 }

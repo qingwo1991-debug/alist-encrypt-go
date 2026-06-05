@@ -125,6 +125,24 @@ func TestProxyResolverRespectsLocalBypass(t *testing.T) {
 	}
 }
 
+func TestProxyResolverLocalBypassWinsOverProxyDefault(t *testing.T) {
+	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:5244/ping", nil)
+	req.Header.Set("X-Encrypt-Provider", "onedrive")
+	resolver := newProxyResolver(&ProxyConfig{
+		EnableLocalBypass:       true,
+		RoutingMode:             routingModeByProvider,
+		RoutingUnmatchedDefault: routingActionProxy,
+	})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
+	if proxyURL != nil {
+		t.Fatalf("expected direct connection for local host even when provider/default wants proxy")
+	}
+}
+
 func TestProxyResolverUnmatchedDefaultDirect(t *testing.T) {
 	t.Setenv("http_proxy", "http://127.0.0.1:9999")
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)

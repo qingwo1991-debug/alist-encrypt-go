@@ -517,18 +517,18 @@ const (
 
 // RedirectInfo 重定向信息，用于缓存和代理重定向
 type RedirectInfo struct {
-	RedirectURL string       `json:"redirectUrl"` // 实际重定向目标
-	PasswdInfo  *EncryptPath `json:"passwdInfo"`  // 加密配置
-	FileSize    int64        `json:"fileSize"`    // 文件大小
-	CiphertextSize int64     `json:"ciphertextSize,omitempty"`
-	ContentVersion int       `json:"contentVersion,omitempty"`
-	HeaderLen      int64     `json:"headerLen,omitempty"`
-	NonceField     []byte    `json:"nonceField,omitempty"`
-	OriginalURL string       `json:"originalUrl"` // 原始请求URL
-	EncryptedPath string     `json:"encryptedPath,omitempty"`
-	Headers     http.Header  `json:"headers"`     // 原始请求头
-	Provider    string       `json:"provider,omitempty"`
-	Driver      string       `json:"driver,omitempty"`
+	RedirectURL    string       `json:"redirectUrl"` // 实际重定向目标
+	PasswdInfo     *EncryptPath `json:"passwdInfo"`  // 加密配置
+	FileSize       int64        `json:"fileSize"`    // 文件大小
+	CiphertextSize int64        `json:"ciphertextSize,omitempty"`
+	ContentVersion int          `json:"contentVersion,omitempty"`
+	HeaderLen      int64        `json:"headerLen,omitempty"`
+	NonceField     []byte       `json:"nonceField,omitempty"`
+	OriginalURL    string       `json:"originalUrl"` // 原始请求URL
+	EncryptedPath  string       `json:"encryptedPath,omitempty"`
+	Headers        http.Header  `json:"headers"` // 原始请求头
+	Provider       string       `json:"provider,omitempty"`
+	Driver         string       `json:"driver,omitempty"`
 }
 
 // SizeMapEntry represents a persistent file size mapping
@@ -4436,23 +4436,23 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				Headers:       r.Header.Clone(),
 				Driver:        driver,
 			}
-			// Pre-populate V2 metadata from file cache so ServeRedirect can skip re-probing
-			for _, cacheKey := range []string{filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
+			// Pre-populate trusted V2 metadata from file cache so ServeRedirect can skip re-probing.
+			for _, cacheKey := range appendUniquePathVariant(nil, filePath) {
 				if cacheKey == "" {
 					continue
 				}
-				if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
-					redirectInfo.ContentVersion = cached.ContentVersion
-					redirectInfo.HeaderLen = cached.HeaderLen
-					redirectInfo.NonceField = cloneNonceField(cached.NonceField)
-					if cached.CiphertextSize > 0 {
-						redirectInfo.CiphertextSize = cached.CiphertextSize
-					} else if cached.ContentVersion == ContentVersionV2 {
-						// Older cache entries may not store CiphertextSize; derive from FileSize
-						redirectInfo.CiphertextSize = fileSize
+				if cached, ok := p.loadFileCache(cacheKey); ok {
+					if cachedMeta, ok := fileInfoContentMeta(cached, encPath.EncType); ok {
+						redirectInfo.ContentVersion = ContentVersionV2
+						redirectInfo.HeaderLen = cachedMeta.HeaderLen
+						redirectInfo.NonceField = cloneNonceField(cachedMeta.NonceField)
+						redirectInfo.CiphertextSize = cachedMeta.CiphertextSize
+						if cachedMeta.PlainSize > 0 {
+							redirectInfo.FileSize = cachedMeta.PlainSize
+						}
+						log.Infof("WebDAV redirect: pre-populated V2 meta from cache: key=%s version=%d cipherSize=%d plainSize=%d", cacheKey, cached.ContentVersion, redirectInfo.CiphertextSize, cachedMeta.PlainSize)
+						break
 					}
-					log.Infof("WebDAV redirect: pre-populated V2 meta from cache: key=%s version=%d cipherSize=%d plainSize=%d", cacheKey, cached.ContentVersion, redirectInfo.CiphertextSize, cached.Size)
-					break
 				}
 			}
 			p.storeRedirectCache(redirectKey, redirectInfo)
