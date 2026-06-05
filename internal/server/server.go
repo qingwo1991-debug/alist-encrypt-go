@@ -205,12 +205,12 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		}
 	}
 
-	// /redirect/:key - 302 redirect decryption (auth required to prevent unauthorized access)
-	redirectGroup := r.Group("/redirect")
-	redirectGroup.Use(AuthMiddleware(s.cfg.JWTSecret))
-	{
-		redirectGroup.Any("/:key", ginWrap(proxyHandler.HandleRedirect))
-	}
+	// /redirect/:key - 302 redirect decryption
+	// No JWT auth required: the redirect key is an MD5 hash of url:size:nanosecond,
+	// effectively a 128-bit unpredictable token with 72h expiry. Browser video
+	// players (Artplayer etc.) cannot include JWT headers when fetching media,
+	// so requiring auth here would block all playback in web UI.
+	r.Any("/redirect/:key", ginWrap(proxyHandler.HandleRedirect))
 
 	// /dav/* - WebDAV proxy (supports all WebDAV methods: PROPFIND, MKCOL, etc.)
 	davGroup := r.Group("/dav")

@@ -345,7 +345,13 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil && (!meta.IsV2() || len(meta.NonceField) != 16) {
-		meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, info.EncryptedPath)
+		encProbePath := info.EncryptedPath
+		if strings.HasPrefix(encProbePath, "/dav") {
+			encProbePath = strings.TrimPrefix(encProbePath, "/dav")
+		} else if strings.HasPrefix(encProbePath, "/d") {
+			encProbePath = strings.TrimPrefix(encProbePath, "/d")
+		}
+		meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, encProbePath)
 		if meta.IsV2() {
 			if meta.PlainSize > 0 {
 				fileSize = meta.PlainSize
