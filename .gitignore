@@ -30,6 +30,10 @@ data/
 config.json
 *.db
 
+# Log files
+log_*.txt
+openlist_logs_*.txt
+
 # OS files
 .DS_Store
 Thumbs.db
