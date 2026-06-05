@@ -70,6 +70,7 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	}
 	meta := LegacyContentMeta(encType, ciphertextSize)
 	if p == nil || encPath == nil || !encPath.Enable || strings.TrimSpace(target) == "" {
+		log.Infof("[v2-inspect] skipped: p=%v encPath=%v enable=%v target=%q", p != nil, encPath != nil, encPath != nil && encPath.Enable, target)
 		return meta
 	}
 	if ctx == nil {
@@ -77,6 +78,7 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
+		log.Infof("[v2-inspect] request creation failed: err=%v", err)
 		return meta
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", ContentHeaderSize()-1))
@@ -92,14 +94,17 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	}
 	resp, err := p.streamClient.Do(req)
 	if err != nil {
+		log.Infof("[v2-inspect] upstream request failed: target=%.120s err=%v", target, err)
 		return meta
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= http.StatusBadRequest {
+		log.Infof("[v2-inspect] upstream returned error status: target=%.120s status=%d", target, resp.StatusCode)
 		return meta
 	}
 	prefix, err := io.ReadAll(io.LimitReader(resp.Body, ContentHeaderSize()))
 	if err != nil {
+		log.Infof("[v2-inspect] failed to read prefix bytes: target=%.120s err=%v", target, err)
 		return meta
 	}
 	if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
@@ -110,6 +115,9 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 		log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
 			target, parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
 		return parsed
+	} else {
+		log.Infof("[v2-inspect] header not detected: target=%.120s encType=%q prefixLen=%d status=%d contentRange=%q ok=%v parseErr=%v first6=%x",
+			target, encType, len(prefix), resp.StatusCode, resp.Header.Get("Content-Range"), ok, err, prefix[:min(len(prefix), 6)])
 	}
 	return meta
 }
