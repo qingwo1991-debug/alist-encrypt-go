@@ -14,7 +14,7 @@
 
 Alist-Encrypt-Go 是一个位于客户端与 [Alist](https://github.com/alist-org/alist) 之间的**透明加密代理**，实时对文件内容和文件名进行加解密，同时完整保留视频拖拽、WebDAV、Range 请求等能力。
 
-除独立后端外，本项目还基于 [OpenList](https://github.com/OpenListTeam/OpenList) 构建了**Android APK**，将加密代理直接集成到手机文件管理器 App 中。
+除独立后端外，本项目还基于 [OpenList](https://github.com/OpenListTeam/OpenList) 构建了**Android APK**，将加密代理直接集成到手机文件管理器 App 中。当前实现重点放在首帧、拖动和弱网体验上，包含响应式 Range、解密块缓存、连接复用和后台学习缓存。
 
 ## 快速开始
 
@@ -72,6 +72,8 @@ docker run -d \
 ```
 
 > 务必挂载 `conf` 和 `data` 目录，否则重启后配置和用户数据将丢失。
+>
+> 当前镜像默认以容器内 root 用户运行，以兼容已有宿主机 bind mount 权限。如果你手动改成非 root 运行，请先确保 `conf` 和 `data` 目录对容器用户可写。
 
 ## 功能特性
 
@@ -80,7 +82,7 @@ docker run -d \
 | **加密** | AES-128-CTR、ChaCha20、RC4-MD5 文件内容加密；MixBase64 + CRC6 文件名加密 |
 | **流媒体** | 加密文件 Range Seek — 视频拖拽进度不受影响 |
 | **WebDAV** | 完整 WebDAV 加密代理 |
-| **性能** | 连接池复用、PBKDF2/MixBase64 缓存、512KB 流缓冲、后台探测调度 |
+| **性能** | 连接池复用、PBKDF2/MixBase64 缓存、解密块缓存、512KB 流缓冲、后台探测调度 |
 | **HTTP/2** | 原生 h2c 和 HTTPS 支持，管理界面热切换 |
 | **代理分流** | 按域名分流（`direct` / `env` / `fixed` / `rules`），内置网盘域名字典 |
 | **智能学习** | 自动探测各存储的 Range 兼容性并缓存，支持并发控制和冷却时间 |
@@ -194,6 +196,9 @@ go build -o alist-encrypt-go ./cmd/server
 | `PLAY_FIRST_FALLBACK` | Range 失败时回退全量播放 | `false` |
 | `SIZE_UNKNOWN_STRICT` | 未知大小时严格处理 | `true` |
 | `CHUNKED_SEEK_MAX_DISCARD_BYTES` | 分块 Seek 最大丢弃字节数 | `8388608` |
+| `DECRYPTED_BLOCK_CACHE_ENABLE` | 启用解密块缓存 | `true` |
+| `DECRYPTED_BLOCK_CACHE_MB` | 解密块缓存大小（MB） | `128` |
+| `DECRYPTED_BLOCK_SIZE_KB` | 解密块粒度（KB） | `256` |
 
 ### 数据库
 
@@ -219,6 +224,12 @@ go build -o alist-encrypt-go ./cmd/server
 - **文件迁移** — 文件夹转换与文件迁移
 
 > 仅独立后端构建提供内嵌管理页。Android APK 和 `noembedwebui` 构建的 `/index` 返回 404，配置由原生 App 提供。
+
+## Mobile 说明
+
+- Android APK 版会把加密代理直接打进 App，后台同步和目录学习都尽量走缓存和异步路径，不阻塞启动端口绑定。
+- 本地 `local_media.db` 备份是异步执行的，只保留最近 2 份，避免启动时被大文件复制拖慢。
+- DB_EXPORT 同步会复用登录 token，只有 token 失效或收到 401 时才重新登录。
 
 ## 致谢
 

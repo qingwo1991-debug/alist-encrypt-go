@@ -668,14 +668,36 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                   children: [
                     // 代理状态卡片
                     Card(
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        side: BorderSide(
+                          color: _proxyRunning
+                              ? Colors.green.withOpacity(0.3)
+                              : Theme.of(context).dividerColor.withOpacity(0.3),
+                        ),
+                      ),
+                      color: _proxyRunning
+                          ? Colors.green.withOpacity(0.06)
+                          : null,
                       child: Padding(
-                        padding: const EdgeInsets.all(16),
+                        padding: const EdgeInsets.all(20),
                         child: Row(
                           children: [
-                            Icon(
-                              _proxyRunning ? Icons.check_circle : Icons.cancel,
-                              color: _proxyRunning ? Colors.green : Colors.grey,
-                              size: 48,
+                            Container(
+                              width: 56,
+                              height: 56,
+                              decoration: BoxDecoration(
+                                color: _proxyRunning
+                                    ? Colors.green.withOpacity(0.12)
+                                    : Colors.grey.withOpacity(0.12),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(
+                                _proxyRunning ? Icons.check_circle : Icons.cancel,
+                                color: _proxyRunning ? Colors.green : Colors.grey,
+                                size: 32,
+                              ),
                             ),
                             const SizedBox(width: 16),
                             Expanded(
@@ -684,18 +706,31 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                 children: [
                                   Text(
                                     _proxyRunning ? '代理运行中' : '代理已停止',
-                                    style: Theme.of(context).textTheme.titleLarge,
+                                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
                                   if (_proxyRunning)
-                                    Text(
-                                      '访问地址: http://127.0.0.1:${_proxyPortController.text}',
-                                      style: Theme.of(context).textTheme.bodySmall,
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        'http://127.0.0.1:${_proxyPortController.text}',
+                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                          color: Theme.of(context).hintColor,
+                                          fontFamily: 'monospace',
+                                        ),
+                                      ),
                                     ),
                                 ],
                               ),
                             ),
                             FilledButton.tonal(
                               onPressed: _toggleProxy,
+                              style: FilledButton.styleFrom(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
                               child: Text(_proxyRunning ? '停止' : '启动'),
                             ),
                           ],
