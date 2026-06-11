@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -50,25 +51,21 @@ func LoggerMiddleware() gin.HandlerFunc {
 // CORSMiddleware handles CORS headers
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Use Origin header to allow specific origins for authenticated endpoints
 		origin := c.GetHeader("Origin")
-		if origin != "" {
-			// For /enc-api/* routes, reflect the origin (effectively allowing the requesting origin)
-			// This is more restrictive than "*" because it doesn't allow credential sharing across origins
-			if strings.HasPrefix(c.Request.URL.Path, "/enc-api") {
+		isEncAPI := strings.HasPrefix(c.Request.URL.Path, "/enc-api")
+		if isEncAPI {
+			if origin != "" && isSameOriginHost(origin, c.Request.Host) {
 				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Credentials", "true")
 				c.Header("Vary", "Origin")
-			} else {
-				// Public routes (WebDAV, downloads) can use wildcard
-				c.Header("Access-Control-Allow-Origin", "*")
 			}
-		} else {
+		} else if origin != "" {
+			// Public routes (WebDAV, downloads) can use wildcard and do not need credentials.
 			c.Header("Access-Control-Allow-Origin", "*")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK")
 		c.Header("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token, Depth, Destination, Overwrite, File-Path, Authorizetoken, AUTHORIZETOKEN")
 		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition")
-		c.Header("Access-Control-Allow-Credentials", "true")
 
 		if c.Request.Method == "OPTIONS" && !strings.HasPrefix(c.Request.URL.Path, "/dav") {
 			c.AbortWithStatus(http.StatusOK)
@@ -77,6 +74,18 @@ func CORSMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func isSameOriginHost(origin, requestHost string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return normalizeOriginHost(u.Host) == normalizeOriginHost(requestHost)
+}
+
+func normalizeOriginHost(hostport string) string {
+	return strings.Trim(strings.ToLower(strings.TrimSpace(hostport)), "[]")
 }
 
 // ForceHTTPSMiddleware redirects HTTP to HTTPS
@@ -97,8 +106,11 @@ func ForceHTTPSMiddleware(httpsPort int) gin.HandlerFunc {
 }
 
 // AuthMiddleware validates JWT tokens
-func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
-	jwtAuth := auth.NewJWTAuth(jwtSecret, 24*time.Hour)
+func AuthMiddleware(jwtSecret string, expireHours int) gin.HandlerFunc {
+	if expireHours <= 0 {
+		expireHours = 48
+	}
+	jwtAuth := auth.NewJWTAuth(jwtSecret, time.Duration(expireHours)*time.Hour)
 
 	extractToken := func(c *gin.Context) string {
 		if token := strings.TrimSpace(c.GetHeader("Authorizetoken")); token != "" {
@@ -135,8 +147,8 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 			return
 		}
 
-		// Store token in context for handlers
-		c.Request.Header.Set("X-User-Token", token)
+		// Store token in Gin context without mutating request headers that may be proxied upstream.
+		c.Set("user_token", token)
 		c.Next()
 	}
 }

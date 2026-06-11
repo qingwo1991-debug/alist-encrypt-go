@@ -123,7 +123,8 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"dbExportSyncIntervalSeconds":     cfg.DBExportSyncIntervalSeconds,
 		"dbExportAuthEnabled":             cfg.DBExportAuthEnabled,
 		"dbExportUsername":                cfg.DBExportUsername,
-		"dbExportPassword":                cfg.DBExportPassword,
+		"dbExportPassword":                "",
+		"dbExportPasswordSet":             strings.TrimSpace(cfg.DBExportPassword) != "",
 		"enableSizeMap":                   cfg.EnableSizeMap,
 		"sizeMapTtlMinutes":               cfg.SizeMapTTL,
 		"streamEngineVersion":             cfg.StreamEngineVersion,
@@ -288,7 +289,9 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 		p.config.DBExportUsername = strings.TrimSpace(v)
 	}
 	if v, ok := body["dbExportPassword"].(string); ok {
-		p.config.DBExportPassword = v
+		if strings.TrimSpace(v) != "" {
+			p.config.DBExportPassword = v
+		}
 	}
 	if v, ok := body["enableSizeMap"].(bool); ok {
 		p.config.EnableSizeMap = v

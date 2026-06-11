@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/encrypt"
@@ -503,6 +504,7 @@ func GetEncryptConfigJson() string {
 		DbExportAuthEnabled      bool       `json:"dbExportAuthEnabled"`
 		DbExportUsername         string     `json:"dbExportUsername"`
 		DbExportPassword         string     `json:"dbExportPassword"`
+		DbExportPasswordSet      bool       `json:"dbExportPasswordSet"`
 		PlayFirstFallback        bool       `json:"playFirstFallback"`
 		EnableRangeCompatCache   bool       `json:"enableRangeCompatCache"`
 		RangeCompatTtlMinutes    int        `json:"rangeCompatTtlMinutes"`
@@ -542,7 +544,8 @@ func GetEncryptConfigJson() string {
 		DbExportSyncIntervalSecs: config.DBExportSyncIntervalSeconds,
 		DbExportAuthEnabled:      config.DBExportAuthEnabled,
 		DbExportUsername:         config.DBExportUsername,
-		DbExportPassword:         config.DBExportPassword,
+		DbExportPassword:         "",
+		DbExportPasswordSet:      strings.TrimSpace(config.DBExportPassword) != "",
 		PlayFirstFallback:        config.PlayFirstFallback,
 		EnableRangeCompatCache:   config.EnableRangeCompatCache,
 		RangeCompatTtlMinutes:    config.RangeCompatTTL,

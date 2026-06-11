@@ -142,6 +142,14 @@ func (h *WebDAVHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
 }
 
+// Stop terminates background maintenance goroutines owned by the WebDAV handler.
+func (h *WebDAVHandler) Stop() {
+	if h == nil || h.proxyHandler == nil {
+		return
+	}
+	h.proxyHandler.Stop()
+}
+
 // getStdClient returns the shared standard-timeout HTTP client,
 // lazily creating one if the handler was constructed without NewWebDAVHandler.
 func (h *WebDAVHandler) getStdClient() *http.Client {

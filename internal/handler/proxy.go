@@ -51,6 +51,8 @@ type ProxyHandler struct {
 	prefetchSkipped       uint64
 	prefetchStaleTriggers uint64
 	prefetchLastAt        int64 // Unix nano
+	stopCleanup           chan struct{}
+	stopCleanupOnce       sync.Once
 }
 
 const maxRedirectEntries = 10000
@@ -137,6 +139,7 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		strategyCache: NewStrategyCache(1000),
 		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		strategySel:   selector,
+		stopCleanup:   make(chan struct{}),
 	}
 	if h.streamProxy != nil {
 		h.streamProxy.SetRedirectRewriter(h.rewriteRedirectLocation)
@@ -145,25 +148,41 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 	return h
 }
 
+// Stop terminates background maintenance goroutines owned by the proxy handler.
+func (h *ProxyHandler) Stop() {
+	if h == nil {
+		return
+	}
+	h.stopCleanupOnce.Do(func() {
+		close(h.stopCleanup)
+	})
+}
+
 func (h *ProxyHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
 }
 
 func (h *ProxyHandler) cleanupRedirects() {
 	ticker := time.NewTicker(5 * time.Minute)
-	for range ticker.C {
-		now := time.Now()
-		h.redirectMap.Range(func(key, value interface{}) bool {
-			info := value.(*redirectInfo)
-			if now.After(info.ExpiresAt) {
-				h.redirectMap.Delete(key)
-			}
-			return true
-		})
+	defer ticker.Stop()
+	for {
+		select {
+		case <-h.stopCleanup:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			h.redirectMap.Range(func(key, value interface{}) bool {
+				info := value.(*redirectInfo)
+				if now.After(info.ExpiresAt) {
+					h.redirectMap.Delete(key)
+				}
+				return true
+			})
 
-		// Cleanup redirectKeys slice to prevent memory leak
-		// Remove entries that no longer exist in the map
-		h.cleanupRedirectKeys()
+			// Cleanup redirectKeys slice to prevent memory leak
+			// Remove entries that no longer exist in the map
+			h.cleanupRedirectKeys()
+		}
 	}
 }
 
@@ -786,7 +805,7 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if shouldRewriteTextResponse(contentType) {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedBody(resp, maxProxyResponseBody)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to read textual proxy response body")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)

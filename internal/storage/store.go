@@ -25,6 +25,11 @@ type Store struct {
 	path string
 }
 
+// BucketTx exposes scoped operations within a single BoltDB write transaction.
+type BucketTx struct {
+	b *bolt.Bucket
+}
+
 // NewStore creates a new BoltDB store
 func NewStore(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -105,6 +110,40 @@ func (s *Store) Delete(bucket []byte, key string) error {
 		}
 		return b.Delete([]byte(key))
 	})
+}
+
+// UpdateBucket runs multiple operations against one bucket in a single write transaction.
+func (s *Store) UpdateBucket(bucket []byte, fn func(*BucketTx) error) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return fmt.Errorf("bucket not found: %s", bucket)
+		}
+		return fn(&BucketTx{b: b})
+	})
+}
+
+// GetJSON retrieves and unmarshals a JSON value within the transaction.
+func (tx *BucketTx) GetJSON(key string, v interface{}) error {
+	raw := tx.b.Get([]byte(key))
+	if raw == nil {
+		return nil
+	}
+	return json.Unmarshal(raw, v)
+}
+
+// SetJSON marshals and stores a JSON value within the transaction.
+func (tx *BucketTx) SetJSON(key string, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return tx.b.Put([]byte(key), data)
+}
+
+// Delete removes a key within the transaction.
+func (tx *BucketTx) Delete(key string) error {
+	return tx.b.Delete([]byte(key))
 }
 
 // GetAll retrieves all key-value pairs from a bucket

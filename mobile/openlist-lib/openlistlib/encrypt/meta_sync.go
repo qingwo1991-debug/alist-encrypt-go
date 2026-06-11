@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -266,7 +265,7 @@ func (p *ProxyServer) dbExportLogin(ctx context.Context, cfg dbExportSyncConfig)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return "", err
 	}
@@ -365,7 +364,7 @@ func (p *ProxyServer) fetchDBExportPage(
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +424,7 @@ func (p *ProxyServer) fetchDBExportGenericPage(
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return nil, err
 	}

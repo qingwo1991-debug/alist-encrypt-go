@@ -166,6 +166,36 @@ func (d *UserDAO) UpdatePassword(username, newPassword string) error {
 	return d.store.SetJSON(storage.BucketUsers, username, user)
 }
 
+// Rename atomically renames a user after validating the current password.
+func (d *UserDAO) Rename(username, password, newUsername string) error {
+	return d.store.UpdateBucket(storage.BucketUsers, func(tx *storage.BucketTx) error {
+		var user User
+		if err := tx.GetJSON(username, &user); err != nil {
+			return err
+		}
+		if user.Username == "" {
+			return ErrUserNotFound
+		}
+		if !verifyPassword(password, user.PasswordHash) {
+			return ErrInvalidPassword
+		}
+
+		var existing User
+		if err := tx.GetJSON(newUsername, &existing); err != nil {
+			return err
+		}
+		if existing.Username != "" {
+			return ErrUserExists
+		}
+
+		user.Username = newUsername
+		if err := tx.SetJSON(newUsername, user); err != nil {
+			return err
+		}
+		return tx.Delete(username)
+	})
+}
+
 // Delete deletes a user
 func (d *UserDAO) Delete(username string) error {
 	return d.store.Delete(storage.BucketUsers, username)

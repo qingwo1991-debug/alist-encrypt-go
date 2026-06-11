@@ -130,6 +130,9 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		EnableParallelDecrypt:       getBoolField(raw, "enableParallelDecrypt"),
 		ParallelDecryptConcurrency:  getIntField(raw, "parallelDecryptConcurrency"),
 		StreamBufferKb:              getIntField(raw, "streamBufferKb"),
+		EnableDecryptedBlockCache:   getBoolFieldWithDefault(raw, "enableDecryptedBlockCache", true),
+		DecryptedBlockCacheMb:       getIntField(raw, "decryptedBlockCacheMb"),
+		DecryptedBlockSizeKb:        getIntField(raw, "decryptedBlockSizeKb"),
 		FollowRedirectForDecrypt:    getBoolField(raw, "followRedirectForDecrypt"),
 		RedirectMaxHops:             getIntField(raw, "redirectMaxHops"),
 		AllowLooseDecode:            getBoolField(raw, "allowLooseDecode"),
@@ -204,6 +207,14 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 	if server.ChunkedSeekMaxDiscardBytes > 1<<30 {
 		server.ChunkedSeekMaxDiscardBytes = 1 << 30
 	}
+	if server.DecryptedBlockCacheMb <= 0 {
+		server.DecryptedBlockCacheMb = 128
+	}
+	server.DecryptedBlockCacheMb = clampInt(server.DecryptedBlockCacheMb, 16, 2048)
+	if server.DecryptedBlockSizeKb <= 0 {
+		server.DecryptedBlockSizeKb = 256
+	}
+	server.DecryptedBlockSizeKb = clampInt(server.DecryptedBlockSizeKb, 32, 4096)
 
 	return server
 }
