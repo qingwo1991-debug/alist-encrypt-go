@@ -43,10 +43,9 @@ COPY --from=builder /alist-encrypt-go .
 # Copy configs (includes config.example.json and proxy_domain_dict.seed.json)
 COPY --from=builder /app/configs/ ./configs/
 
-# Create data and conf directories for persistence
+# Create data and conf directories for persistence. The container intentionally
+# runs as root by default so existing bind mounts owned by root remain writable.
 RUN mkdir -p /app/data /app/conf && chown -R alistenc:alistenc /app
-
-USER alistenc
 
 # Expose port
 EXPOSE 5344
