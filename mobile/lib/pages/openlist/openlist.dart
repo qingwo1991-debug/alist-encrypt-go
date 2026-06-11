@@ -59,7 +59,25 @@ class OpenListScreen extends StatelessWidget {
     return Scaffold(
         appBar: AppBar(
             backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-            title: Obx(() => Text("OpenList - ${ui.openlistVersion.value}")),
+            elevation: 0,
+            scrolledUnderElevation: 2,
+            title: Obx(() => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'OpenList',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                Text(
+                  ui.openlistVersion.value,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onPrimaryContainer.withOpacity(0.7),
+                  ),
+                ),
+              ],
+            )),
             actions: [
               IconButton(
                 tooltip: S.current.setAdminPassword,

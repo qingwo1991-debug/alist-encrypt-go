@@ -1,72 +1,125 @@
 html.dark {
-  .el-card {
-    --el-card-bg-color:  #263445;
-  }
-  /*element-plus section */
-  --el-menu-active-color: #409eff;
-  --el-menu-text-color: #bfcbd9;
-  --el-menu-hover-text-color: var(--el-color-primary);
-  --el-menu-bg-color: #304156;
-  --el-menu-hover-bg-color: #263445;
-  --el-menu-item-height: 56px;
-  --el-menu-border-color: none;
-  /*layout section*/
-  //layout
-  --layout-border-left-color: #ddd;
-  //Breadcrumb
-  --breadcrumb-no-redirect: #97a8be;
-  //Hamburger
-  --hamburger-color: #fff;
-  --hamburger-width: 20px;
-  --hamburger-height: 20px;
-  --el-text-color-primary: #fff;
-  //Sidebar
-  --sidebar-el-icon-size: 20px;
-  --sidebar-logo-background: #2b2f3a;
-  --sidebar-logo-color: #ff9901;
-  --sidebar-logo-width: 32px;
-  --sidebar-logo-height: 32px;
-  --sidebar-logo-title-color: #fff;
-  --side-bar-width: 210px;
-  --side-bar-border-right-color: #2b2f3a;
-  //TagsView
-  --tags-view-background: #304156;
-  --tags-view-border-bottom: #2b2f3a;
-  --tags-view-box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.12), 0 0 3px 0 rgba(0, 0, 0, 0.04);
-  --tags-view-item-background: #fff;
-  --tags-view-item-border-color: #d8dce5;
-  --tags-view-item-color: #495060;
-  --tag-view-height: 32px;
-  --tags-view-item-active-background: #42b983;
-  --tags-view-item-active-color: #fff;
-  --tags-view-item-active-border-color: #42b983;
-  --tags-view-contextmenu-background: #fff;
-  --tags-view-contextmenu-color: #333;
-  --tags-view-contextmenu-box-shadow: 2px 2px 3px 0 rgba(0, 0, 0, 0.3);
-  --tags-view-contextmenu-hover-background: #eee;
-  //close-icon
-  --tags-view-close-icon-hover-background: #b4bccc;
-  --tags-view-close-icon-hover-color: #fff;
-  //AppMain.vue
-  --app-main-padding: 10px;
-  --app-main-background: #304156;
-  //Navbar.vue
-  --nav-bar-height: 50px;
-  --nav-bar-background: #2b2f3a;
-  --nav-bar-box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
-  --nav-bar-right-menu-background: #2b2f3a;
+  color-scheme: dark;
 
-  //transition 动画
-  //侧边栏切换动画时长
-  --sideBar-switch-duration: 0.2s;
-  //logo切换动画时长
-  --logo-switch-duration: 1s;
-  //页面动画时长
+  /* brand */
+  --el-color-primary: #6c8ee6;
+  --el-color-primary-light-3: #86a4ee;
+  --el-color-primary-light-5: #a6bcf3;
+  --el-color-primary-light-7: #cad6f8;
+  --el-color-primary-dark-2: #5577d3;
+  --el-color-success: #5fbf9f;
+  --el-color-warning: #d6a15a;
+  --el-color-danger: #dc758c;
+  --el-color-info: #8691b3;
+
+  /* surfaces */
+  --app-backdrop: #101522;
+  --app-backdrop-secondary: #161d2c;
+  --app-surface: rgba(27, 33, 46, 0.9);
+  --app-surface-strong: #1b212e;
+  --app-surface-soft: rgba(33, 40, 56, 0.82);
+  --app-surface-muted: rgba(18, 24, 36, 0.74);
+  --app-border-color: rgba(157, 173, 213, 0.12);
+  --app-border-strong: rgba(157, 173, 213, 0.2);
+  --app-shadow-lg: 0 18px 40px rgba(7, 12, 27, 0.28);
+  --app-shadow-md: 0 10px 24px rgba(7, 12, 27, 0.2);
+  --app-glow-primary: 0 0 0 1px rgba(108, 142, 230, 0.24), 0 10px 24px rgba(108, 142, 230, 0.16);
+  --app-radius-xl: 20px;
+  --app-radius-lg: 16px;
+  --app-radius-md: 14px;
+  --app-radius-sm: 10px;
+  --app-radius-xs: 8px;
+  --app-gap-lg: 24px;
+  --app-gap-md: 18px;
+  --app-gap-sm: 12px;
+
+  /* typography */
+  --el-text-color-primary: #eef2fb;
+  --el-text-color-regular: #c6cee0;
+  --el-text-color-secondary: #8f99af;
+  --el-text-color-placeholder: #69728a;
+  --el-text-color-disabled: #5a6276;
+  --el-fill-color-blank: transparent;
+  --el-bg-color: transparent;
+  --el-bg-color-page: transparent;
+  --el-bg-color-overlay: rgba(20, 24, 33, 0.96);
+  --el-border-color: rgba(157, 173, 213, 0.12);
+  --el-border-color-light: rgba(157, 173, 213, 0.1);
+  --el-border-color-lighter: rgba(157, 173, 213, 0.08);
+  --el-border-color-extra-light: rgba(157, 173, 213, 0.06);
+  --el-border-color-dark: rgba(157, 173, 213, 0.18);
+  --el-mask-color: rgba(5, 9, 20, 0.55);
+
+  /* element-plus section */
+  --el-card-bg-color: var(--app-surface);
+  --el-menu-active-color: #f6f8ff;
+  --el-menu-text-color: #aeb8cd;
+  --el-menu-hover-text-color: #f6f8ff;
+  --el-menu-bg-color: transparent;
+  --el-menu-hover-bg-color: transparent;
+  --el-menu-item-height: 52px;
+  --el-menu-border-color: transparent;
+  --el-fill-color-light: rgba(255, 255, 255, 0.035);
+  --el-fill-color-lighter: rgba(255, 255, 255, 0.018);
+  --el-fill-color-dark: rgba(10, 14, 28, 0.6);
+  --el-fill-color-darker: rgba(7, 11, 22, 0.8);
+  --el-fill-color-darkest: rgba(4, 7, 15, 0.9);
+  --el-disabled-bg-color: rgba(255, 255, 255, 0.04);
+  --el-disabled-text-color: #7180b2;
+  --el-disabled-border-color: rgba(145, 167, 255, 0.08);
+  --el-input-bg-color: rgba(14, 18, 28, 0.58);
+  --el-input-border-color: rgba(157, 173, 213, 0.14);
+  --el-input-hover-border-color: rgba(108, 142, 230, 0.28);
+  --el-input-focus-border-color: #6c8ee6;
+  --el-fill-color-blank: transparent;
+
+  /* layout */
+  --layout-border-left-color: rgba(145, 167, 255, 0.12);
+  --breadcrumb-no-redirect: #a0acc6;
+  --hamburger-color: #f6f8ff;
+  --hamburger-width: 18px;
+  --hamburger-height: 18px;
+  --sidebar-el-icon-size: 18px;
+  --sidebar-logo-background: transparent;
+  --sidebar-logo-color: #9ab2ed;
+  --sidebar-logo-width: 26px;
+  --sidebar-logo-height: 26px;
+  --sidebar-logo-title-color: #f6f8ff;
+  --side-bar-width: 248px;
+  --side-bar-border-right-color: rgba(145, 167, 255, 0.1);
+
+  /* tags */
+  --tags-view-background: rgba(17, 22, 33, 0.76);
+  --tags-view-border-bottom: rgba(157, 173, 213, 0.06);
+  --tags-view-box-shadow: none;
+  --tags-view-item-background: rgba(255, 255, 255, 0.035);
+  --tags-view-item-border-color: rgba(157, 173, 213, 0.1);
+  --tags-view-item-color: #b7c0d4;
+  --tag-view-height: 48px;
+  --tags-view-item-active-background: rgba(108, 142, 230, 0.16);
+  --tags-view-item-active-color: #eef2fb;
+  --tags-view-item-active-border-color: rgba(108, 142, 230, 0.28);
+  --tags-view-contextmenu-background: rgba(17, 22, 38, 0.98);
+  --tags-view-contextmenu-color: #d7deee;
+  --tags-view-contextmenu-box-shadow: var(--app-shadow-lg);
+  --tags-view-contextmenu-hover-background: rgba(91, 140, 255, 0.14);
+  --tags-view-close-icon-hover-background: rgba(255, 255, 255, 0.08);
+  --tags-view-close-icon-hover-color: #f6f8ff;
+
+  /* main */
+  --app-main-padding: 22px;
+  --app-main-background: transparent;
+  --nav-bar-height: 76px;
+  --nav-bar-background: rgba(22, 28, 40, 0.78);
+  --nav-bar-box-shadow: none;
+  --nav-bar-right-menu-background: transparent;
+
+  /* motion */
+  --sideBar-switch-duration: 0.24s;
+  --logo-switch-duration: 0.35s;
   --page-transform-duration: 0.2s;
-  //面包屑导航动画时长
   --breadcrumb-change-duration: 0.2s;
 
-  //进度条颜色
-  --pregress-bar-color: #409eff;
-
+  /* progress */
+  --pregress-bar-color: #5b8cff;
 }
