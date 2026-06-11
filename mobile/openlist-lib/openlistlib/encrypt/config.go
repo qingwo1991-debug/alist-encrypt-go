@@ -1,12 +1,15 @@
 package encrypt
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
@@ -85,8 +88,16 @@ func DefaultConfig() *ProxyConfig {
 				Enable:   true,
 			},
 		},
-		AdminPassword: "123456",
+		AdminPassword: randomAdminPassword(),
 	}
+}
+
+func randomAdminPassword() string {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "admin-" + hex.EncodeToString([]byte(time.Now().Format("20060102150405.000000000")))
+	}
+	return hex.EncodeToString(buf)
 }
 
 // NewConfigManager 创建配置管理器
@@ -272,13 +283,38 @@ func (m *ConfigManager) saveConfigLocked() error {
 		return err
 	}
 
-	// 写入文件
-	if err := os.WriteFile(m.configPath, data, 0644); err != nil {
+	if err := writeFileAtomic(m.configPath, data, 0600); err != nil {
 		return err
 	}
 
 	log.Info("[" + internal.TagConfig + "] Config saved successfully")
 	return nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // GetConfig 获取配置副本

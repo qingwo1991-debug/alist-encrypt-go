@@ -14,7 +14,7 @@ func NewRC4MD5V2(password string, plainSize int64, nonceField []byte) (*RC4MD5, 
 		password: password,
 		fileSize: plainSize,
 	}
-	baseKey := cachedV2Key(password, "RC4-v2", nonceField, 16)
+	baseKey := cachedV2Key(password, "RC4-v2", 16)
 	material := append(append([]byte(nil), baseKey...), nonceField...)
 	hash := md5.Sum(material)
 	r.fileHexKey = hex.EncodeToString(hash[:])

@@ -1856,7 +1856,8 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"dbExportSyncIntervalSeconds":     p.config.DBExportSyncIntervalSeconds,
 				"dbExportAuthEnabled":             p.config.DBExportAuthEnabled,
 				"dbExportUsername":                p.config.DBExportUsername,
-				"dbExportPassword":                p.config.DBExportPassword,
+				"dbExportPassword":                "",
+				"dbExportPasswordSet":             strings.TrimSpace(p.config.DBExportPassword) != "",
 			},
 		})
 		return
@@ -3535,7 +3536,7 @@ func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHe
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return
 	}
@@ -3626,7 +3627,7 @@ func (p *ProxyServer) fetchAdminDriverNames(ctx context.Context, srcHeaders http
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, true
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return nil, true
 	}
@@ -3718,7 +3719,7 @@ func (p *ProxyServer) doFSRemoveRequest(ctx context.Context, srcHeaders http.Hea
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return 0, nil, err
 	}

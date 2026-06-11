@@ -29,7 +29,9 @@ func newTestProxyHandler(t *testing.T, cfg *config.Config) *ProxyHandler {
 	fileDAO := dao.NewFileDAO(store)
 	passwdDAO := dao.NewPasswdDAO(store)
 	streamProxy := proxy.NewStreamProxy(cfg)
-	return NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, nil, nil)
+	handler := NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, nil, nil)
+	t.Cleanup(handler.Stop)
+	return handler
 }
 
 func TestRegisterRedirectStoresDisplayPathAndCompatKey(t *testing.T) {

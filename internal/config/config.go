@@ -56,6 +56,9 @@ type AlistServer struct {
 	EnableParallelDecrypt       bool                     `json:"enableParallelDecrypt"`
 	ParallelDecryptConcurrency  int                      `json:"parallelDecryptConcurrency"`
 	StreamBufferKb              int                      `json:"streamBufferKb"`
+	EnableDecryptedBlockCache   bool                     `json:"enableDecryptedBlockCache"`
+	DecryptedBlockCacheMb       int                      `json:"decryptedBlockCacheMb"`
+	DecryptedBlockSizeKb        int                      `json:"decryptedBlockSizeKb"`
 	FollowRedirectForDecrypt    bool                     `json:"followRedirectForDecrypt"`
 	RedirectMaxHops             int                      `json:"redirectMaxHops"`
 	AllowLooseDecode            bool                     `json:"allowLooseDecode"`
@@ -243,6 +246,9 @@ func DefaultConfig() *Config {
 			EnableParallelDecrypt:       false,
 			ParallelDecryptConcurrency:  4,
 			StreamBufferKb:              512,
+			EnableDecryptedBlockCache:   true,
+			DecryptedBlockCacheMb:       128,
+			DecryptedBlockSizeKb:        256,
 			FollowRedirectForDecrypt:    true,
 			RedirectMaxHops:             2,
 			AllowLooseDecode:            false,
@@ -356,6 +362,11 @@ func Load() *Config {
 	return cfg
 }
 
+// LoadFresh loads configuration from disk without using the package singleton.
+func LoadFresh() *Config {
+	return loadConfigAt(filepath.Join(getWorkDir(), "conf", "config.json"))
+}
+
 // LoadFromBaseDir loads a fresh configuration rooted at the given base directory.
 // It does not touch the package singleton and is suitable for embedded/mobile use.
 func LoadFromBaseDir(baseDir string) *Config {
@@ -379,7 +390,7 @@ func loadConfigAt(configPath string) *Config {
 	if data, err := os.ReadFile(configPath); err == nil {
 		if migrated, migratedData := migrateLegacyRangeCompatTTL(data); migrated {
 			data = migratedData
-			if err := os.WriteFile(configPath, migratedData, 0600); err != nil {
+			if err := writeFileAtomic(configPath, migratedData, 0600); err != nil {
 				log.Warn().Err(err).Msg("Failed to persist migrated range compat config")
 			} else {
 				log.Info().Str("path", configPath).Msg("Migrated legacy rangeCompatTtlMinutes to rangeReprobeMinutes")
@@ -494,6 +505,7 @@ func (c *Config) Save() error {
 		Scheme:       c.Scheme,
 		Proxy:        c.Proxy,
 		Log:          c.Log,
+		Database:     c.Database,
 		DataDir:      c.DataDir,
 		JWTSecret:    c.JWTSecret,
 		JWTExpire:    c.JWTExpire,
@@ -505,7 +517,36 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	return os.WriteFile(configPath, data, 0600)
+	return writeFileAtomic(configPath, data, 0600)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Config) applyEnvOverrides() {
@@ -558,6 +599,15 @@ func (c *Config) applyEnvOverrides() {
 	if v, ok := getEnvInt("CHUNKED_SEEK_MAX_DISCARD_BYTES"); ok && v >= 0 {
 		c.AlistServer.ChunkedSeekMaxDiscardBytes = int64(v)
 	}
+	if v, ok := getEnvBool("DECRYPTED_BLOCK_CACHE_ENABLE"); ok {
+		c.AlistServer.EnableDecryptedBlockCache = v
+	}
+	if v, ok := getEnvInt("DECRYPTED_BLOCK_CACHE_MB"); ok {
+		c.AlistServer.DecryptedBlockCacheMb = v
+	}
+	if v, ok := getEnvInt("DECRYPTED_BLOCK_SIZE_KB"); ok {
+		c.AlistServer.DecryptedBlockSizeKb = v
+	}
 	if v, ok := getEnvInt("RANGE_FAIL_TO_DOWNGRADE"); ok {
 		c.AlistServer.RangeFailToDowngrade = v
 	}
@@ -607,6 +657,14 @@ func (c *Config) normalizeAlistServerTuning() {
 	if s.ChunkedSeekMaxDiscardBytes > maxDiscard {
 		s.ChunkedSeekMaxDiscardBytes = maxDiscard
 	}
+	if s.DecryptedBlockCacheMb <= 0 {
+		s.DecryptedBlockCacheMb = 128
+	}
+	s.DecryptedBlockCacheMb = clampIntValue(s.DecryptedBlockCacheMb, 16, 2048)
+	if s.DecryptedBlockSizeKb <= 0 {
+		s.DecryptedBlockSizeKb = 256
+	}
+	s.DecryptedBlockSizeKb = clampIntValue(s.DecryptedBlockSizeKb, 32, 4096)
 }
 
 func normalizeProxyMatchType(v string) string {

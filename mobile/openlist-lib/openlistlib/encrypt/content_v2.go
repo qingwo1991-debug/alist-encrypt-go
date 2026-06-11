@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/chacha20"
@@ -35,6 +36,40 @@ var contentHeaderMagic = map[EncryptionType]string{
 	EncTypeAESCTR:   "AECTR2",
 	EncTypeChaCha20: "CHC202",
 	EncTypeRC4:      "RC4MD2",
+}
+
+const v2KeyCacheTTL = 30 * time.Minute
+
+type v2KeyCacheEntry struct {
+	key      []byte
+	expireAt time.Time
+}
+
+var (
+	v2KeyCache   = make(map[string]v2KeyCacheEntry)
+	v2KeyCacheMu sync.RWMutex
+)
+
+func cachedV2Key(password, encType string, keyLen int) []byte {
+	cacheKey := fmt.Sprintf("%s:%s:%d", password, encType, keyLen)
+
+	v2KeyCacheMu.RLock()
+	if entry, ok := v2KeyCache[cacheKey]; ok && time.Now().Before(entry.expireAt) {
+		v2KeyCacheMu.RUnlock()
+		return append([]byte(nil), entry.key...)
+	}
+	v2KeyCacheMu.RUnlock()
+
+	key := pbkdf2.Key([]byte(password), []byte(encType), pbkdf2IterationsModern, keyLen, sha256.New)
+	result := append([]byte(nil), key...)
+
+	v2KeyCacheMu.Lock()
+	v2KeyCache[cacheKey] = v2KeyCacheEntry{
+		key:      result,
+		expireAt: time.Now().Add(v2KeyCacheTTL),
+	}
+	v2KeyCacheMu.Unlock()
+	return result
 }
 
 type ContentMeta struct {
@@ -170,7 +205,7 @@ func NewAESCTRV2(password string, plainSize int64, nonceField []byte) (*AESCTREn
 	if len(nonceField) != 16 {
 		return nil, fmt.Errorf("nonce field must be 16 bytes")
 	}
-	key := pbkdf2.Key([]byte(password), []byte("AES-CTR-v2"), pbkdf2IterationsModern, 16, sha256.New)
+	key := cachedV2Key(password, "AES-CTR-v2", 16)
 	iv := append([]byte(nil), nonceField...)
 	sourceIv := append([]byte(nil), iv...)
 	block, err := aes.NewCipher(key)
@@ -193,7 +228,7 @@ func NewChaCha20V2(password string, plainSize int64, nonceField []byte) (*ChaCha
 	if len(nonceField) != 16 {
 		return nil, fmt.Errorf("nonce field must be 16 bytes")
 	}
-	key := pbkdf2.Key([]byte(password), []byte("ChaCha20-v2"), pbkdf2IterationsModern, 32, sha256.New)
+	key := cachedV2Key(password, "ChaCha20-v2", 32)
 	nonce := append([]byte(nil), nonceField[:12]...)
 	c, err := chacha20.NewUnauthenticatedCipher(key, nonce)
 	if err != nil {
@@ -211,7 +246,7 @@ func NewRC4MD5V2(password string, plainSize int64, nonceField []byte) (*RC4MD5En
 	if len(nonceField) != 16 {
 		return nil, fmt.Errorf("nonce field must be 16 bytes")
 	}
-	baseKey := pbkdf2.Key([]byte(password), []byte("RC4-v2"), pbkdf2IterationsModern, 16, sha256.New)
+	baseKey := cachedV2Key(password, "RC4-v2", 16)
 	material := append(append([]byte(nil), baseKey...), nonceField...)
 	rc4KeyHex := hex.EncodeToString(md5sum(material))
 	rc4 := &CustomRC4{

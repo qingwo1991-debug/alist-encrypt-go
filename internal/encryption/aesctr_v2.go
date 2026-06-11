@@ -14,7 +14,7 @@ func NewAESCTRV2(password string, plainSize int64, nonceField []byte) (*AESCTR, 
 		password: password,
 		fileSize: plainSize,
 	}
-	key := cachedV2Key(password, "AES-CTR-v2", nonceField, 16)
+	key := cachedV2Key(password, "AES-CTR-v2", 16)
 	a.key = append([]byte(nil), key...)
 	a.iv = append([]byte(nil), nonceField...)
 	a.sourceIv = append([]byte(nil), nonceField...)

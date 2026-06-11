@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -578,7 +577,7 @@ func (p *ProxyServer) tryFetchRemoteProviderRoutingCandidates(ctx context.Contex
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, nil, true
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return nil, nil, true
 	}

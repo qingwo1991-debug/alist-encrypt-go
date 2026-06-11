@@ -90,3 +90,24 @@ func TestAutoDecryptReaderMaintainsLegacyCompatibility(t *testing.T) {
 		t.Fatalf("legacy decrypt mismatch")
 	}
 }
+
+func TestV2PBKDF2CacheDoesNotSplitByNonce(t *testing.T) {
+	v2KeyCacheMu.Lock()
+	v2KeyCache = make(map[string]*cacheEntry[[]byte])
+	v2KeyCacheMu.Unlock()
+
+	nonceA := bytes.Repeat([]byte{0x01}, 16)
+	nonceB := bytes.Repeat([]byte{0x02}, 16)
+	if _, err := NewAESCTRV2("same-password", 1024, nonceA); err != nil {
+		t.Fatalf("first cipher: %v", err)
+	}
+	if _, err := NewAESCTRV2("same-password", 1024, nonceB); err != nil {
+		t.Fatalf("second cipher: %v", err)
+	}
+
+	v2KeyCacheMu.RLock()
+	defer v2KeyCacheMu.RUnlock()
+	if got := len(v2KeyCache); got != 1 {
+		t.Fatalf("v2 key cache entries=%d, want 1", got)
+	}
+}

@@ -3,6 +3,7 @@ package encryption
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -50,16 +51,17 @@ var (
 	passwdOutwardCacheMu sync.RWMutex
 )
 
-// v2KeyCache caches V2 PBKDF2-derived keys (600K iterations) to avoid repeated computation.
-// Key format: "password:encType:hex(nonceField)"
+// v2KeyCache caches V2 PBKDF2-derived base keys (600K iterations) to avoid repeated computation.
+// Key format: "password:encType:keyLen". The per-file nonce is applied by each cipher after
+// PBKDF2; it is not part of the PBKDF2 salt.
 var (
 	v2KeyCache   = make(map[string]*cacheEntry[[]byte])
 	v2KeyCacheMu sync.RWMutex
 )
 
 // cachedV2Key returns a cached PBKDF2 key for V2 ciphers, computing it only on cache miss.
-func cachedV2Key(password, encType string, nonceField []byte, keyLen int) []byte {
-	cacheKey := password + ":" + encType + ":" + hex.EncodeToString(nonceField)
+func cachedV2Key(password, encType string, keyLen int) []byte {
+	cacheKey := fmt.Sprintf("%s:%s:%d", password, encType, keyLen)
 
 	v2KeyCacheMu.RLock()
 	if entry, ok := v2KeyCache[cacheKey]; ok && time.Now().Before(entry.expireAt) {

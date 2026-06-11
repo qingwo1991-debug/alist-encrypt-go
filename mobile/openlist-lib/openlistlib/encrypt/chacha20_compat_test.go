@@ -70,3 +70,16 @@ func TestChaCha20SeekCompatibility(t *testing.T) {
 		t.Fatal("seek encryption should match full encryption at same offset")
 	}
 }
+
+func TestChaCha20SetPositionRejectsCounterOverflow(t *testing.T) {
+	password := "seektest"
+	passwdOutward := GetPasswdOutwardChaCha20(password)
+	enc, err := NewChaCha20Encryptor(password, passwdOutward, 1<<40)
+	if err != nil {
+		t.Fatalf("NewChaCha20Encryptor failed: %v", err)
+	}
+
+	if err := enc.SetPosition((1 << 32) * 64); err == nil {
+		t.Fatal("expected counter overflow error")
+	}
+}

@@ -65,6 +65,58 @@ func TestHandleConfigV2PostClampsAndPersists(t *testing.T) {
 	}
 }
 
+func TestHandleConfigV2RedactsDBExportPassword(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	cfg.DBExportPassword = "secret-password"
+	p := &ProxyServer{config: cfg}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/encrypt/v2/config", nil)
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var payload struct {
+		Data struct {
+			Config map[string]interface{} `json:"config"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if got, _ := payload.Data.Config["dbExportPassword"].(string); got != "" {
+		t.Fatalf("expected redacted dbExportPassword, got %q", got)
+	}
+	if got, _ := payload.Data.Config["dbExportPasswordSet"].(bool); !got {
+		t.Fatalf("expected dbExportPasswordSet=true")
+	}
+}
+
+func TestHandleConfigV2EmptyDBExportPasswordKeepsExistingSecret(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	cfg.DBExportPassword = "secret-password"
+	p := &ProxyServer{config: cfg}
+
+	body := map[string]interface{}{
+		"config": map[string]interface{}{
+			"dbExportPassword": "",
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if p.config.DBExportPassword != "secret-password" {
+		t.Fatalf("expected existing password to be preserved")
+	}
+}
+
 func TestHandleConfigV2ProviderRoutingRulesMatchValues(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")

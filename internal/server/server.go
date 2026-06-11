@@ -26,17 +26,20 @@ import (
 
 // Server represents the HTTP/2 server
 type Server struct {
-	cfg         *config.Config
-	store       *storage.Store
-	mysqlStore  *mysqlstore.Store
-	engine      *gin.Engine
-	httpServer  *http.Server
-	httpsServer *http.Server
-	streamProxy *proxy.StreamProxy
-	userDAO     *dao.UserDAO
-	fileDAO     *dao.FileDAO
-	passwdDAO   *dao.PasswdDAO
-	probeCancel context.CancelFunc
+	cfg           *config.Config
+	store         *storage.Store
+	mysqlStore    *mysqlstore.Store
+	engine        *gin.Engine
+	httpServer    *http.Server
+	httpsServer   *http.Server
+	unixServer    *http.Server
+	streamProxy   *proxy.StreamProxy
+	userDAO       *dao.UserDAO
+	fileDAO       *dao.FileDAO
+	passwdDAO     *dao.PasswdDAO
+	proxyHandler  *handler.ProxyHandler
+	webdavHandler *handler.WebDAVHandler
+	probeCancel   context.CancelFunc
 }
 
 // New creates a new server instance
@@ -151,6 +154,8 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
+	s.proxyHandler = proxyHandler
+	s.webdavHandler = webdavHandler
 
 	return apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler
 }
@@ -170,7 +175,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 
 		// Protected routes (auth required)
 		protected := encAPI.Group("")
-		protected.Use(AuthMiddleware(s.cfg.JWTSecret))
+		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
 		{
 			protected.Any("/getBuildInfo", ginWrap(apiHandler.GetBuildInfo))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
@@ -460,7 +465,7 @@ func (s *Server) startUnix() error {
 		}
 	}
 
-	server := &http.Server{
+	s.unixServer = &http.Server{
 		Handler:           s.engine,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       0,
@@ -470,7 +475,10 @@ func (s *Server) startUnix() error {
 
 	log.Info().Str("socket", socketPath).Msg("Starting Unix socket server")
 
-	return server.Serve(listener)
+	if err := s.unixServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 // Shutdown gracefully shuts down the server
@@ -480,6 +488,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Cancel startup probe goroutine
 	if s.probeCancel != nil {
 		s.probeCancel()
+	}
+	if s.proxyHandler != nil {
+		s.proxyHandler.Stop()
+	}
+	if s.webdavHandler != nil {
+		s.webdavHandler.Stop()
 	}
 
 	var lastErr error
@@ -492,6 +506,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if s.httpsServer != nil {
 		if err := s.httpsServer.Shutdown(ctx); err != nil {
+			lastErr = err
+		}
+	}
+
+	if s.unixServer != nil {
+		if err := s.unixServer.Shutdown(ctx); err != nil {
 			lastErr = err
 		}
 	}

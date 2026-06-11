@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,13 +158,13 @@ func (s *Service) UpdateUsername(username, password, newUsername string) error {
 	if len(newUsername) < 3 {
 		return fmt.Errorf("username too short, at least 3 characters")
 	}
-	if err := s.userDAO.Validate(username, password); err != nil {
-		return fmt.Errorf("password error")
-	}
-	if err := s.userDAO.Delete(username); err != nil {
+	if err := s.userDAO.Rename(username, password, newUsername); err != nil {
+		if errors.Is(err, dao.ErrInvalidPassword) || errors.Is(err, dao.ErrUserNotFound) {
+			return fmt.Errorf("password error")
+		}
 		return err
 	}
-	return s.userDAO.Create(newUsername, password)
+	return nil
 }
 
 func (s *Service) GetAlistConfig() interface{} {

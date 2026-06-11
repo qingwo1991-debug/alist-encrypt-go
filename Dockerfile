@@ -33,6 +33,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /alist-encrypt-go ./cm
 FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates tzdata
+RUN addgroup -S alistenc && adduser -S -G alistenc alistenc
 
 WORKDIR /app
 
@@ -43,10 +44,15 @@ COPY --from=builder /alist-encrypt-go .
 COPY --from=builder /app/configs/ ./configs/
 
 # Create data and conf directories for persistence
-RUN mkdir -p /app/data /app/conf
+RUN mkdir -p /app/data /app/conf && chown -R alistenc:alistenc /app
+
+USER alistenc
 
 # Expose port
 EXPOSE 5344
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:5344/health >/dev/null || exit 1
 
 # Run
 ENTRYPOINT ["/app/alist-encrypt-go"]

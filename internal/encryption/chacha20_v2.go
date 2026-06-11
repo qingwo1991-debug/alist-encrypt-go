@@ -14,7 +14,7 @@ func NewChaCha20V2(password string, plainSize int64, nonceField []byte) (*ChaCha
 		password: password,
 		fileSize: plainSize,
 	}
-	key := cachedV2Key(password, "ChaCha20-v2", nonceField, 32)
+	key := cachedV2Key(password, "ChaCha20-v2", 32)
 	c.key = append([]byte(nil), key...)
 	c.nonce = append([]byte(nil), nonceField[:12]...)
 	cipherImpl, err := chacha20.NewUnauthenticatedCipher(c.key, c.nonce)

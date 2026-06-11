@@ -92,3 +92,27 @@ func TestParseAlistServerFromMapRangeLearningClamp(t *testing.T) {
 		t.Fatalf("RangeProbeTimeoutSeconds=%d, want 60", server.RangeProbeTimeoutSeconds)
 	}
 }
+
+func TestParseAlistServerFromMapDecryptedBlockCacheDefaultsAndClamp(t *testing.T) {
+	server := ParseAlistServerFromMap(map[string]interface{}{})
+	if !server.EnableDecryptedBlockCache {
+		t.Fatal("expected decrypted block cache enabled by default")
+	}
+	if server.DecryptedBlockCacheMb != 128 {
+		t.Fatalf("cache mb=%d, want 128", server.DecryptedBlockCacheMb)
+	}
+	if server.DecryptedBlockSizeKb != 256 {
+		t.Fatalf("block kb=%d, want 256", server.DecryptedBlockSizeKb)
+	}
+
+	server = ParseAlistServerFromMap(map[string]interface{}{
+		"decryptedBlockCacheMb": float64(99999),
+		"decryptedBlockSizeKb":  float64(1),
+	})
+	if server.DecryptedBlockCacheMb != 2048 {
+		t.Fatalf("cache mb=%d, want clamp 2048", server.DecryptedBlockCacheMb)
+	}
+	if server.DecryptedBlockSizeKb != 32 {
+		t.Fatalf("block kb=%d, want clamp 32", server.DecryptedBlockSizeKb)
+	}
+}

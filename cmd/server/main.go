@@ -18,17 +18,17 @@ import (
 )
 
 func main() {
-	// Load configuration first
-	cfg := config.Load()
-
-	// Setup logging based on config
-	setupLogging(cfg)
-
-	trace.ServerLog("server", fmt.Sprintf("Encrypt proxy server starting on port %s", cfg.GetHTTPAddr()))
-	trace.ServerLog("config", fmt.Sprintf("Alist URL: %s, H2C: %t, HTTPS: %t", cfg.GetAlistURL(), cfg.Scheme.EnableH2C, cfg.IsHTTPSEnabled()))
-
 	// Server restart loop - allows graceful restart when H2C changes
 	for {
+		// Load fresh configuration each loop so API-triggered restarts pick up persisted changes.
+		cfg := config.LoadFresh()
+
+		// Setup logging based on config
+		setupLogging(cfg)
+
+		trace.ServerLog("server", fmt.Sprintf("Encrypt proxy server starting on port %s", cfg.GetHTTPAddr()))
+		trace.ServerLog("config", fmt.Sprintf("Alist URL: %s, H2C: %t, HTTPS: %t", cfg.GetAlistURL(), cfg.Scheme.EnableH2C, cfg.IsHTTPSEnabled()))
+
 		// Create and start server
 		srv, err := server.New(cfg)
 		if err != nil {
@@ -44,6 +44,7 @@ func main() {
 		go func() {
 			sigChan := make(chan os.Signal, 1)
 			signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(sigChan)
 
 			select {
 			case <-sigChan:

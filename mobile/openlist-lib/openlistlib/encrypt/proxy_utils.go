@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,22 @@ import (
 )
 
 // 流式传输优化常量
+const maxBufferedJSONBody = 10 * 1024 * 1024
+
+func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
+	if r == nil {
+		return nil, nil
+	}
+	limited := io.LimitReader(r, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes limit", maxBytes)
+	}
+	return data, nil
+}
 
 func clampStreamBufferKB(kb int) int {
 	if kb < 32 {

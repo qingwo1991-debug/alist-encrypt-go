@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -19,6 +20,13 @@ const (
 	// Base64 source characters (URL-safe, no padding '=')
 	sourceChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~+"
 )
+
+type compiledPathPattern struct {
+	wildcard *regexp.Regexp
+	legacy   *regexp.Regexp
+}
+
+var pathPatternCache sync.Map // map[string]compiledPathPattern
 
 // MixBase64 implements password-based Base64 encoding with KSA-shuffled alphabet
 // This is a 1:1 port of the Node.js implementation
@@ -618,20 +626,33 @@ func matchPattern(pattern, urlPath string) bool {
 		}
 	}
 
-	regexPattern := wildcardToRegex(pattern)
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return false
-	}
-	if re.MatchString(urlPath) {
+	compiled := compilePathPattern(pattern)
+	if compiled.wildcard != nil && compiled.wildcard.MatchString(urlPath) {
 		return true
 	}
 
 	// Compatibility fallback: old config treated patterns as regular expressions.
-	if legacyRe, err := regexp.Compile(pattern); err == nil {
-		return legacyRe.MatchString(urlPath)
+	if compiled.legacy != nil {
+		return compiled.legacy.MatchString(urlPath)
 	}
 	return false
+}
+
+func compilePathPattern(pattern string) compiledPathPattern {
+	if cached, ok := pathPatternCache.Load(pattern); ok {
+		return cached.(compiledPathPattern)
+	}
+
+	var compiled compiledPathPattern
+	if re, err := regexp.Compile(wildcardToRegex(pattern)); err == nil {
+		compiled.wildcard = re
+	}
+	if legacyRe, err := regexp.Compile(pattern); err == nil {
+		compiled.legacy = legacyRe
+	}
+
+	actual, _ := pathPatternCache.LoadOrStore(pattern, compiled)
+	return actual.(compiledPathPattern)
 }
 
 func wildcardToRegex(pattern string) string {

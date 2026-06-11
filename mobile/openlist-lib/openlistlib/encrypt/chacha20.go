@@ -15,8 +15,9 @@ import (
 // ChaCha20Encryptor ChaCha20 流加密器（与 alist-encrypt-go 密钥派生对齐）
 //
 // 密钥派生：pbkdf2(password, "ChaCha20", 1000, 32, sha256) → hex → passwdOutward
-//           sha256(passwdOutward + strconv.FormatInt(fileSize, 10)) → 32-byte key
-//           md5(strconv.FormatInt(fileSize, 10))[:12] → 12-byte nonce
+//
+//	sha256(passwdOutward + strconv.FormatInt(fileSize, 10)) → 32-byte key
+//	md5(strconv.FormatInt(fileSize, 10))[:12] → 12-byte nonce
 //
 // 此版本与旧版（双 md5 拼接）不兼容。
 type ChaCha20Encryptor struct {
@@ -64,13 +65,17 @@ func (c *ChaCha20Encryptor) SetPosition(position int64) error {
 		return fmt.Errorf("position cannot be negative")
 	}
 
-	blockCount := uint32(position / 64)
+	blockCount := position / 64
+	const maxBlockCount int64 = 1<<32 - 1
+	if blockCount > maxBlockCount {
+		return fmt.Errorf("ChaCha20 position %d exceeds 256 GiB limit (block counter overflow); use AES-128-CTR for files larger than 256 GiB", position)
+	}
 
 	newCipher, err := chacha20.NewUnauthenticatedCipher(c.key, c.nonce)
 	if err != nil {
 		return fmt.Errorf("failed to recreate ChaCha20 cipher: %w", err)
 	}
-	newCipher.SetCounter(blockCount)
+	newCipher.SetCounter(uint32(blockCount))
 	c.cipher = newCipher
 
 	// 丢弃块内偏移字节

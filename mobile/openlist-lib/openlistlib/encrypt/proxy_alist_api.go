@@ -667,7 +667,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 	respStatusCode := resp.StatusCode
 
 	// 读取响应
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -723,7 +723,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 						return false
 					}
 					defer resp2.Body.Close()
-					bodyRetry, err4 := io.ReadAll(resp2.Body)
+					bodyRetry, err4 := readLimitedBody(resp2.Body, maxBufferedJSONBody)
 					if err4 != nil {
 						return false
 					}

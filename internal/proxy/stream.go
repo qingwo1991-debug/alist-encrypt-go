@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -97,6 +99,7 @@ type StreamProxy struct {
 	retrier          *backoff.Retrier // retry with jitter for transient network errors
 	uploadMetaMu     sync.Mutex
 	uploadMeta       map[string]uploadMetaEntry
+	blockCache       *decryptedBlockCache
 }
 
 type contentMetaContextKey struct{}
@@ -266,7 +269,35 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 		cbGate:        backoff.NewGate(cbThreshold, cbCooldown),
 		retrier:       retrier,
 		uploadMeta:    make(map[string]uploadMetaEntry),
+		blockCache:    newDecryptedBlockCacheFromConfig(cfg),
 	}
+}
+
+func newDecryptedBlockCacheFromConfig(cfg *config.Config) *decryptedBlockCache {
+	if cfg == nil || !cfg.AlistServer.EnableDecryptedBlockCache {
+		return nil
+	}
+	cacheMB := cfg.AlistServer.DecryptedBlockCacheMb
+	if cacheMB <= 0 {
+		cacheMB = 128
+	}
+	if cacheMB < 16 {
+		cacheMB = 16
+	}
+	if cacheMB > 2048 {
+		cacheMB = 2048
+	}
+	blockKB := cfg.AlistServer.DecryptedBlockSizeKb
+	if blockKB <= 0 {
+		blockKB = 256
+	}
+	if blockKB < 32 {
+		blockKB = 32
+	}
+	if blockKB > 4096 {
+		blockKB = 4096
+	}
+	return newDecryptedBlockCache(int64(cacheMB)*1024*1024, int64(blockKB)*1024)
 }
 
 // SetRedirectRewriter registers a redirect rewriter for decrypt streams.
@@ -962,6 +993,9 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 			FailureReason: "range_unsupported",
 		}
 	}
+	if outcome, ok := s.tryServeDecryptedCache(w, r, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey); ok {
+		return outcome
+	}
 
 	// Build request with client headers (including Range when present)
 	req, err := httputil.NewRequest(r.Method, targetURL).
@@ -1109,6 +1143,9 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 			FailureReason: "range_unsupported",
 		}
 	}
+	if outcome, ok := s.tryServeDecryptedCache(w, req, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey); ok {
+		return outcome
+	}
 	applyStrategyHeaders(req, strategy)
 	if strategy == StreamStrategyRange {
 		req.Header.Set("Range", buildUpstreamRangeHeader(rangeHeader, meta))
@@ -1135,6 +1172,82 @@ func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
 	if strategy == StreamStrategyFull || strategy == StreamStrategyChunked {
 		req.Header.Del("Range")
 	}
+}
+
+func (s *StreamProxy) tryServeDecryptedCache(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader, compatStorageKey string) (*StreamOutcome, bool) {
+	if s == nil || s.blockCache == nil || req == nil || req.Method != http.MethodGet || rangeHeader == "" || fileSize <= 0 {
+		return nil, false
+	}
+	if meta.PlainSize > 0 {
+		fileSize = meta.PlainSize
+	}
+	parsed, err := httputil.ParseRange(rangeHeader, fileSize)
+	if err != nil || parsed == nil || len(parsed.Ranges) != 1 {
+		return nil, false
+	}
+	activeRange := parsed.Ranges[0]
+	baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
+	if baseKey == "" {
+		return nil, false
+	}
+	data, ok := s.blockCache.getRange(baseKey, activeRange.Start, activeRange.ContentLength())
+	if !ok {
+		return nil, false
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Range", activeRange.ContentRangeHeader(fileSize))
+	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
+	w.WriteHeader(http.StatusPartialContent)
+	n, writeErr := w.Write(data)
+	outcome := &StreamOutcome{
+		BytesWritten:    int64(n),
+		ExpectedBytes:   activeRange.ContentLength(),
+		ResponseStarted: true,
+		StatusCode:      http.StatusPartialContent,
+	}
+	if writeErr != nil {
+		outcome.Err = writeErr
+		outcome.FailureReason = "cache_write_error"
+	}
+	return outcome, true
+}
+
+func (s *StreamProxy) decryptedCacheBaseKey(targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, compatStorageKey string) string {
+	if passwdInfo == nil || !passwdInfo.Enable || fileSize <= 0 {
+		return ""
+	}
+	stableID := strings.TrimSpace(compatStorageKey)
+	if stableID == "" {
+		stableID = strings.TrimSpace(targetURL)
+	}
+	if stableID == "" {
+		return ""
+	}
+	passHash := sha256.Sum256([]byte(passwdInfo.Password))
+	targetHash := sha256.Sum256([]byte(targetURL))
+	nonce := ""
+	if len(meta.NonceField) > 0 {
+		nonce = hex.EncodeToString(meta.NonceField)
+	}
+	return fmt.Sprintf("%s|%x|%s|%x|%d|%d|%d|%d|%s",
+		stableID,
+		targetHash[:8],
+		passwdInfo.EncType,
+		passHash[:8],
+		fileSize,
+		meta.Version,
+		meta.HeaderLen,
+		meta.CiphertextSize,
+		nonce,
+	)
+}
+
+// DecryptedBlockCacheStats returns decrypted block cache runtime stats.
+func (s *StreamProxy) DecryptedBlockCacheStats() map[string]interface{} {
+	if s == nil || s.blockCache == nil {
+		return map[string]interface{}{"enabled": false}
+	}
+	return s.blockCache.stats()
 }
 
 func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
@@ -1395,6 +1508,10 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		} else {
 			readerToStream = sniffBytes
 		}
+	}
+	if req.Method == http.MethodGet && rangeHeader != "" && s.blockCache != nil {
+		baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
+		readerToStream = newDecryptedCacheReader(readerToStream, s.blockCache, baseKey, sniffOffset)
 	}
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true

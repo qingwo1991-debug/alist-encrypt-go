@@ -58,8 +58,9 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 			"recent_strategy_events":  selectorStats["recent_events"],
 		},
 		"cache": map[string]interface{}{
-			"path_cache":      h.fileDAO.PathCacheStats(),
-			"file_size_cache": h.fileDAO.FileSizeCacheStats(),
+			"path_cache":            h.fileDAO.PathCacheStats(),
+			"file_size_cache":       h.fileDAO.FileSizeCacheStats(),
+			"decrypted_block_cache": h.streamProxy.DecryptedBlockCacheStats(),
 		},
 		"proxy":              proxyStats,
 		"webdav":             webdavStats,

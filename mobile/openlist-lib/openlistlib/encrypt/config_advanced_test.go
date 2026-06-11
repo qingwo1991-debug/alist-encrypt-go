@@ -111,3 +111,32 @@ func TestLoadLegacyDefaultsForBoolAdvancedFlags(t *testing.T) {
 		t.Fatalf("unexpected range defaults: min=%d skip=%d", cfg.RangeCompatMinFailures, cfg.RangeSkipMaxBytes)
 	}
 }
+
+func TestDefaultConfigGeneratesRandomAdminPassword(t *testing.T) {
+	first := DefaultConfig()
+	second := DefaultConfig()
+	if first.AdminPassword == "" {
+		t.Fatal("expected generated admin password")
+	}
+	if first.AdminPassword == "123456" {
+		t.Fatal("default admin password must not be fixed")
+	}
+	if first.AdminPassword == second.AdminPassword {
+		t.Fatal("expected different generated admin passwords")
+	}
+}
+
+func TestConfigManagerSaveUses0600Permissions(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "encrypt_config.json")
+	manager := NewConfigManager(configPath)
+	if err := manager.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("perm=%#o, want %#o", got, 0o600)
+	}
+}

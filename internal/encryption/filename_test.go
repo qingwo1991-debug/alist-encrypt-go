@@ -250,6 +250,31 @@ func TestDecodeNameMalformedInputNoPanic(t *testing.T) {
 	}
 }
 
+func TestMatchPatternCachedCompatibility(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		path    string
+		want    bool
+	}{
+		{name: "wildcard file", pattern: "/media/*", path: "/media/movie.mkv", want: true},
+		{name: "wildcard directory", pattern: "/media/*", path: "/media", want: true},
+		{name: "legacy regex", pattern: `^/movies/[0-9]+\.mkv$`, path: "/movies/123.mkv", want: true},
+		{name: "miss", pattern: "/media/*", path: "/other/movie.mkv", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchPattern(tc.pattern, tc.path); got != tc.want {
+				t.Fatalf("first match=%v, want %v", got, tc.want)
+			}
+			if got := matchPattern(tc.pattern, tc.path); got != tc.want {
+				t.Fatalf("cached match=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConvertRealNameWithSuffixRoundTrip(t *testing.T) {
 	password := "testpass"
 	encType := "aesctr"
