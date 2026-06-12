@@ -76,6 +76,8 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	inspectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 
 	// Redirect-following loop (up to 2 hops), matching Docker's StreamProxy.inspectEncryptedContent.
 	// When probing alist /dav/ or /d/ paths, alist returns 302 → CDN URL.
@@ -84,7 +86,7 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	currentURL := target
 	currentAuth := authHeaders
 	for hop := 0; hop <= maxHops; hop++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, currentURL, nil)
+		req, err := http.NewRequestWithContext(inspectCtx, http.MethodGet, currentURL, nil)
 		if err != nil {
 			log.Infof("[v2-inspect] request creation failed: err=%v", err)
 			return meta

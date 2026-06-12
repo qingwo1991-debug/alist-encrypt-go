@@ -51,6 +51,7 @@ class SyncWorker(
         const val DEFAULT_PROXY_PORT = 5344L
         private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
         private const val TASK_POLL_INTERVAL_MS = 3000L
+        private const val V2_HEADER_SIZE = 32L
     }
 
     private data class UploadTaskSubmission(
@@ -197,7 +198,10 @@ class SyncWorker(
             )
 
             val remoteProbe = probeRemoteFile(remotePath, authToken)
-            if (remoteProbe.exists && !remoteProbe.isDir && remoteProbe.size == file.length()) {
+            val localSize = file.length()
+            val sizeMatchesRemote = remoteProbe.size != null &&
+                (remoteProbe.size == localSize || remoteProbe.size == localSize + V2_HEADER_SIZE)
+            if (remoteProbe.exists && !remoteProbe.isDir && sizeMatchesRemote) {
                 if (!alreadySyncedLocally) {
                     SyncRecordStore.markSynced(
                         context,
@@ -236,7 +240,8 @@ class SyncWorker(
                 )
             }
 
-            if (remoteProbe.exists && !remoteProbe.isDir && remoteProbe.size != null && remoteProbe.size != file.length()) {
+            if (remoteProbe.exists && !remoteProbe.isDir && remoteProbe.size != null &&
+                remoteProbe.size != localSize && remoteProbe.size != localSize + V2_HEADER_SIZE) {
                 logSync(
                     traceId,
                     taskId,
