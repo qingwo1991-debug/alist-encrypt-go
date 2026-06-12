@@ -1112,8 +1112,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	}
 	// Check if cached raw_url is still fresh.
 	if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
-		strings.TrimSpace(cached.RawURL) != "" &&
-		cached.UpstreamStaleness() < staleThreshold {
+		cachedRawURLFresh(cached, staleThreshold) {
 		return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size, Source: "cache"}
 	}
 
@@ -1126,8 +1125,15 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	if strings.TrimSpace(linkResult.RawURL) != "" {
 		return linkResult
 	}
+	redirectResult := resolveFinalRawURL(ctx, config.Get(), alistURL, displayPath, realPath, authHeaders, fileDAO)
+	if strings.TrimSpace(redirectResult.RawURL) != "" {
+		return redirectResult
+	}
 	if linkResult.StatusCode != 0 || linkResult.FailureReason != "" {
 		return linkResult
+	}
+	if redirectResult.FailureReason != "" {
+		return redirectResult
 	}
 	return result
 }

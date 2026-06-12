@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -234,6 +236,69 @@ func TestFetchRawURLFallsBackToFsLinkWhenFsGetReturnsEmpty(t *testing.T) {
 		t.Fatal("expected cache entry for display path")
 	}
 	if info.RawURL != "https://cdn.example/from-link" || info.Size != 8192 {
+		t.Fatalf("cached raw_url=%q size=%d", info.RawURL, info.Size)
+	}
+}
+
+func TestFetchRawURLFallsBackToFinalRedirectWhenAPIsReturnEmpty(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+
+	signedAt := time.Now().UTC().Format("20060102T150405Z")
+	finalRawURL := ""
+	var fsGetCalls, fsLinkCalls, dCalls, cdnHeadCalls int
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get":
+			fsGetCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"","size":0}}`))
+		case "/api/fs/link":
+			fsLinkCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"","size":0}}`))
+		case "/d/enc/movie.bin":
+			dCalls++
+			http.Redirect(w, r, finalRawURL, http.StatusFound)
+		case "/cdn/movie.bin":
+			cdnHeadCalls++
+			w.Header().Set("Content-Length", "8192")
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path=%q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	parsed, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	parsed.Host = strings.Replace(parsed.Host, "127.0.0.1", "localhost", 1)
+	finalRawURL = parsed.String() + "/cdn/movie.bin?X-Amz-Date=" + signedAt + "&X-Amz-Expires=900"
+
+	result := fetchRawURL(context.Background(), srv.URL, "/movie.mp4", "/enc/movie.bin", nil, fileDAO, 30*time.Minute)
+	if result.RawURL != finalRawURL {
+		t.Fatalf("raw_url=%q, want %q", result.RawURL, finalRawURL)
+	}
+	if result.Source != "redirect_d" {
+		t.Fatalf("source=%q, want redirect_d", result.Source)
+	}
+	if result.Size != 8192 {
+		t.Fatalf("size=%d, want 8192", result.Size)
+	}
+	if fsGetCalls != 1 || fsLinkCalls != 1 || dCalls != 1 || cdnHeadCalls != 1 {
+		t.Fatalf("calls fs/get=%d fs/link=%d /d=%d cdn=%d", fsGetCalls, fsLinkCalls, dCalls, cdnHeadCalls)
+	}
+
+	info, ok := fileDAO.Get("/movie.mp4")
+	if !ok || info == nil {
+		t.Fatal("expected cache entry for display path")
+	}
+	if info.RawURL != finalRawURL || info.Size != 8192 {
 		t.Fatalf("cached raw_url=%q size=%d", info.RawURL, info.Size)
 	}
 }

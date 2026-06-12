@@ -297,8 +297,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// Prefer cached raw_url (signed direct URL) — same as HTTP HandleDownload.
 	targetURL := ""
 	staleThreshold := h.upstreamStalenessThreshold()
-	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" &&
-		cachedInfo.UpstreamStaleness() < staleThreshold {
+	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold) {
 		targetURL = cachedInfo.RawURL
 		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target, display=%s source=cache", davPath)
 	}
