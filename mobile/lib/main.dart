@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:openlist_mobile/generated/l10n.dart';
 import 'package:openlist_mobile/pages/openlist/openlist.dart';
@@ -61,7 +62,22 @@ class MyApp extends StatelessWidget {
           themeMode: ThemeMode.system,
           theme: ThemeData(
             useMaterial3: true,
-            colorSchemeSeed: Colors.teal, // 使用青色主题区分
+            colorSchemeSeed: Colors.teal,
+            cardTheme: CardThemeData(
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: Colors.grey.withOpacity(0.15)),
+              ),
+            ),
+            appBarTheme: const AppBarTheme(
+              centerTitle: false,
+              scrolledUnderElevation: 2,
+            ),
+            snackBarTheme: SnackBarThemeData(
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
             inputDecorationTheme: const InputDecorationTheme(
               border: OutlineInputBorder(),
             ),
@@ -70,7 +86,28 @@ class MyApp extends StatelessWidget {
             useMaterial3: true,
             brightness: Brightness.dark,
             colorSchemeSeed: Colors.teal,
-            /* dark theme settings */
+            cardTheme: CardThemeData(
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: Colors.white.withOpacity(0.08)),
+              ),
+            ),
+            appBarTheme: const AppBarTheme(
+              centerTitle: false,
+              scrolledUnderElevation: 2,
+            ),
+            snackBarTheme: SnackBarThemeData(
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            inputDecorationTheme: const InputDecorationTheme(
+              border: OutlineInputBorder(),
+            ),
+            navigationBarTheme: NavigationBarThemeData(
+              surfaceTintColor: Colors.transparent,
+              indicatorColor: Colors.teal.withOpacity(0.2),
+            ),
           ),
           locale: appLocale,
           fallbackLocale: const Locale('en'),
@@ -98,6 +135,7 @@ class MyHomePage extends StatelessWidget {
     final controller = Get.put(_MainController());
 
     return Scaffold(
+        extendBody: true,
         body: Obx(
           () => FadeIndexedStack(
             lazy: true,
@@ -110,7 +148,11 @@ class MyHomePage extends StatelessWidget {
             ],
           ),
         ),
-        bottomNavigationBar: Obx(() => NavigationBar(
+        bottomNavigationBar: Obx(() => ClipRect(
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: NavigationBar(
+                backgroundColor: Theme.of(context).colorScheme.surface.withOpacity(0.75),
                 destinations: [
                   NavigationDestination(
                     icon: SvgPicture.asset(
@@ -143,7 +185,9 @@ class MyHomePage extends StatelessWidget {
                 selectedIndex: controller.selectedIndex.value,
                 onDestinationSelected: (int index) {
                   controller.setPageIndex(index);
-                })));
+                })),
+          ),
+        ));
   }
 
 }

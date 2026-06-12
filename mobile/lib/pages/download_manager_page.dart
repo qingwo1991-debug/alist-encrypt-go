@@ -523,8 +523,8 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
               onTap: () {
                 Navigator.pop(context);
                 // 这里可以添加分享功能
-                Get.showSnackbar(GetSnackBar(
-                  message: S.of(context).shareFeatureNotImplemented,
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(S.of(context).shareFeatureNotImplemented),
                   duration: const Duration(seconds: 2),
                 ));
               },
@@ -598,14 +598,14 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
               Navigator.pop(context);
               bool success = await DownloadManager.deleteFile(filename);
               if (success) {
-                Get.showSnackbar(GetSnackBar(
-                  message: S.of(context).fileDeleted,
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(S.of(context).fileDeleted),
                   duration: const Duration(seconds: 2),
                 ));
                 _loadDownloadedFiles(); // 刷新列表
               } else {
-                Get.showSnackbar(GetSnackBar(
-                  message: S.of(context).deleteFailed,
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(S.of(context).deleteFailed),
                   duration: const Duration(seconds: 2),
                 ));
               }
@@ -634,15 +634,15 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
               bool success = await DownloadManager.clearDownloadDirectory();
               if (success) {
                 DownloadManager.clearCompletedTasks();
-                Get.showSnackbar(GetSnackBar(
-                  message: S.of(context).cleared,
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(S.of(context).cleared),
                   duration: const Duration(seconds: 2),
                 ));
                 _loadDownloadedFiles(); // 刷新列表
                 setState(() {});
               } else {
-                Get.showSnackbar(GetSnackBar(
-                  message: S.of(context).clearFailed,
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(S.of(context).clearFailed),
                   duration: const Duration(seconds: 2),
                 ));
               }
@@ -664,51 +664,51 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           // 文件成功打开，不需要额外提示
           break;
         case ResultType.noAppToOpen:
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).noAppToOpenFile,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(S.of(context).noAppToOpenFile),
             duration: const Duration(seconds: 3),
-            mainButton: TextButton(
+            action: SnackBarAction(
+              label: S.of(context).viewLocation,
               onPressed: () {
                 _showFileLocation(filePath);
               },
-              child: Text(S.of(context).viewLocation),
             ),
           ));
           break;
         case ResultType.fileNotFound:
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).fileNotFound,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(S.of(context).fileNotFound),
             duration: const Duration(seconds: 3),
           ));
           break;
         case ResultType.permissionDenied:
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).noPermissionToOpenFile,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(S.of(context).noPermissionToOpenFile),
             duration: const Duration(seconds: 3),
           ));
           break;
         case ResultType.error:
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).openFileFailed(result.message ?? ''),
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(S.of(context).openFileFailed(result.message ?? '')),
             duration: const Duration(seconds: 3),
-            mainButton: TextButton(
+            action: SnackBarAction(
+              label: S.of(context).viewLocation,
               onPressed: () {
                 _showFileLocation(filePath);
               },
-              child: Text(S.of(context).viewLocation),
             ),
           ));
           break;
       }
     } catch (e) {
-      Get.showSnackbar(GetSnackBar(
-        message: S.of(context).openFileFailed(e.toString()),
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(S.of(context).openFileFailed(e.toString())),
         duration: const Duration(seconds: 3),
-        mainButton: TextButton(
+        action: SnackBarAction(
+          label: S.of(context).viewLocation,
           onPressed: () {
             _showFileLocation(filePath);
           },
-          child: Text(S.of(context).viewLocation),
         ),
       ));
     }
@@ -730,14 +730,14 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
         ),
       );
       
-      Get.showSnackbar(GetSnackBar(
-        message: S.of(context).fileManagerOpened,
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(S.of(context).fileManagerOpened),
         duration: const Duration(seconds: 2),
       ));
     } catch (e) {
       print('打开文件管理器失败: $e');
-      Get.showSnackbar(GetSnackBar(
-        message: S.of(context).openFileManagerFailed(e.toString()),
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(S.of(context).openFileManagerFailed(e.toString())),
         duration: const Duration(seconds: 3),
       ));
     }
@@ -749,8 +749,8 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
       try {
         final result = await OpenFilex.open(_downloadPath!);
         if (result.type == ResultType.done) {
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).downloadDirectoryOpened,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(S.of(context).downloadDirectoryOpened),
             duration: const Duration(seconds: 2),
           ));
           return;
@@ -758,14 +758,14 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
         _showFileLocation(_downloadPath!);
       } catch (e) {
         print('打开下载目录失败: $e');
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).openDownloadDirectoryFailed(e.toString()),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(S.of(context).openDownloadDirectoryFailed(e.toString())),
           duration: const Duration(seconds: 3),
         ));
       }
     } else {
-      Get.showSnackbar(GetSnackBar(
-        message: S.of(context).downloadDirectoryPathUnknown,
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(S.of(context).downloadDirectoryPathUnknown),
         duration: const Duration(seconds: 2),
       ));
     }
@@ -842,8 +842,8 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
                 case 'clear_records':
                   DownloadManager.clearCompletedTasks();
                   setState(() {});
-                  Get.showSnackbar(GetSnackBar(
-                    message: S.of(context).downloadRecordsCleared,
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(S.of(context).downloadRecordsCleared),
                     duration: const Duration(seconds: 2),
                   ));
                   break;

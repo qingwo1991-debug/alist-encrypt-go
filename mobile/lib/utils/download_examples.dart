@@ -36,10 +36,10 @@ class DownloadExamples {
       String url = urls[i];
       String filename = 'file_${i + 1}_${DateTime.now().millisecondsSinceEpoch}';
       
-      Get.showSnackbar(GetSnackBar(
-        message: S.current.downloadingFileProgress(i + 1, urls.length),
+      ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.downloadingFileProgress(i + 1, urls.length)),
         duration: Duration(seconds: 2),
-      ));
+));
       
       bool success = await DownloadManager.downloadFileInBackground(
         url: url,
@@ -47,18 +47,18 @@ class DownloadExamples {
       );
       
       if (!success) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.current.fileDownloadFailed(i + 1),
+        ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.fileDownloadFailed(i + 1)),
           duration: Duration(seconds: 3),
-        ));
+));
         break;
       }
     }
     
-    Get.showSnackbar(GetSnackBar(
-      message: S.current.batchDownloadComplete,
+    ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.batchDownloadComplete),
       duration: Duration(seconds: 3),
-    ));
+));
   }
 
   /// 示例5: 下载并显示自定义对话框
@@ -115,18 +115,18 @@ class DownloadExamples {
     Get.back(); // 关闭加载对话框
 
     if (success) {
-      Get.showSnackbar(GetSnackBar(
-        message: S.current.imageDownloadSuccess,
+      ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+        content: Text(S.current.imageDownloadSuccess),
         duration: Duration(seconds: 3),
-        mainButton: TextButton(
+        action: SnackBarAction(
+          label: S.current.view,
           onPressed: () {
-            // 可以在这里添加打开图片的逻辑
-            Get.showSnackbar(GetSnackBar(
-              message: S.current.checkImageInDownloadFolder,
+            // 在这里添加打开图片的逻辑
+            ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+              content: Text(S.current.checkImageInDownloadFolder),
               duration: Duration(seconds: 2),
             ));
           },
-          child: Text(S.current.view),
         ),
       ));
     }
@@ -153,10 +153,10 @@ class DownloadExamples {
               onPressed: () {
                 Get.back();
                 // 这里可以添加安装APK的逻辑
-                Get.showSnackbar(GetSnackBar(
-                  message: S.current.findApkInDownloadFolder,
+                ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.findApkInDownloadFolder),
                   duration: Duration(seconds: 5),
-                ));
+));
               },
               child: Text(S.current.installNow),
             ),

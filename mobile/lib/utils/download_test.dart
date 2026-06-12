@@ -59,10 +59,10 @@ class DownloadTestPage extends StatelessWidget {
             ElevatedButton(
               onPressed: () {
                 // 提示用户通过底部导航栏查看下载文件
-                Get.showSnackbar(GetSnackBar(
-                  message: S.current.checkDownloadManagerForFiles,
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.current.checkDownloadManagerForFiles),
                   duration: const Duration(seconds: 2),
-                ));
+));
               },
               child: Text(S.current.viewDownloadFiles),
             ),
@@ -111,13 +111,13 @@ class DownloadTestHelper {
         content: Text(S.current.openDownloadTestPage),
         actions: [
           TextButton(
-            onPressed: () => Get.back(),
+            onPressed: () => Navigator.pop(context),
             child: Text(S.current.cancel),
           ),
           TextButton(
             onPressed: () {
-              Get.back();
-              Get.to(() => const DownloadTestPage());
+              Navigator.pop(context);
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const DownloadTestPage()));
             },
             child: Text(S.current.ok),
           ),

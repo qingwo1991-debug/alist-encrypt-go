@@ -22,7 +22,7 @@ import 'log_list_view.dart';
 class OpenListScreen extends StatelessWidget {
   const OpenListScreen({Key? key}) : super(key: key);
 
-  Future<String?> _updateAdminPassword(String pwd) async {
+  Future<String?> _updateAdminPassword(BuildContext context, String pwd) async {
     try {
       debugPrint('[OpenListScreen] setAdminPwd start');
       await NativeBridge.android.setAdminPwd(pwd);
@@ -40,9 +40,8 @@ class OpenListScreen extends StatelessWidget {
           }),
         );
       }
-      Get.showSnackbar(const GetSnackBar(
-        title: '管理员密码已更新',
-        message: 'OpenList、本地挂载和同步任务将共用这份密码。',
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('管理员密码已更新，OpenList、本地挂载和同步任务将共用这份密码。'),
         duration: Duration(seconds: 2),
       ));
       return null;
@@ -84,15 +83,15 @@ class OpenListScreen extends StatelessWidget {
                 onPressed: () {
                   showDialog(
                       context: context,
-                      builder: (context) =>
-                          PwdEditDialog(onConfirm: _updateAdminPassword));
+                      builder: (dialogCtx) =>
+                          PwdEditDialog(onConfirm: (pwd) => _updateAdminPassword(context, pwd)));
                 },
                 icon: const Icon(Icons.password),
               ),
               IconButton(
                 tooltip: S.of(context).editOpenListConfig,
                 onPressed: () {
-                  Get.to(() => const ConfigEditorPage());
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ConfigEditorPage()));
                 },
                 icon: const Icon(Icons.edit_note),
               ),
@@ -116,9 +115,10 @@ class OpenListScreen extends StatelessWidget {
                   if (value == 1) {
                     await AppUpdateDialog.checkUpdateAndShowDialog(context, (b) {
                       if (!b) {
-                        Get.showSnackbar(GetSnackBar(
-                            message: S.of(context).currentIsLatestVersion,
-                            duration: const Duration(seconds: 2)));
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).currentIsLatestVersion),
+                            duration: const Duration(seconds: 2),
+));
                       }
                     });
                   } else if (value == 2) {
@@ -196,10 +196,10 @@ class OpenListController extends GetxController {
 
   Future<void> exportLogs(BuildContext context) async {
     if (logs.isEmpty) {
-      Get.showSnackbar(GetSnackBar(
-        message: S.of(context).noLogsToExport,
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).noLogsToExport),
         duration: const Duration(seconds: 2),
-      ));
+));
       return;
     }
 
@@ -229,15 +229,15 @@ class OpenListController extends GetxController {
         subject: 'OpenList Logs',
       );
 
-      Get.showSnackbar(GetSnackBar(
-        message: S.of(context).logsExportSuccess,
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).logsExportSuccess),
         duration: const Duration(seconds: 2),
-      ));
+));
     } catch (e) {
-      Get.showSnackbar(GetSnackBar(
-        message: '${S.of(context).logsExportFailed}: $e',
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text('${S.of(context).logsExportFailed}: $e'),
         duration: const Duration(seconds: 3),
-      ));
+));
     }
   }
 

@@ -110,10 +110,10 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                   },
                   onLongPress: () {
                     Clipboard.setData(ClipboardData(text: projectUrl));
-                    Get.showSnackbar(GetSnackBar(
-                      message: S.of(context).copiedToClipboard,
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).copiedToClipboard),
                       duration: const Duration(seconds: 1),
-                    ));
+));
                   },
                 ),
               ),
@@ -164,10 +164,10 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                   },
                   onLongPress: () {
                     Clipboard.setData(ClipboardData(text: openlistUrl));
-                    Get.showSnackbar(GetSnackBar(
-                      message: S.of(context).copiedToClipboard,
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).copiedToClipboard),
                       duration: const Duration(seconds: 1),
-                    ));
+));
                   },
                 ),
               ),
@@ -187,10 +187,10 @@ class _AppAboutDialogState extends State<AppAboutDialog> {
                   },
                   onLongPress: () {
                     Clipboard.setData(const ClipboardData(text: openlistMobileUrl));
-                    Get.showSnackbar(GetSnackBar(
-                      message: S.of(context).copiedToClipboard,
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).copiedToClipboard),
                       duration: const Duration(seconds: 1),
-                    ));
+));
                   },
                 ),
               ),

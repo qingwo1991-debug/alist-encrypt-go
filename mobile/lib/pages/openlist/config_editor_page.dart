@@ -128,10 +128,10 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       final backupFile = File(_backupFilePath);
       if (!await backupFile.exists()) {
         if (mounted) {
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).noBackupFound,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).noBackupFound),
             duration: const Duration(seconds: 2),
-          ));
+));
         }
         return;
       }
@@ -142,17 +142,17 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       });
 
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).backupRestored,
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).backupRestored),
           duration: const Duration(seconds: 2),
-        ));
+));
       }
     } catch (e) {
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).restoreBackupFailed(e.toString()),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).restoreBackupFailed(e.toString())),
           duration: const Duration(seconds: 2),
-        ));
+));
       }
     }
   }
@@ -198,10 +198,10 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
   Future<void> _restartOpenListService() async {
     if (!Platform.isAndroid) {
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).serviceRestartOnlyAndroid,
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).serviceRestartOnlyAndroid),
           duration: const Duration(seconds: 2),
-        ));
+));
       }
       return;
     }
@@ -209,11 +209,11 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
     try {
       // Show loading indicator
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).restartingService,
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).restartingService),
           duration: const Duration(seconds: 2),
           showProgressIndicator: true,
-        ));
+));
       }
 
       // Restart service via ServiceManager
@@ -221,25 +221,25 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       
       if (mounted) {
         if (success) {
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).serviceRestartSuccess,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).serviceRestartSuccess),
             duration: const Duration(seconds: 3),
-          ));
+));
         } else {
-          Get.showSnackbar(GetSnackBar(
-            message: S.of(context).serviceRestartFailed,
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).serviceRestartFailed),
             duration: const Duration(seconds: 3),
             backgroundColor: Colors.orange,
-          ));
+));
         }
       }
     } catch (e) {
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).saveFailed(e.toString()),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).saveFailed(e.toString())),
           duration: const Duration(seconds: 3),
           backgroundColor: Colors.red,
-        ));
+));
       }
     }
   }
@@ -261,13 +261,13 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       if (mounted) {
         final match = RegExp(r'line (\d+)').firstMatch(e.message);
         final line = match != null ? int.tryParse(match.group(1) ?? '') : null;
-        Get.showSnackbar(GetSnackBar(
-          message: line != null 
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(line != null 
             ? S.of(context).invalidJsonFormat(line, e.message)
-            : S.of(context).saveFailed(e.message),
+            : S.of(context).saveFailed(e.message)),
           duration: const Duration(seconds: 3),
           backgroundColor: Colors.red,
-        ));
+));
       }
       return false;
     }
@@ -298,12 +298,12 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       _controller.text = normalizedText;
       
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: previousPort != canonicalPort
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(previousPort != canonicalPort
               ? '已保存；监听端口已按 OpenList 页面设置收敛为 $canonicalPort'
-              : S.of(context).saved,
+              : S.of(context).saved),
           duration: const Duration(seconds: 2),
-        ));
+));
       }
       
       return true;
@@ -319,11 +319,11 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
         final errorMsg = e.osError?.errorCode == 13 
           ? S.of(context).filePermissionDenied 
           : S.of(context).saveFailed(e.message);
-        Get.showSnackbar(GetSnackBar(
-          message: errorMsg,
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(errorMsg),
           duration: const Duration(seconds: 3),
           backgroundColor: Colors.red,
-        ));
+));
       }
       return false;
     } catch (e) {
@@ -335,11 +335,11 @@ class _ConfigEditorPageState extends State<ConfigEditorPage> {
       }
       
       if (mounted) {
-        Get.showSnackbar(GetSnackBar(
-          message: S.of(context).saveFailed(e.toString()),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text(S.of(context).saveFailed(e.toString())),
           duration: const Duration(seconds: 3),
           backgroundColor: Colors.red,
-        ));
+));
       }
       return false;
     }
