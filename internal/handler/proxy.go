@@ -507,8 +507,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch fresh upstream metadata if cache is cold or stale.
 	cachedInfo, hasCache := h.fileDAO.Get(displayPath)
-	stale := hasCache && cachedInfo != nil && cachedInfo.Size > 0 && strings.TrimSpace(cachedInfo.RawURL) != "" &&
-		cachedInfo.UpstreamStaleness() > h.upstreamStalenessThreshold()
+	stale := hasCache && cachedInfo != nil && !cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold())
 	if !hasCache || cachedInfo == nil ||
 		cachedInfo.Size <= 0 || strings.TrimSpace(cachedInfo.RawURL) == "" || stale {
 		h.prefetchDownloadMetadata(r, displayPath, realPath, stale)
@@ -520,7 +519,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	trace.Logf(r.Context(), "download", "File size: %d, strategy: %s", fileInfo.Size, usedStrategy)
 
 	targetURL := ""
-	if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" {
+	if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold()) {
 		targetURL = cachedInfo.RawURL
 		trace.Logf(r.Context(), "download", "Using cached raw_url for target")
 	}

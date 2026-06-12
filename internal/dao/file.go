@@ -400,7 +400,8 @@ func (d *FileDAO) cleanupPathCache() {
 // SetFromAlistResponse parses and stores file info from Alist API response
 func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{}) error {
 	info := &FileInfo{
-		Path: path,
+		Path:              path,
+		UpstreamFetchedAt: time.Now(),
 	}
 
 	if name, ok := data["name"].(string); ok {
