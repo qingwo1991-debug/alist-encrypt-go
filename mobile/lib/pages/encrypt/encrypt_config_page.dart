@@ -787,205 +787,219 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         ),
                       ],
                     ),
-                    SwitchListTile(
-                      title: const Text('本地/私网直连（全局，绕过系统代理）'),
-                      value: _enableLocalBypass,
-                      onChanged: (value) => setState(() => _enableLocalBypass = value),
-                    ),
-                    SwitchListTile(
-                      title: const Text('播放优先兜底（解密失败时透传）'),
-                      value: _playFirstFallback,
-                      onChanged: (value) => setState(() => _playFirstFallback = value),
-                    ),
-                    SwitchListTile(
-                      title: const Text('启用 Range 兼容缓存'),
-                      value: _enableRangeCompatCache,
-                      onChanged: (value) => setState(() => _enableRangeCompatCache = value),
-                    ),
-                    Row(
+                    ExpansionTile(
+                      title: const Text('高级：解密与缓存'),
+                      maintainState: true,
+                      initiallyExpanded: false,
                       children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _rangeCompatTtlController,
-                            decoration: const InputDecoration(
-                              labelText: 'Range 兼容缓存 TTL（分钟）',
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextFormField(
-                            controller: _rangeCompatMinFailuresController,
-                            decoration: const InputDecoration(
-                              labelText: 'Range 失败阈值',
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    TextFormField(
-                      controller: _rangeSkipMaxBytesController,
-                      decoration: const InputDecoration(
-                        labelText: 'Range 跳过上限（字节）',
+                      SwitchListTile(
+                        title: const Text('本地/私网直连（全局，绕过系统代理）'),
+                        value: _enableLocalBypass,
+                        onChanged: (value) => setState(() => _enableLocalBypass = value),
                       ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    SwitchListTile(
-                      title: const Text('启用并行解密'),
-                      value: _enableParallelDecrypt,
-                      onChanged: (value) => setState(() => _enableParallelDecrypt = value),
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _parallelDecryptConcurrencyController,
-                            decoration: const InputDecoration(
-                              labelText: '并行解密并发',
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextFormField(
-                            controller: _streamBufferKbController,
-                            decoration: const InputDecoration(
-                              labelText: '流缓冲 KB',
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    TextFormField(
-                      controller: _webdavNegativeCacheTtlController,
-                      decoration: const InputDecoration(
-                        labelText: 'WebDAV 负缓存 TTL（分钟）',
+                      SwitchListTile(
+                        title: const Text('播放优先兜底（解密失败时透传）'),
+                        value: _playFirstFallback,
+                        onChanged: (value) => setState(() => _playFirstFallback = value),
                       ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    SwitchListTile(
-                      title: const Text('使用 HTTPS'),
-                      value: _alistHttps,
-                      onChanged: (value) => setState(() => _alistHttps = value),
-                    ),
-                    SwitchListTile(
-                      title: const Text('启用 H2C (HTTP/2 明文)'),
-                      subtitle: const Text('需要后端 OpenList 也开启 enable_h2c'),
-                      value: _enableH2C,
-                      onChanged: (value) async {
-                        setState(() => _enableH2C = value);
-                        try {
-                          await NativeBridge.encryptProxy.setEncryptEnableH2C(value);
-                        } catch (e) {
-                          debugPrint('Failed to set H2C: $e');
-                        }
-                      },
+                      SwitchListTile(
+                        title: const Text('启用 Range 兼容缓存'),
+                        value: _enableRangeCompatCache,
+                        onChanged: (value) => setState(() => _enableRangeCompatCache = value),
+                      ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _rangeCompatTtlController,
+                              decoration: const InputDecoration(
+                                labelText: 'Range 兼容缓存 TTL（分钟）',
+                              ),
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextFormField(
+                              controller: _rangeCompatMinFailuresController,
+                              decoration: const InputDecoration(
+                                labelText: 'Range 失败阈值',
+                              ),
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      TextFormField(
+                        controller: _rangeSkipMaxBytesController,
+                        decoration: const InputDecoration(
+                          labelText: 'Range 跳过上限（字节）',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                      SwitchListTile(
+                        title: const Text('启用并行解密'),
+                        value: _enableParallelDecrypt,
+                        onChanged: (value) => setState(() => _enableParallelDecrypt = value),
+                      ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _parallelDecryptConcurrencyController,
+                              decoration: const InputDecoration(
+                                labelText: '并行解密并发',
+                              ),
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextFormField(
+                              controller: _streamBufferKbController,
+                              decoration: const InputDecoration(
+                                labelText: '流缓冲 KB',
+                              ),
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      TextFormField(
+                        controller: _webdavNegativeCacheTtlController,
+                        decoration: const InputDecoration(
+                          labelText: 'WebDAV 负缓存 TTL（分钟）',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                      SwitchListTile(
+                        title: const Text('使用 HTTPS'),
+                        value: _alistHttps,
+                        onChanged: (value) => setState(() => _alistHttps = value),
+                      ),
+                      SwitchListTile(
+                        title: const Text('启用 H2C (HTTP/2 明文)'),
+                        subtitle: const Text('需要后端 OpenList 也开启 enable_h2c'),
+                        value: _enableH2C,
+                        onChanged: (value) async {
+                          setState(() => _enableH2C = value);
+                          try {
+                            await NativeBridge.encryptProxy.setEncryptEnableH2C(value);
+                          } catch (e) {
+                            debugPrint('Failed to set H2C: $e');
+                          }
+                        },
+                      ),
+                      ],
                     ),
 
                     const SizedBox(height: 24),
 
-                    // DB_EXPORT API 同步配置
-                    Text(
-                      'DB_EXPORT 同步',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    SwitchListTile(
-                      title: const Text('启用 DB_EXPORT 元数据同步'),
-                      subtitle: const Text('从远端 exportFileMeta 增量拉取元数据到本地数据库'),
-                      value: _enableDbExportSync,
-                      onChanged: (value) => setState(() => _enableDbExportSync = value),
-                    ),
-                    if (_enableDbExportSync) ...[
-                      TextFormField(
-                        controller: _dbExportBaseUrlController,
-                        decoration: const InputDecoration(
-                          labelText: 'API 地址',
-                          hintText: 'http://127.0.0.1:5344',
-                        ),
-                        validator: (value) {
-                          if (!_enableDbExportSync) return null;
-                          if (value == null || value.trim().isEmpty) {
-                            return '请输入 API 地址';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 8),
-                      TextFormField(
-                        controller: _dbExportSyncIntervalController,
-                        decoration: const InputDecoration(
-                          labelText: '同步间隔（秒）',
-                          hintText: '300',
-                        ),
-                        keyboardType: TextInputType.number,
-                        validator: (value) {
-                          if (!_enableDbExportSync) return null;
-                          final interval = int.tryParse(value ?? '');
-                          if (interval == null || interval <= 0) {
-                            return '请输入有效同步间隔';
-                          }
-                          return null;
-                        },
+                    ExpansionTile(
+                      title: const Text('高级：DB_EXPORT 元数据同步'),
+                      maintainState: true,
+                      initiallyExpanded: false,
+                      children: [
+                      // DB_EXPORT API 同步配置
+                      Text(
+                        'DB_EXPORT 同步',
+                        style: Theme.of(context).textTheme.titleMedium,
                       ),
                       const SizedBox(height: 8),
                       SwitchListTile(
-                        title: const Text('启用鉴权'),
-                        subtitle: const Text('开启后使用 /enc-api/login 获取 token'),
-                        value: _dbExportAuthEnabled,
-                        onChanged: (value) => setState(() => _dbExportAuthEnabled = value),
+                        title: const Text('启用 DB_EXPORT 元数据同步'),
+                        subtitle: const Text('从远端 exportFileMeta 增量拉取元数据到本地数据库'),
+                        value: _enableDbExportSync,
+                        onChanged: (value) => setState(() => _enableDbExportSync = value),
                       ),
-                    ],
-                    if (_enableDbExportSync && _dbExportAuthEnabled) ...[
-                      TextFormField(
-                        controller: _dbExportUsernameController,
-                        decoration: const InputDecoration(
-                          labelText: '账号',
-                          hintText: 'admin',
+                      if (_enableDbExportSync) ...[
+                        TextFormField(
+                          controller: _dbExportBaseUrlController,
+                          decoration: const InputDecoration(
+                            labelText: 'API 地址',
+                            hintText: 'http://127.0.0.1:5344',
+                          ),
+                          validator: (value) {
+                            if (!_enableDbExportSync) return null;
+                            if (value == null || value.trim().isEmpty) {
+                              return '请输入 API 地址';
+                            }
+                            return null;
+                          },
                         ),
-                        validator: (value) {
-                          if (!_enableDbExportSync || !_dbExportAuthEnabled) return null;
-                          if (value == null || value.trim().isEmpty) {
-                            return '请输入账号';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 8),
-                      _PasswordInput(
-                        controller: _dbExportPasswordController,
-                        labelText: '密码（留空保持不变）',
-                      ),
-                    ],
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('主动探测 / 数据同步状态'),
-                      subtitle: Text(
-                        _dbExportBaseUrlController.text.trim().isEmpty
-                            ? '先配置 Go 服务 API 地址后查看'
-                            : '查看总量、进度、最近更新时间和下次计划时间',
-                      ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: _dbExportBaseUrlController.text.trim().isEmpty
-                          ? null
-                          : () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => DirSyncStatusPage(
-                                    baseUrl: _dbExportBaseUrlController.text.trim(),
-                                    proxyPort: int.tryParse(_proxyPortController.text) ?? 5344,
+                        const SizedBox(height: 8),
+                        TextFormField(
+                          controller: _dbExportSyncIntervalController,
+                          decoration: const InputDecoration(
+                            labelText: '同步间隔（秒）',
+                            hintText: '300',
+                          ),
+                          keyboardType: TextInputType.number,
+                          validator: (value) {
+                            if (!_enableDbExportSync) return null;
+                            final interval = int.tryParse(value ?? '');
+                            if (interval == null || interval <= 0) {
+                              return '请输入有效同步间隔';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        SwitchListTile(
+                          title: const Text('启用鉴权'),
+                          subtitle: const Text('开启后使用 /enc-api/login 获取 token'),
+                          value: _dbExportAuthEnabled,
+                          onChanged: (value) => setState(() => _dbExportAuthEnabled = value),
+                        ),
+                      ],
+                      if (_enableDbExportSync && _dbExportAuthEnabled) ...[
+                        TextFormField(
+                          controller: _dbExportUsernameController,
+                          decoration: const InputDecoration(
+                            labelText: '账号',
+                            hintText: 'admin',
+                          ),
+                          validator: (value) {
+                            if (!_enableDbExportSync || !_dbExportAuthEnabled) return null;
+                            if (value == null || value.trim().isEmpty) {
+                              return '请输入账号';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        _PasswordInput(
+                          controller: _dbExportPasswordController,
+                          labelText: '密码（留空保持不变）',
+                        ),
+                      ],
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('主动探测 / 数据同步状态'),
+                        subtitle: Text(
+                          _dbExportBaseUrlController.text.trim().isEmpty
+                              ? '先配置 Go 服务 API 地址后查看'
+                              : '查看总量、进度、最近更新时间和下次计划时间',
+                        ),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: _dbExportBaseUrlController.text.trim().isEmpty
+                            ? null
+                            : () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => DirSyncStatusPage(
+                                      baseUrl: _dbExportBaseUrlController.text.trim(),
+                                      proxyPort: int.tryParse(_proxyPortController.text) ?? 5344,
+                                    ),
                                   ),
-                                ),
-                              );
-                            },
-                    ),
+                                );
+                              },
+                      ),
                     
+                      ],
+                    ),
                     const SizedBox(height: 24),
 
                     ListTile(
@@ -1066,60 +1080,67 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
 
                     const SizedBox(height: 24),
 
-                    Text(
-                      '网络策略',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
+                    ExpansionTile(
+                      title: const Text('高级：网络策略'),
+                      maintainState: true,
+                      initiallyExpanded: false,
                       children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _upstreamTimeoutController,
-                            decoration: const InputDecoration(
-                              labelText: '上游超时（秒）',
-                              hintText: '8',
+                        Text(
+                        '网络策略',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _upstreamTimeoutController,
+                              decoration: const InputDecoration(
+                                labelText: '上游超时（秒）',
+                                hintText: '8',
+                              ),
+                              keyboardType: TextInputType.number,
                             ),
-                            keyboardType: TextInputType.number,
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextFormField(
-                            controller: _probeTimeoutController,
-                            decoration: const InputDecoration(
-                              labelText: '单次探测超时（秒）',
-                              hintText: '3',
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextFormField(
+                              controller: _probeTimeoutController,
+                              decoration: const InputDecoration(
+                                labelText: '单次探测超时（秒）',
+                                hintText: '3',
+                              ),
+                              keyboardType: TextInputType.number,
                             ),
-                            keyboardType: TextInputType.number,
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: _probeBudgetController,
-                            decoration: const InputDecoration(
-                              labelText: '探测总预算（秒）',
-                              hintText: '5',
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              controller: _probeBudgetController,
+                              decoration: const InputDecoration(
+                                labelText: '探测总预算（秒）',
+                                hintText: '5',
+                              ),
+                              keyboardType: TextInputType.number,
                             ),
-                            keyboardType: TextInputType.number,
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextFormField(
-                            controller: _upstreamBackoffController,
-                            decoration: const InputDecoration(
-                              labelText: '失败退避（秒）',
-                              hintText: '20',
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextFormField(
+                              controller: _upstreamBackoffController,
+                              decoration: const InputDecoration(
+                                labelText: '失败退避（秒）',
+                                hintText: '20',
+                              ),
+                              keyboardType: TextInputType.number,
                             ),
-                            keyboardType: TextInputType.number,
                           ),
-                        ),
+                        ],
+                      ),
                       ],
                     ),
                     const SizedBox(height: 24),
