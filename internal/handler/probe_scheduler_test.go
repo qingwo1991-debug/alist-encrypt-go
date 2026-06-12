@@ -193,6 +193,51 @@ func TestFetchRawURLUsesAuthHeaders(t *testing.T) {
 	}
 }
 
+func TestFetchRawURLFallsBackToFsLinkWhenFsGetReturnsEmpty(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+
+	var fsGetCalls, fsLinkCalls int
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get":
+			fsGetCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"","size":0}}`))
+		case "/api/fs/link":
+			fsLinkCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"https://cdn.example/from-link","size":8192}}`))
+		default:
+			t.Fatalf("unexpected path=%q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	result := fetchRawURL(context.Background(), srv.URL, "/movie.mp4", "/enc/movie.bin", nil, fileDAO, 30*time.Minute)
+	if result.RawURL != "https://cdn.example/from-link" {
+		t.Fatalf("raw_url=%q", result.RawURL)
+	}
+	if result.Source != "fs_link" {
+		t.Fatalf("source=%q, want fs_link", result.Source)
+	}
+	if fsGetCalls != 1 || fsLinkCalls != 1 {
+		t.Fatalf("fsGetCalls=%d fsLinkCalls=%d, want 1/1", fsGetCalls, fsLinkCalls)
+	}
+
+	info, ok := fileDAO.Get("/movie.mp4")
+	if !ok || info == nil {
+		t.Fatal("expected cache entry for display path")
+	}
+	if info.RawURL != "https://cdn.example/from-link" || info.Size != 8192 {
+		t.Fatalf("cached raw_url=%q size=%d", info.RawURL, info.Size)
+	}
+}
+
 func TestProbeSchedulerRunItemUsesEffectiveAuthForRawURLAndRangeProbe(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AlistServer.EnableRangeCompatCache = true

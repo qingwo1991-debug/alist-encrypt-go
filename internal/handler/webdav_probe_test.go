@@ -334,6 +334,28 @@ func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
 	}
 }
 
+func TestConvertToRealPathKeepsEncryptedNamePassthrough(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		EncName:  true,
+		Enable:   true,
+		EncPath:  []string{"/encrypt/*"},
+	}
+	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
+	encryptedName := converter.ToRealName("movie.mp4")
+
+	h := newProbeTestHandler(t, "http://127.0.0.1:5244")
+
+	got, mode := h.resolveRealPathWithMode("/encrypt/"+encryptedName, passwd)
+	if got != "/encrypt/"+encryptedName {
+		t.Fatalf("realPath=%q, want passthrough %q", got, "/encrypt/"+encryptedName)
+	}
+	if mode != pathModeEncryptedNamePassthrough {
+		t.Fatalf("mode=%q, want %q", mode, pathModeEncryptedNamePassthrough)
+	}
+}
+
 func TestHandlePropfindDirectoryDoesNotConvertToEncryptedFilePath(t *testing.T) {
 	cfg := config.Get()
 	original := cfg.AlistServer
