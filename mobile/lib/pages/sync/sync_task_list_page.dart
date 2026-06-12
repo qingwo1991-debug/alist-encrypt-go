@@ -176,6 +176,21 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                   ),
               ],
             ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                [
+                  if (task.lastSyncTime != null)
+                    '上次: ${DateTime.fromMillisecondsSinceEpoch(task.lastSyncTime!).toString().substring(5, 16)}',
+                  if (status != null) _describeStatus(status),
+                  if (task.lastSyncFileCount != null)
+                    '${task.lastSyncFileCount} 文件',
+                ].join(' · '),
+                style: TextStyle(fontSize: 11, color: Theme.of(context).hintColor),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
         children: [

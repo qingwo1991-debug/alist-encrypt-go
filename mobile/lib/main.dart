@@ -128,8 +128,12 @@ class MyHomePage extends StatelessWidget {
                     label: '加密',
                   ),
                   NavigationDestination(
-                    icon: const Icon(Icons.arrow_downward),
-                    label: _getDownloadLabel(),
+                    icon: Badge(
+                      isLabelVisible: DownloadManager.activeTasks.isNotEmpty,
+                      label: Text('${DownloadManager.activeTasks.length}'),
+                      child: const Icon(Icons.arrow_downward),
+                    ),
+                    label: S.current.downloadManager,
                   ),
                   NavigationDestination(
                     icon: const Icon(Icons.settings),
@@ -142,14 +146,6 @@ class MyHomePage extends StatelessWidget {
                 })));
   }
 
-  String _getDownloadLabel() {
-    int activeCount = DownloadManager.activeTasks.length;
-    if (activeCount > 0) {
-      return S.current.downloadManagerWithCount(activeCount);
-    } else {
-      return S.current.downloadManager;
-    }
-  }
 }
 
 class _MainController extends GetxController {

@@ -1237,21 +1237,56 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         itemBuilder: (context, index) {
                           final config = _encryptPaths[index];
                           return Card(
-                            child: ListTile(
-                              leading: Icon(
-                                config.enable
-                                    ? Icons.lock
-                                    : Icons.lock_open,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              side: BorderSide(
                                 color: config.enable
-                                    ? Colors.green
-                                    : Colors.grey,
+                                    ? Colors.green.withOpacity(0.3)
+                                    : Colors.grey.withOpacity(0.2),
                               ),
-                              title: Text(config.path),
-                              subtitle: Text(
-                                '${config.encType.toUpperCase()} | '
-                                '${config.encName ? "加密文件名" : "不加密文件名"}'
-                                '${config.encSuffix.isEmpty ? "" : " | 后缀 ${config.encSuffix}"}',
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                border: Border(
+                                  left: BorderSide(
+                                    color: config.enable ? Colors.green : Colors.grey.shade400,
+                                    width: 4,
+                                  ),
+                                ),
                               ),
+                              child: ListTile(
+                                leading: Icon(
+                                  config.enable
+                                      ? Icons.lock
+                                      : Icons.lock_open,
+                                  color: config.enable
+                                      ? Colors.green
+                                      : Colors.grey,
+                                ),
+                                title: Text(config.path),
+                                subtitle: Wrap(
+                                  spacing: 6,
+                                  runSpacing: 4,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                      decoration: BoxDecoration(
+                                        color: Colors.teal.withOpacity(0.1),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        config.encType.toUpperCase(),
+                                        style: const TextStyle(fontSize: 11, color: Colors.teal, fontWeight: FontWeight.w600),
+                                      ),
+                                    ),
+                                    Text(
+                                      '${config.encName ? "加密文件名" : "原文件名"}'
+                                      '${config.encSuffix.isEmpty ? "" : " · 后缀 ${config.encSuffix}"}',
+                                      style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+                                    ),
+                                  ],
+                                ),
                               trailing: Switch(
                                 value: config.enable,
                                 onChanged: (value) async {
@@ -1276,6 +1311,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                 },
                               ),
                               onTap: () => _editPath(index),
+                            ),
                             ),
                           );
                         },
