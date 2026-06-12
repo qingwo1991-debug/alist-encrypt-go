@@ -52,7 +52,7 @@ class ConfigExport {
 
   /// 分享导出的配置文件
   static Future<void> shareConfig(String filePath) async {
-    await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
+    await Share.shareXFiles([XFile(filePath)]);
   }
 
   /// 从文件导入配置

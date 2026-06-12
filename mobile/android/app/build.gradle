@@ -72,8 +72,8 @@ if (goBindingAars.isEmpty()) {
 
 android {
     namespace "com.openlist.mobile"
-    compileSdk = 35
-    ndkVersion = "25.2.9519653"  // 与 CI 中安装的版本保持一致
+    compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     signingConfigs {
         local {
