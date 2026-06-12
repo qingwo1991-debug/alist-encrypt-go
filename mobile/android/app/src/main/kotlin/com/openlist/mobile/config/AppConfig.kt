@@ -9,8 +9,8 @@ object AppConfig {
 
     var isSilentJumpAppEnabled by prefs.dynamic("isSilentJumpAppEnabled", fallback = false)
 
-    // 默认启用 WakeLock，确保后台服务网络连接不被系统限制
-    var isWakeLockEnabled: Boolean by prefs.dynamic("isWakeLockEnabled", fallback = true)
+    // WakeLock 默认关闭，避免 CPU 常驻导致耗电；需要时可手动开启
+    var isWakeLockEnabled: Boolean by prefs.dynamic("isWakeLockEnabled", fallback = false)
     var isStartAtBootEnabled: Boolean by prefs.dynamic("isStartAtBootEnabled", fallback = false)
     var isAutoCheckUpdateEnabled: Boolean by prefs.dynamic(
         "isAutoCheckUpdateEnabled",

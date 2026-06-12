@@ -13,6 +13,7 @@ class SyncTask {
   bool enabled;
   bool deleteAfterSync;
   bool preserveFolderStructure;
+  int uploadSpeedLimitKbps;
   int? lastSyncTime;
   int? lastSyncFileCount;
   String? lastError;
@@ -29,6 +30,7 @@ class SyncTask {
     this.enabled = true,
     this.deleteAfterSync = false,
     this.preserveFolderStructure = true,
+    this.uploadSpeedLimitKbps = 0,
     this.lastSyncTime,
     this.lastSyncFileCount,
     this.lastError,
@@ -47,6 +49,7 @@ class SyncTask {
         'enabled': enabled,
         'deleteAfterSync': deleteAfterSync,
         'preserveFolderStructure': preserveFolderStructure,
+        'uploadSpeedLimitKbps': uploadSpeedLimitKbps,
         'lastSyncTime': lastSyncTime,
         'lastSyncFileCount': lastSyncFileCount,
         'lastError': lastError,
@@ -72,6 +75,7 @@ class SyncTask {
       deleteAfterSync: json['deleteAfterSync'] as bool? ?? false,
       preserveFolderStructure:
           json['preserveFolderStructure'] as bool? ?? true,
+      uploadSpeedLimitKbps: json['uploadSpeedLimitKbps'] as int? ?? 0,
       lastSyncTime: json['lastSyncTime'] as int?,
       lastSyncFileCount: json['lastSyncFileCount'] as int?,
       lastError: json['lastError'] as String?,
