@@ -84,6 +84,8 @@ class DownloadManager {
   static final Dio _dio = Dio();
   static final Map<String, DownloadTask> _activeTasks = {};
   static final List<DownloadTask> _completedTasks = [];
+  static const int _downloadThreads = 4;
+  static const int _minMultiThreadSize = 10 * 1024 * 1024;
   
   /// 获取所有活跃的下载任务
   static List<DownloadTask> get activeTasks => _activeTasks.values.toList();
@@ -149,26 +151,45 @@ class DownloadManager {
       // 显示初始通知
       await NotificationManager.showDownloadProgressNotification();
       
-      // 执行下载
-      await _dio.download(
-        url,
-        filePath,
+      // 执行下载：优先多线程，失败回退单线程
+      final multiOk = await _downloadMultiThread(
+        url: url,
+        filePath: filePath,
         cancelToken: cancelToken,
-        onReceiveProgress: (received, total) {
+        onProgress: (received, total) {
           if (task.status == DownloadStatus.cancelled) return;
-          
           task.receivedBytes = received;
           task.totalBytes = total;
           if (total > 0) {
             task.progress = received / total;
           }
-          
-          // 更新通知进度
           NotificationManager.showDownloadProgressNotification();
-          
-          log('下载进度: ${(task.progress * 100).toStringAsFixed(1)}%');
+          log('下载进度(多线程): ${(task.progress * 100).toStringAsFixed(1)}%');
         },
       );
+
+      if (!multiOk) {
+        log('多线程下载未适用或失败，回退到单线程下载');
+        await _dio.download(
+          url,
+          filePath,
+          cancelToken: cancelToken,
+          onReceiveProgress: (received, total) {
+            if (task.status == DownloadStatus.cancelled) return;
+
+            task.receivedBytes = received;
+            task.totalBytes = total;
+            if (total > 0) {
+              task.progress = received / total;
+            }
+
+            // 更新通知进度
+            NotificationManager.showDownloadProgressNotification();
+
+            log('下载进度: ${(task.progress * 100).toStringAsFixed(1)}%');
+          },
+        );
+      }
 
       // 下载完成
       task.status = DownloadStatus.completed;
@@ -266,12 +287,12 @@ class DownloadManager {
     filePath = _getUniqueFilePath(filePath);
 
     try {
-      // 执行下载
-      await _dio.download(
-        url,
-        filePath,
+      // 执行下载：优先多线程，失败回退单线程
+      final multiOk = await _downloadMultiThread(
+        url: url,
+        filePath: filePath,
         cancelToken: cancelToken,
-        onReceiveProgress: (received, total) {
+        onProgress: (received, total) {
           double progress = 0.0;
           if (total > 0) {
             progress = received / total;
@@ -279,6 +300,21 @@ class DownloadManager {
           onProgress(progress, received, total);
         },
       );
+
+      if (!multiOk) {
+        await _dio.download(
+          url,
+          filePath,
+          cancelToken: cancelToken,
+          onReceiveProgress: (received, total) {
+            double progress = 0.0;
+            if (total > 0) {
+              progress = received / total;
+            }
+            onProgress(progress, received, total);
+          },
+        );
+      }
 
       // 下载完成
       onComplete(filePath);
@@ -296,6 +332,100 @@ class DownloadManager {
         onError(e.toString());
         return null;
       }
+    }
+  }
+
+  /// 多线程分片下载，失败返回 false 供调用方回退到单线程
+  static Future<bool> _downloadMultiThread({
+    required String url,
+    required String filePath,
+    CancelToken? cancelToken,
+    required void Function(int received, int total) onProgress,
+  }) async {
+    try {
+      final headResp = await _dio.head(
+        url,
+        options: Options(
+          followRedirects: true,
+          validateStatus: (s) => s != null && s < 400,
+        ),
+      );
+
+      final contentLength =
+          int.tryParse(headResp.headers.value('content-length') ?? '') ?? 0;
+      final acceptRanges = headResp.headers.value('accept-ranges') ?? '';
+
+      if (contentLength < _minMultiThreadSize ||
+          acceptRanges.toLowerCase() != 'bytes') {
+        return false;
+      }
+
+      final chunkSize = contentLength ~/ _downloadThreads;
+      final file = File(filePath);
+      await file.create(recursive: true);
+      final raf = await file.open(mode: FileMode.writeOnly);
+
+      try {
+        await raf.truncate(contentLength);
+
+        final receivedPerChunk = List.filled(_downloadThreads, 0);
+        final futures = <Future<void>>[];
+
+        for (int i = 0; i < _downloadThreads; i++) {
+          final start = i * chunkSize;
+          final end = (i == _downloadThreads - 1)
+              ? contentLength - 1
+              : (i + 1) * chunkSize - 1;
+
+          futures.add(() async {
+            final resp = await _dio.get<List<int>>(
+              url,
+              cancelToken: cancelToken,
+              options: Options(
+                headers: {'Range': 'bytes=$start-$end'},
+                responseType: ResponseType.bytes,
+                followRedirects: true,
+              ),
+              onReceiveProgress: (received, total) {
+                receivedPerChunk[i] = received;
+                final totalReceived = receivedPerChunk.fold<int>(
+                    0, (sum, v) => sum + v);
+                onProgress(totalReceived, contentLength);
+              },
+            );
+
+            final bytes = resp.data;
+            if (bytes != null && bytes.isNotEmpty) {
+              await raf.setPosition(start);
+              await raf.writeFrom(bytes);
+            }
+          }());
+        }
+
+        await Future.wait(futures);
+
+        if (cancelToken?.isCancelled == true) {
+          try {
+            await file.delete();
+          } catch (_) {}
+          return false;
+        }
+
+        return true;
+      } finally {
+        try {
+          await raf.close();
+        } catch (_) {}
+      }
+    } catch (e) {
+      if (e is DioException && e.type == DioExceptionType.cancel) {
+        rethrow;
+      }
+      log('多线程下载失败，将回退到单线程: $e');
+      try {
+        await File(filePath).delete();
+      } catch (_) {}
+      return false;
     }
   }
 
