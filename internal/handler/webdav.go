@@ -53,6 +53,7 @@ const webdavAuthContextKey = "webdav-auth"
 
 type webdavRawURLResolution struct {
 	RawURL        string
+	Source        string
 	StatusCode    int
 	FailureReason string
 }
@@ -255,25 +256,13 @@ func (h *WebDAVHandler) deepScan(ctx context.Context, paths []string) {
 
 // convertToRealPath converts display path to encrypted path for WebDAV
 func (h *WebDAVHandler) convertToRealPath(davPath string, passwdInfo *config.PasswdInfo) string {
-	if passwdInfo == nil || !passwdInfo.EncName {
-		return davPath
-	}
+	realPath, _ := h.resolveRealPathWithMode(davPath, passwdInfo)
+	return realPath
+}
 
-	// First try to get cached encrypted path
-	if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
-		return encPath
-	}
-
-	// Fallback: re-encrypt
-	fileName := path.Base(davPath)
-	if encryption.IsOriginalFile(fileName) {
-		realName := encryption.StripOriginalPrefix(fileName)
-		return path.Dir(davPath) + "/" + realName
-	}
-
-	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-	realName := converter.ToRealName(fileName)
-	return path.Dir(davPath) + "/" + realName
+func (h *WebDAVHandler) resolveRealPathWithMode(davPath string, passwdInfo *config.PasswdInfo) (string, string) {
+	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	return resolveEncryptedRealPath(h.fileDAO, passwdInfo, davPath, allowLoose)
 }
 
 // handleGet handles GET requests with decryption
@@ -302,8 +291,8 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	}
 
 	// Convert display path to real encrypted path
-	realPath := h.convertToRealPath(davPath, passwdInfo)
-	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s", davPath, realPath)
+	realPath, pathMode := h.resolveRealPathWithMode(davPath, passwdInfo)
+	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
 
 	// Prefer cached raw_url (signed direct URL) — same as HTTP HandleDownload.
 	targetURL := ""
@@ -311,24 +300,24 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && strings.TrimSpace(cachedInfo.RawURL) != "" &&
 		cachedInfo.UpstreamStaleness() < staleThreshold {
 		targetURL = cachedInfo.RawURL
-		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target, display=%s", davPath)
+		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target, display=%s source=cache", davPath)
 	}
 	if targetURL == "" {
-		// Fetch raw_url from alist /api/fs/get (PROPFIND XML doesn't include it).
+		// Fetch raw_url from alist API (PROPFIND XML doesn't include it).
 		resolve := h.resolveRawURLFromAlist(r, davPath, realPath)
 		if resolve.RawURL != "" {
 			targetURL = resolve.RawURL
-			trace.Logf(r.Context(), "webdav-get", "Fetched raw_url from alist fs/get, display=%s", davPath)
+			trace.Logf(r.Context(), "webdav-get", "Fetched raw_url from alist, display=%s source=%s", davPath, resolve.Source)
 		} else {
-			trace.Logf(r.Context(), "webdav-get", "raw_url fresh fetch failed, display=%s real=%s status=%d reason=%s",
-				davPath, realPath, resolve.StatusCode, resolve.FailureReason)
+			trace.Logf(r.Context(), "webdav-get", "raw_url fresh fetch failed, display=%s real=%s status=%d reason=%s source=%s",
+				davPath, realPath, resolve.StatusCode, resolve.FailureReason, resolve.Source)
 			if passwdInfo != nil && passwdInfo.EncName && isStrictWebDAVRawURLFailure(resolve.StatusCode) {
 				trace.Logf(r.Context(), "webdav-get", "Rejecting /dav fallback for EncName path, display=%s status=%d", davPath, resolve.StatusCode)
 				RespondHTTPErrorWithStatus(w, "Unable to resolve upstream raw_url for encrypted WebDAV playback", http.StatusBadGateway)
 				return
 			}
 			targetURL = httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
-			trace.Logf(r.Context(), "webdav-get", "Using /dav fallback target for display=%s", davPath)
+			trace.Logf(r.Context(), "webdav-get", "Using /dav fallback target for display=%s source=dav_fallback", davPath)
 		}
 	}
 
@@ -427,6 +416,7 @@ func (h *WebDAVHandler) resolveRawURLFromAlist(r *http.Request, displayPath, rea
 	result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, stalenessThreshold)
 	return webdavRawURLResolution{
 		RawURL:        result.RawURL,
+		Source:        result.Source,
 		StatusCode:    result.StatusCode,
 		FailureReason: result.FailureReason,
 	}

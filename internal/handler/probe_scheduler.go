@@ -192,6 +192,7 @@ type probeExecutionResult struct {
 type rawURLFetchResult struct {
 	RawURL        string
 	Size          int64
+	Source        string
 	StatusCode    int
 	FailureReason string
 }
@@ -1102,7 +1103,7 @@ func fetchAlistJWT(alistURL, username, password string) string {
 	return result.Data.Token
 }
 
-// fetchRawURL calls alist /api/fs/get to get the signed raw_url and caches it.
+// fetchRawURL calls alist metadata APIs to get the signed raw_url and caches it.
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
 // staleThreshold: if cached raw_url is fresher than this, skip the fetch.
 func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO, staleThreshold time.Duration) rawURLFetchResult {
@@ -1113,11 +1114,27 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
 		strings.TrimSpace(cached.RawURL) != "" &&
 		cached.UpstreamStaleness() < staleThreshold {
-		return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size}
+		return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size, Source: "cache"}
 	}
 
+	result := fetchRawURLViaAPI(ctx, alistURL, displayPath, realPath, authHeaders, fileDAO, "/api/fs/get")
+	if strings.TrimSpace(result.RawURL) != "" || result.FailureReason != "raw_url_empty" {
+		return result
+	}
+
+	linkResult := fetchRawURLViaAPI(ctx, alistURL, displayPath, realPath, authHeaders, fileDAO, "/api/fs/link")
+	if strings.TrimSpace(linkResult.RawURL) != "" {
+		return linkResult
+	}
+	if linkResult.StatusCode != 0 || linkResult.FailureReason != "" {
+		return linkResult
+	}
+	return result
+}
+
+func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO, apiPath string) rawURLFetchResult {
 	body, _ := json.Marshal(map[string]string{"path": realPath})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, alistURL+"/api/fs/get", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, alistURL+apiPath, bytes.NewReader(body))
 	if err != nil {
 		return rawURLFetchResult{}
 	}
@@ -1126,7 +1143,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return rawURLFetchResult{FailureReason: "raw_url_fetch:" + err.Error()}
+		return rawURLFetchResult{FailureReason: "raw_url_fetch:" + err.Error(), Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
@@ -1134,6 +1151,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 		fileDAO.DeleteEncPathMapping(displayPath)
 		return rawURLFetchResult{
 			StatusCode:    resp.StatusCode,
+			Source:        rawURLSourceFromAPIPath(apiPath),
 			FailureReason: "raw_url_http_" + http.StatusText(resp.StatusCode),
 		}
 	}
@@ -1146,10 +1164,10 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 		} `json:"data"`
 	}
 	if json.Unmarshal(respBody, &result) != nil {
-		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_invalid_json"}
+		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_invalid_json", Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	if result.Code != 200 || result.Data.RawURL == "" {
-		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_empty"}
+		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_empty", Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	fileDAO.Set(&dao.FileInfo{
 		Path:              displayPath,
@@ -1157,5 +1175,21 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 		RawURL:            result.Data.RawURL,
 		UpstreamFetchedAt: time.Now(),
 	})
-	return rawURLFetchResult{RawURL: result.Data.RawURL, Size: result.Data.Size, StatusCode: resp.StatusCode}
+	return rawURLFetchResult{
+		RawURL:     result.Data.RawURL,
+		Size:       result.Data.Size,
+		Source:     rawURLSourceFromAPIPath(apiPath),
+		StatusCode: resp.StatusCode,
+	}
+}
+
+func rawURLSourceFromAPIPath(apiPath string) string {
+	switch apiPath {
+	case "/api/fs/get":
+		return "fs_get"
+	case "/api/fs/link":
+		return "fs_link"
+	default:
+		return strings.TrimPrefix(apiPath, "/")
+	}
 }

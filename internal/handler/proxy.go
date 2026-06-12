@@ -19,7 +19,6 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
@@ -415,16 +414,9 @@ func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, displayPath stri
 }
 
 func (h *ProxyHandler) convertRedirectDisplayPath(displayPath string, passwdInfo *config.PasswdInfo) string {
-	if passwdInfo == nil || !passwdInfo.EncName {
-		return displayPath
-	}
-	fileName := path.Base(displayPath)
-	if encryption.IsOriginalFile(fileName) {
-		realName := encryption.StripOriginalPrefix(fileName)
-		return path.Dir(displayPath) + "/" + realName
-	}
-	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-	return path.Dir(displayPath) + "/" + converter.ToRealName(fileName)
+	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	realPath, _ := resolveEncryptedRealPath(h.fileDAO, passwdInfo, displayPath, allowLoose)
+	return realPath
 }
 
 func resolveRedirectDisplayPath(r *http.Request) string {
@@ -466,25 +458,9 @@ func redirectDisplayPathFromURLPath(rawPath string) string {
 
 // convertDisplayToRealPath converts a display path to encrypted path for downloads
 func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *config.PasswdInfo) string {
-	if passwdInfo == nil || !passwdInfo.EncName {
-		return displayPath
-	}
-
-	// First try to get cached encrypted path
-	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok {
-		return encPath
-	}
-
-	// Fallback: re-encrypt
-	fileName := path.Base(displayPath)
-	if encryption.IsOriginalFile(fileName) {
-		realName := encryption.StripOriginalPrefix(fileName)
-		return path.Dir(displayPath) + "/" + realName
-	}
-
-	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-	realName := converter.ToRealName(fileName)
-	return path.Dir(displayPath) + "/" + realName
+	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	realPath, _ := resolveEncryptedRealPath(h.fileDAO, passwdInfo, displayPath, allowLoose)
+	return realPath
 }
 
 // HandleDownload handles /d/* and /p/* download requests with decryption

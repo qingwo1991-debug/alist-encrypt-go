@@ -272,6 +272,15 @@ func (d *FileDAO) GetEncPath(displayPath string) (string, bool) {
 	return d.pathCache.GetEncPath(displayPath)
 }
 
+// HasEncryptedPath reports whether the path cache already knows this encrypted path.
+func (d *FileDAO) HasEncryptedPath(encryptedPath string) bool {
+	if d == nil || d.pathCache == nil {
+		return false
+	}
+	_, ok := d.pathCache.GetByEncPath(encryptedPath)
+	return ok
+}
+
 // DeleteEncPathMapping removes the display path to encrypted path mapping
 func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
 	// Find and delete both encrypted path and display path indexes
