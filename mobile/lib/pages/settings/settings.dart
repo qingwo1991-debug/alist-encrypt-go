@@ -128,16 +128,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
               final path = await FilePicker.platform.getDirectoryPath();
 
               if (path == null) {
-                Get.showSnackbar(GetSnackBar(
-                    message: S.current.setDefaultDirectory,
-                    duration: const Duration(seconds: 3),
-                    mainButton: TextButton(
-                      onPressed: () {
-                        controller.setDataDir("");
-                        Get.back();
-                      },
-                      child: Text(S.current.confirm),
-                    )));
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(S.current.setDefaultDirectory),
+                  duration: const Duration(seconds: 3),
+                  action: SnackBarAction(
+                    label: S.current.confirm,
+                    onPressed: () {
+                      controller.setDataDir("");
+                      Get.back();
+                    },
+                  ),
+                ));
               } else {
                 controller.setDataDir(path);
               }

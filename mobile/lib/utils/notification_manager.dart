@@ -47,7 +47,7 @@ class NotificationManager {
     
     // 跳转到下载管理页面
     if (getx.Get.context != null) {
-      getx.Get.to(() => const DownloadManagerPage());
+      Navigator.of(getx.Get.context!).push(MaterialPageRoute(builder: (_) => const DownloadManagerPage()));
     }
   }
 

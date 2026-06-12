@@ -110,10 +110,10 @@ class DownloadManager {
     // 获取下载目录
     Directory? downloadDir = await _getOpenListDownloadDirectory();
     if (downloadDir == null) {
-      getx.Get.showSnackbar(getx.GetSnackBar(
-        message: S.current.cannotGetDownloadDirectory,
+      ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.cannotGetDownloadDirectory),
         duration: const Duration(seconds: 3),
-      ));
+));
       return false;
     }
 
@@ -138,11 +138,11 @@ class DownloadManager {
     _activeTasks[taskId] = task;
 
     // 显示开始下载提示（只显示一次）
-    getx.Get.showSnackbar(getx.GetSnackBar(
-      message: S.current.startDownloadFile(finalFilename),
+    ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.startDownloadFile(finalFilename)),
       duration: const Duration(seconds: 2),
       backgroundColor: Colors.green,
-    ));
+));
 
     try {
       // 更新任务状态
@@ -204,17 +204,14 @@ class DownloadManager {
       await NotificationManager.showSingleFileCompleteNotification(task);
 
       // 显示完成提示
-      getx.Get.showSnackbar(getx.GetSnackBar(
-        message: S.current.downloadCompleteFile(finalFilename),
+      ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.downloadCompleteFile(finalFilename)),
         duration: const Duration(seconds: 3),
         backgroundColor: Colors.blue,
-        mainButton: TextButton(
-          onPressed: () {
+  action: SnackBarAction(label: S.current.open, onPressed: () {
             _openFile(filePath);
-          },
-          child: Text(S.current.open),
-        ),
-      ));
+          }),
+));
 
       log('文件下载完成: $filePath');
       return true;
@@ -232,11 +229,11 @@ class DownloadManager {
         task.endTime = DateTime.now();
         log('下载失败: $e');
         
-        getx.Get.showSnackbar(getx.GetSnackBar(
-          message: S.current.downloadFailedFile(finalFilename),
+        ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.downloadFailedFile(finalFilename)),
           duration: const Duration(seconds: 3),
           backgroundColor: Colors.red,
-        ));
+));
       }
 
       // 移动到已完成列表
@@ -604,10 +601,10 @@ class DownloadManager {
           );
           return false;
         } else {
-          getx.Get.showSnackbar(getx.GetSnackBar(
-            message: S.current.needInstallPermissionToInstallApk,
+          ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.needInstallPermissionToInstallApk),
             duration: const Duration(seconds: 3),
-          ));
+));
           return false;
         }
       }
@@ -644,79 +641,64 @@ class DownloadManager {
           break;
         case ResultType.noAppToOpen:
           if (_isApkFile(filePath)) {
-            getx.Get.showSnackbar(getx.GetSnackBar(
-              message: S.current.cannotInstallApkNeedPermission,
+            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.cannotInstallApkNeedPermission),
               duration: const Duration(seconds: 5),
-              mainButton: TextButton(
-                onPressed: () {
+        action: SnackBarAction(label: S.current.goToSettings, onPressed: () {
                   openAppSettings();
-                },
-                child: Text(S.current.goToSettings),
-              ),
-            ));
+                }),
+));
           } else {
-            getx.Get.showSnackbar(getx.GetSnackBar(
-              message: S.current.noAppToOpenFile,
+            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.noAppToOpenFile),
               duration: const Duration(seconds: 3),
-              mainButton: TextButton(
-                onPressed: () {
+        action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
                   _showFileLocation(filePath);
-                },
-                child: Text(S.current.viewLocation),
-              ),
-            ));
+                }),
+));
           }
           break;
         case ResultType.fileNotFound:
-          getx.Get.showSnackbar(getx.GetSnackBar(
-            message: S.current.fileNotFound,
+          ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.fileNotFound),
             duration: const Duration(seconds: 3),
-          ));
+));
           break;
         case ResultType.permissionDenied:
           if (_isApkFile(filePath)) {
-            getx.Get.showSnackbar(getx.GetSnackBar(
-              message: S.current.noPermissionToInstallApkFile,
+            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.noPermissionToInstallApkFile),
               duration: const Duration(seconds: 5),
-              mainButton: TextButton(
-                onPressed: () {
+        action: SnackBarAction(label: S.current.goToSettings, onPressed: () {
                   openAppSettings();
-                },
-                child: Text(S.current.goToSettings),
-              ),
-            ));
+                }),
+));
           } else {
-            getx.Get.showSnackbar(getx.GetSnackBar(
-              message: S.current.noPermissionToOpenFile,
+            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.noPermissionToOpenFile),
               duration: const Duration(seconds: 3),
-            ));
+));
           }
           break;
         case ResultType.error:
-          getx.Get.showSnackbar(getx.GetSnackBar(
-            message: S.current.openFileFailed(result.message),
+          ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.openFileFailed(result.message)),
             duration: const Duration(seconds: 3),
-            mainButton: TextButton(
-              onPressed: () {
+      action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
                 _showFileLocation(filePath);
-              },
-              child: Text(S.current.viewLocation),
-            ),
-          ));
+              }),
+));
           break;
       }
     } catch (e) {
       log('打开文件异常: $e');
-      getx.Get.showSnackbar(getx.GetSnackBar(
-        message: S.current.openFileException(e.toString()),
+      ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
+content: Text(S.current.openFileException(e.toString())),
         duration: const Duration(seconds: 3),
-        mainButton: TextButton(
-          onPressed: () {
+  action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
             _showFileLocation(filePath);
-          },
-          child: Text(S.current.viewLocation),
-        ),
-      ));
+          }),
+));
     }
   }
 

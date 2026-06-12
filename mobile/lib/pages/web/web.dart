@@ -210,16 +210,17 @@ class WebScreenState extends State<WebScreen> {
                         if (silentMode) {
                           NativeCommon().startActivityFromUri(uri.toString());
                         } else {
-                          Get.showSnackbar(GetSnackBar(
-                              message: S.current.jumpToOtherApp,
-                              duration: const Duration(seconds: 5),
-                              mainButton: TextButton(
-                                onPressed: () {
-                                  NativeCommon()
-                                      .startActivityFromUri(uri.toString());
-                                },
-                                child: Text(S.current.goTo),
-                              )));
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text(S.current.jumpToOtherApp),
+                          duration: const Duration(seconds: 5),
+                          action: SnackBarAction(
+                            label: S.current.goTo,
+                            onPressed: () {
+                              NativeCommon()
+                                  .startActivityFromUri(uri.toString());
+                            },
+                          ),
+                        ));
                         }
 
                         return NavigationActionPolicy.CANCEL;
@@ -254,49 +255,24 @@ class WebScreenState extends State<WebScreen> {
                           "console ${consoleMessage.messageLevel}: ${consoleMessage.message}");
                     },
                     onDownloadStartRequest: (controller, url) async {
-                      Get.showSnackbar(GetSnackBar(
-                        title: S.of(context).downloadThisFile,
-                        message: url.suggestedFilename ??
-                            url.contentDisposition ??
-                            url.toString(),
+                      final filename = url.suggestedFilename ??
+                          url.contentDisposition ??
+                          url.toString();
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text('${S.of(context).downloadThisFile}\n$filename'),
                         duration: const Duration(seconds: 5),
-                        mainButton: Column(children: [
-                          TextButton(
-                            onPressed: () async {
-                              Get.closeCurrentSnackbar();
-                              DownloadManager.downloadFileInBackground(
-                                url: url.url.toString(),
-                                filename: url.suggestedFilename,
-                              );
-                            },
-                            child: Text(S.of(context).directDownload),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              IntentUtils.getUrlIntent(url.url.toString())
-                                  .launchChooser(
-                                      S.of(context).selectAppToOpen);
-                            },
-                            child: Text(S.of(context).selectAppToOpen),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              IntentUtils.getUrlIntent(url.url.toString())
-                                  .launch();
-                            },
-                            child: Text(S.of(context).browserDownload),
-                          ),
-                        ]),
-                        onTap: (_) {
-                          Clipboard.setData(
-                              ClipboardData(text: url.url.toString()));
-                          Get.closeCurrentSnackbar();
-                          Get.showSnackbar(GetSnackBar(
-                            message: S.of(context).copiedToClipboard,
-                            duration: const Duration(seconds: 1),
-                          ));
-                        },
+                        action: SnackBarAction(
+                          label: S.of(context).directDownload,
+                          onPressed: () {
+                            DownloadManager.downloadFileInBackground(
+                              url: url.url.toString(),
+                              filename: url.suggestedFilename,
+                            );
+                          },
+                        ),
                       ));
+                      Clipboard.setData(
+                          ClipboardData(text: url.url.toString()));
                     },
                     onLoadStop:
                         (InAppWebViewController controller, Uri? url) async {
