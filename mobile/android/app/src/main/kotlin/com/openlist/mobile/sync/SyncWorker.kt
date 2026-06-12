@@ -167,6 +167,11 @@ class SyncWorker(
         // 4. 收集要上传的文件
         val filesToUpload = mutableListOf<File>()
         val excludeNames = taskConfig.excludeFolders.map { it.trimEnd('/') }.toSet()
+        publishProgress(
+            phase = "SCANNING",
+            currentFile = taskConfig.sourcePath,
+            scannedFiles = 0,
+        )
         collectFiles(sourceDir, taskConfig.fileExtensions, excludeNames, filesToUpload)
         logSync(traceId, taskId, "scan", "扫描完成 total=${filesToUpload.size} source=${taskConfig.sourcePath}")
         publishProgress(
@@ -473,7 +478,7 @@ class SyncWorker(
         }
     }
 
-    private fun collectFiles(
+    private suspend fun collectFiles(
         dir: File,
         extensions: List<String>,
         excludeFolders: Set<String>,
@@ -499,6 +504,13 @@ class SyncWorker(
             } else if (file.isFile) {
                 if (shouldInclude(file, extensions)) {
                     result.add(file)
+                    if (result.size % 100 == 0) {
+                        publishProgress(
+                            phase = "SCANNING",
+                            currentFile = currentRelative.ifEmpty { dir.name },
+                            scannedFiles = result.size,
+                        )
+                    }
                 }
             }
         }
