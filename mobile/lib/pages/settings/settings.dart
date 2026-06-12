@@ -4,6 +4,7 @@ import 'package:openlist_mobile/generated_api.dart';
 import 'package:openlist_mobile/pages/settings/preference_widgets.dart';
 import 'package:openlist_mobile/pages/settings/troubleshooting_page.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
+import 'package:openlist_mobile/utils/config_export.dart';
 import 'package:openlist_mobile/utils/language_controller.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -149,6 +150,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 return;
               }
               controller.setDownloadDir(path);
+            },
+          ),
+          DividerPreference(title: '配置备份'),
+          BasicPreference(
+            title: '导出加密配置',
+            subtitle: '导出加密路径和代理设置（不含管理密码）',
+            leading: const Icon(Icons.upload_file),
+            onTap: () async {
+              try {
+                final path = await ConfigExport.exportConfig();
+                if (path != null && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('配置已导出'),
+                      action: SnackBarAction(
+                        label: '分享',
+                        onPressed: () => ConfigExport.shareConfig(path),
+                      ),
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('导出失败: $e')),
+                  );
+                }
+              }
+            },
+          ),
+          BasicPreference(
+            title: '导入加密配置',
+            subtitle: '从备份文件恢复加密路径和代理设置',
+            leading: const Icon(Icons.download),
+            onTap: () async {
+              final confirm = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('确认导入'),
+                  content: const Text('导入将覆盖当前加密配置（管理密码不受影响）。确定继续？'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+                    FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('导入')),
+                  ],
+                ),
+              );
+              if (confirm != true) return;
+              try {
+                await ConfigExport.importConfig();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('配置已导入，重启应用生效')),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('导入失败: $e')),
+                  );
+                }
+              }
             },
           ),
           DividerPreference(title: S.of(context).uiSettings),

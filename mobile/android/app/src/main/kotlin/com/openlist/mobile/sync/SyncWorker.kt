@@ -310,6 +310,7 @@ class SyncWorker(
                     failureCount = failureCount,
                     totalPending = newOrModified.size,
                     displayPath = remotePath,
+                    uploadSpeedLimitKbps = taskConfig.uploadSpeedLimitKbps,
                 )
 
                 // 记录同步成功
@@ -538,8 +539,9 @@ class SyncWorker(
         failureCount: Int,
         totalPending: Int,
         displayPath: String,
+        uploadSpeedLimitKbps: Int = 0,
     ) {
-        val submission = submitUploadTask(file, remotePath, authToken)
+        val submission = submitUploadTask(file, remotePath, authToken, uploadSpeedLimitKbps)
         logSync(
             traceId,
             taskId,
@@ -575,11 +577,13 @@ class SyncWorker(
         file: File,
         remotePath: String,
         authToken: String,
+        uploadSpeedLimitKbps: Int = 0,
     ): UploadTaskSubmission {
         val url = URL("${proxyBaseUrl()}/api/fs/put")
         val conn = url.openConnection() as HttpURLConnection
         try {
-            appLog(LogLevel.INFO, "媒体备份上传开始：remotePath=$remotePath local=${file.name} size=${file.length()}")
+            val speedInfo = if (uploadSpeedLimitKbps > 0) " speedLimit=${uploadSpeedLimitKbps}KB/s" else ""
+            appLog(LogLevel.INFO, "媒体备份上传开始：remotePath=$remotePath local=${file.name} size=${file.length()}$speedInfo")
             conn.requestMethod = "PUT"
             conn.doOutput = true
             conn.connectTimeout = 60000
@@ -593,10 +597,32 @@ class SyncWorker(
             conn.setRequestProperty("Content-Type", "application/octet-stream")
             conn.setRequestProperty("Authorization", authToken)
 
-            // Write file body
+            // Write file body with optional rate limiting
             FileInputStream(file).use { input ->
                 conn.outputStream.use { output ->
-                    input.copyTo(output, 8192)
+                    if (uploadSpeedLimitKbps > 0) {
+                        val bufferSize = 64 * 1024
+                        val bytesPerSecond = uploadSpeedLimitKbps * 1024L
+                        val buffer = ByteArray(bufferSize)
+                        var totalWritten = 0L
+                        val startTime = System.nanoTime()
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            output.write(buffer, 0, read)
+                            totalWritten += read
+                            val elapsed = (System.nanoTime() - startTime).toDouble() / 1_000_000_000.0
+                            if (elapsed > 0) {
+                                val expectedTime = totalWritten.toDouble() / bytesPerSecond
+                                val sleepMs = ((expectedTime - elapsed) * 1000).toLong()
+                                if (sleepMs > 5) {
+                                    Thread.sleep(sleepMs.coerceAtMost(500))
+                                }
+                            }
+                        }
+                        output.flush()
+                    } else {
+                        input.copyTo(output, 8192)
+                    }
                 }
             }
 

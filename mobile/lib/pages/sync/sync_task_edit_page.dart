@@ -29,6 +29,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
   bool _enabled = true;
   bool _deleteAfterSync = false;
   bool _preserveFolderStructure = true;
+  int _uploadSpeedLimitKbps = 0;
   List<String> _selectedExtensions = [];
   final Set<String> _selectedPresets = {};
   List<String> _enabledEncryptPaths = [];
@@ -49,6 +50,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
       _enabled = task.enabled;
       _deleteAfterSync = task.deleteAfterSync;
       _preserveFolderStructure = task.preserveFolderStructure;
+      _uploadSpeedLimitKbps = task.uploadSpeedLimitKbps;
       _selectedExtensions = List.from(task.fileExtensions);
 
       // 反推预设选中状态
@@ -234,6 +236,24 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
               onChanged: (v) => setState(() => _preserveFolderStructure = v),
               contentPadding: EdgeInsets.zero,
             ),
+            DropdownButtonFormField<int>(
+              decoration: const InputDecoration(
+                labelText: '上传限速',
+                hintText: '不限速',
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+              value: _uploadSpeedLimitKbps,
+              items: const [
+                DropdownMenuItem(value: 0, child: Text('不限速')),
+                DropdownMenuItem(value: 1024, child: Text('1 MB/s')),
+                DropdownMenuItem(value: 2048, child: Text('2 MB/s')),
+                DropdownMenuItem(value: 5120, child: Text('5 MB/s')),
+                DropdownMenuItem(value: 10240, child: Text('10 MB/s')),
+              ],
+              onChanged: (v) => setState(() => _uploadSpeedLimitKbps = v ?? 0),
+            ),
+            const SizedBox(height: 16),
             SwitchListTile(
               title: const Text('同步后删除源文件 ⚠️'),
               subtitle: const Text('只删除已成功上传到加密目标路径的文件'),
@@ -417,6 +437,7 @@ class _SyncTaskEditPageState extends State<SyncTaskEditPage> {
       enabled: _enabled,
       deleteAfterSync: _deleteAfterSync,
       preserveFolderStructure: _preserveFolderStructure,
+      uploadSpeedLimitKbps: _uploadSpeedLimitKbps,
       lastSyncTime: widget.existingTask?.lastSyncTime,
       lastSyncFileCount: widget.existingTask?.lastSyncFileCount,
       lastError: widget.existingTask?.lastError,

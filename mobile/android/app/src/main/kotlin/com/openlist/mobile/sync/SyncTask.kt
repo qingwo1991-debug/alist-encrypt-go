@@ -20,6 +20,7 @@ data class SyncTaskConfig(
     val enabled: Boolean = true,
     val deleteAfterSync: Boolean = false,
     val preserveFolderStructure: Boolean = true,
+    val uploadSpeedLimitKbps: Int = 0,
     val lastSyncTime: Long? = null,
     val lastSyncFileCount: Int? = null,
     val lastError: String? = null
