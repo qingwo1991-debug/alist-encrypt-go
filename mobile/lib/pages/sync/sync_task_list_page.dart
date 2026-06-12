@@ -18,6 +18,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
   final SyncTaskManager _manager = SyncTaskManager();
   final Map<String, Map<String, dynamic>> _statusByTaskId = {};
   Timer? _statusTimer;
+  String? _togglingTaskId;
 
   @override
   void initState() {
@@ -41,6 +42,11 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
   }
 
   Future<void> _reloadTasks() async {
+    await _manager.loadTasks();
+    await _refreshStatuses();
+  }
+
+  Future<void> _refreshTasks() async {
     await _manager.loadTasks();
     await _refreshStatuses();
   }
@@ -123,13 +129,16 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _manager.tasks.length,
-      itemBuilder: (context, index) {
-        final task = _manager.tasks[index];
-        return _buildTaskCard(task);
-      },
+    return RefreshIndicator(
+      onRefresh: _refreshTasks,
+      child: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: _manager.tasks.length,
+        itemBuilder: (context, index) {
+          final task = _manager.tasks[index];
+          return _buildTaskCard(task);
+        },
+      ),
     );
   }
 
@@ -142,10 +151,32 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
           color: task.enabled ? Colors.green : Colors.grey,
         ),
         title: Text(task.name),
-        subtitle: Text(
-          '${task.sourcePath} → ${task.targetPath}',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${task.sourcePath} → ${task.targetPath}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            Row(
+              children: [
+                Text(task.enabled ? '已启用' : '已停用',
+                    style: TextStyle(fontSize: 12, color: task.enabled ? Colors.green : Colors.grey)),
+                const Spacer(),
+                if (_togglingTaskId == task.id)
+                  const SizedBox(
+                    width: 20, height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  Switch(
+                    value: task.enabled,
+                    onChanged: (v) => _toggleTaskEnabled(task, v),
+                  ),
+              ],
+            ),
+          ],
         ),
         children: [
           Padding(
@@ -198,50 +229,44 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                 if (task.lastError != null && task.lastError!.isNotEmpty)
                   _buildInfoRow('最后错误', task.lastError!, isError: true),
                 const SizedBox(height: 8),
-                Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: 8,
-                  runSpacing: 8,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.history),
-                      label: const Text('历史'),
-                      onPressed: () => _openHistory(task),
-                    ),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.info_outline),
-                      label: const Text('详情'),
-                      onPressed: () => _showStatusDetails(task, status),
-                    ),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.cleaning_services_outlined),
-                      label: const Text('清历史'),
-                      onPressed: () => _confirmClearTaskHistory(task),
-                    ),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.delete_sweep_outlined),
-                      label: const Text('清理已备份'),
-                      onPressed: () => _confirmCleanUploadedSourceFiles(task),
-                    ),
                     FilledButton.tonalIcon(
                       icon: const Icon(Icons.play_arrow),
-                      label: const Text('立即执行'),
+                      label: const Text('执行'),
                       onPressed: () => _runNow(task),
                     ),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.restart_alt),
-                      label: const Text('重传'),
-                      onPressed: () => _confirmRerunFromScratch(task),
-                    ),
+                    const SizedBox(width: 8),
                     OutlinedButton.icon(
                       icon: const Icon(Icons.edit),
                       label: const Text('编辑'),
                       onPressed: () => _openEditPage(task),
                     ),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      label: const Text('删除'),
+                    const SizedBox(width: 4),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.red),
                       onPressed: () => _confirmDelete(task),
+                      tooltip: '删除',
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: '更多操作',
+                      onSelected: (value) {
+                        switch (value) {
+                          case 'history': _openHistory(task); break;
+                          case 'details': _showStatusDetails(task, status); break;
+                          case 'clear_history': _confirmClearTaskHistory(task); break;
+                          case 'clean': _confirmCleanUploadedSourceFiles(task); break;
+                          case 'rerun': _confirmRerunFromScratch(task); break;
+                        }
+                      },
+                      itemBuilder: (context) => const [
+                        PopupMenuItem(value: 'history', child: Text('查看历史')),
+                        PopupMenuItem(value: 'details', child: Text('运行详情')),
+                        PopupMenuItem(value: 'clear_history', child: Text('清空历史')),
+                        PopupMenuItem(value: 'clean', child: Text('清理已备份源文件')),
+                        PopupMenuItem(value: 'rerun', child: Text('清空记录并重传')),
+                      ],
                     ),
                   ],
                 ),
@@ -386,6 +411,40 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         builder: (_) => SyncHistoryPage(taskId: task.id, taskName: task.name),
       ),
     );
+  }
+
+  Future<void> _toggleTaskEnabled(SyncTask task, bool enabled) async {
+    if (_togglingTaskId != null) return;
+    setState(() => _togglingTaskId = task.id);
+    try {
+      final updated = SyncTask(
+        id: task.id,
+        name: task.name,
+        sourcePath: task.sourcePath,
+        targetPath: task.targetPath,
+        fileExtensions: List.from(task.fileExtensions),
+        excludeFolders: List.from(task.excludeFolders),
+        intervalHours: task.intervalHours,
+        wifiOnly: task.wifiOnly,
+        enabled: enabled,
+        deleteAfterSync: task.deleteAfterSync,
+        preserveFolderStructure: task.preserveFolderStructure,
+        uploadSpeedLimitKbps: task.uploadSpeedLimitKbps,
+        lastSyncTime: task.lastSyncTime,
+        lastSyncFileCount: task.lastSyncFileCount,
+        lastError: task.lastError,
+      );
+      await _manager.updateTask(updated);
+      if (mounted) await _reloadTasks();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('切换失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _togglingTaskId = null);
+    }
   }
 
   Future<void> _runNow(SyncTask task) async {

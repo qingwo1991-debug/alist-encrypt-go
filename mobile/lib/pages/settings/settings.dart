@@ -48,7 +48,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final controller = Get.put(_SettingsController());
     return Scaffold(
         body: Obx(
-      () => ListView(
+      () => RefreshIndicator(
+        onRefresh: () async {
+          final controller = Get.put(_SettingsController());
+          controller.updateData();
+        },
+        child: ListView(
         children: [
           Visibility(
             visible: !controller._notificationGranted.value,
@@ -247,6 +252,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ],
       ),
+      ),
     ));
   }
 
@@ -348,7 +354,7 @@ class _SettingsController extends GetxController {
 
   get autoUpdate => _autoUpdate.value;
 
-  final _wakeLock = true.obs;
+  final _wakeLock = false.obs;
 
   set wakeLock(value) => {
         _wakeLock.value = value,

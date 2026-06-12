@@ -38,9 +38,8 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   }
 
   void _startPeriodicRefresh() {
-    // 每秒刷新一次活跃任务状态
     Stream.periodic(const Duration(seconds: 1)).listen((_) {
-      if (mounted && _tabController.index == 0) {
+      if (mounted && _tabController.index == 0 && DownloadManager.activeTasks.isNotEmpty) {
         setState(() {});
       }
     });
