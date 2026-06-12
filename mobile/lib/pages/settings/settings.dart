@@ -135,7 +135,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     label: S.current.confirm,
                     onPressed: () {
                       controller.setDataDir("");
-                      Get.back();
                     },
                   ),
                 ));

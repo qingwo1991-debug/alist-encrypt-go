@@ -209,17 +209,30 @@ content: Text(S.of(context).serviceRestartOnlyAndroid),
     try {
       // Show loading indicator
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-content: Text(S.of(context).restartingService),
-          duration: const Duration(seconds: 2),
-          showProgressIndicator: true,
-));
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 30),
+            content: Row(
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text(S.of(context).restartingService)),
+              ],
+            ),
+          ),
+        );
       }
 
       // Restart service via ServiceManager
       final success = await ServiceManager.instance.restartService();
       
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         if (success) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
 content: Text(S.of(context).serviceRestartSuccess),
@@ -235,6 +248,7 @@ content: Text(S.of(context).serviceRestartFailed),
       }
     } catch (e) {
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
 content: Text(S.of(context).saveFailed(e.toString())),
           duration: const Duration(seconds: 3),
@@ -249,7 +263,7 @@ content: Text(S.of(context).saveFailed(e.toString())),
   Future<bool> _saveConfigFile() async {
     final text = _controller.text.trim();
     late final Map<String, dynamic> decodedConfig;
-    
+
     // Validate JSON format before saving
     try {
       final decoded = jsonDecode(text);

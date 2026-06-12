@@ -258,21 +258,76 @@ class WebScreenState extends State<WebScreen> {
                       final filename = url.suggestedFilename ??
                           url.contentDisposition ??
                           url.toString();
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text('${S.of(context).downloadThisFile}\n$filename'),
-                        duration: const Duration(seconds: 5),
-                        action: SnackBarAction(
-                          label: S.of(context).directDownload,
-                          onPressed: () {
-                            DownloadManager.downloadFileInBackground(
-                              url: url.url.toString(),
-                              filename: url.suggestedFilename,
-                            );
-                          },
+                      if (!context.mounted) {
+                        return;
+                      }
+                      await showModalBottomSheet<void>(
+                        context: context,
+                        builder: (sheetContext) => SafeArea(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              ListTile(
+                                title: Text(S.of(context).downloadThisFile),
+                                subtitle: Text(
+                                  filename,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              ListTile(
+                                leading: const Icon(Icons.download),
+                                title: Text(S.of(context).directDownload),
+                                onTap: () {
+                                  Navigator.pop(sheetContext);
+                                  DownloadManager.downloadFileInBackground(
+                                    url: url.url.toString(),
+                                    filename: url.suggestedFilename,
+                                  );
+                                },
+                              ),
+                              ListTile(
+                                leading: const Icon(Icons.open_in_new),
+                                title: Text(S.of(context).selectAppToOpen),
+                                onTap: () {
+                                  Navigator.pop(sheetContext);
+                                  IntentUtils.getUrlIntent(url.url.toString())
+                                      .launchChooser(
+                                        S.of(context).selectAppToOpen,
+                                      );
+                                },
+                              ),
+                              ListTile(
+                                leading: const Icon(Icons.language),
+                                title: Text(S.of(context).browserDownload),
+                                onTap: () {
+                                  Navigator.pop(sheetContext);
+                                  IntentUtils.getUrlIntent(url.url.toString())
+                                      .launch();
+                                },
+                              ),
+                              ListTile(
+                                leading: const Icon(Icons.copy),
+                                title: Text(S.of(context).copiedToClipboard),
+                                onTap: () {
+                                  Clipboard.setData(
+                                    ClipboardData(text: url.url.toString()),
+                                  );
+                                  Navigator.pop(sheetContext);
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        S.of(context).copiedToClipboard,
+                                      ),
+                                      duration: const Duration(seconds: 1),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
                         ),
-                      ));
-                      Clipboard.setData(
-                          ClipboardData(text: url.url.toString()));
+                      );
                     },
                     onLoadStop:
                         (InAppWebViewController controller, Uri? url) async {
