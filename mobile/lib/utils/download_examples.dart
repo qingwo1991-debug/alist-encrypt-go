@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'app_shell.dart';
 import 'download_manager.dart';
 import '../generated/l10n.dart';
 
@@ -36,10 +37,10 @@ class DownloadExamples {
       String url = urls[i];
       String filename = 'file_${i + 1}_${DateTime.now().millisecondsSinceEpoch}';
       
-      ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.downloadingFileProgress(i + 1, urls.length)),
-        duration: Duration(seconds: 2),
-));
+      showGlobalSnackBar(SnackBar(
+        content: Text(S.current.downloadingFileProgress(i + 1, urls.length)),
+        duration: const Duration(seconds: 2),
+      ));
       
       bool success = await DownloadManager.downloadFileInBackground(
         url: url,
@@ -47,18 +48,18 @@ content: Text(S.current.downloadingFileProgress(i + 1, urls.length)),
       );
       
       if (!success) {
-        ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.fileDownloadFailed(i + 1)),
-          duration: Duration(seconds: 3),
-));
+        showGlobalSnackBar(SnackBar(
+          content: Text(S.current.fileDownloadFailed(i + 1)),
+          duration: const Duration(seconds: 3),
+        ));
         break;
       }
     }
     
-    ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.batchDownloadComplete),
-      duration: Duration(seconds: 3),
-));
+    showGlobalSnackBar(SnackBar(
+      content: Text(S.current.batchDownloadComplete),
+      duration: const Duration(seconds: 3),
+    ));
   }
 
   /// 示例5: 下载并显示自定义对话框
@@ -115,16 +116,16 @@ content: Text(S.current.batchDownloadComplete),
     Get.back(); // 关闭加载对话框
 
     if (success) {
-      ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+      showGlobalSnackBar(SnackBar(
         content: Text(S.current.imageDownloadSuccess),
-        duration: Duration(seconds: 3),
+        duration: const Duration(seconds: 3),
         action: SnackBarAction(
           label: S.current.view,
           onPressed: () {
             // 在这里添加打开图片的逻辑
-            ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
+            showGlobalSnackBar(SnackBar(
               content: Text(S.current.checkImageInDownloadFolder),
-              duration: Duration(seconds: 2),
+              duration: const Duration(seconds: 2),
             ));
           },
         ),
@@ -153,10 +154,10 @@ content: Text(S.current.batchDownloadComplete),
               onPressed: () {
                 Get.back();
                 // 这里可以添加安装APK的逻辑
-                ScaffoldMessenger.of(Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.findApkInDownloadFolder),
-                  duration: Duration(seconds: 5),
-));
+                showGlobalSnackBar(SnackBar(
+                  content: Text(S.current.findApkInDownloadFolder),
+                  duration: const Duration(seconds: 5),
+                ));
               },
               child: Text(S.current.installNow),
             ),

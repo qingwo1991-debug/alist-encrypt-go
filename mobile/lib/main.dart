@@ -9,6 +9,7 @@ import 'package:openlist_mobile/pages/settings/settings.dart';
 import 'package:openlist_mobile/pages/download_manager_page.dart';
 import 'package:openlist_mobile/pages/encrypt/encrypt_config_page.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
+import 'package:openlist_mobile/utils/app_shell.dart';
 import 'package:openlist_mobile/utils/notification_manager.dart';
 import 'package:openlist_mobile/utils/service_manager.dart';
 import 'package:openlist_mobile/utils/language_controller.dart';
@@ -57,6 +58,8 @@ class MyApp extends StatelessWidget {
         Locale? appLocale = languageController.locale;
         
         return GetMaterialApp(
+          navigatorKey: rootNavigatorKey,
+          scaffoldMessengerKey: rootScaffoldMessengerKey,
           title: 'OpenList Encrypt',
           onGenerateTitle: (context) => S.of(context).appName,
           themeMode: ThemeMode.system,

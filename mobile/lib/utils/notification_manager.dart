@@ -1,7 +1,9 @@
 import 'dart:developer';
+import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:get/get.dart' as getx;
 import 'download_manager.dart';
+import 'app_shell.dart';
 import '../pages/download_manager_page.dart';
 import '../generated/l10n.dart';
 
@@ -44,10 +46,19 @@ class NotificationManager {
   /// 处理通知点击事件
   static void _onNotificationTapped(NotificationResponse response) {
     log('通知被点击: ${response.payload}');
-    
-    // 跳转到下载管理页面
+
+    final navigator = rootNavigatorKey.currentState;
+    if (navigator != null) {
+      navigator.push(
+        MaterialPageRoute(builder: (_) => const DownloadManagerPage()),
+      );
+      return;
+    }
+
     if (getx.Get.context != null) {
-      Navigator.of(getx.Get.context!).push(MaterialPageRoute(builder: (_) => const DownloadManagerPage()));
+      Navigator.of(getx.Get.context!).push(
+        MaterialPageRoute(builder: (_) => const DownloadManagerPage()),
+      );
     }
   }
 

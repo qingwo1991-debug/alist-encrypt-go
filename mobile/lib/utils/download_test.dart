@@ -105,18 +105,19 @@ content: Text(S.current.checkDownloadManagerForFiles),
 /// 在主应用中添加测试入口的辅助方法
 class DownloadTestHelper {
   static void showTestDialog(BuildContext context) {
-    Get.dialog(
-      AlertDialog(
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
         title: Text(S.current.downloadFunctionTest),
         content: Text(S.current.openDownloadTestPage),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: Text(S.current.cancel),
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
+              Navigator.pop(dialogContext);
               Navigator.push(context, MaterialPageRoute(builder: (_) => const DownloadTestPage()));
             },
             child: Text(S.current.ok),

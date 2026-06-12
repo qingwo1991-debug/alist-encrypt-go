@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'notification_manager.dart';
+import 'app_shell.dart';
 import '../generated/l10n.dart';
 
 /// 下载任务状态
@@ -110,10 +111,10 @@ class DownloadManager {
     // 获取下载目录
     Directory? downloadDir = await _getOpenListDownloadDirectory();
     if (downloadDir == null) {
-      ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.cannotGetDownloadDirectory),
+      showGlobalSnackBar(SnackBar(
+        content: Text(S.current.cannotGetDownloadDirectory),
         duration: const Duration(seconds: 3),
-));
+      ));
       return false;
     }
 
@@ -138,11 +139,11 @@ content: Text(S.current.cannotGetDownloadDirectory),
     _activeTasks[taskId] = task;
 
     // 显示开始下载提示（只显示一次）
-    ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.startDownloadFile(finalFilename)),
+    showGlobalSnackBar(SnackBar(
+      content: Text(S.current.startDownloadFile(finalFilename)),
       duration: const Duration(seconds: 2),
       backgroundColor: Colors.green,
-));
+    ));
 
     try {
       // 更新任务状态
@@ -204,14 +205,14 @@ content: Text(S.current.startDownloadFile(finalFilename)),
       await NotificationManager.showSingleFileCompleteNotification(task);
 
       // 显示完成提示
-      ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.downloadCompleteFile(finalFilename)),
+      showGlobalSnackBar(SnackBar(
+        content: Text(S.current.downloadCompleteFile(finalFilename)),
         duration: const Duration(seconds: 3),
         backgroundColor: Colors.blue,
-  action: SnackBarAction(label: S.current.open, onPressed: () {
+        action: SnackBarAction(label: S.current.open, onPressed: () {
             _openFile(filePath);
-          }),
-));
+        }),
+      ));
 
       log('文件下载完成: $filePath');
       return true;
@@ -229,11 +230,11 @@ content: Text(S.current.downloadCompleteFile(finalFilename)),
         task.endTime = DateTime.now();
         log('下载失败: $e');
         
-        ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.downloadFailedFile(finalFilename)),
+        showGlobalSnackBar(SnackBar(
+          content: Text(S.current.downloadFailedFile(finalFilename)),
           duration: const Duration(seconds: 3),
           backgroundColor: Colors.red,
-));
+        ));
       }
 
       // 移动到已完成列表
@@ -601,10 +602,10 @@ content: Text(S.current.downloadFailedFile(finalFilename)),
           );
           return false;
         } else {
-          ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.needInstallPermissionToInstallApk),
+          showGlobalSnackBar(SnackBar(
+            content: Text(S.current.needInstallPermissionToInstallApk),
             duration: const Duration(seconds: 3),
-));
+          ));
           return false;
         }
       }
@@ -641,64 +642,64 @@ content: Text(S.current.needInstallPermissionToInstallApk),
           break;
         case ResultType.noAppToOpen:
           if (_isApkFile(filePath)) {
-            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.cannotInstallApkNeedPermission),
+            showGlobalSnackBar(SnackBar(
+              content: Text(S.current.cannotInstallApkNeedPermission),
               duration: const Duration(seconds: 5),
-        action: SnackBarAction(label: S.current.goToSettings, onPressed: () {
+              action: SnackBarAction(label: S.current.goToSettings, onPressed: () {
                   openAppSettings();
-                }),
-));
+              }),
+            ));
           } else {
-            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.noAppToOpenFile),
+            showGlobalSnackBar(SnackBar(
+              content: Text(S.current.noAppToOpenFile),
               duration: const Duration(seconds: 3),
-        action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
+              action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
                   _showFileLocation(filePath);
-                }),
-));
+              }),
+            ));
           }
           break;
         case ResultType.fileNotFound:
-          ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.fileNotFound),
+          showGlobalSnackBar(SnackBar(
+            content: Text(S.current.fileNotFound),
             duration: const Duration(seconds: 3),
-));
+          ));
           break;
         case ResultType.permissionDenied:
           if (_isApkFile(filePath)) {
-            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.noPermissionToInstallApkFile),
+            showGlobalSnackBar(SnackBar(
+              content: Text(S.current.noPermissionToInstallApkFile),
               duration: const Duration(seconds: 5),
-        action: SnackBarAction(label: S.current.goToSettings, onPressed: () {
+              action: SnackBarAction(label: S.current.goToSettings, onPressed: () {
                   openAppSettings();
-                }),
-));
+              }),
+            ));
           } else {
-            ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.noPermissionToOpenFile),
+            showGlobalSnackBar(SnackBar(
+              content: Text(S.current.noPermissionToOpenFile),
               duration: const Duration(seconds: 3),
-));
+            ));
           }
           break;
         case ResultType.error:
-          ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.openFileFailed(result.message)),
+          showGlobalSnackBar(SnackBar(
+            content: Text(S.current.openFileFailed(result.message)),
             duration: const Duration(seconds: 3),
-      action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
+            action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
                 _showFileLocation(filePath);
-              }),
-));
+            }),
+          ));
           break;
       }
     } catch (e) {
       log('打开文件异常: $e');
-      ScaffoldMessenger.of(getx.Get.context!).showSnackBar(SnackBar(
-content: Text(S.current.openFileException(e.toString())),
+      showGlobalSnackBar(SnackBar(
+        content: Text(S.current.openFileException(e.toString())),
         duration: const Duration(seconds: 3),
-  action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
+        action: SnackBarAction(label: S.current.viewLocation, onPressed: () {
             _showFileLocation(filePath);
-          }),
-));
+        }),
+      ));
     }
   }
 
