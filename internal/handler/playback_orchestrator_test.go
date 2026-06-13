@@ -3,9 +3,11 @@ package handler
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -601,5 +603,131 @@ func TestExecuteDecryptPlaybackUsesCachedV2MetaWithNonce(t *testing.T) {
 	}
 	if !bytes.Equal(body, plain[:32]) {
 		t.Fatal("decrypted body mismatch")
+	}
+}
+
+func TestInspectPlaybackContentMetaPrefersEncryptedPathCandidates(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	sp := proxy.NewStreamProxy(cfg)
+
+	passwd := &config.PasswdInfo{
+		Password: "testpass",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	plain := bytes.Repeat([]byte("v2-probe-order-"), 128)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	var gotProbePaths []string
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/d/demo.bin":
+			gotProbePaths = append(gotProbePaths, r.URL.Path)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 0-31/"+strconv.Itoa(len(ciphertext)))
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:32])
+		case "/raw/demo.bin":
+			gotProbePaths = append(gotProbePaths, r.URL.Path)
+			t.Fatalf("raw target should not be probed before encrypted path candidates")
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	parsedURL := srv.URL
+	cfg.AlistServer.ServerHost = strings.TrimPrefix(strings.TrimPrefix(parsedURL, "http://"), "https://")
+	cfg.AlistServer.HTTPS = false
+	if host, port, err := net.SplitHostPort(cfg.AlistServer.ServerHost); err == nil {
+		cfg.AlistServer.ServerHost = host
+		if parsedPort, convErr := strconv.Atoi(port); convErr == nil {
+			cfg.AlistServer.ServerPort = parsedPort
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/demo.mp4", nil)
+	meta, ok := inspectPlaybackContentMeta(decryptPlaybackRequest{
+		Request:     req,
+		Config:      cfg,
+		StreamProxy: sp,
+		FileDAO:     fileDAO,
+		PasswdInfo:  passwd,
+		FileItem: FileItem{
+			DisplayPath:   "/demo.mp4",
+			EncryptedPath: "/demo.bin",
+			TargetURL:     srv.URL + "/raw/demo.bin",
+			FileName:      "demo.mp4",
+		},
+		TargetURL:        srv.URL + "/raw/demo.bin",
+		Path:             "/demo.mp4",
+		ConsumerScenario: consumerScenarioWebDAV,
+	}, nil, int64(len(ciphertext)))
+	if !ok {
+		t.Fatal("expected V2 probe success")
+	}
+	if !meta.IsV2() || meta.PlainSize != int64(len(plain)) {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+	if len(gotProbePaths) != 1 || gotProbePaths[0] != "/d/demo.bin" {
+		t.Fatalf("gotProbePaths=%v", gotProbePaths)
+	}
+}
+
+func TestInvalidatePlaybackStatePreservesEncPathOnUpstream4xx(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	fileDAO.SetEncPathMapping("/demo.mp4", "/enc/demo.bin")
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path:              "/demo.mp4",
+		EncryptedPath:     "/enc/demo.bin",
+		Name:              "demo.mp4",
+		Size:              4096,
+		RawURL:            "https://cdn.example/demo.bin",
+		UpstreamFetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed file info: %v", err)
+	}
+
+	invalidatePlaybackState(decryptPlaybackRequest{
+		FileDAO: fileDAO,
+		FileItem: FileItem{
+			DisplayPath:   "/demo.mp4",
+			EncryptedPath: "/enc/demo.bin",
+		},
+	}, "upstream_4xx")
+
+	encPath, ok := fileDAO.GetEncPath("/demo.mp4")
+	if !ok || encPath != "/enc/demo.bin" {
+		t.Fatalf("encPath=%q ok=%v", encPath, ok)
+	}
+	info, ok := fileDAO.Get("/demo.mp4")
+	if !ok || info == nil {
+		t.Fatal("expected display path entry to remain cached")
+	}
+	if info.RawURL != "" || info.Size != 0 {
+		t.Fatalf("expected volatile fields cleared, got raw_url=%q size=%d", info.RawURL, info.Size)
 	}
 }
