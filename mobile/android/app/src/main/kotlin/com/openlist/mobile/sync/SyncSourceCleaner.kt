@@ -33,6 +33,8 @@ object SyncSourceCleaner {
 
     data class CleanupProgress(
         val phase: String,
+        val currentPhaseProgress: Int? = null,
+        val currentPhaseDetail: String? = null,
         val currentFile: String? = null,
         val scannedFiles: Int? = null,
         val pendingFiles: Int? = null,
@@ -78,6 +80,8 @@ object SyncSourceCleaner {
         onProgress?.invoke(
             CleanupProgress(
                 phase = "CLEANUP_SCANNING",
+                currentPhaseProgress = 100,
+                currentPhaseDetail = "本地扫描完成，共 ${filesToCheck.size} 个文件",
                 scannedFiles = filesToCheck.size,
                 pendingFiles = 0,
                 skippedFiles = 0,
@@ -92,7 +96,11 @@ object SyncSourceCleaner {
         var failed = 0
         var skipped = 0
 
-        filesToCheck.forEach { file ->
+        filesToCheck.forEachIndexed { index, file ->
+            val checked = index + 1
+            val phaseProgress = if (filesToCheck.isEmpty()) 100 else {
+                ((checked.toDouble() / filesToCheck.size.toDouble()) * 100.0).toInt().coerceIn(0, 100)
+            }
             val remotePath = buildRemotePath(task, sourceDir, file)
             val remoteProbe = probeRemoteFile(remotePath, authToken)
             if (!remoteProbe.exists || remoteProbe.isDir || remoteProbe.size != file.length()) {
@@ -100,6 +108,8 @@ object SyncSourceCleaner {
                 onProgress?.invoke(
                     CleanupProgress(
                         phase = "CLEANUP_DELETING",
+                        currentPhaseProgress = phaseProgress,
+                        currentPhaseDetail = "正在校验远端已存在文件 $checked/${filesToCheck.size}",
                         currentFile = file.name,
                         scannedFiles = filesToCheck.size,
                         pendingFiles = remoteMatched,
@@ -129,6 +139,8 @@ object SyncSourceCleaner {
                 onProgress?.invoke(
                     CleanupProgress(
                         phase = "CLEANUP_DELETING",
+                        currentPhaseProgress = phaseProgress,
+                        currentPhaseDetail = "正在清理本地源文件 $checked/${filesToCheck.size}",
                         currentFile = file.name,
                         scannedFiles = filesToCheck.size,
                         pendingFiles = remoteMatched,
@@ -154,6 +166,8 @@ object SyncSourceCleaner {
                 onProgress?.invoke(
                     CleanupProgress(
                         phase = "CLEANUP_DELETING",
+                        currentPhaseProgress = phaseProgress,
+                        currentPhaseDetail = "正在清理本地源文件 $checked/${filesToCheck.size}",
                         currentFile = file.name,
                         scannedFiles = filesToCheck.size,
                         pendingFiles = remoteMatched,
@@ -169,6 +183,8 @@ object SyncSourceCleaner {
                 onProgress?.invoke(
                     CleanupProgress(
                         phase = "CLEANUP_DELETING",
+                        currentPhaseProgress = phaseProgress,
+                        currentPhaseDetail = "正在清理本地源文件 $checked/${filesToCheck.size}",
                         currentFile = file.name,
                         scannedFiles = filesToCheck.size,
                         pendingFiles = remoteMatched,
@@ -185,6 +201,8 @@ object SyncSourceCleaner {
         onProgress?.invoke(
             CleanupProgress(
                 phase = "CLEANUP_COMPLETED",
+                currentPhaseProgress = 100,
+                currentPhaseDetail = "清理完成",
                 scannedFiles = filesToCheck.size,
                 pendingFiles = remoteMatched,
                 skippedFiles = skipped,

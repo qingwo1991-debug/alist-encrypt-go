@@ -31,6 +31,8 @@ class SyncCleanupWorker(
                 setProgressAsync(
                     Data.Builder()
                         .putString("phase", progress.phase)
+                        .putInt("currentPhaseProgress", progress.currentPhaseProgress ?: -1)
+                        .putString("currentPhaseDetail", progress.currentPhaseDetail)
                         .putString("currentFile", progress.currentFile)
                         .putString("currentUploadTaskStatus", progress.currentUploadTaskStatus)
                         .putString("currentUploadTaskError", progress.currentUploadTaskError)
@@ -48,6 +50,7 @@ class SyncCleanupWorker(
             setProgressAsync(
                 Data.Builder()
                     .putString("phase", "CLEANUP_FAILED")
+                    .putInt("currentPhaseProgress", -1)
                     .putString("currentUploadTaskStatus", "清理失败")
                     .putString("currentUploadTaskError", e.message)
                     .build()

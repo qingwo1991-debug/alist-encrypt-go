@@ -340,7 +340,9 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
   }
 
   bool _hasRuntimeProgress(Map<String, dynamic> status) {
-    return status['scannedFiles'] != null ||
+    return status['currentPhaseProgress'] != null ||
+        status['currentPhaseDetail'] != null ||
+        status['scannedFiles'] != null ||
         status['pendingFiles'] != null ||
         status['uploadedFiles'] != null ||
         status['failedFiles'] != null ||
@@ -354,11 +356,17 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
     final skippedFiles = status['skippedFiles'] as int?;
     final uploadedFiles = status['uploadedFiles'] as int? ?? 0;
     final failedFiles = status['failedFiles'] as int? ?? 0;
+    final currentPhaseProgress = status['currentPhaseProgress'] as int?;
+    final currentPhaseDetail = status['currentPhaseDetail']?.toString();
     final currentFile = status['currentFile']?.toString();
     final phase = _describePhase(status['currentPhase']?.toString());
     final denominator = pendingFiles ?? scannedFiles ?? 0;
     final completed = uploadedFiles + failedFiles;
-    final progress = denominator > 0 ? (completed / denominator).clamp(0.0, 1.0) : null;
+    final progress = currentPhaseProgress != null
+        ? (currentPhaseProgress / 100).clamp(0.0, 1.0)
+        : denominator > 0
+            ? (completed / denominator).clamp(0.0, 1.0)
+            : null;
 
     return Padding(
       padding: const EdgeInsets.only(top: 6, bottom: 4),
@@ -366,6 +374,8 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildInfoRow('当前阶段', phase),
+          if (currentPhaseDetail != null && currentPhaseDetail.isNotEmpty)
+            _buildInfoRow('阶段说明', currentPhaseDetail),
           if (currentFile != null && currentFile.isNotEmpty)
             _buildInfoRow('当前文件', currentFile),
           if (status['currentUploadTaskId'] != null)
@@ -588,6 +598,8 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
         return '扫描本地文件';
       case 'READY':
         return '等待上传';
+      case 'FILTERING_REMOTE':
+        return '校验远端并增量筛选';
       case 'UPLOADING':
         return '上传中';
       case 'UPLOADING_TASK':
@@ -625,6 +637,13 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
               children: [
                 _buildDialogRow('任务ID', task.id),
                 _buildDialogRow('当前阶段', _describePhase(status?['currentPhase']?.toString())),
+                _buildDialogRow('阶段说明', status?['currentPhaseDetail']?.toString() ?? '-'),
+                _buildDialogRow(
+                  '阶段进度',
+                  status?['currentPhaseProgress'] != null
+                      ? '${status!['currentPhaseProgress']}%'
+                      : '-',
+                ),
                 _buildDialogRow('清理任务状态', status?['cleanupState']?.toString() ?? '-'),
                 _buildDialogRow('当前文件', status?['currentFile']?.toString() ?? '-'),
                 _buildDialogRow('OpenList上传任务ID', status?['currentUploadTaskId']?.toString() ?? '-'),
