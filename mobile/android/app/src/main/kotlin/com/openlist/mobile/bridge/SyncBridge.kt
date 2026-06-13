@@ -159,6 +159,7 @@ class SyncBridge(private val context: Context) {
                         val args = message as List<*>
                         val taskId = args[0] as String
                         SyncRecordStore.clearRecords(bridge.context, taskId)
+                        SyncRecordStore.clearLogs(bridge.context, taskId)
                         reply.reply(listOf(null))
                     } catch (e: Exception) {
                         Log.e(TAG, "clearSyncTaskRecords error", e)
@@ -173,6 +174,7 @@ class SyncBridge(private val context: Context) {
                         val args = message as List<*>
                         val taskId = args[0] as String
                         SyncRecordStore.clearHistory(bridge.context, taskId)
+                        SyncRecordStore.clearLogs(bridge.context, taskId)
                         reply.reply(listOf(null))
                     } catch (e: Exception) {
                         Log.e(TAG, "clearSyncTaskHistory error", e)
@@ -185,6 +187,7 @@ class SyncBridge(private val context: Context) {
                 .setMessageHandler { _, reply ->
                     try {
                         SyncRecordStore.clearAllHistory(bridge.context)
+                        SyncRecordStore.clearAllLogs(bridge.context)
                         reply.reply(listOf(null))
                     } catch (e: Exception) {
                         Log.e(TAG, "clearAllSyncTaskHistory error", e)

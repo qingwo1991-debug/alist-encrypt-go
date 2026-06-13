@@ -281,6 +281,7 @@ object SyncScheduler {
         // 读取最近一次历史记录
         val history = SyncRecordStore.getHistory(context, taskId)
         val lastHistoryEntry = history.lastOrNull()
+        val recentLogs = SyncRecordStore.getRecentLogs(context, taskId, 12)
 
         val status = SyncTaskStatus(
             taskId = taskId,
@@ -303,7 +304,8 @@ object SyncScheduler {
             lastSyncTime = lastSyncTime,
             lastSyncFileCount = lastSyncFileCount,
             lastError = lastError,
-            lastHistoryEntry = lastHistoryEntry
+            lastHistoryEntry = lastHistoryEntry,
+            recentLogs = recentLogs,
         )
 
         return SyncTaskStatus.toJsonString(status)

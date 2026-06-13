@@ -1,11 +1,19 @@
 package com.openlist.mobile.sync
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.media.MediaScannerConnection
+import android.os.Build
 import android.os.Environment
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.work.*
 import com.openlist.mobile.constant.LogLevel
+import com.openlist.mobile.R
 import com.openlist.mobile.config.AppConfig
 import com.openlist.mobile.model.openlist.Logger
 import com.openlist.mobile.model.openlist.OpenList
@@ -43,6 +51,8 @@ class SyncWorker(
     workerParams: WorkerParameters
 ) : CoroutineWorker(context, workerParams) {
 
+    private var foregroundTitle: String = "媒体加密备份"
+
     companion object {
         const val TAG = "SyncWorker"
         const val KEY_TASK_ID = "task_id"
@@ -52,6 +62,8 @@ class SyncWorker(
         private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
         private const val TASK_POLL_INTERVAL_MS = 3000L
         private const val V2_HEADER_SIZE = 32L
+        private const val FOREGROUND_CHANNEL_ID = "media_backup_sync"
+        private const val FOREGROUND_NOTIFICATION_ID = 53440
     }
 
     private data class UploadTaskSubmission(
@@ -75,6 +87,21 @@ class SyncWorker(
         val message: String,
     )
 
+    private data class ScanProgressState(
+        var visitedDirectories: Int = 0,
+        var matchedFiles: Int = 0,
+        var lastPublishedFiles: Int = -1,
+        var lastDetail: String = "",
+    ) {
+        fun heuristicProgress(): Int {
+            val ticks = visitedDirectories + matchedFiles
+            if (ticks <= 0) return 0
+            return ((ticks.toDouble() / (ticks.toDouble() + 24.0)) * 95.0)
+                .toInt()
+                .coerceIn(1, 95)
+        }
+    }
+
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val taskId = inputData.getString(KEY_TASK_ID) ?: return@withContext Result.failure()
         val taskJson = inputData.getString(KEY_TASK_JSON) ?: return@withContext Result.failure()
@@ -90,6 +117,14 @@ class SyncWorker(
             return@withContext Result.failure()
         }
 
+        SyncRecordStore.clearLogs(context, taskId)
+        foregroundTitle = taskConfig.name
+        updateForegroundNotification(
+            title = taskConfig.name,
+            detail = "准备执行媒体加密备份",
+            progress = 0,
+            indeterminate = true,
+        )
         publishProgress(phase = "PREPARING")
         logSync(traceId, taskId, "prepare", "任务开始 name=${taskConfig.name}")
 
@@ -167,6 +202,7 @@ class SyncWorker(
         // 4. 收集要上传的文件
         val filesToUpload = mutableListOf<File>()
         val excludeNames = taskConfig.excludeFolders.map { it.trimEnd('/') }.toSet()
+        val scanState = ScanProgressState()
         publishProgress(
             phase = "SCANNING",
             currentPhaseProgress = 0,
@@ -174,13 +210,31 @@ class SyncWorker(
             currentFile = taskConfig.sourcePath,
             scannedFiles = 0,
         )
-        collectFiles(sourceDir, taskConfig.fileExtensions, excludeNames, filesToUpload)
+        updateForegroundNotification(
+            title = taskConfig.name,
+            detail = "扫描本地目录",
+            progress = 0,
+            indeterminate = true,
+        )
+        collectFiles(
+            dir = sourceDir,
+            extensions = taskConfig.fileExtensions,
+            excludeFolders = excludeNames,
+            result = filesToUpload,
+            scanState = scanState,
+        )
         logSync(traceId, taskId, "scan", "扫描完成 total=${filesToUpload.size} source=${taskConfig.sourcePath}")
         publishProgress(
             phase = "SCANNING",
             currentPhaseProgress = 100,
             currentPhaseDetail = "本地扫描完成，共 ${filesToUpload.size} 个文件",
             scannedFiles = filesToUpload.size,
+        )
+        updateForegroundNotification(
+            title = taskConfig.name,
+            detail = "本地扫描完成，共 ${filesToUpload.size} 个文件",
+            progress = 100,
+            indeterminate = false,
         )
 
         if (filesToUpload.isEmpty()) {
@@ -198,16 +252,23 @@ class SyncWorker(
         filesToUpload.forEachIndexed { index, file ->
             val checked = index + 1
             if (checked == 1 || checked % 25 == 0 || checked == filesToUpload.size) {
+                val filterProgress = ((checked.toDouble() / filesToUpload.size.toDouble()) * 100.0)
+                    .toInt()
+                    .coerceIn(0, 100)
                 publishProgress(
                     phase = "FILTERING_REMOTE",
-                    currentPhaseProgress = ((checked.toDouble() / filesToUpload.size.toDouble()) * 100.0)
-                        .toInt()
-                        .coerceIn(0, 100),
+                    currentPhaseProgress = filterProgress,
                     currentPhaseDetail = "正在校验远端已存在文件 $checked/${filesToUpload.size}",
                     currentFile = file.name,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
                     skippedFiles = skippedByLocalRecord + skippedByRemotePresence,
+                )
+                updateForegroundNotification(
+                    title = taskConfig.name,
+                    detail = "校验远端文件 $checked/${filesToUpload.size}",
+                    progress = filterProgress,
+                    indeterminate = false,
                 )
             }
             val remotePath = buildRemotePath(taskConfig, sourceDir, file)
@@ -319,6 +380,12 @@ class SyncWorker(
                     uploadedFiles = successCount,
                     failedFiles = failureCount,
                 )
+                updateForegroundNotification(
+                    title = taskConfig.name,
+                    detail = "上传 ${successCount + failureCount + 1}/${newOrModified.size}: ${file.name}",
+                    progress = if (newOrModified.isEmpty()) 0 else ((successCount + failureCount).toDouble() / newOrModified.size.toDouble() * 100.0).toInt().coerceIn(0, 99),
+                    indeterminate = false,
+                )
                 val progressBefore = buildProgressPercent(successCount, failureCount, newOrModified.size)
                 logSync(
                     traceId,
@@ -399,14 +466,37 @@ class SyncWorker(
         val cleanupErrors = mutableListOf<String>()
         if (taskConfig.deleteAfterSync) {
             uploadSucceededFiles.forEach { file -> cleanupCandidates.add(file.absolutePath) }
-            for (filePath in cleanupCandidates) {
+            val cleanupList = cleanupCandidates.toList()
+            for ((index, filePath) in cleanupList.withIndex()) {
                 val file = File(filePath)
+                val cleanupProgress = if (cleanupList.isEmpty()) 100 else {
+                    (((index + 1).toDouble() / cleanupList.size.toDouble()) * 100.0).toInt().coerceIn(0, 100)
+                }
                 try {
                     if (!file.exists()) {
                         continue
                     }
+                    publishProgress(
+                        phase = "CLEANUP_DELETING",
+                        currentPhaseProgress = cleanupProgress,
+                        currentPhaseDetail = "正在清理本地源文件 ${index + 1}/${cleanupList.size}",
+                        currentFile = file.name,
+                        scannedFiles = filesToUpload.size,
+                        pendingFiles = newOrModified.size,
+                        skippedFiles = skippedCount,
+                        uploadedFiles = successCount,
+                        failedFiles = failureCount + cleanupFailureCount,
+                    )
+                    updateForegroundNotification(
+                        title = taskConfig.name,
+                        detail = "清理本地源文件 ${index + 1}/${cleanupList.size}",
+                        progress = cleanupProgress,
+                        indeterminate = false,
+                    )
                     val deleted = file.delete()
                     if (deleted || !file.exists()) {
+                        notifyMediaLibraryChanged(file)
+                        pruneEmptyDirectories(file.parentFile, sourceDir)
                         logSync(traceId, taskId, "cleanup", "已删除本地源文件 file=${file.absolutePath}")
                         Log.d(TAG, "Deleted synced file: ${file.absolutePath}")
                     } else {
@@ -450,6 +540,12 @@ class SyncWorker(
             skippedFiles = skippedCount,
             uploadedFiles = successCount,
             failedFiles = totalFailureCount,
+        )
+        updateForegroundNotification(
+            title = taskConfig.name,
+            detail = if (totalFailureCount > 0) "任务完成，存在失败项" else "任务完成",
+            progress = 100,
+            indeterminate = false,
         )
         logSync(
             traceId,
@@ -507,10 +603,13 @@ class SyncWorker(
         extensions: List<String>,
         excludeFolders: Set<String>,
         result: MutableList<File>,
+        scanState: ScanProgressState,
         sourceRoot: File? = null,
         currentRelative: String = ""
     ) {
         val root = sourceRoot ?: dir
+        scanState.visitedDirectories++
+        publishScanProgress(scanState, currentRelative.ifEmpty { root.absolutePath }, result.size)
         val files = dir.listFiles() ?: return
         for (file in files) {
             if (file.isDirectory) {
@@ -524,16 +623,13 @@ class SyncWorker(
                     Log.d(TAG, "Excluding directory: $relPath")
                     continue
                 }
-                collectFiles(file, extensions, excludeFolders, result, root, relPath)
+                collectFiles(file, extensions, excludeFolders, result, scanState, root, relPath)
             } else if (file.isFile) {
                 if (shouldInclude(file, extensions)) {
                     result.add(file)
-                    if (result.size % 100 == 0) {
-                        publishProgress(
-                            phase = "SCANNING",
-                            currentFile = currentRelative.ifEmpty { dir.name },
-                            scannedFiles = result.size,
-                        )
+                    scanState.matchedFiles++
+                    if (result.size % 25 == 0) {
+                        publishScanProgress(scanState, currentRelative.ifEmpty { dir.name }, result.size)
                     }
                 }
             }
@@ -1054,6 +1150,29 @@ class SyncWorker(
         setProgress(builder.build())
     }
 
+    private suspend fun publishScanProgress(scanState: ScanProgressState, currentLocation: String, scannedFiles: Int) {
+        val detail = "正在扫描目录: ${currentLocation.ifBlank { "/" }}"
+        if (scanState.lastPublishedFiles == scannedFiles && scanState.lastDetail == detail) {
+            return
+        }
+        scanState.lastPublishedFiles = scannedFiles
+        scanState.lastDetail = detail
+        val progress = scanState.heuristicProgress()
+        publishProgress(
+            phase = "SCANNING",
+            currentPhaseProgress = progress,
+            currentPhaseDetail = detail,
+            currentFile = currentLocation,
+            scannedFiles = scannedFiles,
+        )
+        updateForegroundNotification(
+            title = foregroundTitle,
+            detail = "扫描本地目录，已发现 $scannedFiles 个文件",
+            progress = progress,
+            indeterminate = false,
+        )
+    }
+
     private fun compactBody(body: String, maxLen: Int = 240): String {
         val compact = body.replace('\n', ' ').replace('\r', ' ').trim()
         return if (compact.length <= maxLen) compact else compact.take(maxLen) + "..."
@@ -1064,6 +1183,16 @@ class SyncWorker(
     }
 
     private fun logSync(traceId: String, taskId: String, step: String, msg: String, level: Int = LogLevel.INFO) {
+        SyncRecordStore.addLog(
+            applicationContext,
+            SyncLogEntry(
+                taskId = taskId,
+                timestamp = System.currentTimeMillis(),
+                level = level,
+                step = step,
+                message = msg,
+            )
+        )
         appLog(level, "[sync][trace=$traceId][task=$taskId][step=$step] $msg")
     }
 
@@ -1135,6 +1264,101 @@ class SyncWorker(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update task status for $taskId", e)
+        }
+    }
+
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        return createForegroundInfo("媒体加密备份运行中", "正在准备任务", 0, true)
+    }
+
+    private suspend fun updateForegroundNotification(
+        title: String,
+        detail: String,
+        progress: Int,
+        indeterminate: Boolean,
+    ) {
+        setForeground(createForegroundInfo(title, detail, progress, indeterminate))
+    }
+
+    private fun createForegroundInfo(
+        title: String,
+        detail: String,
+        progress: Int,
+        indeterminate: Boolean,
+    ): ForegroundInfo {
+        ensureForegroundChannel()
+        val notification = NotificationCompat.Builder(applicationContext, FOREGROUND_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(detail)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setProgress(100, progress.coerceIn(0, 100), indeterminate)
+            .build()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                FOREGROUND_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            ForegroundInfo(FOREGROUND_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun ensureForegroundChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return
+        val existing = manager.getNotificationChannel(FOREGROUND_CHANNEL_ID)
+        if (existing != null) {
+            return
+        }
+        val channel = NotificationChannel(
+            FOREGROUND_CHANNEL_ID,
+            "媒体加密备份",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "媒体加密备份任务运行通知"
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun notifyMediaLibraryChanged(file: File) {
+        try {
+            MediaScannerConnection.scanFile(
+                applicationContext,
+                arrayOf(file.absolutePath, file.parentFile?.absolutePath ?: ""),
+                null,
+                null,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to refresh media scanner for ${file.absolutePath}: ${e.message}")
+        }
+    }
+
+    private fun pruneEmptyDirectories(startDir: File?, stopDir: File) {
+        var current = startDir
+        val stopPath = stopDir.absoluteFile
+        while (current != null) {
+            val normalized = current.absoluteFile
+            if (normalized == stopPath || !normalized.absolutePath.startsWith(stopPath.absolutePath)) {
+                break
+            }
+            val children = normalized.listFiles()
+            if (children != null && children.isEmpty()) {
+                val removed = runCatching { normalized.delete() }.getOrDefault(false)
+                if (removed) {
+                    notifyMediaLibraryChanged(normalized)
+                    current = normalized.parentFile
+                    continue
+                }
+            }
+            break
         }
     }
 }
