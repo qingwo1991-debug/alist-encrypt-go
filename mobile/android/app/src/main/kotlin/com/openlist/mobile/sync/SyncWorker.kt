@@ -169,6 +169,8 @@ class SyncWorker(
         val excludeNames = taskConfig.excludeFolders.map { it.trimEnd('/') }.toSet()
         publishProgress(
             phase = "SCANNING",
+            currentPhaseProgress = 0,
+            currentPhaseDetail = "正在扫描本地目录",
             currentFile = taskConfig.sourcePath,
             scannedFiles = 0,
         )
@@ -176,6 +178,8 @@ class SyncWorker(
         logSync(traceId, taskId, "scan", "扫描完成 total=${filesToUpload.size} source=${taskConfig.sourcePath}")
         publishProgress(
             phase = "SCANNING",
+            currentPhaseProgress = 100,
+            currentPhaseDetail = "本地扫描完成，共 ${filesToUpload.size} 个文件",
             scannedFiles = filesToUpload.size,
         )
 
@@ -191,7 +195,21 @@ class SyncWorker(
         var skippedByRemotePresence = 0
         val cleanupCandidates = linkedSetOf<String>()
 
-        filesToUpload.forEach { file ->
+        filesToUpload.forEachIndexed { index, file ->
+            val checked = index + 1
+            if (checked == 1 || checked % 25 == 0 || checked == filesToUpload.size) {
+                publishProgress(
+                    phase = "FILTERING_REMOTE",
+                    currentPhaseProgress = ((checked.toDouble() / filesToUpload.size.toDouble()) * 100.0)
+                        .toInt()
+                        .coerceIn(0, 100),
+                    currentPhaseDetail = "正在校验远端已存在文件 $checked/${filesToUpload.size}",
+                    currentFile = file.name,
+                    scannedFiles = filesToUpload.size,
+                    pendingFiles = newOrModified.size,
+                    skippedFiles = skippedByLocalRecord + skippedByRemotePresence,
+                )
+            }
             val remotePath = buildRemotePath(taskConfig, sourceDir, file)
             val alreadySyncedLocally = SyncRecordStore.isAlreadySynced(
                 context,
@@ -267,6 +285,8 @@ class SyncWorker(
         )
         publishProgress(
             phase = "READY",
+            currentPhaseProgress = 100,
+            currentPhaseDetail = "增量筛选完成，待上传 ${newOrModified.size} 个文件",
             scannedFiles = filesToUpload.size,
             pendingFiles = newOrModified.size,
             skippedFiles = skippedCount,
@@ -287,6 +307,7 @@ class SyncWorker(
                 val remotePath = buildRemotePath(taskConfig, sourceDir, file)
                 publishProgress(
                     phase = "UPLOADING",
+                    currentPhaseDetail = "正在上传文件",
                     currentFile = file.name,
                     currentUploadTaskId = null,
                     currentUploadTaskProgress = null,
@@ -336,6 +357,7 @@ class SyncWorker(
                 logSync(traceId, taskId, "upload", "上传成功 progress=$progressAfter remotePath=$remotePath file=${file.name}")
                 publishProgress(
                     phase = "UPLOADING",
+                    currentPhaseDetail = "正在上传文件",
                     currentFile = file.name,
                     currentUploadTaskId = null,
                     currentUploadTaskProgress = null,
@@ -421,6 +443,8 @@ class SyncWorker(
         // 9. Worker 返回 success/failure 取决于是否完成主流程（不论单文件失败）
         publishProgress(
             phase = "COMPLETED",
+            currentPhaseProgress = 100,
+            currentPhaseDetail = "任务执行完成",
             scannedFiles = filesToUpload.size,
             pendingFiles = newOrModified.size,
             skippedFiles = skippedCount,
@@ -1000,6 +1024,8 @@ class SyncWorker(
 
     private suspend fun publishProgress(
         phase: String,
+        currentPhaseProgress: Int? = null,
+        currentPhaseDetail: String? = null,
         currentFile: String? = null,
         currentUploadTaskId: String? = null,
         currentUploadTaskProgress: Int? = null,
@@ -1013,6 +1039,8 @@ class SyncWorker(
     ) {
         val builder = Data.Builder()
             .putString("phase", phase)
+        currentPhaseProgress?.let { builder.putInt("currentPhaseProgress", it) }
+        currentPhaseDetail?.let { builder.putString("currentPhaseDetail", it) }
         currentFile?.let { builder.putString("currentFile", it) }
         currentUploadTaskId?.let { builder.putString("currentUploadTaskId", it) }
         currentUploadTaskProgress?.let { builder.putInt("currentUploadTaskProgress", it) }

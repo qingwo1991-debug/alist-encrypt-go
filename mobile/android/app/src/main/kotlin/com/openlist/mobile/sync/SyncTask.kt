@@ -48,6 +48,8 @@ data class SyncTaskStatus(
     val oneTimeState: String = "NONE",
     val cleanupState: String = "NONE",
     val currentPhase: String? = null,
+    val currentPhaseProgress: Int? = null,
+    val currentPhaseDetail: String? = null,
     val currentFile: String? = null,
     val currentUploadTaskId: String? = null,
     val currentUploadTaskProgress: Int? = null,

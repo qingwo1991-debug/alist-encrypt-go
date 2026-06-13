@@ -288,6 +288,8 @@ object SyncScheduler {
             oneTimeState = oneTimeState,
             cleanupState = cleanupState,
             currentPhase = activeProgress?.getString("phase"),
+            currentPhaseProgress = activeProgress?.getInt("currentPhaseProgress", -1)?.takeIf { it >= 0 },
+            currentPhaseDetail = activeProgress?.getString("currentPhaseDetail"),
             currentFile = activeProgress?.getString("currentFile"),
             currentUploadTaskId = activeProgress?.getString("currentUploadTaskId"),
             currentUploadTaskProgress = activeProgress?.getInt("currentUploadTaskProgress", -1)?.takeIf { it >= 0 },
