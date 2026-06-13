@@ -228,6 +228,10 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                   _buildInfoRow('上传任务错误', status['currentUploadTaskError'].toString(), isError: true),
                 if (status != null && _hasRuntimeProgress(status))
                   _buildRuntimeProgress(status),
+                if (status != null &&
+                    status['recentLogs'] is List &&
+                    (status['recentLogs'] as List).isNotEmpty)
+                  _buildRecentLogs(status['recentLogs'] as List<dynamic>),
                 if (status != null && status['lastHistoryEntry'] is Map)
                   ..._buildHistorySummaryRows(
                     status['lastHistoryEntry'] as Map<String, dynamic>,
@@ -396,6 +400,57 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
           ),
           const SizedBox(height: 8),
           LinearProgressIndicator(value: progress),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecentLogs(List<dynamic> rawLogs) {
+    final logs = rawLogs
+        .whereType<Map>()
+        .map((e) => e.map((key, value) => MapEntry(key.toString(), value)))
+        .toList();
+    if (logs.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '最近日志',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.35),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: logs.take(6).map((log) {
+                final step = log['step']?.toString() ?? '-';
+                final message = log['message']?.toString() ?? '';
+                final ts = log['timestamp'];
+                final time = ts is int
+                    ? DateTime.fromMillisecondsSinceEpoch(ts).toString().substring(11, 19)
+                    : '--:--:--';
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Text(
+                    '[$time][$step] $message',
+                    style: const TextStyle(fontSize: 12, height: 1.35),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
         ],
       ),
     );
@@ -661,6 +716,34 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                 _buildDialogRow('成功数', '${status?['uploadedFiles'] ?? '-'}'),
                 _buildDialogRow('失败数', '${status?['failedFiles'] ?? '-'}'),
                 _buildDialogRow('最后错误', task.lastError?.isNotEmpty == true ? task.lastError! : '-'),
+                if (status?['recentLogs'] is List &&
+                    (status?['recentLogs'] as List).isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  const Text(
+                    '最近日志',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 6),
+                  ...((status?['recentLogs'] as List)
+                      .whereType<Map>()
+                      .take(10)
+                      .map((log) {
+                    final map = log.map((key, value) => MapEntry(key.toString(), value));
+                    final ts = map['timestamp'];
+                    final time = ts is int
+                        ? DateTime.fromMillisecondsSinceEpoch(ts).toString().substring(11, 19)
+                        : '--:--:--';
+                    final step = map['step']?.toString() ?? '-';
+                    final message = map['message']?.toString() ?? '';
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: SelectableText(
+                        '[$time][$step] $message',
+                        style: const TextStyle(fontSize: 12, height: 1.35),
+                      ),
+                    );
+                  })),
+                ],
               ],
             ),
           ),

@@ -1,6 +1,7 @@
 package com.openlist.mobile.sync
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.util.Log
 import com.openlist.mobile.config.AppConfig
 import com.openlist.mobile.constant.LogLevel
@@ -18,6 +19,7 @@ import java.util.Locale
 object SyncSourceCleaner {
     private const val TAG = "SyncSourceCleaner"
     private const val DEFAULT_PROXY_PORT = 5344L
+    private const val V2_HEADER_SIZE = 32L
     private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
 
     data class CleanupSummary(
@@ -63,6 +65,7 @@ object SyncSourceCleaner {
             SyncTaskConfig.fromJsonString(taskJson)
         } ?: throw IllegalArgumentException("未找到任务: $taskId")
         val traceId = buildTraceId(taskId)
+        SyncRecordStore.clearLogs(context, taskId)
 
         onProgress?.invoke(CleanupProgress(phase = "CLEANUP_PREPARING"))
         ensureRuntimeReady()
@@ -103,7 +106,10 @@ object SyncSourceCleaner {
             }
             val remotePath = buildRemotePath(task, sourceDir, file)
             val remoteProbe = probeRemoteFile(remotePath, authToken)
-            if (!remoteProbe.exists || remoteProbe.isDir || remoteProbe.size != file.length()) {
+            val localSize = file.length()
+            val sizeMatches = remoteProbe.size != null &&
+                (remoteProbe.size == localSize || remoteProbe.size == localSize + V2_HEADER_SIZE)
+            if (!remoteProbe.exists || remoteProbe.isDir || !sizeMatches) {
                 skipped++
                 onProgress?.invoke(
                     CleanupProgress(
@@ -156,13 +162,15 @@ object SyncSourceCleaner {
             val removed = try {
                 file.delete()
             } catch (e: Exception) {
-                log(traceId, taskId, "cleanup", "手动清理异常 file=${file.absolutePath} error=${e.message}", LogLevel.WARN)
+                log(context, traceId, taskId, "cleanup", "手动清理异常 file=${file.absolutePath} error=${e.message}", LogLevel.WARN)
                 false
             }
 
             if (removed || !file.exists()) {
                 deleted++
-                log(traceId, taskId, "cleanup", "手动清理已删除本地源文件 file=${file.absolutePath}")
+                notifyMediaLibraryChanged(context, file)
+                pruneEmptyDirectories(context, file.parentFile, sourceDir)
+                log(context, traceId, taskId, "cleanup", "手动清理已删除本地源文件 file=${file.absolutePath}")
                 onProgress?.invoke(
                     CleanupProgress(
                         phase = "CLEANUP_DELETING",
@@ -179,7 +187,7 @@ object SyncSourceCleaner {
                 )
             } else {
                 failed++
-                log(traceId, taskId, "cleanup", "手动清理删除失败 file=${file.absolutePath}: delete() returned false", LogLevel.WARN)
+                log(context, traceId, taskId, "cleanup", "手动清理删除失败 file=${file.absolutePath}: delete() returned false", LogLevel.WARN)
                 onProgress?.invoke(
                     CleanupProgress(
                         phase = "CLEANUP_DELETING",
@@ -362,8 +370,52 @@ object SyncSourceCleaner {
         return "http://127.0.0.1:$port"
     }
 
-    private fun log(traceId: String, taskId: String, step: String, msg: String, level: Int = LogLevel.INFO) {
+    private fun log(context: Context, traceId: String, taskId: String, step: String, msg: String, level: Int = LogLevel.INFO) {
+        SyncRecordStore.addLog(
+            context,
+            SyncLogEntry(
+                taskId = taskId,
+                timestamp = System.currentTimeMillis(),
+                level = level,
+                step = step,
+                message = msg,
+            )
+        )
         Logger.log(level, logDateFormatter.format(System.currentTimeMillis()), "[sync][trace=$traceId][task=$taskId][step=$step] $msg")
+    }
+
+    private fun notifyMediaLibraryChanged(context: Context, file: File) {
+        try {
+            MediaScannerConnection.scanFile(
+                context,
+                arrayOf(file.absolutePath, file.parentFile?.absolutePath ?: ""),
+                null,
+                null,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to refresh media scanner for ${file.absolutePath}: ${e.message}")
+        }
+    }
+
+    private fun pruneEmptyDirectories(context: Context, startDir: File?, stopDir: File) {
+        var current = startDir
+        val stopPath = stopDir.absoluteFile
+        while (current != null) {
+            val normalized = current.absoluteFile
+            if (normalized == stopPath || !normalized.absolutePath.startsWith(stopPath.absolutePath)) {
+                break
+            }
+            val children = normalized.listFiles()
+            if (children != null && children.isEmpty()) {
+                val removed = runCatching { normalized.delete() }.getOrDefault(false)
+                if (removed) {
+                    notifyMediaLibraryChanged(context, normalized)
+                    current = normalized.parentFile
+                    continue
+                }
+            }
+            break
+        }
     }
 
     private fun buildTraceId(taskId: String): String {

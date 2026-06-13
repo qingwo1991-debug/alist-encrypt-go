@@ -35,6 +35,15 @@ data class SyncHistoryEntry(
     val errors: List<String> = emptyList()
 )
 
+@Serializable
+data class SyncLogEntry(
+    val taskId: String,
+    val timestamp: Long,
+    val level: Int,
+    val step: String,
+    val message: String,
+)
+
 /**
  * 同步记录持久化存储（线程安全）
  *
@@ -54,7 +63,8 @@ object SyncRecordStore {
     @Serializable
     private data class RecordsContainer(
         val records: MutableMap<String, SyncRecord> = mutableMapOf(),
-        val history: MutableList<SyncHistoryEntry> = mutableListOf()
+        val history: MutableList<SyncHistoryEntry> = mutableListOf(),
+        val logs: MutableList<SyncLogEntry> = mutableListOf(),
     )
 
     private fun getRecordsFile(context: Context): File {
@@ -172,6 +182,45 @@ object SyncRecordStore {
     fun clearAllHistory(context: Context) {
         val container = load(context)
         container.history.clear()
+        save(context, container)
+    }
+
+    @Synchronized
+    fun clearAllLogs(context: Context) {
+        val container = load(context)
+        container.logs.clear()
+        save(context, container)
+    }
+
+    @Synchronized
+    fun addLog(context: Context, entry: SyncLogEntry) {
+        val container = load(context)
+        container.logs.add(entry)
+        if (container.logs.size > 400) {
+            val trimCount = container.logs.size - 400
+            repeat(trimCount.coerceAtLeast(0)) {
+                if (container.logs.isNotEmpty()) {
+                    container.logs.removeAt(0)
+                }
+            }
+        }
+        save(context, container)
+    }
+
+    @Synchronized
+    fun getRecentLogs(context: Context, taskId: String, limit: Int = 20): List<SyncLogEntry> {
+        val container = load(context)
+        return container.logs
+            .asSequence()
+            .filter { it.taskId == taskId }
+            .takeLast(limit.coerceAtLeast(1))
+            .toList()
+    }
+
+    @Synchronized
+    fun clearLogs(context: Context, taskId: String) {
+        val container = load(context)
+        container.logs.removeAll { it.taskId == taskId }
         save(context, container)
     }
 }

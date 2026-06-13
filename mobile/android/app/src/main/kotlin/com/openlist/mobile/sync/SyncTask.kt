@@ -63,7 +63,8 @@ data class SyncTaskStatus(
     val lastSyncTime: Long? = null,
     val lastSyncFileCount: Int? = null,
     val lastError: String? = null,
-    val lastHistoryEntry: SyncHistoryEntry? = null
+    val lastHistoryEntry: SyncHistoryEntry? = null,
+    val recentLogs: List<SyncLogEntry> = emptyList(),
 ) {
     companion object {
         private val json = Json {
