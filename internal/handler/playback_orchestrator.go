@@ -317,16 +317,17 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	default:
 		return encryption.ContentMeta{}, false
 	}
-	candidateURLs := []string{req.TargetURL}
+	candidateURLs := make([]string, 0, 3)
 	if req.Config != nil && req.FileItem.EncryptedPath != "" {
 		alistURL := strings.TrimSpace(req.Config.GetAlistURL())
 		if alistURL != "" {
 			candidateURLs = append(candidateURLs,
-				httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
 				httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
+				httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
 			)
 		}
 	}
+	candidateURLs = append(candidateURLs, req.TargetURL)
 	authVariants := buildProbeAuthVariants(req.Config, authHeaders)
 	seen := make(map[string]struct{}, len(candidateURLs))
 	for _, candidateURL := range candidateURLs {
@@ -462,8 +463,5 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 	switch reason {
 	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout", "network_error", "stream_error":
 		req.FileDAO.InvalidateDisplayPath(req.FileItem.DisplayPath)
-	}
-	if reason == "upstream_4xx" && req.FileItem.DisplayPath != "" {
-		req.FileDAO.DeleteEncPathMapping(req.FileItem.DisplayPath)
 	}
 }
