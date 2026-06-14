@@ -1857,16 +1857,16 @@ func classifyStreamError(err error) (string, bool) {
 	if stderrors.Is(err, context.DeadlineExceeded) {
 		return "timeout", false
 	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset by peer") {
+		return "client_disconnect", false
+	}
 	var netErr net.Error
 	if stderrors.As(err, &netErr) {
 		if netErr.Timeout() {
 			return "timeout", false
 		}
 		return "network_error", false
-	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset by peer") {
-		return "client_disconnect", false
 	}
 	if strings.Contains(msg, "timeout") {
 		return "timeout", false

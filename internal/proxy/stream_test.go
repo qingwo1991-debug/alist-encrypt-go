@@ -22,6 +22,12 @@ func (timeoutErr) Error() string   { return "timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
 
+type netStringErr string
+
+func (e netStringErr) Error() string   { return string(e) }
+func (e netStringErr) Timeout() bool   { return false }
+func (e netStringErr) Temporary() bool { return false }
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -48,6 +54,17 @@ func TestClassifyStreamErrorTimeout(t *testing.T) {
 	}
 	if retryable {
 		t.Fatalf("expected retryable=false for net.Error timeout")
+	}
+}
+
+func TestClassifyStreamErrorClientDisconnectBeforeGenericNetError(t *testing.T) {
+	var err net.Error = netStringErr("write tcp 127.0.0.1:5344->127.0.0.1:50000: write: broken pipe")
+	reason, retryable := classifyStreamError(err)
+	if reason != "client_disconnect" {
+		t.Fatalf("expected client_disconnect reason, got %q", reason)
+	}
+	if retryable {
+		t.Fatalf("expected retryable=false for client disconnect")
 	}
 }
 

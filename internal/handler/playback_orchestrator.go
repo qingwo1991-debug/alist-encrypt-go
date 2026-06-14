@@ -518,6 +518,10 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 	if reason == "" {
 		return
 	}
+	switch reason {
+	case "client_disconnect", "network_error":
+		return
+	}
 	if req.Probe != nil {
 		req.Probe.InvalidateWarm(req.FileItem.DisplayPath, reason)
 	}
@@ -525,7 +529,7 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 		return
 	}
 	switch reason {
-	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout", "network_error", "stream_error":
+	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout", "stream_error":
 		req.FileDAO.InvalidateDisplayPath(req.FileItem.DisplayPath)
 	}
 }
