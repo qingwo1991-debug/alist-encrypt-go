@@ -731,3 +731,105 @@ func TestInvalidatePlaybackStatePreservesEncPathOnUpstream4xx(t *testing.T) {
 		t.Fatalf("expected volatile fields cleared, got raw_url=%q size=%d", info.RawURL, info.Size)
 	}
 }
+
+func TestExecuteDecryptPlaybackWebDAVFallsBackToInternalDOnUpstream4xx(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := proxy.NewStreamProxy(cfg)
+
+	fileSize := int64(4096)
+	plain := bytes.Repeat([]byte("W"), int(fileSize))
+	ciphertext := make([]byte, len(plain))
+	copy(ciphertext, plain)
+
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to build flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	var rawHits int
+	var internalHits int
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/raw/demo.bin":
+			rawHits++
+			http.Error(w, "bad raw url", http.StatusBadRequest)
+		case "/d/demo.bin", "/dav/demo.bin":
+			internalHits++
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Length", "4096")
+			if r.Header.Get("Range") != "" {
+				w.Header().Set("Content-Range", "bytes 0-1023/4096")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(ciphertext[:1024])
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(ciphertext)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg.AlistServer.ServerHost = strings.TrimPrefix(strings.TrimPrefix(srv.URL, "http://"), "https://")
+	cfg.AlistServer.HTTPS = false
+	if host, port, err := net.SplitHostPort(cfg.AlistServer.ServerHost); err == nil {
+		cfg.AlistServer.ServerHost = host
+		if parsedPort, convErr := strconv.Atoi(port); convErr == nil {
+			cfg.AlistServer.ServerPort = parsedPort
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/demo.mp4", nil)
+	req.Header.Set("Range", "bytes=0-1023")
+	rr := httptest.NewRecorder()
+
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter: rr,
+		Request:        req,
+		Config:         cfg,
+		StreamProxy:    sp,
+		PasswdInfo:     passwd,
+		FileItem: FileItem{
+			DisplayPath:   "/demo.mp4",
+			EncryptedPath: "/demo.bin",
+			TargetURL:     srv.URL + "/raw/demo.bin",
+			FileName:      "demo.mp4",
+		},
+		TargetURL:        srv.URL + "/raw/demo.bin",
+		ProviderKey:      ProviderKey(srv.URL+"/raw/demo.bin", "/demo.mp4"),
+		Path:             "/demo.mp4",
+		InitialSize:      fileSize,
+		OverridePath:     "/demo.mp4",
+		CompatKey:        "/encrypt",
+		ConsumerScenario: consumerScenarioWebDAV,
+		FailureLogMsg:    "test playback failed",
+	})
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d body=%s", rr.Code, http.StatusPartialContent, rr.Body.String())
+	}
+	body, err := io.ReadAll(rr.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if len(body) != 1024 {
+		t.Fatalf("body len=%d, want 1024", len(body))
+	}
+	if !bytes.Equal(body, plain[:1024]) {
+		t.Fatal("decrypted first-frame payload mismatch")
+	}
+	if rawHits != 2 {
+		t.Fatalf("rawHits=%d, want 2", rawHits)
+	}
+	if internalHits < 3 {
+		t.Fatalf("internalHits=%d, want at least 3", internalHits)
+	}
+}
