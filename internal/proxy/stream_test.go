@@ -210,7 +210,7 @@ func TestInspectEncryptedContentFollowsRedirectForV2Probe(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusPartialContent,
 				Header: http.Header{
-					"Content-Range": []string{"bytes 0-31/" + strconv.Itoa(len(ciphertext))},
+					"Content-Range":  []string{"bytes 0-31/" + strconv.Itoa(len(ciphertext))},
 					"Content-Length": []string{"32"},
 				},
 				Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
@@ -274,6 +274,64 @@ func TestDecryptRequestUsesDisplayNameFromContext(t *testing.T) {
 	}
 	if got := rr.Header().Get("Content-Disposition"); !strings.Contains(got, "oceans.mp4") {
 		t.Fatalf("Content-Disposition=%q, want rewritten display name", got)
+	}
+}
+
+func TestStripForeignHeadersPreservesAuthForAlistTargets(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.ServerHost = "openalist"
+	cfg.AlistServer.ServerPort = 5244
+	cfg.AlistServer.HTTPS = false
+	sp := NewStreamProxy(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "http://openalist:5244/d/enc/demo.bin", nil)
+	req.Header.Set("Authorization", "Basic test")
+	req.Header.Set("Cookie", "sid=1")
+	req.Header.Set("Referer", "http://example.com")
+	req.Header.Set("Depth", "1")
+
+	sp.StripForeignHeaders(req)
+
+	if got := req.Header.Get("Authorization"); got != "Basic test" {
+		t.Fatalf("authorization=%q", got)
+	}
+	if got := req.Header.Get("Cookie"); got != "sid=1" {
+		t.Fatalf("cookie=%q", got)
+	}
+	if got := req.Header.Get("Depth"); got != "" {
+		t.Fatalf("depth=%q", got)
+	}
+	if got := req.Header.Get("Referer"); got != "" {
+		t.Fatalf("referer=%q", got)
+	}
+}
+
+func TestStripForeignHeadersStripsAuthForCDNTargets(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.ServerHost = "openalist"
+	cfg.AlistServer.ServerPort = 5244
+	cfg.AlistServer.HTTPS = false
+	sp := NewStreamProxy(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "https://cdn.example.com/demo.bin", nil)
+	req.Header.Set("Authorization", "Basic test")
+	req.Header.Set("Cookie", "sid=1")
+	req.Header.Set("Referer", "http://example.com")
+	req.Header.Set("Depth", "1")
+
+	sp.StripForeignHeaders(req)
+
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("authorization=%q", got)
+	}
+	if got := req.Header.Get("Cookie"); got != "sid=1" {
+		t.Fatalf("cookie=%q", got)
+	}
+	if got := req.Header.Get("Depth"); got != "" {
+		t.Fatalf("depth=%q", got)
+	}
+	if got := req.Header.Get("Referer"); got != "" {
+		t.Fatalf("referer=%q", got)
 	}
 }
 

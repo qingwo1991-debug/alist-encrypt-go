@@ -1979,12 +1979,34 @@ func (s *StreamProxy) StripForeignHeaders(req *http.Request) {
 	if req == nil || req.URL == nil {
 		return
 	}
-	// Strip regardless of scheme — alist ignores these headers, CDNs reject them.
-	StripWebDAVHeaders(req)
+	stripWebDAVHeaders(req)
+	if s.shouldPreserveUpstreamAuth(req.URL) {
+		req.Header.Del("Referer")
+		req.Header.Del("Host")
+		return
+	}
+	// Raw CDN targets reject WebDAV auth/referrer style headers.
+	req.Header.Del("Authorization")
+	req.Header.Del("Referer")
+	req.Header.Del("Host")
 }
 
 // StripWebDAVHeaders removes WebDAV-specific request headers that confuse CDNs.
 func StripWebDAVHeaders(r *http.Request) {
+	stripWebDAVHeaders(r)
+	// Old encrypt proxy also stripped these for CDN compatibility:
+	// - Authorization: CDNs don't understand alist/WebDAV auth tokens
+	// - Referer: Aliyun CDN returns 403 with certain referrers
+	// - Host: prevent host header mismatch with CDN
+	r.Header.Del("Authorization")
+	r.Header.Del("Referer")
+	r.Header.Del("Host")
+}
+
+func stripWebDAVHeaders(r *http.Request) {
+	if r == nil {
+		return
+	}
 	webdavHeaders := []string{
 		"Depth", "Translate", "Destination", "If", "If-Match",
 		"If-None-Match", "If-Modified-Since", "If-Unmodified-Since",
@@ -1993,11 +2015,19 @@ func StripWebDAVHeaders(r *http.Request) {
 	for _, h := range webdavHeaders {
 		r.Header.Del(h)
 	}
-	// Old encrypt proxy also stripped these for CDN compatibility:
-	// - Authorization: CDNs don't understand alist/WebDAV auth tokens
-	// - Referer: Aliyun CDN returns 403 with certain referrers
-	// - Host: prevent host header mismatch with CDN
-	r.Header.Del("Authorization")
-	r.Header.Del("Referer")
-	r.Header.Del("Host")
+}
+
+func (s *StreamProxy) shouldPreserveUpstreamAuth(target *url.URL) bool {
+	if s == nil || s.cfg == nil || target == nil {
+		return false
+	}
+	targetHost := parseHostOnly(target.Host)
+	if targetHost == "" {
+		return false
+	}
+	alistHost := parseHostOnly(s.cfg.AlistServer.ServerHost)
+	if alistHost != "" && strings.EqualFold(targetHost, alistHost) {
+		return true
+	}
+	return false
 }
