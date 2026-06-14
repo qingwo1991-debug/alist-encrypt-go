@@ -735,6 +735,52 @@ func TestInvalidatePlaybackStatePreservesEncPathOnUpstream4xx(t *testing.T) {
 	}
 }
 
+func TestInvalidatePlaybackStatePreservesPlaybackMetaOnClientAbort(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	nonce := bytes.Repeat([]byte{7}, 16)
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path:              "/demo.mp4",
+		EncryptedPath:     "/enc/demo.bin",
+		Name:              "demo.mp4",
+		Size:              4096,
+		CiphertextSize:    4128,
+		ContentVersion:    encryption.ContentVersionV2,
+		HeaderLen:         encryption.ContentHeaderSize(),
+		NonceField:        nonce,
+		RawURL:            "https://cdn.example/demo.bin",
+		UpstreamFetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed file info: %v", err)
+	}
+
+	for _, reason := range []string{"client_disconnect", "network_error"} {
+		invalidatePlaybackState(decryptPlaybackRequest{
+			FileDAO:          fileDAO,
+			ConsumerScenario: consumerScenarioWebDAV,
+			FileItem: FileItem{
+				DisplayPath:   "/demo.mp4",
+				EncryptedPath: "/enc/demo.bin",
+			},
+		}, reason)
+
+		info, ok := fileDAO.Get("/demo.mp4")
+		if !ok || info == nil {
+			t.Fatalf("expected display path entry to remain cached after %s", reason)
+		}
+		if info.RawURL != "https://cdn.example/demo.bin" || info.Size != 4096 || info.ContentVersion != encryption.ContentVersionV2 {
+			t.Fatalf("unexpected cached info after %s: raw_url=%q size=%d version=%d", reason, info.RawURL, info.Size, info.ContentVersion)
+		}
+		if !bytes.Equal(info.NonceField, nonce) {
+			t.Fatalf("nonce changed after %s", reason)
+		}
+	}
+}
+
 func TestExecuteDecryptPlaybackWebDAVFallsBackToInternalDavOnRawURLUpstream4xx(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := proxy.NewStreamProxy(cfg)
