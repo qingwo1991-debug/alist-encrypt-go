@@ -303,22 +303,34 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	firstFrameRange := proxy.IsFirstFrameRangeHint(r.Method, rangeHeader)
 	staleThreshold := h.upstreamStalenessThreshold()
+	needsRawURLWarmup := true
 	if firstFrameRange {
 		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			targetURL = cachedInfo.RawURL
+			needsRawURLWarmup = false
 			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for first-frame playback, display=%s source=cache", davPath)
 		}
 	}
-	if resolve := h.resolveRawURLFromAlist(r, davPath, realPath); resolve.RawURL != "" {
-		if firstFrameRange && !strings.EqualFold(targetURL, resolve.RawURL) {
-			targetURL = resolve.RawURL
-			trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for first-frame playback, display=%s source=%s", davPath, resolve.Source)
-		} else {
-			trace.Logf(r.Context(), "webdav-get", "Warmed raw_url from alist, display=%s source=%s", davPath, resolve.Source)
+	if firstFrameRange {
+		if needsRawURLWarmup {
+			if resolve := h.resolveRawURLFromAlist(r, davPath, realPath); resolve.RawURL != "" {
+				if !strings.EqualFold(targetURL, resolve.RawURL) {
+					targetURL = resolve.RawURL
+					trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for first-frame playback, display=%s source=%s", davPath, resolve.Source)
+				} else {
+					trace.Logf(r.Context(), "webdav-get", "Warmed raw_url from alist, display=%s source=%s", davPath, resolve.Source)
+				}
+			} else {
+				trace.Logf(r.Context(), "webdav-get", "raw_url warmup failed, display=%s real=%s status=%d reason=%s source=%s",
+					davPath, realPath, resolve.StatusCode, resolve.FailureReason, resolve.Source)
+			}
 		}
 	} else {
-		trace.Logf(r.Context(), "webdav-get", "raw_url warmup failed, display=%s real=%s status=%d reason=%s source=%s",
-			davPath, realPath, resolve.StatusCode, resolve.FailureReason, resolve.Source)
+		if needsRawURLWarmup {
+			h.warmRawURLFromAlistAsync(r, davPath, realPath)
+		} else {
+			trace.Logf(r.Context(), "webdav-get", "Skipped raw_url warmup, fresh cache exists display=%s", davPath)
+		}
 	}
 
 	// Look up file info using DISPLAY path (davPath), not realPath
@@ -420,6 +432,47 @@ func (h *WebDAVHandler) resolveRawURLFromAlist(r *http.Request, displayPath, rea
 		StatusCode:    result.StatusCode,
 		FailureReason: result.FailureReason,
 	}
+}
+
+func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, realPath string) {
+	if h == nil || h.cfg == nil || strings.TrimSpace(displayPath) == "" || strings.TrimSpace(realPath) == "" {
+		return
+	}
+	stalenessThreshold := h.upstreamStalenessThreshold()
+	if h.fileDAO != nil {
+		if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, stalenessThreshold) && strings.TrimSpace(cachedInfo.RawURL) != "" {
+			trace.Logf(r.Context(), "webdav-get", "Skipped raw_url async warmup, fresh cache exists display=%s", displayPath)
+			return
+		}
+	}
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	trace.Logf(r.Context(), "webdav-get", "Queued raw_url async warmup, display=%s", displayPath)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), finalRawURLResolveTimeout)
+		defer cancel()
+		result := fetchRawURL(ctx, h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, stalenessThreshold)
+		if result.RawURL != "" {
+			log.Info().
+				Str("category", "webdav_get").
+				Str("display_path", displayPath).
+				Str("source", result.Source).
+				Msg("Warmed raw_url asynchronously")
+			return
+		}
+		log.Debug().
+			Str("category", "webdav_get").
+			Str("display_path", displayPath).
+			Int("status", result.StatusCode).
+			Str("reason", result.FailureReason).
+			Str("source", result.Source).
+			Msg("raw_url async warmup failed")
+	}()
 }
 
 // handlePut handles PUT requests with encryption and filename encryption
