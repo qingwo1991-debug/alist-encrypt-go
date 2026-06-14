@@ -294,30 +294,30 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	realPath, pathMode := h.resolveRealPathWithMode(davPath, passwdInfo)
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
 
-	// Prefer cached raw_url (signed direct URL) — same as HTTP HandleDownload.
-	targetURL := ""
+	// WebDAV clients often start playback without a Range header. Some signed
+	// CDN URLs reject that full-file GET, so keep non-range startup on the stable
+	// internal /dav path. Range requests can still use a fresh raw_url for fast
+	// seeking.
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
+	trace.Logf(r.Context(), "webdav-get", "Using internal /dav target for playback, display=%s source=dav_internal", davPath)
+	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	staleThreshold := h.upstreamStalenessThreshold()
-	if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold) {
-		targetURL = cachedInfo.RawURL
-		trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for target, display=%s source=cache", davPath)
-	}
-	if targetURL == "" {
-		// Fetch raw_url from alist API (PROPFIND XML doesn't include it).
-		resolve := h.resolveRawURLFromAlist(r, davPath, realPath)
-		if resolve.RawURL != "" {
-			targetURL = resolve.RawURL
-			trace.Logf(r.Context(), "webdav-get", "Fetched raw_url from alist, display=%s source=%s", davPath, resolve.Source)
-		} else {
-			trace.Logf(r.Context(), "webdav-get", "raw_url fresh fetch failed, display=%s real=%s status=%d reason=%s source=%s",
-				davPath, realPath, resolve.StatusCode, resolve.FailureReason, resolve.Source)
-			if passwdInfo != nil && passwdInfo.EncName && isStrictWebDAVRawURLFailure(resolve.StatusCode) {
-				trace.Logf(r.Context(), "webdav-get", "Rejecting /dav fallback for EncName path, display=%s status=%d", davPath, resolve.StatusCode)
-				RespondHTTPErrorWithStatus(w, "Unable to resolve upstream raw_url for encrypted WebDAV playback", http.StatusBadGateway)
-				return
-			}
-			targetURL = httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
-			trace.Logf(r.Context(), "webdav-get", "Using /dav fallback target for display=%s source=dav_fallback", davPath)
+	if rangeHeader != "" {
+		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold) && strings.TrimSpace(cachedInfo.RawURL) != "" {
+			targetURL = cachedInfo.RawURL
+			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for ranged playback, display=%s source=cache", davPath)
 		}
+	}
+	if resolve := h.resolveRawURLFromAlist(r, davPath, realPath); resolve.RawURL != "" {
+		if rangeHeader != "" && !strings.EqualFold(targetURL, resolve.RawURL) {
+			targetURL = resolve.RawURL
+			trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for ranged playback, display=%s source=%s", davPath, resolve.Source)
+		} else {
+			trace.Logf(r.Context(), "webdav-get", "Warmed raw_url from alist, display=%s source=%s", davPath, resolve.Source)
+		}
+	} else {
+		trace.Logf(r.Context(), "webdav-get", "raw_url warmup failed, display=%s real=%s status=%d reason=%s source=%s",
+			davPath, realPath, resolve.StatusCode, resolve.FailureReason, resolve.Source)
 	}
 
 	// Look up file info using DISPLAY path (davPath), not realPath

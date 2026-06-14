@@ -277,7 +277,7 @@ func TestHandlePropfindUsesDirRuleAndPersistsRetryMapping(t *testing.T) {
 	}
 }
 
-func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
+func TestHandleGetUsesInternalDavWhenRawURLAuthFails(t *testing.T) {
 	cfg := config.Get()
 	original := cfg.AlistServer
 	t.Cleanup(func() {
@@ -293,15 +293,42 @@ func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
 	}
 	cfg.AlistServer.PasswdList = []config.PasswdInfo{passwd}
 
-	var fsGetCalls, davCalls int
+	var fsGetCalls, dCalls, davCalls int
 	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/fs/get":
 			fsGetCalls++
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"code":401}`))
+		case "/d/encrypt/enc_movie.bin":
+			dCalls++
+			if r.Method == http.MethodHead {
+				w.Header().Set("Content-Length", "4096")
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Header.Get("Range") != "" {
+				w.Header().Set("Content-Range", "bytes 0-0/4096")
+				w.Header().Set("Content-Length", "1")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte{0})
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
 		case "/dav/encrypt/enc_movie.bin":
 			davCalls++
+			if r.Method == http.MethodHead {
+				w.Header().Set("Content-Length", "4096")
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Header.Get("Range") != "" {
+				w.Header().Set("Content-Range", "bytes 0-0/4096")
+				w.Header().Set("Content-Length", "1")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte{0})
+				return
+			}
 			w.WriteHeader(http.StatusUnauthorized)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -314,7 +341,7 @@ func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
 	h.fileDAO.Set(&dao.FileInfo{
 		Path:              "/encrypt/movie.mp4",
 		Name:              "movie.mp4",
-		Size:              1024,
+		Size:              4096,
 		UpstreamFetchedAt: time.Time{},
 	})
 
@@ -323,14 +350,17 @@ func TestHandleGetRejectsDavFallbackOnRawURLAuthFailure(t *testing.T) {
 
 	h.handleGet(rec, req, "/encrypt/movie.mp4")
 
-	if rec.Code != http.StatusBadGateway {
+	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if fsGetCalls != 1 {
 		t.Fatalf("fsGetCalls=%d, want 1", fsGetCalls)
 	}
-	if davCalls != 0 {
-		t.Fatalf("davCalls=%d, want 0", davCalls)
+	if dCalls == 0 {
+		t.Fatalf("dCalls=%d, want V2 probe to try /d candidate", dCalls)
+	}
+	if davCalls == 0 {
+		t.Fatalf("davCalls=%d, want playback/probe to use internal /dav", davCalls)
 	}
 }
 
@@ -459,11 +489,13 @@ func newProbeTestHandler(t *testing.T, backendURL string) *WebDAVHandler {
 	passwdDAO := dao.NewPasswdDAO(store)
 
 	return &WebDAVHandler{
-		cfg:         cfg,
-		fileDAO:     fileDAO,
-		passwdDAO:   passwdDAO,
-		streamProxy: proxy.NewStreamProxy(cfg),
-		negCache:    newNegativePathCache(0),
+		cfg:           cfg,
+		fileDAO:       fileDAO,
+		passwdDAO:     passwdDAO,
+		streamProxy:   proxy.NewStreamProxy(cfg),
+		strategyCache: NewStrategyCache(1000),
+		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		negCache:      newNegativePathCache(0),
 	}
 }
 
