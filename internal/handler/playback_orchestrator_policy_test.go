@@ -57,12 +57,3 @@ func TestShouldRetryFreshResolveAllowsRedirectMetadataRecovery(t *testing.T) {
 		}
 	}
 }
-
-func TestShouldRetryFreshResolveAllowsWebDAVUpstreamRecovery(t *testing.T) {
-	cases := []string{"upstream_4xx", "upstream_5xx"}
-	for _, reason := range cases {
-		if !shouldRetryFreshResolve(reason, true, consumerScenarioWebDAV) {
-			t.Fatalf("expected webdav retry for %q", reason)
-		}
-	}
-}

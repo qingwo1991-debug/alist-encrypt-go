@@ -234,7 +234,6 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	if shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
 		logDecryptFailure(req, strategy, lastFailure, true)
-		targetRetried := false
 		if req.ConsumerScenario == consumerScenarioRedirect && req.FileDAO != nil && req.FileItem.DisplayPath != "" && req.Config != nil {
 			authCopy := cloneHeader(authHeaders)
 			freshRaw := fetchRawURL(r.Context(), req.Config.GetAlistURL(), req.FileItem.DisplayPath, req.FileItem.EncryptedPath, authCopy, req.FileDAO, 0)
@@ -246,19 +245,6 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				fileSize = freshRaw.Size
 			}
 		}
-		if req.ConsumerScenario == consumerScenarioWebDAV && req.Config != nil && req.FileItem.EncryptedPath != "" {
-			switch lastFailure {
-			case "upstream_4xx", "upstream_5xx":
-				retryTarget := httputil.BuildTargetURLWithQuery(req.Config.GetAlistURL(), "/d"+req.FileItem.EncryptedPath, "")
-				if strings.TrimSpace(retryTarget) != "" && retryTarget != req.TargetURL {
-					req.TargetURL = retryTarget
-					req.FileItem.TargetURL = retryTarget
-					req.ProviderKey = ProviderKey(retryTarget, req.FileItem.DisplayPath)
-					targetRetried = true
-				}
-			}
-		}
-		retried := false
 		if req.SizeResolver != nil {
 			fresh := req.SizeResolver.ResolveSingleFresh(r.Context(), req.FileItem, authHeaders)
 			if fresh.Error == nil && fresh.Size > 0 {
@@ -275,17 +261,10 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 						req.FileItem.TargetURL = refreshed.RawURL
 					}
 				}
-				retried = true
 				success, lastFailure, lastErr = trySingle(fileSize)
 				if success {
 					return
 				}
-			}
-		}
-		if targetRetried && !retried {
-			success, lastFailure, lastErr = trySingle(fileSize)
-			if success {
-				return
 			}
 		}
 	}
@@ -310,12 +289,6 @@ func shouldRetryFreshResolve(failureReason string, firstFrameHint bool, consumer
 	if consumerScenario == consumerScenarioRedirect {
 		switch failureReason {
 		case "range_unsatisfiable", "decrypt_validation_failed", "upstream_4xx", "upstream_5xx", "stream_error", "unknown", "":
-			return true
-		}
-	}
-	if consumerScenario == consumerScenarioWebDAV {
-		switch failureReason {
-		case "upstream_4xx", "upstream_5xx":
 			return true
 		}
 	}
