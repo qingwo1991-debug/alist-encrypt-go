@@ -378,10 +378,17 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	if req.Config != nil && req.FileItem.EncryptedPath != "" {
 		alistURL := strings.TrimSpace(req.Config.GetAlistURL())
 		if alistURL != "" {
-			candidateURLs = append(candidateURLs,
-				httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
-				httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
-			)
+			if req.ConsumerScenario == consumerScenarioWebDAV {
+				candidateURLs = append(candidateURLs,
+					httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
+					httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
+				)
+			} else {
+				candidateURLs = append(candidateURLs,
+					httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
+					httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
+				)
+			}
 		}
 	}
 	candidateURLs = append(candidateURLs, req.TargetURL)
