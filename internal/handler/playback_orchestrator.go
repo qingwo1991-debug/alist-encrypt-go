@@ -158,6 +158,41 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			req.StrategySel.RecordFailure(req.ProviderKey, strategy, reason)
 		}
 
+		if isWebDAVUpstreamFailure(reason) && !result.ResponseStarted {
+			if fallbackTarget := webDAVInternalPlaybackTarget(req); fallbackTarget != "" && !strings.EqualFold(fallbackTarget, req.TargetURL) {
+				fallbackFile := req.FileItem
+				fallbackFile.TargetURL = fallbackTarget
+				fallbackProvider := ProviderKey(fallbackTarget, req.FileItem.DisplayPath)
+				fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
+					w, r, fallbackTarget, req.PasswdInfo, size, strategy, req.CompatKey,
+				)
+				if fallback.Err == nil && !fallback.Retryable {
+					req.StreamProxy.RecordPlaybackHint(fallbackTarget, req.CompatKey, strategy)
+					if req.StrategySel != nil && !fallback.NoLearning {
+						req.StrategySel.RecordSuccess(fallbackProvider, strategy)
+					}
+					if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
+						metaSize := size
+						if fallback.ExpectedBytes > 0 {
+							metaSize = fallback.ExpectedBytes
+						}
+						req.SizeResolver.RecordPlaybackSuccess(
+							r.Context(), fallbackFile, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+						)
+					}
+					if req.Probe != nil {
+						req.Probe.RecordConsumerHit(fallbackFile, req.ConsumerScenario)
+					}
+					maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+					return true, "", nil
+				}
+				if fallback.Err != nil {
+					return false, reason, fallback.Err
+				}
+				return false, reason, result.Err
+			}
+		}
+
 		if reason == "range_unsupported" && !result.ResponseStarted && firstFrameHint && strategy == proxy.StreamStrategyRange {
 			if req.FirstFrameFallbacks != nil {
 				atomic.AddUint64(req.FirstFrameFallbacks, 1)
@@ -283,6 +318,26 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	invalidatePlaybackState(req, lastFailure)
 	log.Error().Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
 	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
+}
+
+func isWebDAVUpstreamFailure(reason string) bool {
+	switch reason {
+	case "upstream_4xx", "upstream_5xx":
+		return true
+	default:
+		return false
+	}
+}
+
+func webDAVInternalPlaybackTarget(req decryptPlaybackRequest) string {
+	if req.ConsumerScenario != consumerScenarioWebDAV || req.Config == nil || strings.TrimSpace(req.FileItem.EncryptedPath) == "" {
+		return ""
+	}
+	alistURL := strings.TrimSpace(req.Config.GetAlistURL())
+	if alistURL == "" {
+		return ""
+	}
+	return httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, "")
 }
 
 func shouldRetryFreshResolve(failureReason string, firstFrameHint bool, consumerScenario string) bool {

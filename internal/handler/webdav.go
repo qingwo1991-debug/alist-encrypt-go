@@ -295,23 +295,24 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
 
 	// WebDAV clients often start playback without a Range header. Some signed
-	// CDN URLs reject that full-file GET, so keep non-range startup on the stable
-	// internal /dav path. Range requests can still use a fresh raw_url for fast
-	// seeking.
+	// CDN URLs reject that full-file GET, and some providers reject deep seek
+	// ranges on signed URLs. Keep startup and arbitrary seeks on the stable
+	// internal /dav path; only first-frame shaped ranges may use raw_url.
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 	trace.Logf(r.Context(), "webdav-get", "Using internal /dav target for playback, display=%s source=dav_internal", davPath)
 	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
+	firstFrameRange := proxy.IsFirstFrameRangeHint(r.Method, rangeHeader)
 	staleThreshold := h.upstreamStalenessThreshold()
-	if rangeHeader != "" {
+	if firstFrameRange {
 		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			targetURL = cachedInfo.RawURL
-			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for ranged playback, display=%s source=cache", davPath)
+			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for first-frame playback, display=%s source=cache", davPath)
 		}
 	}
 	if resolve := h.resolveRawURLFromAlist(r, davPath, realPath); resolve.RawURL != "" {
-		if rangeHeader != "" && !strings.EqualFold(targetURL, resolve.RawURL) {
+		if firstFrameRange && !strings.EqualFold(targetURL, resolve.RawURL) {
 			targetURL = resolve.RawURL
-			trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for ranged playback, display=%s source=%s", davPath, resolve.Source)
+			trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for first-frame playback, display=%s source=%s", davPath, resolve.Source)
 		} else {
 			trace.Logf(r.Context(), "webdav-get", "Warmed raw_url from alist, display=%s source=%s", davPath, resolve.Source)
 		}
