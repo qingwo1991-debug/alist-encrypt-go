@@ -638,13 +638,16 @@ func TestInspectPlaybackContentMetaPrefersEncryptedPathCandidates(t *testing.T) 
 	var gotProbePaths []string
 	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/d/demo.bin":
+		case "/dav/demo.bin":
 			gotProbePaths = append(gotProbePaths, r.URL.Path)
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Range", "bytes 0-31/"+strconv.Itoa(len(ciphertext)))
 			w.Header().Set("Content-Length", "32")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write(ciphertext[:32])
+		case "/d/demo.bin":
+			gotProbePaths = append(gotProbePaths, r.URL.Path)
+			t.Fatalf("/d target should not be probed before WebDAV /dav candidate")
 		case "/raw/demo.bin":
 			gotProbePaths = append(gotProbePaths, r.URL.Path)
 			t.Fatalf("raw target should not be probed before encrypted path candidates")
@@ -687,7 +690,7 @@ func TestInspectPlaybackContentMetaPrefersEncryptedPathCandidates(t *testing.T) 
 	if !meta.IsV2() || meta.PlainSize != int64(len(plain)) {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
-	if len(gotProbePaths) != 1 || gotProbePaths[0] != "/d/demo.bin" {
+	if len(gotProbePaths) != 1 || gotProbePaths[0] != "/dav/demo.bin" {
 		t.Fatalf("gotProbePaths=%v", gotProbePaths)
 	}
 }
