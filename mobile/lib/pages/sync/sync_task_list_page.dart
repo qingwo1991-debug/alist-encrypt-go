@@ -144,6 +144,7 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
 
   Widget _buildTaskCard(SyncTask task) {
     final status = _statusByTaskId[task.id];
+    final visibleError = _visibleTaskError(task, status);
     return Card(
       child: ExpansionTile(
         leading: Icon(
@@ -191,6 +192,16 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+            if (visibleError != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  visibleError,
+                  style: const TextStyle(fontSize: 12, color: Colors.red),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
           ],
         ),
         children: [
@@ -625,9 +636,30 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
     final cleanupState = status['cleanupState']?.toString() ?? '';
     final oneTimeState = status['oneTimeState']?.toString() ?? '';
     final periodicState = status['periodicState']?.toString() ?? '';
+    final failedFiles = status['failedFiles'] as int? ?? 0;
+    final currentError = status['currentUploadTaskError']?.toString() ?? '';
+    final lastError = status['lastError']?.toString() ?? '';
     return cleanupState == 'FAILED' ||
         oneTimeState == 'FAILED' ||
-        periodicState == 'FAILED';
+        periodicState == 'FAILED' ||
+        failedFiles > 0 ||
+        currentError.isNotEmpty ||
+        lastError.isNotEmpty;
+  }
+
+  String? _visibleTaskError(SyncTask task, Map<String, dynamic>? status) {
+    final currentError = status?['currentUploadTaskError']?.toString();
+    if (currentError != null && currentError.isNotEmpty) {
+      return '错误: $currentError';
+    }
+    final statusLastError = status?['lastError']?.toString();
+    if (statusLastError != null && statusLastError.isNotEmpty) {
+      return '最后错误: $statusLastError';
+    }
+    if (task.lastError != null && task.lastError!.isNotEmpty) {
+      return '最后错误: ${task.lastError}';
+    }
+    return null;
   }
 
   String _describeStatus(Map<String, dynamic> status) {
@@ -654,13 +686,15 @@ class _SyncTaskListPageState extends State<SyncTaskListPage> {
       case 'READY':
         return '等待上传';
       case 'FILTERING_REMOTE':
-        return '校验远端并增量筛选';
+        return '校验远端并上传';
       case 'UPLOADING':
         return '上传中';
       case 'UPLOADING_TASK':
         return '等待 OpenList 上传任务完成';
       case 'UPLOAD_TASK_FAILED':
         return 'OpenList 上传任务失败';
+      case 'UPLOAD_ABORTED':
+        return '上传已停止';
       case 'COMPLETED':
         return '已完成';
       case 'CLEANUP_PREPARING':

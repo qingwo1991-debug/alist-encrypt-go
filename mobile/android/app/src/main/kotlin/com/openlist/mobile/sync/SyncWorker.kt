@@ -243,13 +243,21 @@ class SyncWorker(
             return@withContext Result.success()
         }
 
-        // 5. 过滤已同步文件（增量判断 + 远端兜底校验）
+        // 5. 增量判断 + 上传流水线：每个文件远端校验完成后立即上传
         val newOrModified = mutableListOf<File>()
         var skippedByLocalRecord = 0
         var skippedByRemotePresence = 0
         val cleanupCandidates = linkedSetOf<String>()
+        var successCount = 0
+        var failureCount = 0
+        val errors = mutableListOf<String>()
+        val uploadSucceededFiles = mutableListOf<File>()
+        var abortedByFatalError = false
 
-        filesToUpload.forEachIndexed { index, file ->
+        for ((index, file) in filesToUpload.withIndex()) {
+            if (abortedByFatalError) {
+                break
+            }
             val checked = index + 1
             if (checked == 1 || checked % 25 == 0 || checked == filesToUpload.size) {
                 val filterProgress = ((checked.toDouble() / filesToUpload.size.toDouble()) * 100.0)
@@ -258,15 +266,17 @@ class SyncWorker(
                 publishProgress(
                     phase = "FILTERING_REMOTE",
                     currentPhaseProgress = filterProgress,
-                    currentPhaseDetail = "正在校验远端已存在文件 $checked/${filesToUpload.size}",
+                    currentPhaseDetail = "正在校验并上传 $checked/${filesToUpload.size}",
                     currentFile = file.name,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
                     skippedFiles = skippedByLocalRecord + skippedByRemotePresence,
+                    uploadedFiles = successCount,
+                    failedFiles = failureCount,
                 )
                 updateForegroundNotification(
                     title = taskConfig.name,
-                    detail = "校验远端文件 $checked/${filesToUpload.size}",
+                    detail = "校验并上传 $checked/${filesToUpload.size}",
                     progress = filterProgress,
                     indeterminate = false,
                 )
@@ -311,7 +321,7 @@ class SyncWorker(
                 if (taskConfig.deleteAfterSync) {
                     cleanupCandidates.add(file.absolutePath)
                 }
-                return@forEachIndexed
+                continue
             }
 
             if (alreadySyncedLocally) {
@@ -336,36 +346,8 @@ class SyncWorker(
             }
 
             newOrModified.add(file)
-        }
-        val skippedCount = skippedByLocalRecord + skippedByRemotePresence
-        logSync(
-            traceId,
-            taskId,
-            "scan",
-            "增量筛选完成 total=${filesToUpload.size} pending=${newOrModified.size} skipped=$skippedCount localRecord=$skippedByLocalRecord remoteExists=$skippedByRemotePresence",
-        )
-        publishProgress(
-            phase = "READY",
-            currentPhaseProgress = 100,
-            currentPhaseDetail = "增量筛选完成，待上传 ${newOrModified.size} 个文件",
-            scannedFiles = filesToUpload.size,
-            pendingFiles = newOrModified.size,
-            skippedFiles = skippedCount,
-        )
-
-        if (newOrModified.isEmpty()) {
-            Log.d(TAG, "No new or modified files to upload for task $taskId")
-        }
-
-        // 6. 逐个上传
-        var successCount = 0
-        var failureCount = 0
-        val errors = mutableListOf<String>()
-        val uploadSucceededFiles = mutableListOf<File>()
-
-        for (file in newOrModified) {
+            val currentSkippedCount = skippedByLocalRecord + skippedByRemotePresence
             try {
-                val remotePath = buildRemotePath(taskConfig, sourceDir, file)
                 publishProgress(
                     phase = "UPLOADING",
                     currentPhaseDetail = "正在上传文件",
@@ -376,7 +358,7 @@ class SyncWorker(
                     currentUploadTaskError = null,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
-                    skippedFiles = skippedCount,
+                    skippedFiles = currentSkippedCount,
                     uploadedFiles = successCount,
                     failedFiles = failureCount,
                 )
@@ -432,7 +414,7 @@ class SyncWorker(
                     currentUploadTaskError = null,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
-                    skippedFiles = skippedCount,
+                    skippedFiles = currentSkippedCount,
                     uploadedFiles = successCount,
                     failedFiles = failureCount,
                 )
@@ -443,6 +425,7 @@ class SyncWorker(
                 errors.add(errorMsg)
                 val progressAfter = buildProgressPercent(successCount, failureCount, newOrModified.size)
                 logSync(traceId, taskId, "upload", "上传失败 progress=$progressAfter file=${file.name} error=${e.message}", LogLevel.ERROR)
+                updateTaskStatus(context, taskId, filesToUpload.size, errorMsg)
                 publishProgress(
                     phase = "UPLOADING",
                     currentFile = file.name,
@@ -452,13 +435,51 @@ class SyncWorker(
                     currentUploadTaskError = e.message,
                     scannedFiles = filesToUpload.size,
                     pendingFiles = newOrModified.size,
-                    skippedFiles = skippedCount,
+                    skippedFiles = currentSkippedCount,
                     uploadedFiles = successCount,
                     failedFiles = failureCount,
                 )
                 Log.e(TAG, "Failed to upload ${file.absolutePath}: ${e.message}", e)
-                // 单文件失败不终止整个任务
+                if (isFatalUploadError(e.message)) {
+                    abortedByFatalError = true
+                    val fatalMessage = "检测到不可恢复上传错误，已停止继续上传: ${e.message}"
+                    logSync(traceId, taskId, "upload", fatalMessage, LogLevel.ERROR)
+                    publishProgress(
+                        phase = "UPLOAD_ABORTED",
+                        currentPhaseDetail = fatalMessage,
+                        currentFile = file.name,
+                        currentUploadTaskError = e.message,
+                        scannedFiles = filesToUpload.size,
+                        pendingFiles = newOrModified.size,
+                        skippedFiles = skippedByLocalRecord + skippedByRemotePresence,
+                        uploadedFiles = successCount,
+                        failedFiles = failureCount,
+                    )
+                    updateForegroundNotification(
+                        title = taskConfig.name,
+                        detail = "上传已停止：${summarizeError(e.message)}",
+                        progress = buildProgressPercentValue(successCount, failureCount, newOrModified.size),
+                        indeterminate = false,
+                    )
+                    break
+                }
             }
+
+            if (abortedByFatalError) {
+                break
+            }
+        }
+        val skippedCount = skippedByLocalRecord + skippedByRemotePresence
+        logSync(
+            traceId,
+            taskId,
+            "scan",
+            "校验上传完成 total=${filesToUpload.size} checked=${skippedCount + newOrModified.size} pending=${newOrModified.size} skipped=$skippedCount localRecord=$skippedByLocalRecord remoteExists=$skippedByRemotePresence aborted=$abortedByFatalError",
+            if (abortedByFatalError) LogLevel.WARN else LogLevel.INFO,
+        )
+
+        if (newOrModified.isEmpty()) {
+            Log.d(TAG, "No new or modified files to upload for task $taskId")
         }
 
         // 7. 如启用 deleteAfterSync，删除已确认在云端存在的文件
@@ -532,9 +553,10 @@ class SyncWorker(
 
         // 9. Worker 返回 success/failure 取决于是否完成主流程（不论单文件失败）
         publishProgress(
-            phase = "COMPLETED",
+            phase = if (abortedByFatalError) "UPLOAD_ABORTED" else "COMPLETED",
             currentPhaseProgress = 100,
-            currentPhaseDetail = "任务执行完成",
+            currentPhaseDetail = if (abortedByFatalError) "任务因不可恢复上传错误停止" else "任务执行完成",
+            currentUploadTaskError = if (abortedByFatalError) errors.lastOrNull() else null,
             scannedFiles = filesToUpload.size,
             pendingFiles = newOrModified.size,
             skippedFiles = skippedCount,
@@ -543,7 +565,13 @@ class SyncWorker(
         )
         updateForegroundNotification(
             title = taskConfig.name,
-            detail = if (totalFailureCount > 0) "任务完成，存在失败项" else "任务完成",
+            detail = if (abortedByFatalError) {
+                "上传已停止：${summarizeError(errors.lastOrNull())}"
+            } else if (totalFailureCount > 0) {
+                "任务完成，存在失败项"
+            } else {
+                "任务完成"
+            },
             progress = 100,
             indeterminate = false,
         )
@@ -952,7 +980,7 @@ class SyncWorker(
             conn.requestMethod = "POST"
             conn.doOutput = true
             conn.connectTimeout = 15000
-            conn.readTimeout = 30000
+            conn.readTimeout = 10000
             conn.setRequestProperty("Accept", "application/json")
             conn.setRequestProperty("Content-Type", "application/json;charset=UTF-8")
             conn.setRequestProperty("Authorization", authToken)
@@ -1201,6 +1229,27 @@ class SyncWorker(
         val completed = successCount + failureCount
         val percent = ((completed.toDouble() / totalPending.toDouble()) * 100.0).toInt().coerceIn(0, 100)
         return "$percent%"
+    }
+
+    private fun buildProgressPercentValue(successCount: Int, failureCount: Int, totalPending: Int): Int {
+        if (totalPending <= 0) return 0
+        val completed = successCount + failureCount
+        return ((completed.toDouble() / totalPending.toDouble()) * 100.0).toInt().coerceIn(0, 100)
+    }
+
+    private fun isFatalUploadError(message: String?): Boolean {
+        if (message.isNullOrBlank()) return false
+        return message.contains("资源配额不足") ||
+            message.contains("00010012") ||
+            message.contains("quota", ignoreCase = true) ||
+            message.contains("insufficient storage", ignoreCase = true) ||
+            message.contains("not enough space", ignoreCase = true)
+    }
+
+    private fun summarizeError(message: String?): String {
+        val compact = message.orEmpty().replace('\n', ' ').replace('\r', ' ').trim()
+        if (compact.isBlank()) return "未知错误"
+        return if (compact.length <= 48) compact else compact.take(48) + "..."
     }
 
     private fun buildTraceId(taskId: String): String {
