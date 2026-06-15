@@ -168,6 +168,7 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		CircuitBreakerThreshold:     getIntFieldWithDefault(raw, "circuitBreakerThreshold", 5),
 		CircuitBreakerCooldownSecs:  getIntFieldWithDefault(raw, "circuitBreakerCooldownSecs", 30),
 		RetryMaxAttempts:            getIntFieldWithDefault(raw, "retryMaxAttempts", 3),
+		V2KeyCacheTTLMinutes:        getIntFieldWithDefault(raw, "v2KeyCacheTtlMinutes", 1440),
 	}
 
 	if passwdListRaw, ok := raw["passwdList"]; ok {
@@ -215,6 +216,10 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		server.DecryptedBlockSizeKb = 256
 	}
 	server.DecryptedBlockSizeKb = clampInt(server.DecryptedBlockSizeKb, 32, 4096)
+	if server.V2KeyCacheTTLMinutes <= 0 {
+		server.V2KeyCacheTTLMinutes = 1440
+	}
+	server.V2KeyCacheTTLMinutes = clampInt(server.V2KeyCacheTTLMinutes, 1, 10080)
 
 	return server
 }

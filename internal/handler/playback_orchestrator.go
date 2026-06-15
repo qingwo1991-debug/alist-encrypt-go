@@ -370,28 +370,34 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 		return encryption.ContentMeta{}, false
 	}
 	switch req.ConsumerScenario {
-	case consumerScenarioRedirect, consumerScenarioWebDAV:
+	case consumerScenarioRedirect, consumerScenarioWebDAV, consumerScenarioHTTP:
 	default:
 		return encryption.ContentMeta{}, false
 	}
+	if shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
+		return encryption.ContentMeta{}, false
+	}
 	candidateURLs := make([]string, 0, 3)
-	if req.Config != nil && req.FileItem.EncryptedPath != "" {
+	appendCandidate := func(candidateURL string) {
+		candidateURL = strings.TrimSpace(candidateURL)
+		if candidateURL == "" {
+			return
+		}
+		candidateURLs = append(candidateURLs, candidateURL)
+	}
+	appendCandidate(req.TargetURL)
+	if req.ConsumerScenario != consumerScenarioHTTP && req.Config != nil && req.FileItem.EncryptedPath != "" {
 		alistURL := strings.TrimSpace(req.Config.GetAlistURL())
 		if alistURL != "" {
 			if req.ConsumerScenario == consumerScenarioWebDAV {
-				candidateURLs = append(candidateURLs,
-					httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
-					httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
-				)
+				appendCandidate(httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""))
+				appendCandidate(httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""))
 			} else {
-				candidateURLs = append(candidateURLs,
-					httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""),
-					httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""),
-				)
+				appendCandidate(httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""))
+				appendCandidate(httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""))
 			}
 		}
 	}
-	candidateURLs = append(candidateURLs, req.TargetURL)
 	authVariants := buildProbeAuthVariants(req.Config, authHeaders)
 	seen := make(map[string]struct{}, len(candidateURLs))
 	for _, candidateURL := range candidateURLs {
@@ -430,6 +436,23 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 			Msg("Playback content meta inspection did not detect V2")
 	}
 	return encryption.ContentMeta{}, false
+}
+
+func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSize int64) bool {
+	if req.ConsumerScenario != consumerScenarioHTTP || req.Request == nil || req.FileDAO == nil || req.FileItem.DisplayPath == "" {
+		return false
+	}
+	if req.Request.Header.Get("Range") != "" {
+		return false
+	}
+	info, ok := req.FileDAO.Get(req.FileItem.DisplayPath)
+	if !ok || info == nil || info.ContentVersion != 0 || info.RawURL == "" || info.Size <= 0 {
+		return false
+	}
+	if fallbackSize > 0 && info.Size != fallbackSize {
+		return false
+	}
+	return strings.TrimSpace(info.RawURL) == strings.TrimSpace(req.TargetURL)
 }
 
 func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.ContentMeta) {

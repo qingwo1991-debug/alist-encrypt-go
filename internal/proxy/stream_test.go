@@ -250,6 +250,66 @@ func TestInspectEncryptedContentFollowsRedirectForV2Probe(t *testing.T) {
 	}
 }
 
+func TestDecryptRequestFollowsTemporaryRedirect(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.FollowRedirectForDecrypt = true
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(64)
+	plain := bytes.Repeat([]byte("R"), int(fileSize))
+	ciphertext := append([]byte(nil), plain...)
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("new flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case "http://openalist:5244/dav/demo.bin":
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header: http.Header{
+					"Location": []string{"https://cdn.example/demo.bin"},
+				},
+				Body:    io.NopCloser(strings.NewReader("")),
+				Request: r,
+			}, nil
+		case "https://cdn.example/demo.bin":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type":   []string{"video/mp4"},
+					"Content-Length": []string{strconv.FormatInt(fileSize, 10)},
+				},
+				Body:    io.NopCloser(bytes.NewReader(ciphertext)),
+				Request: r,
+			}, nil
+		default:
+			t.Fatalf("unexpected url: %s", r.URL.String())
+			return nil, nil
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/demo.mp4", nil)
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://openalist:5244/dav/demo.bin", passwd, fileSize, StreamStrategyRange, "/encrypt")
+	if result.Err != nil {
+		t.Fatalf("unexpected stream error: %v", result.Err)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", rr.Code, http.StatusOK)
+	}
+	if !bytes.Equal(rr.Body.Bytes(), plain) {
+		t.Fatal("decrypted redirect body mismatch")
+	}
+}
+
 func TestDecryptRequestUsesDisplayNameFromContext(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)

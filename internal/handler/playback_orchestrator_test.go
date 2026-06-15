@@ -204,6 +204,85 @@ func TestExecuteDecryptPlaybackEnqueuesWarmupAfterFirstFrameSuccess(t *testing.T
 	}
 }
 
+func TestExecuteDecryptPlaybackHTTPDetectsV2WithoutCachedMeta(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := proxy.NewStreamProxy(cfg)
+
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	plain := bytes.Repeat([]byte("http-v2-cold-cache-"), 128)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch got := r.Header.Get("Range"); got {
+		case "bytes=0-31":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 0-31/"+strconv.Itoa(len(ciphertext)))
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:32])
+		case "bytes=32-63":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Range", "bytes 32-63/"+strconv.Itoa(len(ciphertext)))
+			w.Header().Set("Content-Length", "32")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[32:64])
+		default:
+			t.Fatalf("unexpected range: %q", got)
+		}
+	}))
+	defer srv.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/d/demo.mp4", nil)
+	req.Header.Set("Range", "bytes=0-31")
+	rr := httptest.NewRecorder()
+
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter:   rr,
+		Request:          req,
+		Config:           cfg,
+		StreamProxy:      sp,
+		PasswdInfo:       passwd,
+		FileItem:         FileItem{DisplayPath: "/demo.mp4", EncryptedPath: "/demo.mp4", TargetURL: srv.URL, FileName: "demo.mp4"},
+		TargetURL:        srv.URL,
+		ProviderKey:      ProviderKey(srv.URL, "/demo.mp4"),
+		Path:             "/demo.mp4",
+		InitialSize:      int64(len(ciphertext)),
+		OverridePath:     "/demo.mp4",
+		CompatKey:        "/encrypt",
+		ConsumerScenario: consumerScenarioHTTP,
+		FailureLogMsg:    "test playback failed",
+	})
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d body=%s", rr.Code, http.StatusPartialContent, rr.Body.String())
+	}
+	body, err := io.ReadAll(rr.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(body, plain[:32]) {
+		t.Fatal("decrypted V2 HTTP body mismatch")
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 0-31/"+strconv.Itoa(len(plain)) {
+		t.Fatalf("content-range=%q", got)
+	}
+}
+
 func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AlistServer.PlayFirstFallback = true
@@ -606,7 +685,7 @@ func TestExecuteDecryptPlaybackUsesCachedV2MetaWithNonce(t *testing.T) {
 	}
 }
 
-func TestInspectPlaybackContentMetaPrefersEncryptedPathCandidates(t *testing.T) {
+func TestInspectPlaybackContentMetaPrefersCurrentTargetURL(t *testing.T) {
 	cfg := config.DefaultConfig()
 	store, err := storage.NewStore(t.TempDir())
 	if err != nil {
@@ -640,17 +719,17 @@ func TestInspectPlaybackContentMetaPrefersEncryptedPathCandidates(t *testing.T) 
 		switch r.URL.Path {
 		case "/dav/demo.bin":
 			gotProbePaths = append(gotProbePaths, r.URL.Path)
+			t.Fatalf("/dav target should not be probed before current raw target")
+		case "/d/demo.bin":
+			gotProbePaths = append(gotProbePaths, r.URL.Path)
+			t.Fatalf("/d target should not be probed before current raw target")
+		case "/raw/demo.bin":
+			gotProbePaths = append(gotProbePaths, r.URL.Path)
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("Content-Range", "bytes 0-31/"+strconv.Itoa(len(ciphertext)))
 			w.Header().Set("Content-Length", "32")
 			w.WriteHeader(http.StatusPartialContent)
 			_, _ = w.Write(ciphertext[:32])
-		case "/d/demo.bin":
-			gotProbePaths = append(gotProbePaths, r.URL.Path)
-			t.Fatalf("/d target should not be probed before WebDAV /dav candidate")
-		case "/raw/demo.bin":
-			gotProbePaths = append(gotProbePaths, r.URL.Path)
-			t.Fatalf("raw target should not be probed before encrypted path candidates")
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -690,7 +769,7 @@ func TestInspectPlaybackContentMetaPrefersEncryptedPathCandidates(t *testing.T) 
 	if !meta.IsV2() || meta.PlainSize != int64(len(plain)) {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
-	if len(gotProbePaths) != 1 || gotProbePaths[0] != "/dav/demo.bin" {
+	if len(gotProbePaths) != 1 || gotProbePaths[0] != "/raw/demo.bin" {
 		t.Fatalf("gotProbePaths=%v", gotProbePaths)
 	}
 }

@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/encryption"
@@ -85,6 +88,150 @@ func TestHandleFsLinkUsesEncryptedPathAndWrapsRawURL(t *testing.T) {
 	if rawURL == "" || rawURL == upstreamBase+"/d/"+encryptedName {
 		t.Fatalf("expected raw_url to be wrapped by redirect, got %q", rawURL)
 	}
+}
+
+func TestHandleFsGetUsesShortHotCacheForRepeatedMetadata(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password: "testpass",
+		EncType:  "aesctr",
+		Enable:   true,
+		EncPath:  []string{"/enc/*"},
+	}
+	var upstreamCalls int32
+	handler, _ := newTestAlistHandler(t, "http://proxy.local:80", passwd)
+	handler.httpClient = &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		return jsonResponse(200, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"name":   "plain.txt",
+				"size":   float64(123),
+				"is_dir": false,
+			},
+		}), nil
+	})}
+
+	reqBody, _ := json.Marshal(map[string]interface{}{"path": "/plain/plain.txt", "refresh": false})
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/fs/get", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.HandleFsGet(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("round %d status=%d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	if got := atomic.LoadInt32(&upstreamCalls); got != 1 {
+		t.Fatalf("upstream calls=%d, want 1", got)
+	}
+	stats := handlerFSMetaStats(t, handler)
+	if stats["cache_hits"].(uint64) != 1 || stats["upstream_fetches"].(uint64) != 1 {
+		t.Fatalf("unexpected fs metadata stats: %+v", stats)
+	}
+}
+
+func TestHandleFsGetRefreshBypassesShortHotCache(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password: "testpass",
+		EncType:  "aesctr",
+		Enable:   true,
+		EncPath:  []string{"/enc/*"},
+	}
+	var upstreamCalls int32
+	handler, _ := newTestAlistHandler(t, "http://proxy.local:80", passwd)
+	handler.httpClient = &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+		count := atomic.AddInt32(&upstreamCalls, 1)
+		return jsonResponse(200, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"name":   "plain.txt",
+				"size":   float64(100 + count),
+				"is_dir": false,
+			},
+		}), nil
+	})}
+
+	reqBody, _ := json.Marshal(map[string]interface{}{"path": "/plain/plain.txt", "refresh": true})
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/fs/get", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.HandleFsGet(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("round %d status=%d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	if got := atomic.LoadInt32(&upstreamCalls); got != 2 {
+		t.Fatalf("upstream calls=%d, want 2", got)
+	}
+	stats := handlerFSMetaStats(t, handler)
+	if stats["refresh_bypass"].(uint64) != 2 || stats["cache_hits"].(uint64) != 0 {
+		t.Fatalf("unexpected fs metadata stats: %+v", stats)
+	}
+}
+
+func TestHandleFsGetSingleflightCollapsesConcurrentMetadata(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password: "testpass",
+		EncType:  "aesctr",
+		Enable:   true,
+		EncPath:  []string{"/enc/*"},
+	}
+	var upstreamCalls int32
+	handler, _ := newTestAlistHandler(t, "http://proxy.local:80", passwd)
+	handler.httpClient = &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		time.Sleep(50 * time.Millisecond)
+		return jsonResponse(200, map[string]interface{}{
+			"code":    200,
+			"message": "success",
+			"data": map[string]interface{}{
+				"name":   "plain.txt",
+				"size":   float64(123),
+				"is_dir": false,
+			},
+		}), nil
+	})}
+
+	reqBody, _ := json.Marshal(map[string]interface{}{"path": "/plain/plain.txt", "refresh": false})
+	const requests = 8
+	var wg sync.WaitGroup
+	wg.Add(requests)
+	for i := 0; i < requests; i++ {
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/fs/get", bytes.NewReader(reqBody))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.HandleFsGet(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&upstreamCalls); got != 1 {
+		t.Fatalf("upstream calls=%d, want 1", got)
+	}
+	stats := handlerFSMetaStats(t, handler)
+	if stats["singleflight_hits"].(uint64) == 0 || stats["upstream_fetches"].(uint64) != 1 {
+		t.Fatalf("unexpected fs metadata stats: %+v", stats)
+	}
+}
+
+func handlerFSMetaStats(t *testing.T, handler *AlistHandler) map[string]interface{} {
+	t.Helper()
+	stats := handler.Stats()
+	raw, ok := stats["fs_metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing fs_metadata stats: %+v", stats)
+	}
+	return raw
 }
 
 func TestHandleFsGetRewritesV2CiphertextSizeToPlaintextSize(t *testing.T) {

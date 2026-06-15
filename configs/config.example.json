@@ -37,7 +37,8 @@
     "probeMaxDelayMs": 15000,
     "probeCooldownMinutes": 1440,
     "probeQueueSize": 1000,
-    "probeMinSizeBytes": 104857600
+    "probeMinSizeBytes": 104857600,
+    "v2KeyCacheTtlMinutes": 1440
   },
   "cache": {
     "enable": true,

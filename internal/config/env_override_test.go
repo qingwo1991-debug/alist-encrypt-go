@@ -40,3 +40,15 @@ func TestApplyEnvOverridesRangeLearning(t *testing.T) {
 		t.Fatalf("RangeProbeTimeoutSeconds=%d, want 12", cfg.AlistServer.RangeProbeTimeoutSeconds)
 	}
 }
+
+func TestApplyEnvOverridesV2KeyCacheTTL(t *testing.T) {
+	t.Setenv("V2_KEY_CACHE_TTL_MINUTES", "2880")
+
+	cfg := DefaultConfig()
+	cfg.applyEnvOverrides()
+	cfg.normalizeAlistServerTuning()
+
+	if cfg.AlistServer.V2KeyCacheTTLMinutes != 2880 {
+		t.Fatalf("V2KeyCacheTTLMinutes=%d, want 2880", cfg.AlistServer.V2KeyCacheTTLMinutes)
+	}
+}
