@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -35,6 +37,37 @@ type AlistHandler struct {
 	dirSyncStore DirSyncStore
 	dirSyncStart sync.Once
 	dirSyncGroup singleflight.Group
+	fsMetaGroup  singleflight.Group
+	fsMetaMu     sync.Mutex
+	fsMetaCache  map[string]fsMetaCacheEntry
+
+	fsMetaRequests         uint64
+	fsMetaCacheHits        uint64
+	fsMetaSingleflightHits uint64
+	fsMetaUpstreamFetches  uint64
+	fsMetaRefreshBypass    uint64
+	fsMetaFailureFastHits  uint64
+	fsMetaFailureStores    uint64
+}
+
+type fsMetaCacheEntry struct {
+	StatusCode  int
+	Header      http.Header
+	Body        []byte
+	ExpiresAt   time.Time
+	FailureFast bool
+}
+
+type fsMetaUpstreamResponse struct {
+	StatusCode  int
+	Header      http.Header
+	Body        []byte
+	FailureFast bool
+}
+
+type fsMetaFetchResult struct {
+	Response *fsMetaUpstreamResponse
+	CacheHit bool
 }
 
 // NewAlistHandler creates a new Alist handler
@@ -56,6 +89,30 @@ func (h *AlistHandler) SetDirSyncStore(store DirSyncStore) {
 	h.dirSyncStore = store
 }
 
+func (h *AlistHandler) Stats() map[string]interface{} {
+	if h == nil {
+		return map[string]interface{}{}
+	}
+	h.fsMetaMu.Lock()
+	fsMetaEntries := len(h.fsMetaCache)
+	h.fsMetaMu.Unlock()
+	return map[string]interface{}{
+		"fs_metadata": map[string]interface{}{
+			"requests":          atomic.LoadUint64(&h.fsMetaRequests),
+			"cache_hits":        atomic.LoadUint64(&h.fsMetaCacheHits),
+			"singleflight_hits": atomic.LoadUint64(&h.fsMetaSingleflightHits),
+			"upstream_fetches":  atomic.LoadUint64(&h.fsMetaUpstreamFetches),
+			"refresh_bypass":    atomic.LoadUint64(&h.fsMetaRefreshBypass),
+			"failure_fast_hits": atomic.LoadUint64(&h.fsMetaFailureFastHits),
+			"failure_stores":    atomic.LoadUint64(&h.fsMetaFailureStores),
+			"entries":           fsMetaEntries,
+			"hot_ttl_seconds":   int(fsMetaHotCacheTTL.Seconds()),
+			"fail_ttl_seconds":  int(fsMetaFailureCacheTTL.Seconds()),
+			"max_entries":       maxFSMetaCacheEntries,
+		},
+	}
+}
+
 // decryptResult holds the result of parallel filename decryption
 type decryptResult struct {
 	index    int
@@ -65,6 +122,9 @@ type decryptResult struct {
 const (
 	parallelDecryptThreshold = 5
 	maxParallelDecryptLimit  = 32
+	fsMetaHotCacheTTL        = 10 * time.Second
+	fsMetaFailureCacheTTL    = 2 * time.Second
+	maxFSMetaCacheEntries    = 512
 )
 
 var mediaTypeByExt = map[string]float64{
@@ -735,42 +795,31 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	trace.Logf(r.Context(), "get", "Alist URL: %s", h.cfg.GetAlistURL())
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), apiPath, nil)
 	trace.Logf(r.Context(), "get", "Target for %s: %s", apiPath, targetURL)
-	proxyReq, err := httputil.NewRequest("POST", targetURL).
-		WithContext(r.Context()).
-		WithBody(modifiedBody).
-		CopyHeadersExcept(r, "Content-Length").
-		WithForwardedHeaders(r).
-		WithHeader("Content-Type", "application/json").
-		Build()
-	if err != nil {
-		RespondHTTPErrorWithStatus(w, "Internal error", http.StatusInternalServerError)
-		return
+	cacheAllowed := true
+	if refresh, ok := reqData["refresh"].(bool); ok && refresh {
+		cacheAllowed = false
 	}
-
-	resp, err := h.httpClient.Do(proxyReq)
+	upstream, cacheHit, shared, err := h.fetchFSMetaUpstream(r, apiPath, targetURL, modifiedBody, cacheAllowed)
 	if err != nil {
 		log.Error().Err(err).Str("api_path", apiPath).Msg("Failed to proxy fs/get-or-link")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
-
-	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
-	if err != nil {
-		RespondHTTPErrorWithStatus(w, "Failed to read response", http.StatusBadGateway)
-		return
+	if cacheHit {
+		trace.Logf(r.Context(), "get", "%s metadata hot cache hit shared=%v failure_fast=%v", apiPath, shared, upstream.FailureFast)
 	}
+	respBody := upstream.Body
 
 	// Log Alist response (truncate to 500 chars)
 	respPreview := string(respBody)
 	if len(respPreview) > 500 {
 		respPreview = respPreview[:500]
 	}
-	trace.Logf(r.Context(), "get", "Alist response status=%d body=%s", resp.StatusCode, respPreview)
+	trace.Logf(r.Context(), "get", "Alist response status=%d body=%s", upstream.StatusCode, respPreview)
 
 	var respData map[string]interface{}
 	if err := json.Unmarshal(respBody, &respData); err != nil {
-		RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+		RespondRaw(w, upstream.StatusCode, upstream.Header.Get("Content-Type"), respBody)
 		return
 	}
 
@@ -835,7 +884,175 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	RespondJSON(w, resp.StatusCode, respData)
+	RespondJSON(w, upstream.StatusCode, respData)
+}
+
+func (h *AlistHandler) fetchFSMetaUpstream(r *http.Request, apiPath, targetURL string, body []byte, cacheAllowed bool) (*fsMetaUpstreamResponse, bool, bool, error) {
+	atomic.AddUint64(&h.fsMetaRequests, 1)
+	if !cacheAllowed {
+		atomic.AddUint64(&h.fsMetaRefreshBypass, 1)
+	}
+	cacheKey := fsMetaCacheKey(apiPath, targetURL, body, r.Header)
+	if cacheAllowed {
+		if cached, ok := h.getFSMetaCache(cacheKey); ok {
+			atomic.AddUint64(&h.fsMetaCacheHits, 1)
+			if cached.FailureFast {
+				atomic.AddUint64(&h.fsMetaFailureFastHits, 1)
+			}
+			return cached, true, false, nil
+		}
+	}
+
+	result, err, shared := h.fsMetaGroup.Do(cacheKey, func() (interface{}, error) {
+		if cacheAllowed {
+			if cached, ok := h.getFSMetaCache(cacheKey); ok {
+				return fsMetaFetchResult{Response: cached, CacheHit: true}, nil
+			}
+		}
+		upstream, err := h.fetchFSMetaFromAlist(r, apiPath, targetURL, body)
+		if err != nil {
+			return nil, err
+		}
+		if cacheAllowed {
+			h.setFSMetaCache(cacheKey, upstream)
+		}
+		return fsMetaFetchResult{Response: upstream}, nil
+	})
+	if err != nil {
+		return nil, false, shared, err
+	}
+	fetched, ok := result.(fsMetaFetchResult)
+	if !ok || fetched.Response == nil {
+		return nil, false, shared, fmt.Errorf("unexpected fs metadata response type")
+	}
+	if shared {
+		atomic.AddUint64(&h.fsMetaSingleflightHits, 1)
+	}
+	if fetched.CacheHit {
+		atomic.AddUint64(&h.fsMetaCacheHits, 1)
+		if fetched.Response.FailureFast {
+			atomic.AddUint64(&h.fsMetaFailureFastHits, 1)
+		}
+	}
+	return cloneFSMetaResponse(fetched.Response), fetched.CacheHit, shared, nil
+}
+
+func (h *AlistHandler) fetchFSMetaFromAlist(r *http.Request, apiPath, targetURL string, body []byte) (*fsMetaUpstreamResponse, error) {
+	atomic.AddUint64(&h.fsMetaUpstreamFetches, 1)
+	ctx := context.Background()
+	cancel := func() {}
+	if timeout := getAlistRequestTimeout(h.cfg); timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	proxyReq, err := httputil.NewRequest("POST", targetURL).
+		WithContext(ctx).
+		WithBody(body).
+		CopyHeadersExcept(r, "Content-Length").
+		WithForwardedHeaders(r).
+		WithHeader("Content-Type", "application/json").
+		Build()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := h.httpClient.Do(proxyReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		return nil, err
+	}
+	return &fsMetaUpstreamResponse{
+		StatusCode: resp.StatusCode,
+		Header:     cloneHeader(resp.Header),
+		Body:       append([]byte(nil), respBody...),
+	}, nil
+}
+
+func fsMetaCacheKey(apiPath, targetURL string, body []byte, headers http.Header) string {
+	bodyHash := sha256.Sum256(body)
+	authHash := sha256.Sum256([]byte(headers.Get("Authorization") + "\x00" + headers.Get("Cookie")))
+	return fmt.Sprintf("%s|%s|%x|%x", apiPath, targetURL, bodyHash[:8], authHash[:8])
+}
+
+func (h *AlistHandler) getFSMetaCache(key string) (*fsMetaUpstreamResponse, bool) {
+	if h == nil || key == "" {
+		return nil, false
+	}
+	h.fsMetaMu.Lock()
+	defer h.fsMetaMu.Unlock()
+	if h.fsMetaCache == nil {
+		return nil, false
+	}
+	entry, ok := h.fsMetaCache[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		delete(h.fsMetaCache, key)
+		return nil, false
+	}
+	return &fsMetaUpstreamResponse{
+		StatusCode:  entry.StatusCode,
+		Header:      cloneHeader(entry.Header),
+		Body:        append([]byte(nil), entry.Body...),
+		FailureFast: entry.FailureFast,
+	}, true
+}
+
+func (h *AlistHandler) setFSMetaCache(key string, upstream *fsMetaUpstreamResponse) {
+	if h == nil || key == "" || upstream == nil {
+		return
+	}
+	ttl := fsMetaHotCacheTTL
+	failureFast := false
+	if upstream.StatusCode >= http.StatusBadRequest {
+		ttl = fsMetaFailureCacheTTL
+		failureFast = true
+		atomic.AddUint64(&h.fsMetaFailureStores, 1)
+	}
+	h.fsMetaMu.Lock()
+	defer h.fsMetaMu.Unlock()
+	if h.fsMetaCache == nil {
+		h.fsMetaCache = make(map[string]fsMetaCacheEntry)
+	}
+	now := time.Now()
+	if len(h.fsMetaCache) >= maxFSMetaCacheEntries {
+		for cacheKey, entry := range h.fsMetaCache {
+			if now.After(entry.ExpiresAt) {
+				delete(h.fsMetaCache, cacheKey)
+			}
+		}
+	}
+	if len(h.fsMetaCache) >= maxFSMetaCacheEntries {
+		for cacheKey := range h.fsMetaCache {
+			delete(h.fsMetaCache, cacheKey)
+			break
+		}
+	}
+	h.fsMetaCache[key] = fsMetaCacheEntry{
+		StatusCode:  upstream.StatusCode,
+		Header:      cloneHeader(upstream.Header),
+		Body:        append([]byte(nil), upstream.Body...),
+		ExpiresAt:   now.Add(ttl),
+		FailureFast: failureFast,
+	}
+}
+
+func cloneFSMetaResponse(src *fsMetaUpstreamResponse) *fsMetaUpstreamResponse {
+	if src == nil {
+		return nil
+	}
+	return &fsMetaUpstreamResponse{
+		StatusCode:  src.StatusCode,
+		Header:      cloneHeader(src.Header),
+		Body:        append([]byte(nil), src.Body...),
+		FailureFast: src.FailureFast,
+	}
 }
 
 func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, encryptedPath string, ciphertextSize int64, passwdInfo *config.PasswdInfo) encryption.ContentMeta {

@@ -52,21 +52,53 @@ var (
 )
 
 // v2KeyCache caches V2 PBKDF2-derived base keys (600K iterations) to avoid repeated computation.
-// Key format: "password:encType:keyLen". The per-file nonce is applied by each cipher after
+// Key format: "sha256(password):encType:keyLen". The per-file nonce is applied by each cipher after
 // PBKDF2; it is not part of the PBKDF2 salt.
 var (
-	v2KeyCache   = make(map[string]*cacheEntry[[]byte])
-	v2KeyCacheMu sync.RWMutex
+	v2KeyCache      = make(map[string]*cacheEntry[[]byte])
+	v2KeyCacheMu    sync.RWMutex
+	v2KeyCacheTTL   = 24 * time.Hour
+	v2KeyCacheTTLMu sync.RWMutex
 )
+
+// SetV2KeyCacheTTL configures how long V2 PBKDF2 base keys stay hot in memory.
+// Non-positive values keep the current TTL.
+func SetV2KeyCacheTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	v2KeyCacheTTLMu.Lock()
+	v2KeyCacheTTL = ttl
+	v2KeyCacheTTLMu.Unlock()
+}
+
+func currentV2KeyCacheTTL() time.Duration {
+	v2KeyCacheTTLMu.RLock()
+	ttl := v2KeyCacheTTL
+	v2KeyCacheTTLMu.RUnlock()
+	if ttl <= 0 {
+		return 24 * time.Hour
+	}
+	return ttl
+}
 
 // cachedV2Key returns a cached PBKDF2 key for V2 ciphers, computing it only on cache miss.
 func cachedV2Key(password, encType string, keyLen int) []byte {
-	cacheKey := fmt.Sprintf("%s:%s:%d", password, encType, keyLen)
+	passHash := sha256.Sum256([]byte(password))
+	cacheKey := fmt.Sprintf("%x:%s:%d", passHash, encType, keyLen)
+	now := time.Now()
+	ttl := currentV2KeyCacheTTL()
 
 	v2KeyCacheMu.RLock()
-	if entry, ok := v2KeyCache[cacheKey]; ok && time.Now().Before(entry.expireAt) {
+	if entry, ok := v2KeyCache[cacheKey]; ok && now.Before(entry.expireAt) {
+		result := append([]byte(nil), entry.value...)
 		v2KeyCacheMu.RUnlock()
-		return entry.value
+		v2KeyCacheMu.Lock()
+		if current, ok := v2KeyCache[cacheKey]; ok && current == entry {
+			current.expireAt = now.Add(ttl)
+		}
+		v2KeyCacheMu.Unlock()
+		return result
 	}
 	v2KeyCacheMu.RUnlock()
 
@@ -75,8 +107,8 @@ func cachedV2Key(password, encType string, keyLen int) []byte {
 
 	v2KeyCacheMu.Lock()
 	v2KeyCache[cacheKey] = &cacheEntry[[]byte]{
-		value:    result,
-		expireAt: time.Now().Add(cacheEntryTTL),
+		value:    append([]byte(nil), result...),
+		expireAt: now.Add(ttl),
 	}
 	v2KeyCacheMu.Unlock()
 

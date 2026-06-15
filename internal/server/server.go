@@ -153,7 +153,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	alistHandler.StartDirSyncLoop()
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
-	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, proxyHandler, webdavHandler, s.streamProxy, startTime)
+	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, alistHandler, proxyHandler, webdavHandler, s.streamProxy, startTime)
 	s.proxyHandler = proxyHandler
 	s.webdavHandler = webdavHandler
 

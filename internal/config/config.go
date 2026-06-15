@@ -12,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/rs/zerolog/log"
 )
 
@@ -95,6 +97,7 @@ type AlistServer struct {
 	CircuitBreakerThreshold     int                      `json:"circuitBreakerThreshold"`
 	CircuitBreakerCooldownSecs  int                      `json:"circuitBreakerCooldownSecs"`
 	RetryMaxAttempts            int                      `json:"retryMaxAttempts"`
+	V2KeyCacheTTLMinutes        int                      `json:"v2KeyCacheTtlMinutes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -284,6 +287,7 @@ func DefaultConfig() *Config {
 			CircuitBreakerThreshold:     5,
 			CircuitBreakerCooldownSecs:  30,
 			RetryMaxAttempts:            3,
+			V2KeyCacheTTLMinutes:        1440,
 			PasswdList: []PasswdInfo{
 				{
 					Password: "123456",
@@ -408,6 +412,7 @@ func loadConfigAt(configPath string) *Config {
 
 	cfg.applyEnvOverrides()
 	cfg.normalizeAlistServerTuning()
+	encryption.SetV2KeyCacheTTL(time.Duration(cfg.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
 	cfg.normalizeProxyConfig()
 
 	if strings.TrimSpace(cfg.JWTSecret) == "" || cfg.JWTSecret == "alist-encrypt-secret" {
@@ -620,6 +625,9 @@ func (c *Config) applyEnvOverrides() {
 	if v, ok := getEnvInt("RANGE_PROBE_TIMEOUT_SECONDS"); ok {
 		c.AlistServer.RangeProbeTimeoutSeconds = v
 	}
+	if v, ok := getEnvInt("V2_KEY_CACHE_TTL_MINUTES"); ok {
+		c.AlistServer.V2KeyCacheTTLMinutes = v
+	}
 }
 
 func (c *Config) normalizeAlistServerTuning() {
@@ -665,6 +673,10 @@ func (c *Config) normalizeAlistServerTuning() {
 		s.DecryptedBlockSizeKb = 256
 	}
 	s.DecryptedBlockSizeKb = clampIntValue(s.DecryptedBlockSizeKb, 32, 4096)
+	if s.V2KeyCacheTTLMinutes <= 0 {
+		s.V2KeyCacheTTLMinutes = 1440
+	}
+	s.V2KeyCacheTTLMinutes = clampIntValue(s.V2KeyCacheTTLMinutes, 1, 10080)
 }
 
 func normalizeProxyMatchType(v string) string {

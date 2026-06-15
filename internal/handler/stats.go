@@ -13,6 +13,7 @@ import (
 type StatsHandler struct {
 	cfg           *config.Config
 	fileDAO       *dao.FileDAO
+	alistHandler  *AlistHandler
 	proxyHandler  *ProxyHandler
 	webdavHandler *WebDAVHandler
 	streamProxy   *proxy.StreamProxy
@@ -20,10 +21,11 @@ type StatsHandler struct {
 }
 
 // NewStatsHandler creates a new StatsHandler
-func NewStatsHandler(cfg *config.Config, fileDAO *dao.FileDAO, proxyHandler *ProxyHandler, webdavHandler *WebDAVHandler, streamProxy *proxy.StreamProxy, startTime time.Time) *StatsHandler {
+func NewStatsHandler(cfg *config.Config, fileDAO *dao.FileDAO, alistHandler *AlistHandler, proxyHandler *ProxyHandler, webdavHandler *WebDAVHandler, streamProxy *proxy.StreamProxy, startTime time.Time) *StatsHandler {
 	return &StatsHandler{
 		cfg:           cfg,
 		fileDAO:       fileDAO,
+		alistHandler:  alistHandler,
 		proxyHandler:  proxyHandler,
 		webdavHandler: webdavHandler,
 		streamProxy:   streamProxy,
@@ -34,6 +36,10 @@ func NewStatsHandler(cfg *config.Config, fileDAO *dao.FileDAO, proxyHandler *Pro
 // HandleStats returns runtime stats
 func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 	proxyStats := h.proxyHandler.Stats()
+	alistStats := map[string]interface{}{}
+	if h.alistHandler != nil {
+		alistStats = h.alistHandler.Stats()
+	}
 	webdavStats := h.webdavHandler.Stats()
 	proxyStream := getStreamStats(proxyStats)
 	webdavStream := getStreamStats(webdavStats)
@@ -62,6 +68,7 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 			"file_size_cache":       h.fileDAO.FileSizeCacheStats(),
 			"decrypted_block_cache": h.streamProxy.DecryptedBlockCacheStats(),
 		},
+		"alist":              alistStats,
 		"proxy":              proxyStats,
 		"webdav":             webdavStats,
 		"range_compat_cache": h.streamProxy.RangeCompatStats(),

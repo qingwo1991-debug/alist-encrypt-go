@@ -3,7 +3,9 @@ package encryption
 import (
 	"bytes"
 	"io"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLatestContentEncryptorRoundtripAllAlgorithms(t *testing.T) {
@@ -95,6 +97,7 @@ func TestV2PBKDF2CacheDoesNotSplitByNonce(t *testing.T) {
 	v2KeyCacheMu.Lock()
 	v2KeyCache = make(map[string]*cacheEntry[[]byte])
 	v2KeyCacheMu.Unlock()
+	SetV2KeyCacheTTL(24 * time.Hour)
 
 	nonceA := bytes.Repeat([]byte{0x01}, 16)
 	nonceB := bytes.Repeat([]byte{0x02}, 16)
@@ -109,5 +112,42 @@ func TestV2PBKDF2CacheDoesNotSplitByNonce(t *testing.T) {
 	defer v2KeyCacheMu.RUnlock()
 	if got := len(v2KeyCache); got != 1 {
 		t.Fatalf("v2 key cache entries=%d, want 1", got)
+	}
+	for key := range v2KeyCache {
+		if strings.Contains(key, "same-password") {
+			t.Fatalf("v2 key cache key contains plaintext password: %q", key)
+		}
+	}
+}
+
+func TestV2PBKDF2CacheHitExtendsTTL(t *testing.T) {
+	v2KeyCacheMu.Lock()
+	v2KeyCache = make(map[string]*cacheEntry[[]byte])
+	v2KeyCacheMu.Unlock()
+	SetV2KeyCacheTTL(time.Hour)
+
+	nonce := bytes.Repeat([]byte{0x03}, 16)
+	if _, err := NewAESCTRV2("sliding-password", 1024, nonce); err != nil {
+		t.Fatalf("first cipher: %v", err)
+	}
+
+	var oldExpire time.Time
+	v2KeyCacheMu.Lock()
+	for _, entry := range v2KeyCache {
+		entry.expireAt = time.Now().Add(time.Millisecond)
+		oldExpire = entry.expireAt
+	}
+	v2KeyCacheMu.Unlock()
+
+	if _, err := NewAESCTRV2("sliding-password", 1024, nonce); err != nil {
+		t.Fatalf("second cipher: %v", err)
+	}
+
+	v2KeyCacheMu.RLock()
+	defer v2KeyCacheMu.RUnlock()
+	for _, entry := range v2KeyCache {
+		if !entry.expireAt.After(oldExpire.Add(30 * time.Minute)) {
+			t.Fatalf("cache hit did not extend ttl enough: old=%s new=%s", oldExpire, entry.expireAt)
+		}
 	}
 }
