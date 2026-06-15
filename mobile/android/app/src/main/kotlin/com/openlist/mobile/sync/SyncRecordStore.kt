@@ -213,8 +213,8 @@ object SyncRecordStore {
         return container.logs
             .asSequence()
             .filter { it.taskId == taskId }
-            .takeLast(limit.coerceAtLeast(1))
             .toList()
+            .takeLast(limit.coerceAtLeast(1))
     }
 
     @Synchronized

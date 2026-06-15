@@ -125,7 +125,7 @@ object SyncSourceCleaner {
                         currentUploadTaskStatus = "云端未命中，跳过",
                     )
                 )
-                return@forEach
+                return@forEachIndexed
             }
 
             remoteMatched++
@@ -156,7 +156,7 @@ object SyncSourceCleaner {
                         currentUploadTaskStatus = "本地文件已不存在",
                     )
                 )
-                return@forEach
+                return@forEachIndexed
             }
 
             val removed = try {

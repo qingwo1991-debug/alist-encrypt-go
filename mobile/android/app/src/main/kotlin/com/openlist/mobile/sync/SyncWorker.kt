@@ -311,7 +311,7 @@ class SyncWorker(
                 if (taskConfig.deleteAfterSync) {
                     cleanupCandidates.add(file.absolutePath)
                 }
-                return@forEach
+                return@forEachIndexed
             }
 
             if (alreadySyncedLocally) {
