@@ -9,6 +9,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const maxUpsertBatchRows = 1000
+
 func (s *Store) ensureSchema(ctx context.Context) error {
 	strategyTable := TableName("strategy")
 	fileMetaTable := TableName("file_meta")
@@ -195,6 +197,18 @@ func (s *Store) upsertStrategies(ctx context.Context, records []StrategyRecord) 
 	if len(records) == 0 {
 		return nil
 	}
+	if len(records) > maxUpsertBatchRows {
+		for start := 0; start < len(records); start += maxUpsertBatchRows {
+			end := start + maxUpsertBatchRows
+			if end > len(records) {
+				end = len(records)
+			}
+			if err := s.upsertStrategies(ctx, records[start:end]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	query := fmt.Sprintf(`INSERT INTO %s
   (key_hash, provider_host, original_path, preferred_strategy, failures_json, success_streak, total_failures, total_successes, cooldown_until, last_downgrade, last_failure, last_strategy, last_accessed, updated_at, is_active)
   VALUES %s
@@ -248,6 +262,18 @@ func (s *Store) upsertStrategies(ctx context.Context, records []StrategyRecord) 
 
 func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) error {
 	if len(records) == 0 {
+		return nil
+	}
+	if len(records) > maxUpsertBatchRows {
+		for start := 0; start < len(records); start += maxUpsertBatchRows {
+			end := start + maxUpsertBatchRows
+			if end > len(records) {
+				end = len(records)
+			}
+			if err := s.upsertFileMeta(ctx, records[start:end]); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	query := fmt.Sprintf(`INSERT INTO %s
@@ -315,6 +341,18 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 
 func (s *Store) upsertRangeCompats(ctx context.Context, records []RangeCompatRecord) error {
 	if len(records) == 0 {
+		return nil
+	}
+	if len(records) > maxUpsertBatchRows {
+		for start := 0; start < len(records); start += maxUpsertBatchRows {
+			end := start + maxUpsertBatchRows
+			if end > len(records) {
+				end = len(records)
+			}
+			if err := s.upsertRangeCompats(ctx, records[start:end]); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	query := fmt.Sprintf(`INSERT INTO %s
