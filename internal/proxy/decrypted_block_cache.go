@@ -6,6 +6,8 @@ import (
 	"sync"
 )
 
+const maxDecryptedCacheServeBytes = 16 * 1024 * 1024
+
 type decryptedBlockCache struct {
 	mu        sync.Mutex
 	maxBytes  int64
@@ -40,7 +42,13 @@ func (c *decryptedBlockCache) getRange(baseKey string, start, length int64) ([]b
 	if c == nil || baseKey == "" || start < 0 || length <= 0 {
 		return nil, false
 	}
-	out := make([]byte, 0, length)
+	if length > c.maxServeBytes() {
+		c.mu.Lock()
+		c.missCount++
+		c.mu.Unlock()
+		return nil, false
+	}
+	out := make([]byte, 0, minInt64(length, c.blockSize))
 	remaining := length
 	blockStart := (start / c.blockSize) * c.blockSize
 	blockOffset := start - blockStart
@@ -138,8 +146,25 @@ func (c *decryptedBlockCache) stats() map[string]interface{} {
 	}
 }
 
+func (c *decryptedBlockCache) maxServeBytes() int64 {
+	if c == nil || c.maxBytes <= 0 {
+		return 0
+	}
+	if c.maxBytes < maxDecryptedCacheServeBytes {
+		return c.maxBytes
+	}
+	return maxDecryptedCacheServeBytes
+}
+
 func (c *decryptedBlockCache) blockKey(baseKey string, offset int64) string {
 	return baseKey + "|" + itoa64(offset/c.blockSize)
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func itoa64(v int64) string {

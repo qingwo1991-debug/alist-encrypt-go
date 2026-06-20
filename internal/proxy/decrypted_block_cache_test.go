@@ -51,6 +51,20 @@ func TestDecryptedBlockCacheEvictsLRU(t *testing.T) {
 	}
 }
 
+func TestDecryptedBlockCacheRejectsHugeRange(t *testing.T) {
+	cache := newDecryptedBlockCache(1024, 256)
+	cache.putBlock("file", 0, bytes.Repeat([]byte("a"), 256))
+
+	if _, ok := cache.getRange("file", 0, 1025); ok {
+		t.Fatal("expected range larger than cache capacity to miss")
+	}
+
+	stats := cache.stats()
+	if stats["miss_count"] != uint64(1) {
+		t.Fatalf("miss_count=%v, want 1", stats["miss_count"])
+	}
+}
+
 func TestDecryptedCacheReaderCachesAlignedBlocks(t *testing.T) {
 	cache := newDecryptedBlockCache(1024, 4)
 	reader := newDecryptedCacheReader(bytes.NewReader([]byte("abcdefgh")), cache, "file", 0)
