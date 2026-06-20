@@ -56,6 +56,36 @@ type FileDAO struct {
 	fileMetaWriter FileMetaStoreWriter
 }
 
+const mediaSizePreserveThreshold = 100 * 1024
+
+func isLikelyMediaCachePath(values ...string) bool {
+	for _, value := range values {
+		lower := strings.ToLower(value)
+		for _, suffix := range []string{
+			".mp4", ".mkv", ".mov", ".avi", ".wmv", ".flv", ".webm", ".m4v", ".ts", ".m2ts",
+			".mp3", ".m4a", ".flac", ".wav", ".aac", ".ogg",
+		} {
+			if strings.HasSuffix(lower, suffix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func preserveLargerMediaSize(existingSize, incomingSize int64, isDir bool, pathHints ...string) int64 {
+	if isDir || existingSize <= 0 || incomingSize <= 0 {
+		return incomingSize
+	}
+	if existingSize < mediaSizePreserveThreshold || incomingSize >= existingSize/2 {
+		return incomingSize
+	}
+	if !isLikelyMediaCachePath(pathHints...) {
+		return incomingSize
+	}
+	return existingSize
+}
+
 // NewFileDAO creates a new file DAO
 func NewFileDAO(store *storage.Store) *FileDAO {
 	dao := &FileDAO{
@@ -120,6 +150,8 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		}
 		if info.Size <= 0 {
 			info.Size = existing.Size
+		} else {
+			info.Size = preserveLargerMediaSize(existing.Size, info.Size, info.IsDir, info.Path, info.Name, existing.Name)
 		}
 		if info.CiphertextSize <= 0 {
 			info.CiphertextSize = existing.CiphertextSize
@@ -257,6 +289,11 @@ func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 
 // SetEncPathMappingWithInfo caches mapping with full file info (recommended)
 func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name string, size int64, isDir bool) {
+	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok && existing != nil {
+		size = preserveLargerMediaSize(existing.Size, size, isDir, displayPath, encryptedPath, name, existing.Name)
+	} else if existing, ok := d.pathCache.GetByEncPath(encryptedPath); ok && existing != nil {
+		size = preserveLargerMediaSize(existing.Size, size, isDir, displayPath, encryptedPath, name, existing.Name)
+	}
 	entry := &PathEntry{
 		EncryptedPath: encryptedPath,
 		DisplayPath:   displayPath,
@@ -323,6 +360,7 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 
 	// Try to update existing entry
 	if entry, ok := d.pathCache.Get(path); ok {
+		size = preserveLargerMediaSize(entry.Size, size, entry.IsDir, path, entry.DisplayPath, entry.EncryptedPath, entry.Name)
 		entry.Size = size
 		d.pathCache.Set(entry, ttl)
 	} else {
