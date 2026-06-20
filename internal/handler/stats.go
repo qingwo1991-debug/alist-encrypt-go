@@ -44,6 +44,10 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 	proxyStream := getStreamStats(proxyStats)
 	webdavStream := getStreamStats(webdavStats)
 	selectorStats := getSelectorStats(proxyStats, webdavStats)
+	streamLimitStats := map[string]interface{}{}
+	if h.streamProxy != nil {
+		streamLimitStats = h.streamProxy.StreamLimitStats()
+	}
 
 	data := map[string]interface{}{
 		"version": config.Version,
@@ -62,6 +66,7 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 			"strategy_reason_counts":  selectorStats["reason_counts"],
 			"provider_strategy":       selectorStats["provider_strategy"],
 			"recent_strategy_events":  selectorStats["recent_events"],
+			"limit":                   streamLimitStats,
 		},
 		"cache": map[string]interface{}{
 			"path_cache":            h.fileDAO.PathCacheStats(),

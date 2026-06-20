@@ -168,6 +168,8 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		CircuitBreakerThreshold:     getIntFieldWithDefault(raw, "circuitBreakerThreshold", 5),
 		CircuitBreakerCooldownSecs:  getIntFieldWithDefault(raw, "circuitBreakerCooldownSecs", 30),
 		RetryMaxAttempts:            getIntFieldWithDefault(raw, "retryMaxAttempts", 3),
+		MaxActiveStreams:            getIntFieldWithDefault(raw, "maxActiveStreams", 32),
+		StreamOverloadStatus:        getIntFieldWithDefault(raw, "streamOverloadStatus", 429),
 		V2KeyCacheTTLMinutes:        getIntFieldWithDefault(raw, "v2KeyCacheTtlMinutes", 1440),
 	}
 
@@ -220,6 +222,13 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		server.V2KeyCacheTTLMinutes = 1440
 	}
 	server.V2KeyCacheTTLMinutes = clampInt(server.V2KeyCacheTTLMinutes, 1, 10080)
+	if server.MaxActiveStreams <= 0 {
+		server.MaxActiveStreams = 32
+	}
+	server.MaxActiveStreams = clampInt(server.MaxActiveStreams, 1, 1024)
+	if server.StreamOverloadStatus != 429 && server.StreamOverloadStatus != 503 {
+		server.StreamOverloadStatus = 429
+	}
 
 	return server
 }

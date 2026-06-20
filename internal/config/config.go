@@ -97,6 +97,8 @@ type AlistServer struct {
 	CircuitBreakerThreshold     int                      `json:"circuitBreakerThreshold"`
 	CircuitBreakerCooldownSecs  int                      `json:"circuitBreakerCooldownSecs"`
 	RetryMaxAttempts            int                      `json:"retryMaxAttempts"`
+	MaxActiveStreams            int                      `json:"maxActiveStreams"`
+	StreamOverloadStatus        int                      `json:"streamOverloadStatus"`
 	V2KeyCacheTTLMinutes        int                      `json:"v2KeyCacheTtlMinutes"`
 }
 
@@ -287,6 +289,8 @@ func DefaultConfig() *Config {
 			CircuitBreakerThreshold:     5,
 			CircuitBreakerCooldownSecs:  30,
 			RetryMaxAttempts:            3,
+			MaxActiveStreams:            32,
+			StreamOverloadStatus:        429,
 			V2KeyCacheTTLMinutes:        1440,
 			PasswdList: []PasswdInfo{
 				{
@@ -628,6 +632,12 @@ func (c *Config) applyEnvOverrides() {
 	if v, ok := getEnvInt("V2_KEY_CACHE_TTL_MINUTES"); ok {
 		c.AlistServer.V2KeyCacheTTLMinutes = v
 	}
+	if v, ok := getEnvInt("MAX_ACTIVE_STREAMS"); ok {
+		c.AlistServer.MaxActiveStreams = v
+	}
+	if v, ok := getEnvInt("STREAM_OVERLOAD_STATUS"); ok {
+		c.AlistServer.StreamOverloadStatus = v
+	}
 }
 
 func (c *Config) normalizeAlistServerTuning() {
@@ -677,6 +687,13 @@ func (c *Config) normalizeAlistServerTuning() {
 		s.V2KeyCacheTTLMinutes = 1440
 	}
 	s.V2KeyCacheTTLMinutes = clampIntValue(s.V2KeyCacheTTLMinutes, 1, 10080)
+	if s.MaxActiveStreams <= 0 {
+		s.MaxActiveStreams = 32
+	}
+	s.MaxActiveStreams = clampIntValue(s.MaxActiveStreams, 1, 1024)
+	if s.StreamOverloadStatus != 429 && s.StreamOverloadStatus != 503 {
+		s.StreamOverloadStatus = 429
+	}
 }
 
 func normalizeProxyMatchType(v string) string {

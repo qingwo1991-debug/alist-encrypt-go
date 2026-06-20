@@ -78,6 +78,9 @@ type StreamProxy struct {
 	uploadMetaMu     sync.Mutex
 	uploadMeta       map[string]uploadMetaEntry
 	blockCache       *decryptedBlockCache
+	streamLimiter    chan struct{}
+	activeStreams    int64
+	rejectedStreams  uint64
 }
 
 // StreamOutcome describes the streaming result for strategy selection.
@@ -99,6 +102,7 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 	applyStreamBufferConfig(cfg)
 	cbThreshold := 5
 	cbCooldown := 30 * time.Second
+	maxActiveStreams := 32
 	retrier := backoff.DefaultRetrier()
 	if cfg != nil {
 		if cfg.AlistServer.CircuitBreakerThreshold > 0 {
@@ -109,6 +113,9 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 		}
 		if cfg.AlistServer.RetryMaxAttempts >= 0 {
 			retrier.MaxRetries = cfg.AlistServer.RetryMaxAttempts
+		}
+		if cfg.AlistServer.MaxActiveStreams > 0 {
+			maxActiveStreams = cfg.AlistServer.MaxActiveStreams
 		}
 	}
 	return &StreamProxy{
@@ -121,6 +128,49 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 		retrier:       retrier,
 		uploadMeta:    make(map[string]uploadMetaEntry),
 		blockCache:    newDecryptedBlockCacheFromConfig(cfg),
+		streamLimiter: make(chan struct{}, maxActiveStreams),
+	}
+}
+
+// AcquireStream reserves capacity for a decrypt playback stream. It returns a
+// release function when accepted, or false when the service is overloaded.
+func (s *StreamProxy) AcquireStream() (func(), bool) {
+	if s == nil || s.streamLimiter == nil {
+		return func() {}, true
+	}
+	select {
+	case s.streamLimiter <- struct{}{}:
+		atomic.AddInt64(&s.activeStreams, 1)
+		var released atomic.Bool
+		return func() {
+			if released.Swap(true) {
+				return
+			}
+			<-s.streamLimiter
+			atomic.AddInt64(&s.activeStreams, -1)
+		}, true
+	default:
+		atomic.AddUint64(&s.rejectedStreams, 1)
+		return nil, false
+	}
+}
+
+// StreamLimitStats returns current decrypt playback concurrency stats.
+func (s *StreamProxy) StreamLimitStats() map[string]interface{} {
+	limit := 0
+	if s != nil && s.streamLimiter != nil {
+		limit = cap(s.streamLimiter)
+	}
+	var active int64
+	var rejected uint64
+	if s != nil {
+		active = atomic.LoadInt64(&s.activeStreams)
+		rejected = atomic.LoadUint64(&s.rejectedStreams)
+	}
+	return map[string]interface{}{
+		"active_streams":   active,
+		"max_active":       limit,
+		"rejected_streams": rejected,
 	}
 }
 

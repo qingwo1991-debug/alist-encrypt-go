@@ -18,6 +18,66 @@ import (
 	"github.com/alist-encrypt-go/internal/storage"
 )
 
+func TestExecuteDecryptPlaybackRejectsWhenStreamLimitReached(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.MaxActiveStreams = 1
+	cfg.AlistServer.StreamOverloadStatus = http.StatusTooManyRequests
+	sp := proxy.NewStreamProxy(cfg)
+	release, ok := sp.AcquireStream()
+	if !ok {
+		t.Fatal("failed to acquire initial stream slot")
+	}
+	defer release()
+
+	var hits int
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/d/demo.mp4", nil)
+	rr := httptest.NewRecorder()
+
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter: rr,
+		Request:        req,
+		Config:         cfg,
+		StreamProxy:    sp,
+		PasswdInfo: &config.PasswdInfo{
+			Password: "123456",
+			EncType:  "aesctr",
+			Enable:   true,
+		},
+		FileItem: FileItem{
+			DisplayPath: "/demo.mp4",
+			TargetURL:   srv.URL,
+			FileName:    "demo.mp4",
+		},
+		TargetURL:     srv.URL,
+		ProviderKey:   ProviderKey(srv.URL, "/demo.mp4"),
+		Path:          "/demo.mp4",
+		InitialSize:   1024,
+		OverridePath:  "/demo.mp4",
+		CompatKey:     "/encrypt",
+		FailureLogMsg: "test playback failed",
+	})
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want %d", rr.Code, http.StatusTooManyRequests)
+	}
+	if got := rr.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After=%q, want 2", got)
+	}
+	if hits != 0 {
+		t.Fatalf("upstream hits=%d, want 0", hits)
+	}
+	stats := sp.StreamLimitStats()
+	if got := stats["rejected_streams"]; got != uint64(1) {
+		t.Fatalf("rejected_streams=%v, want 1", got)
+	}
+}
+
 func TestExecuteDecryptPlaybackFirstFrameFallsBackToChunked(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := proxy.NewStreamProxy(cfg)

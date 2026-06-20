@@ -48,6 +48,19 @@ type decryptPlaybackRequest struct {
 func executeDecryptPlayback(req decryptPlaybackRequest) {
 	w := req.ResponseWriter
 	r := req.Request
+	if req.StreamProxy != nil {
+		release, ok := req.StreamProxy.AcquireStream()
+		if !ok {
+			status := http.StatusTooManyRequests
+			if req.Config != nil && req.Config.AlistServer.StreamOverloadStatus == http.StatusServiceUnavailable {
+				status = http.StatusServiceUnavailable
+			}
+			w.Header().Set("Retry-After", "2")
+			RespondHTTPErrorWithStatus(w, "too many active streams", status)
+			return
+		}
+		defer release()
+	}
 	fileSize := req.InitialSize
 	authHeaders := make(http.Header)
 	if auth := r.Header.Get("Authorization"); auth != "" {
