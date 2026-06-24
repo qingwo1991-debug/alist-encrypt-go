@@ -9,6 +9,8 @@ alist-encrypt-go
 # Test binary
 *.test
 test_video/
+test_rt/
+test_rt_out/
 
 # Output of the go coverage tool
 *.out
