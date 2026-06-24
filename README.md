@@ -110,7 +110,15 @@ docker run -d \
 
 - NAS / VPS 的 Docker 部署
 - 直接运行的 Windows exe / Linux 二进制
-- 支持 linux/amd64、linux/arm64、darwin/amd64、darwin/arm64、windows/amd64
+- 支持 linux/amd64、linux/arm64、linux/armv7、darwin/amd64、darwin/arm64、windows/amd64、windows/arm64
+
+GitHub Releases 中的独立运行文件命名如下：
+
+- `alist-encrypt-go-linux-amd64`
+- `alist-encrypt-go-linux-arm64`
+- `alist-encrypt-go-linux-armv7`
+- `alist-encrypt-go-windows-amd64.exe`
+- `alist-encrypt-go-windows-arm64.exe`
 
 ```bash
 # 带内嵌管理页（默认）
