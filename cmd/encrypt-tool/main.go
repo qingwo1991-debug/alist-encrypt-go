@@ -20,23 +20,75 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/encryption"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 // verifySampleSize is how many bytes we read back after encryption to verify correctness.
 const verifySampleSize = 4096
+
+// progressThreshold is the file size above which progress is auto-shown
+// even without -v.  Below this, progress is only shown in verbose mode.
+const progressThreshold = 100 * 1024 * 1024 // 100 MB
+
+// progressInterval controls how often progress is printed to stderr.
+const progressInterval = 3 * time.Second
+
+// logHandle is the optional error log file (nil when --log not used).
+var logHandle *os.File
 
 // knownSuffixes are always safe to strip during decryption.
 var knownSuffixes = []string{".bin", ".enc", ".dat"}
 
 // allEncTypes is tried in order when auto-detecting from V1 files.
 var allEncTypes = []string{"aesctr", "chacha20", "rc4md5"}
+
+// knownFileSignatures lists common file magic bytes for content-based detection.
+// Used when V2 header magic is absent and filename CRC6 fails — we decrypt a
+// small sample with each algorithm and check if the result matches a known file
+// signature.  At least 3 bytes per signature keeps false positives negligible.
+var knownFileSignatures = []struct {
+	offset int
+	magic  []byte
+}{
+	{4, []byte("ftyp")},                              // MP4/MOV/HEIF/3GP
+	{0, []byte{0x1A, 0x45, 0xDF, 0xA3}},              // MKV/WebM (EBML)
+	{0, []byte("RIFF")},                               // AVI/WAV
+	{0, []byte{0x50, 0x4B, 0x03, 0x04}},               // ZIP/DOCX/XLSX/APK
+	{0, []byte("Rar!\x1a\x07")},                        // RAR
+	{0, []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}},   // 7z
+	{0, []byte{0x1F, 0x8B, 0x08}},                       // GZIP
+	{0, []byte("%PDF")},                                 // PDF
+	{0, []byte{0x89, 0x50, 0x4E, 0x47}},               // PNG
+	{0, []byte{0xFF, 0xD8, 0xFF}},                      // JPEG
+	{0, []byte("GIF87a")},                              // GIF
+	{0, []byte("GIF89a")},                              // GIF
+	{0, []byte("ID3")},                                  // MP3 (ID3 tag)
+	{0, []byte("fLaC")},                                 // FLAC
+	{0, []byte("OggS")},                                 // OGG
+	{0, []byte{0xD0, 0xCF, 0x11, 0xE0}},               // MS Office legacy (doc/xls/ppt)
+	{0, []byte{0x7F, 0x45, 0x4C, 0x46}},               // ELF binary
+	{0, []byte("BM")},                                  // BMP (2 bytes — weaker)
+}
+
+// hasKnownFileSignature checks whether the given decrypted bytes start with
+// a recognized file magic signature.
+func hasKnownFileSignature(data []byte) bool {
+	for _, sig := range knownFileSignatures {
+		end := sig.offset + len(sig.magic)
+		if end <= len(data) && bytes.Equal(data[sig.offset:end], sig.magic) {
+			return true
+		}
+	}
+	return false
+}
 
 // flags holds all parsed command-line options.
 type flags struct {
@@ -48,6 +100,7 @@ type flags struct {
 	suffix   string // enc only: suffix to append
 	workers  int    // parallel workers for batch mode
 	verbose  bool
+	logFile  string // --log: path to error log file
 }
 
 func main() {
@@ -74,11 +127,32 @@ func main() {
 func run(command string) {
 	f := parseFlags(command)
 
+	// Open error log file if requested.
+	if f.logFile != "" {
+		lf, err := os.OpenFile(f.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fatal("cannot open log file %s: %v", f.logFile, err)
+		}
+		logHandle = lf
+		defer logHandle.Close()
+		logLine("=== encrypt-tool %s started: %s %s ===", version, command, f.input)
+	}
+
 	if command == "enc" && f.encType == "auto" {
 		f.encType = "aesctr"
 	}
+	// Auto-tune workers: 0 (unset) → NumCPU
+	if f.workers == 0 {
+		f.workers = runtime.NumCPU()
+	}
 	if f.workers < 1 {
 		f.workers = 1
+	}
+
+	// Warn if worker count exceeds CPU cores (memory is tiny per worker,
+	// but CPU-bound crypto means extra workers just add scheduler overhead).
+	if cpu := runtime.NumCPU(); f.workers > cpu {
+		warnf("Note: -w %d > %d CPU cores; extra workers may reduce throughput\n", f.workers, cpu)
 	}
 
 	if f.password == "" {
@@ -109,6 +183,12 @@ func runSingle(command string, f *flags, fileSize int64) {
 	if skip {
 		fmt.Println("Skipping: source and output are the same file")
 		return
+	}
+
+	// Disk space pre-check (warn only)
+	outDir := filepath.Dir(outFile)
+	if err := checkDiskSpace(outDir, fileSize); err != nil {
+		warnf("Warning: %v\n", err)
 	}
 
 	logf(f.verbose, "%s file (%s)...\n", opName(command), formatBytes(fileSize))
@@ -169,6 +249,13 @@ func runBatch(command string, f *flags) {
 		fatal("no non-empty files found in: %s", f.input)
 	}
 
+	// Disk space pre-check (warn only)
+	if f.output != "" {
+		if err := checkDiskSpace(f.output, totalBytes); err != nil {
+			warnf("Warning: %v\n", err)
+		}
+	}
+
 	total := len(jobs)
 	workers := f.workers
 	if workers > total {
@@ -201,14 +288,17 @@ func runBatch(command string, f *flags) {
 
 			if err != nil {
 				errs.Add(1)
+				errMsg := fmt.Sprintf("  %s: %v", j.srcPath, err)
 				mu.Lock()
-				errMsgs = append(errMsgs, fmt.Sprintf("  %s: %v", j.srcPath, err))
+				errMsgs = append(errMsgs, errMsg)
 				mu.Unlock()
+				logLine("ERROR: %s: %v", j.srcPath, err)
 			} else if command == "enc" {
 				if vErr := verifyEncryption(j.srcPath, j.outFile, f); vErr != nil {
 					mu.Lock()
 					errMsgs = append(errMsgs, fmt.Sprintf("  %s: verification failed: %v", j.srcPath, vErr))
 					mu.Unlock()
+					logLine("VERIFY FAIL: %s: %v", j.srcPath, vErr)
 				}
 			}
 
@@ -221,6 +311,8 @@ func runBatch(command string, f *flags) {
 	wg.Wait()
 
 	fmt.Printf("\nDone: %d/%d files, %s %s", done.Load(), total, formatBytes(doneBytes.Load()), opName(command)+"ed")
+	logLine("BATCH DONE: %d/%d files, %s %s, errors=%d",
+		done.Load(), total, formatBytes(doneBytes.Load()), opName(command), errs.Load())
 	if e := errs.Load(); e > 0 {
 		fmt.Fprintf(os.Stderr, "\nErrors (%d):\n", e)
 		for _, m := range errMsgs {
@@ -268,30 +360,59 @@ func resolveOutputPath(srcPath string, f *flags, command, baseDir string) (strin
 	outRel := filepath.Join(dir, outName)
 
 	if f.output == "" {
+		var outPath string
 		if baseDir != "" {
-			return filepath.Join(baseDir, outRel), false
+			outPath = filepath.Join(baseDir, outRel)
+		} else {
+			outPath = filepath.Join(filepath.Dir(srcPath), outName)
 		}
-		return filepath.Join(filepath.Dir(srcPath), outName), false
+		// Avoid truncating the source when the name didn't change.
+		srcAbs, _ := filepath.Abs(srcPath)
+		outAbs, _ := filepath.Abs(outPath)
+		if srcAbs == outAbs {
+			return "", true
+		}
+		return outPath, false
 	}
 
+	// Output path specified.
+	// If it's an existing directory → place file inside it.
+	// If it doesn't exist → treat as explicit output file path (single-file mode)
+	//   or as a directory to create (batch mode, baseDir != "").
 	outInfo, err := os.Stat(f.output)
-	if err == nil && !outInfo.IsDir() && baseDir == "" {
+	if err == nil {
+		// Output exists: if it's a directory, place file inside; otherwise overwrite.
+		if outInfo.IsDir() || baseDir != "" {
+			var outPath string
+			if baseDir == "" {
+				outPath = filepath.Join(f.output, outName)
+			} else {
+				outPath = filepath.Join(f.output, outRel)
+			}
+			srcAbs, _ := filepath.Abs(srcPath)
+			outAbs, _ := filepath.Abs(outPath)
+			if srcAbs == outAbs {
+				return "", true
+			}
+			return outPath, false
+		}
+		// Existing file path → overwrite directly.
 		return f.output, false
 	}
 
-	var outPath string
-	if baseDir == "" {
-		outPath = filepath.Join(f.output, outName)
-	} else {
-		outPath = filepath.Join(f.output, outRel)
+	// Output path doesn't exist yet.
+	if baseDir != "" {
+		// Batch mode: create as directory, preserve relative structure.
+		outPath := filepath.Join(f.output, outRel)
+		srcAbs, _ := filepath.Abs(srcPath)
+		outAbs, _ := filepath.Abs(outPath)
+		if srcAbs == outAbs {
+			return "", true
+		}
+		return outPath, false
 	}
-
-	srcAbs, _ := filepath.Abs(srcPath)
-	outAbs, _ := filepath.Abs(outPath)
-	if srcAbs == outAbs {
-		return "", true
-	}
-	return outPath, false
+	// Single-file mode: treat as explicit file path.
+	return f.output, false
 }
 
 // encryptOutputName produces the encrypted filename.
@@ -331,84 +452,130 @@ func autoDecryptOutputName(fileName, srcPath string, f *flags) string {
 		encType = string(detectEncType(srcPath, f.password))
 	}
 
-	// Step 1: Try decoding the filename as-is (no suffix stripping)
-	if decoded := tryDecodeName(fileName, f.password, encType); decoded != "" {
-		return decoded
-	}
-
-	// Step 2: Try stripping known encrypted suffixes (.bin, .enc, .dat)
+	// Step 1: Strip known encrypted suffixes (.bin, .enc, .dat) BEFORE
+	// trying to decode.  This prevents tryDecodeName's V1 fallback from
+	// treating the suffix as a file extension to preserve.
+	stripped := fileName
+	suffixWasStripped := false
 	for _, s := range knownSuffixes {
-		if strings.HasSuffix(fileName, s) {
-			stripped := strings.TrimSuffix(fileName, s)
-			if decoded := tryDecodeName(stripped, f.password, encType); decoded != "" {
-				return decoded
-			}
-			// Filename isn't encrypted — return without the suffix
-			return stripped
+		if strings.HasSuffix(stripped, s) {
+			stripped = strings.TrimSuffix(stripped, s)
+			suffixWasStripped = true
+			break
 		}
 	}
 
-	// Step 3: Try stripping last extension as a potential custom suffix.
+	// Step 2: Try decoding (handles both V1 and V2 filename formats)
+	if decoded := tryDecodeName(stripped, f.password, encType); decoded != "" {
+		return decoded
+	}
+
+	// Step 3: If we stripped a suffix but decoding failed, the name was
+	// not encrypted — return without the suffix.
+	if suffixWasStripped {
+		return stripped
+	}
+
+	// Step 4: Try stripping last extension as a potential custom suffix.
 	// Only accept if decode succeeds — otherwise it's a real file extension.
 	lastExt := filepath.Ext(fileName)
 	if lastExt != "" {
-		stripped := strings.TrimSuffix(fileName, lastExt)
-		if decoded := tryDecodeName(stripped, f.password, encType); decoded != "" {
+		customStripped := strings.TrimSuffix(fileName, lastExt)
+		if decoded := tryDecodeName(customStripped, f.password, encType); decoded != "" {
 			return decoded
 		}
 	}
 
-	// Step 4: No decode worked — filename wasn't encrypted
+	// Step 5: No decode worked — filename wasn't encrypted
 	return fileName
 }
 
-// tryDecodeName splits name into base + extension, tries DecodeName(base).
-// Returns the decoded name WITHOUT appending the stripped extension,
-// because EncodeName encrypts the full filename (including extension),
-// so DecodeName already returns the complete original name.
-// This matches the proxy's DecryptPath / ConvertShowName behavior.
+// tryDecodeName attempts to decrypt a filename using CRC6 verification.
+//
+// Two filename formats are supported:
+//
+//   V2 (with or without suffix): EncodeName(fullName) → "XyZ…G"
+//     The entire filename was encrypted, so DecodeName returns the complete
+//     original name (including extension). No ext appending needed.
+//
+//   V1 (no suffix): EncodeName(baseName) → "XyZ…O" + ".mp4"
+//     Only the baseName was encrypted; the extension is plaintext and must
+//     be appended back after decoding.
+//
+// The heuristic for distinguishing: if DecodeName succeeds on the full name
+// (Try 1), the result is complete.  If it only succeeds on the baseName
+// (Try 2), check whether the decoded result already has an extension —
+// if yes, the stripped ext was a custom suffix (don't append); if no,
+// it was a V1-preserved extension (append it).
 func tryDecodeName(name, password, encType string) string {
+	// Try 1: entire name is encrypted (V2 format, suffix already stripped)
+	if decoded := encryption.DecodeName(password, encType, name); decoded != "" {
+		return decoded
+	}
+
+	// Try 2: baseName is encrypted, extension preserved (V1 format)
 	ext := filepath.Ext(name)
+	if ext == "" {
+		return ""
+	}
 	baseName := strings.TrimSuffix(name, ext)
 	if baseName == "" {
 		return ""
 	}
 	decoded := encryption.DecodeName(password, encType, baseName)
-	if decoded != "" {
-		return decoded
+	if decoded == "" {
+		return ""
 	}
-	return ""
+
+	// Only append the stripped extension if the decoded result doesn't
+	// already have one.  V1 baseName decode → "video" (no ext) → append.
+	// V2 with unknown custom suffix → "video.mp4" (has ext) → don't append.
+	if filepath.Ext(decoded) == "" {
+		return decoded + ext
+	}
+	return decoded
 }
 
 // ---------------------------------------------------------------------------
 // Encryption type auto-detection
 // ---------------------------------------------------------------------------
 
-// detectEncType reads the first 6 bytes to identify V2 encryption type.
-// V2 headers contain magic: AECTR2, CHC202, RC4MD2.
-// For V1 files (no header), tries filename CRC6 with each type.
-// Falls back to aesctr.
+// detectEncType returns the detected encryption type. For details about
+// which detection method was used, call detectEncTypeVerbose.
 func detectEncType(filePath, password string) encryption.EncType {
+	t, _ := detectEncTypeVerbose(filePath, password)
+	return t
+}
+
+// detectEncTypeVerbose returns the encryption type and a human-readable
+// detection method string.  Detection cascade:
+//
+//  1. V2 magic bytes (AECTR2/CHC202/RC4MD2) — 100% reliable
+//  2. Filename CRC6 — ~98.4% reliable per algorithm (1/64 false positive)
+//  3. Content file signature — decrypt first 256 bytes, check magic bytes
+//  4. Default to aesctr — uncertain, caller should warn
+func detectEncTypeVerbose(filePath, password string) (encryption.EncType, string) {
 	header := make([]byte, 6)
 	f, err := os.Open(filePath)
 	if err != nil {
-		return encryption.EncTypeAESCTR
+		return encryption.EncTypeAESCTR, "default"
 	}
 	n, _ := io.ReadFull(f, header)
 	f.Close()
 
+	// Layer 1: V2 magic bytes
 	if n >= 6 {
 		switch string(header[:6]) {
 		case "AECTR2":
-			return encryption.EncTypeAESCTR
+			return encryption.EncTypeAESCTR, "v2-magic"
 		case "CHC202":
-			return encryption.EncTypeChaCha20
+			return encryption.EncTypeChaCha20, "v2-magic"
 		case "RC4MD2":
-			return encryption.EncTypeRC4MD5
+			return encryption.EncTypeRC4MD5, "v2-magic"
 		}
 	}
 
-	// V1 file: try filename decode with each type
+	// Layer 2: V1 filename CRC6
 	fileName := filepath.Base(filePath)
 	workName := fileName
 	for _, s := range knownSuffixes {
@@ -417,19 +584,171 @@ func detectEncType(filePath, password string) encryption.EncType {
 			break
 		}
 	}
+
+	// Try both the full workName (no extension — V2 with suffix stripped)
+	// and the baseName (V1 style: encrypted baseName + plaintext extension).
 	ext := filepath.Ext(workName)
 	baseName := strings.TrimSuffix(workName, ext)
 
-	if baseName != "" {
+	for _, candidate := range []string{workName, baseName} {
+		if candidate == "" {
+			continue
+		}
 		for _, t := range allEncTypes {
-			if encryption.DecodeName(password, t, baseName) != "" {
-				return encryption.EncType(t)
+			if encryption.DecodeName(password, t, candidate) != "" {
+				return encryption.EncType(t), "filename-crc6"
 			}
 		}
 	}
 
-	return encryption.EncTypeAESCTR
+	// Layer 3: Content-based detection — decrypt a sample and check signatures
+	if t, ok := detectEncTypeByContent(filePath, password); ok {
+		return t, "content-signature"
+	}
+
+	// Layer 4: give up — default to aesctr
+	return encryption.EncTypeAESCTR, "default"
 }
+
+// detectEncTypeByContent reads the first 256 bytes, decrypts them with each
+// algorithm, and checks whether the decrypted data starts with a known file
+// signature (MP4 ftyp, ZIP PK, PDF %PDF, etc.).  This catches V1 files whose
+// filenames are not encrypted or whose CRC6 didn't match.
+func detectEncTypeByContent(filePath, password string) (encryption.EncType, bool) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return encryption.EncTypeAESCTR, false
+	}
+	fileSize := info.Size()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return encryption.EncTypeAESCTR, false
+	}
+	defer f.Close()
+
+	sample := make([]byte, 256)
+	n, err := io.ReadFull(f, sample)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return encryption.EncTypeAESCTR, false
+	}
+	sample = sample[:n]
+	if n < 4 {
+		return encryption.EncTypeAESCTR, false
+	}
+
+	for _, encType := range allEncTypes {
+		reader, _, err := encryption.AutoDecryptReader(
+			password, encryption.EncType(encType),
+			bytes.NewReader(sample), fileSize,
+		)
+		if err != nil {
+			continue
+		}
+		decrypted := make([]byte, 64)
+		decN, _ := io.ReadFull(reader, decrypted)
+		decrypted = decrypted[:decN]
+
+		if decN > 0 && hasKnownFileSignature(decrypted) {
+			return encryption.EncType(encType), true
+		}
+	}
+
+	return encryption.EncTypeAESCTR, false
+}
+
+// ---------------------------------------------------------------------------
+// Progress reporting & disk space
+// ---------------------------------------------------------------------------
+
+// shouldShowProgress returns true if progress should be auto-displayed.
+// Large files (> progressThreshold) always get progress; small files only in verbose.
+func shouldShowProgress(fileSize int64, verbose bool) bool {
+	return verbose || fileSize > progressThreshold
+}
+
+// copyWithProgress streams from src to dst, reporting throughput and ETA to
+// stderr every progressInterval.  Uses the provided buffer for I/O.
+func copyWithProgress(dst io.Writer, src io.Reader, buf []byte, totalSize int64, name string, showProgress bool) (int64, error) {
+	var written int64
+	start := time.Now()
+	lastReport := start
+
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw < 0 || nr < nw {
+				return written, fmt.Errorf("invalid write: %d/%d", nw, nr)
+			}
+			if ew != nil {
+				return written + int64(nw), ew
+			}
+			written += int64(nw)
+			if nr != nw {
+				return written, fmt.Errorf("short write: %d != %d", nw, nr)
+			}
+
+			if showProgress {
+				now := time.Now()
+				if now.Sub(lastReport) >= progressInterval {
+					lastReport = now
+					printProgress(name, written, totalSize, start)
+				}
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				if showProgress && written > 0 {
+					printProgress(name, written, totalSize, start)
+					fmt.Fprintln(os.Stderr) // newline after progress
+				}
+				return written, nil // EOF is expected, not an error
+			}
+			return written, er
+		}
+	}
+}
+
+// printProgress writes a single-line progress report to stderr.
+func printProgress(name string, written, total int64, start time.Time) {
+	elapsed := time.Since(start).Seconds()
+	if elapsed < 0.1 {
+		return
+	}
+	speed := float64(written) / elapsed
+	base := filepath.Base(name)
+
+	if total > 0 {
+		pct := float64(written) / float64(total) * 100
+		remaining := total - written
+		var eta string
+		if speed > 0 {
+			etaSec := float64(remaining) / speed
+			eta = formatDuration(etaSec)
+		} else {
+			eta = "—"
+		}
+		fmt.Fprintf(os.Stderr, "\r  %s: %s / %s (%.0f%%) | %s/s | ETA: %s   ",
+			base, formatBytes(written), formatBytes(total), pct,
+			formatBytes(int64(speed)), eta)
+	} else {
+		fmt.Fprintf(os.Stderr, "\r  %s: %s | %s/s   ",
+			base, formatBytes(written), formatBytes(int64(speed)))
+	}
+}
+
+// formatDuration turns seconds into a human-readable duration string.
+func formatDuration(sec float64) string {
+	if sec < 60 {
+		return fmt.Sprintf("%.0fs", sec)
+	}
+	m := int(sec) / 60
+	s := int(sec) % 60
+	return fmt.Sprintf("%dm%ds", m, s)
+}
+
+// checkDiskSpace is implemented in disk_unix.go / disk_windows.go (build-tagged).
 
 // ---------------------------------------------------------------------------
 // File processing (encrypt / decrypt)
@@ -459,6 +778,18 @@ func processOne(srcPath, dstPath string, f *flags, command string) (int64, error
 	defer out.Close()
 
 	buf := make([]byte, 512*1024)
+	showProgress := shouldShowProgress(fileSize, f.verbose)
+
+		if fileSize > 1<<30 { // > 1 GiB
+		encTypeForWarn := f.encType
+		if command == "dec" && (encTypeForWarn == "auto" || encTypeForWarn == "") {
+			// For decrypt, we don't know the type yet — check after detection
+		} else if encTypeForWarn == "rc4md5" {
+			warnf("Warning: RC4-MD5 is ~10-50x slower than AES-CTR/ChaCha20.\n"+
+				"  For a %s file, expect ~%s on a single core. Consider -t aesctr or -t chacha20.\n",
+				formatBytes(fileSize), formatDuration(float64(fileSize)/30/1024/1024))
+		}
+	}
 
 	if command == "enc" {
 		enc, err := encryption.NewLatestContentEncryptor(f.password, f.encType, fileSize)
@@ -469,21 +800,42 @@ func processOne(srcPath, dstPath string, f *flags, command string) (int64, error
 		if err != nil {
 			return 0, fmt.Errorf("encrypt reader: %w", err)
 		}
-		return io.CopyBuffer(out, reader, buf)
+		return copyWithProgress(out, reader, buf, fileSize, srcPath, showProgress)
 	}
 
 	// Decrypt: determine encType (auto-detect if not specified)
 	encType := f.encType
+	detectMethod := "user-specified"
 	if encType == "auto" || encType == "" {
-		encType = string(detectEncType(srcPath, f.password))
+		var t encryption.EncType
+		t, detectMethod = detectEncTypeVerbose(srcPath, f.password)
+		encType = string(t)
 	}
+
+	if detectMethod == "default" {
+		// All detection methods failed — the file might use a non-aesctr
+		// algorithm.  Warn the user so they can try -t explicitly.
+		warnf("Warning: could not auto-detect encryption type for %s\n"+
+			"  (no V2 header, filename CRC6 failed, no recognized file signature)\n"+
+			"  Defaulting to aesctr. If the output is corrupt, try: -t chacha20 or -t rc4md5\n",
+			filepath.Base(srcPath))
+	}
+
+	// RC4-MD5 warning for decrypt mode (encType known after detection)
+	if fileSize > 1<<30 && encType == "rc4md5" {
+		warnf("Warning: RC4-MD5 is ~10-50x slower than AES-CTR/ChaCha20.\n"+
+			"  For a %s file, expect ~%s on a single core.\n",
+			formatBytes(fileSize), formatDuration(float64(fileSize)/30/1024/1024))
+	}
+
+	logf(f.verbose, "  detected: %s via %s\n", encType, detectMethod)
 
 	// AutoDecryptReader handles V1/V2 header detection automatically
 	reader, _, err := encryption.AutoDecryptReader(f.password, encryption.EncType(encType), in, fileSize)
 	if err != nil {
 		return 0, fmt.Errorf("create decryptor: %w", err)
 	}
-	return io.CopyBuffer(out, reader, buf)
+	return copyWithProgress(out, reader, buf, fileSize, srcPath, showProgress)
 }
 
 // ---------------------------------------------------------------------------
@@ -573,10 +925,11 @@ func parseFlags(command string) *flags {
 	fs.BoolVar(&f.encName, "enc-name", false, "enc: encrypt filenames")
 	fs.StringVar(&f.suffix, "s", ".bin", `enc: suffix (default .bin, "" = none)`)
 	fs.StringVar(&f.suffix, "suffix", ".bin", "enc: suffix to append")
-	fs.IntVar(&f.workers, "w", 1, "number of parallel workers for batch mode")
-	fs.IntVar(&f.workers, "workers", 1, "number of parallel workers")
+	fs.IntVar(&f.workers, "w", 0, "parallel workers for batch (default: NumCPU)")
+	fs.IntVar(&f.workers, "workers", 0, "parallel workers for batch (default: NumCPU)")
 	fs.BoolVar(&f.verbose, "v", false, "verbose output")
 	fs.BoolVar(&f.verbose, "verbose", false, "verbose output")
+	fs.StringVar(&f.logFile, "log", "", "write detailed error log to this file")
 
 	_ = fs.Parse(os.Args[2:])
 	return f
@@ -602,20 +955,22 @@ Encrypt flags:
   -t, --type <algo>      aesctr (default) | chacha20 | rc4md5
   -n, --enc-name         Encrypt filenames (matches proxy's ConvertRealNameWithSuffix)
   -s, --suffix <str>     Encrypted suffix (default: .bin, "" = none)
-  -w, --workers <n>      Parallel workers for batch mode (default: 1)
+  -w, --workers <n>      Parallel workers for batch (default: NumCPU)
+      --log <path>       Write detailed error log to file
 
 Decrypt flags:
   -p, --password <str>   Password — the only thing you need
   -i, --input <path>     Input file or directory (required)
   -o, --output <path>    Output path (default: alongside source)
   -t, --type <algo>      auto (default) | aesctr | chacha20 | rc4md5
-  -w, --workers <n>      Parallel workers for batch mode (default: 1)
+  -w, --workers <n>      Parallel workers for batch (default: NumCPU)
   -v, --verbose          Show progress per file
+      --log <path>       Write detailed error log (detection, warnings, errors)
 
 Decrypt auto-detection:
   - V1/V2:     Auto-detected from file header (V2 has 32-byte header)
   - Type:      Auto-detected from V2 magic bytes (AECTR2/CHC202/RC4MD2)
-               V1 fallback: tries filename CRC6, then defaults to aesctr
+               V1 fallback cascade: filename CRC6 → content file signature → aesctr
   - Suffix:    .bin/.enc/.dat always stripped; others detected via CRC6
   - Filename:  Auto-decrypted if CRC6 verification passes
 
@@ -639,6 +994,9 @@ Examples:
 
   # No suffix
   encrypt-tool enc -p mypass -i file.zip -s ""
+
+  # Batch decrypt with error log for troubleshooting
+  encrypt-tool dec -p mypass -i ./encrypted -o ./decrypted --log errors.log -v -w 4
 `, version)
 }
 
@@ -657,6 +1015,29 @@ func logf(verbose bool, format string, args ...interface{}) {
 	if verbose {
 		fmt.Fprintf(os.Stderr, format, args...)
 	}
+	if logHandle != nil {
+		logLine(format, args...)
+	}
+}
+
+// logLine writes a timestamped line to the log file (if --log was used).
+func logLine(format string, args ...interface{}) {
+	if logHandle == nil {
+		return
+	}
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(logHandle, "[%s] %s\n", ts, strings.TrimRight(msg, "\n"))
+}
+
+// warnf prints a warning to stderr and the log file.
+func warnf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, args...)
+	if logHandle != nil {
+		msg := fmt.Sprintf(format, args...)
+		msg = strings.TrimPrefix(msg, "Warning: ")
+		logLine("WARNING: %s", strings.TrimRight(msg, "\n"))
+	}
 }
 
 func formatBytes(b int64) string {
@@ -673,6 +1054,11 @@ func formatBytes(b int64) string {
 }
 
 func fatal(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+	if logHandle != nil {
+		logLine("FATAL: %s", msg)
+		logHandle.Close()
+	}
 	os.Exit(1)
 }
