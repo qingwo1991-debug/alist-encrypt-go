@@ -136,25 +136,32 @@ jobs:
           - goos: linux
             goarch: amd64
             name: alist-encrypt-go-linux-amd64
+            tool_name: encrypt-tool-linux-amd64
           - goos: linux
             goarch: arm64
             name: alist-encrypt-go-linux-arm64
+            tool_name: encrypt-tool-linux-arm64
           - goos: linux
             goarch: arm
             goarm: '7'
             name: alist-encrypt-go-linux-armv7
+            tool_name: encrypt-tool-linux-armv7
           - goos: windows
             goarch: amd64
             name: alist-encrypt-go-windows-amd64.exe
+            tool_name: encrypt-tool-windows-amd64.exe
           - goos: windows
             goarch: arm64
             name: alist-encrypt-go-windows-arm64.exe
+            tool_name: encrypt-tool-windows-arm64.exe
           - goos: darwin
             goarch: amd64
             name: alist-encrypt-go-darwin-amd64
+            tool_name: encrypt-tool-darwin-amd64
           - goos: darwin
             goarch: arm64
             name: alist-encrypt-go-darwin-arm64
+            tool_name: encrypt-tool-darwin-arm64
 
     steps:
       - name: Checkout repository
@@ -167,7 +174,7 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Build binary
+      - name: Build binaries
         env:
           CGO_ENABLED: '0'
           GOOS: ${{ matrix.goos }}
@@ -175,12 +182,20 @@ jobs:
           GOARM: ${{ matrix.goarm }}
         run: |
           go build -ldflags="-w -s" -o "${{ matrix.name }}" ./cmd/server
+          go build -ldflags="-w -s" -o "${{ matrix.tool_name }}" ./cmd/encrypt-tool
 
-      - name: Upload binary artifact
+      - name: Upload server artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}
+          if-no-files-found: error
+
+      - name: Upload encrypt-tool artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.tool_name }}
+          path: ${{ matrix.tool_name }}
           if-no-files-found: error
 
   build-mobile-aar:

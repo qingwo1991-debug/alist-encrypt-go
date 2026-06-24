@@ -8,6 +8,7 @@ alist-encrypt-go
 
 # Test binary
 *.test
+test_video/
 
 # Output of the go coverage tool
 *.out
