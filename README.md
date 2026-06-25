@@ -88,6 +88,7 @@ docker run -d \
 | **智能学习** | 自动探测各存储的 Range 兼容性并缓存，支持并发控制和冷却时间 |
 | **数据库** | 默认 BoltDB 文件存储；可选 MySQL 持久化 Range 缓存与文件元数据 |
 | **部署** | 单二进制、多架构 Docker（linux/amd64, linux/arm64）、Android APK |
+| **CLI 工具** | 独立加解密命令行工具 encrypt-tool，支持单文件/批量、文件名加密、自动检测 |
 | **管理界面** | Vue 3 管理面板：Alist 配置、WebDAV 设置、本地加解密、在线加密规则、文件迁移 |
 
 ## 加密算法
@@ -154,6 +155,32 @@ flutter build apk --release --split-per-abi
 ```
 
 详细构建说明请参考 [mobile/BUILD_GUIDE.md](mobile/BUILD_GUIDE.md)。
+
+### 3. 独立加解密 CLI 工具
+
+命令行加解密工具，适合批量处理和脚本调用。加密产物为 V2 格式，与代理服务完全互通，可直接上传到 Alist 供在线解密和流式播放。
+
+```bash
+# 编译
+go build -o encrypt-tool ./cmd/encrypt-tool/
+
+# 加密单个文件（输出追加 .bin 后缀）
+encrypt-tool enc -p mypass -i video.mp4
+
+# 自动化脚本：从受限权限文件读取密码，避免出现在进程参数中
+encrypt-tool enc --password-file /etc/encrypted-mover/key -i video.mp4
+
+# 解密（全自动检测，只需密码）
+encrypt-tool dec -p mypass -i video.mp4.bin
+
+# 批量加密文件夹（含文件名加密）
+encrypt-tool enc -p mypass -i ./videos -o ./encrypted -n -w 4
+
+# 批量解密文件夹，带错误日志
+encrypt-tool dec -p mypass -i ./encrypted -o ./decrypted --log errors.log -v
+```
+
+详细用法请参考 [encrypt-tool 文档](docs/encrypt-tool.md)。
 
 ## 源码构建（独立后端）
 

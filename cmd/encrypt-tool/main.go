@@ -1,7 +1,7 @@
 // Package main provides a standalone CLI tool for encrypting/decrypting files.
 //
-//	encrypt-tool enc -p <password> -i <input> [-o output] [-t aesctr] [-n] [-s .bin] [-w 4] [-v]
-//	encrypt-tool dec -p <password> -i <input> [-o output] [-w 4] [-v]
+//	encrypt-tool enc --password-file <path> -i <input> [-o output] [-t aesctr] [-n] [-s .bin] [-w 4] [-v]
+//	encrypt-tool dec --password-file <path> -i <input> [-o output] [-w 4] [-v]
 //
 // Encryption produces V2-format files fully compatible with the alist-encrypt-go proxy:
 // content uses NewLatestContentEncryptor (32-byte V2 header), filenames use the same
@@ -29,7 +29,7 @@ import (
 	"github.com/alist-encrypt-go/internal/encryption"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 // verifySampleSize is how many bytes we read back after encryption to verify correctness.
 const verifySampleSize = 4096
@@ -58,24 +58,24 @@ var knownFileSignatures = []struct {
 	offset int
 	magic  []byte
 }{
-	{4, []byte("ftyp")},                              // MP4/MOV/HEIF/3GP
-	{0, []byte{0x1A, 0x45, 0xDF, 0xA3}},              // MKV/WebM (EBML)
-	{0, []byte("RIFF")},                               // AVI/WAV
-	{0, []byte{0x50, 0x4B, 0x03, 0x04}},               // ZIP/DOCX/XLSX/APK
-	{0, []byte("Rar!\x1a\x07")},                        // RAR
-	{0, []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}},   // 7z
-	{0, []byte{0x1F, 0x8B, 0x08}},                       // GZIP
-	{0, []byte("%PDF")},                                 // PDF
-	{0, []byte{0x89, 0x50, 0x4E, 0x47}},               // PNG
-	{0, []byte{0xFF, 0xD8, 0xFF}},                      // JPEG
-	{0, []byte("GIF87a")},                              // GIF
-	{0, []byte("GIF89a")},                              // GIF
-	{0, []byte("ID3")},                                  // MP3 (ID3 tag)
-	{0, []byte("fLaC")},                                 // FLAC
-	{0, []byte("OggS")},                                 // OGG
-	{0, []byte{0xD0, 0xCF, 0x11, 0xE0}},               // MS Office legacy (doc/xls/ppt)
-	{0, []byte{0x7F, 0x45, 0x4C, 0x46}},               // ELF binary
-	{0, []byte("BM")},                                  // BMP (2 bytes — weaker)
+	{4, []byte("ftyp")},                             // MP4/MOV/HEIF/3GP
+	{0, []byte{0x1A, 0x45, 0xDF, 0xA3}},             // MKV/WebM (EBML)
+	{0, []byte("RIFF")},                             // AVI/WAV
+	{0, []byte{0x50, 0x4B, 0x03, 0x04}},             // ZIP/DOCX/XLSX/APK
+	{0, []byte("Rar!\x1a\x07")},                     // RAR
+	{0, []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}}, // 7z
+	{0, []byte{0x1F, 0x8B, 0x08}},                   // GZIP
+	{0, []byte("%PDF")},                             // PDF
+	{0, []byte{0x89, 0x50, 0x4E, 0x47}},             // PNG
+	{0, []byte{0xFF, 0xD8, 0xFF}},                   // JPEG
+	{0, []byte("GIF87a")},                           // GIF
+	{0, []byte("GIF89a")},                           // GIF
+	{0, []byte("ID3")},                              // MP3 (ID3 tag)
+	{0, []byte("fLaC")},                             // FLAC
+	{0, []byte("OggS")},                             // OGG
+	{0, []byte{0xD0, 0xCF, 0x11, 0xE0}},             // MS Office legacy (doc/xls/ppt)
+	{0, []byte{0x7F, 0x45, 0x4C, 0x46}},             // ELF binary
+	{0, []byte("BM")},                               // BMP (2 bytes — weaker)
 }
 
 // hasKnownFileSignature checks whether the given decrypted bytes start with
@@ -92,15 +92,16 @@ func hasKnownFileSignature(data []byte) bool {
 
 // flags holds all parsed command-line options.
 type flags struct {
-	password string
-	input    string
-	output   string
-	encType  string // "auto" for dec; "aesctr"/"chacha20"/"rc4md5" for enc
-	encName  bool   // enc only: encrypt filenames
-	suffix   string // enc only: suffix to append
-	workers  int    // parallel workers for batch mode
-	verbose  bool
-	logFile  string // --log: path to error log file
+	password     string
+	passwordFile string // read password from file instead of exposing it in process arguments
+	input        string
+	output       string
+	encType      string // "auto" for dec; "aesctr"/"chacha20"/"rc4md5" for enc
+	encName      bool   // enc only: encrypt filenames
+	suffix       string // enc only: suffix to append
+	workers      int    // parallel workers for batch mode
+	verbose      bool
+	logFile      string // --log: path to error log file
 }
 
 func main() {
@@ -126,6 +127,10 @@ func main() {
 
 func run(command string) {
 	f := parseFlags(command)
+
+	if err := loadPassword(f); err != nil {
+		fatal("%s", err)
+	}
 
 	// Open error log file if requested.
 	if f.logFile != "" {
@@ -155,9 +160,6 @@ func run(command string) {
 		warnf("Note: -w %d > %d CPU cores; extra workers may reduce throughput\n", f.workers, cpu)
 	}
 
-	if f.password == "" {
-		fatal("-p/--password is required")
-	}
 	if f.input == "" {
 		fatal("-i/--input is required")
 	}
@@ -335,6 +337,7 @@ func runBatch(command string, f *flags) {
 //	e.g. oceans.mp4 → EncodeName("oceans.mp4").bin
 //
 // Without -n: original_name + suffix
+//
 //	e.g. oceans.mp4 → oceans.mp4.bin
 //
 // Decryption: auto-detect everything — strip suffix, try CRC6 decode on filename.
@@ -418,11 +421,13 @@ func resolveOutputPath(srcPath string, f *flags, command, baseDir string) (strin
 // encryptOutputName produces the encrypted filename.
 //
 // With filename encryption (-n):
-//   EncodeName(password, encType, fullFileName) + suffix
-//   This matches the proxy's ConvertRealNameWithSuffix exactly.
+//
+//	EncodeName(password, encType, fullFileName) + suffix
+//	This matches the proxy's ConvertRealNameWithSuffix exactly.
 //
 // Without filename encryption:
-//   originalFileName + suffix
+//
+//	originalFileName + suffix
 func encryptOutputName(fileName string, f *flags) string {
 	suffix := f.suffix
 	if suffix != "" && !strings.HasPrefix(suffix, ".") {
@@ -494,13 +499,13 @@ func autoDecryptOutputName(fileName, srcPath string, f *flags) string {
 //
 // Two filename formats are supported:
 //
-//   V2 (with or without suffix): EncodeName(fullName) → "XyZ…G"
-//     The entire filename was encrypted, so DecodeName returns the complete
-//     original name (including extension). No ext appending needed.
+//	V2 (with or without suffix): EncodeName(fullName) → "XyZ…G"
+//	  The entire filename was encrypted, so DecodeName returns the complete
+//	  original name (including extension). No ext appending needed.
 //
-//   V1 (no suffix): EncodeName(baseName) → "XyZ…O" + ".mp4"
-//     Only the baseName was encrypted; the extension is plaintext and must
-//     be appended back after decoding.
+//	V1 (no suffix): EncodeName(baseName) → "XyZ…O" + ".mp4"
+//	  Only the baseName was encrypted; the extension is plaintext and must
+//	  be appended back after decoding.
 //
 // The heuristic for distinguishing: if DecodeName succeeds on the full name
 // (Try 1), the result is complete.  If it only succeeds on the baseName
@@ -780,7 +785,7 @@ func processOne(srcPath, dstPath string, f *flags, command string) (int64, error
 	buf := make([]byte, 512*1024)
 	showProgress := shouldShowProgress(fileSize, f.verbose)
 
-		if fileSize > 1<<30 { // > 1 GiB
+	if fileSize > 1<<30 { // > 1 GiB
 		encTypeForWarn := f.encType
 		if command == "dec" && (encTypeForWarn == "auto" || encTypeForWarn == "") {
 			// For decrypt, we don't know the type yet — check after detection
@@ -915,6 +920,7 @@ func parseFlags(command string) *flags {
 
 	fs.StringVar(&f.password, "p", "", "encryption password (required)")
 	fs.StringVar(&f.password, "password", "", "encryption password (required)")
+	fs.StringVar(&f.passwordFile, "password-file", "", "read password from file (safer for scripts; mutually exclusive with --password)")
 	fs.StringVar(&f.input, "i", "", "input file or directory (required)")
 	fs.StringVar(&f.input, "input", "", "input file or directory (required)")
 	fs.StringVar(&f.output, "o", "", "output path (default: alongside source)")
@@ -935,6 +941,42 @@ func parseFlags(command string) *flags {
 	return f
 }
 
+// loadPassword resolves the password source after flag parsing.
+//
+// Password files commonly end with one editor-added newline. Remove exactly
+// one trailing LF or CRLF while preserving every other byte, including leading
+// and trailing spaces that may intentionally be part of the password.
+func loadPassword(f *flags) error {
+	if f.password != "" && f.passwordFile != "" {
+		return fmt.Errorf("--password and --password-file are mutually exclusive")
+	}
+	if f.passwordFile == "" {
+		if f.password == "" {
+			return fmt.Errorf("-p/--password or --password-file is required")
+		}
+		return nil
+	}
+
+	data, err := os.ReadFile(f.passwordFile)
+	if err != nil {
+		return fmt.Errorf("read password file: %w", err)
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return fmt.Errorf("password file contains a NUL byte")
+	}
+	if bytes.HasSuffix(data, []byte("\r\n")) {
+		data = data[:len(data)-2]
+	} else if bytes.HasSuffix(data, []byte("\n")) {
+		data = data[:len(data)-1]
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("password file is empty")
+	}
+
+	f.password = string(data)
+	return nil
+}
+
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `encrypt-tool %s - Standalone file encryption/decryption CLI
 
@@ -949,7 +991,9 @@ Commands:
   dec    Decrypt file(s) — fully automatic (V1/V2, type, suffix, filename)
 
 Encrypt flags:
-  -p, --password <str>   Password (required)
+  -p, --password <str>   Password (mutually exclusive with --password-file)
+      --password-file <path>
+                         Read password from file (recommended for scripts)
   -i, --input <path>     Input file or directory (required)
   -o, --output <path>    Output path (default: alongside source)
   -t, --type <algo>      aesctr (default) | chacha20 | rc4md5
@@ -959,7 +1003,9 @@ Encrypt flags:
       --log <path>       Write detailed error log to file
 
 Decrypt flags:
-  -p, --password <str>   Password — the only thing you need
+  -p, --password <str>   Password (mutually exclusive with --password-file)
+      --password-file <path>
+                         Read password from file (recommended for scripts)
   -i, --input <path>     Input file or directory (required)
   -o, --output <path>    Output path (default: alongside source)
   -t, --type <algo>      auto (default) | aesctr | chacha20 | rc4md5
@@ -979,6 +1025,9 @@ Verification:
   correctness. This catches password/algorithm issues before upload.
 
 Examples:
+  # Read password from a protected file (recommended for automation)
+  encrypt-tool enc --password-file /etc/encrypted-mover/key -i oceans.mp4
+
   # Encrypt single file → oceans.mp4.bin
   encrypt-tool enc -p mypass -i oceans.mp4
 

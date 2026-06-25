@@ -10,7 +10,7 @@ func TestNormalizeUserEncPaths(t *testing.T) {
 		"/p/personal_cloud/encrypt/*",
 		"/dav/personal_cloud/encrypt/*",
 		"/d/d/personal_cloud/encrypt/*",
-		"/duser_storage/encrypt/*",
+		"/d/user_storage/encrypt/*",
 		"",
 	}
 

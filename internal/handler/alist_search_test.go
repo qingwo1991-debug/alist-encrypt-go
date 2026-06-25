@@ -337,7 +337,7 @@ func TestHandleFsSearchRecursiveDecryptsDisplayNames(t *testing.T) {
 	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
 
 	rootDirRaw := converter.ToRealName("season1")
-	leafDisplay := "sample_420HOI-291.mp4"
+	leafDisplay := "sample_video_001.mp4"
 	leafRaw := converter.ToRealName(leafDisplay)
 
 	mux := http.NewServeMux()
@@ -405,7 +405,7 @@ func TestHandleFsSearchRecursiveDecryptsDisplayNames(t *testing.T) {
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/personal_cloud","path":"/personal_cloud/encrypt","keywords":"hhd800","scope":2,"page":1,"per_page":20}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/personal_cloud","path":"/personal_cloud/encrypt","keywords":"sample","scope":2,"page":1,"per_page":20}`))
 	rec := httptest.NewRecorder()
 	handler.HandleFsSearch(rec, req)
 
@@ -453,7 +453,7 @@ func TestHandleFsSearchScopeZeroDoesNotRecurse(t *testing.T) {
 	}
 	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
 	rootDirRaw := converter.ToRealName("season1")
-	leafDisplay := "sample_420HOI-291.mp4"
+	leafDisplay := "sample_video_001.mp4"
 	leafRaw := converter.ToRealName(leafDisplay)
 
 	mux := http.NewServeMux()
@@ -506,7 +506,7 @@ func TestHandleFsSearchScopeZeroDoesNotRecurse(t *testing.T) {
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/personal_cloud/encrypt","keywords":"hhd800","scope":0,"page":1,"per_page":20}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/personal_cloud/encrypt","keywords":"sample","scope":0,"page":1,"per_page":20}`))
 	rec := httptest.NewRecorder()
 	handler.HandleFsSearch(rec, req)
 
@@ -537,7 +537,7 @@ func TestHandleFsSearchRootSearchesEncryptedRoots(t *testing.T) {
 		EncPath:   []string{"/personal_cloud/encrypt/*"},
 	}
 	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
-	leafDisplay := "sample_420HOI-291.mp4"
+	leafDisplay := "sample_video_001.mp4"
 	leafRaw := converter.ToRealName(leafDisplay)
 
 	mux := http.NewServeMux()
@@ -573,7 +573,7 @@ func TestHandleFsSearchRootSearchesEncryptedRoots(t *testing.T) {
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"hhd","scope":0,"page":1,"per_page":100,"password":""}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"vid","scope":0,"page":1,"per_page":100,"password":""}`))
 	rec := httptest.NewRecorder()
 	handler.HandleFsSearch(rec, req)
 
@@ -611,7 +611,7 @@ func TestResolveRemoveNameAvoidsDoubleEncryption(t *testing.T) {
 		EncPath:   []string{"/encrypt/*"},
 	}
 	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
-	plain := "sample_420HOI-291.mp4"
+	plain := "sample_video_001.mp4"
 	encoded := converter.ToRealName(plain)
 
 	var capturedRemoveBody []byte
@@ -741,7 +741,7 @@ func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
 		EncPath:   []string{"/encrypt/*"},
 	}
 	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
-	leafDisplay := "sample_420HOI-291.mp4"
+	leafDisplay := "sample_video_001.mp4"
 	leafRaw := converter.ToRealName(leafDisplay)
 
 	mux := http.NewServeMux()
@@ -777,7 +777,7 @@ func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
 	defer srv.Close()
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
-	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"hhd","scope":0,"page":1,"per_page":100,"password":""}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"vid","scope":0,"page":1,"per_page":100,"password":""}`))
 	req.Header.Set("Authorization", "Bearer frontend-token")
 	req.Header.Set("Authorizetoken", "frontend-token")
 	rec := httptest.NewRecorder()

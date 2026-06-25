@@ -32,6 +32,10 @@ enc-webui/node_modules/
 data/
 config.json
 *.db
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
 
 # Log files
 log_*.txt

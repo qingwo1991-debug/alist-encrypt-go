@@ -42,7 +42,8 @@ encrypt-tool <command> [flags]
 
 | 参数 | 简写 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--password` | `-p` | （必填） | 加密/解密密码 |
+| `--password` | `-p` | 二选一 | 直接传入加密/解密密码；会出现在进程参数中 |
+| `--password-file` | — | 二选一 | 从文件读取密码，适合自动化脚本，与 `--password` 互斥 |
 | `--input` | `-i` | （必填） | 输入文件或目录路径 |
 | `--output` | `-o` | 源文件同目录 | 输出路径：文件、目录或不指定 |
 | `--workers` | `-w` | NumCPU | 批量模式并发工作线程数 |
@@ -159,6 +160,13 @@ encrypt-tool dec -p mypass -i ./encrypted -o ./decrypted --log errors.log -v
 ## 使用示例
 
 ```bash
+# 自动化场景推荐：密码文件仅允许 root 读取
+install -m 0600 /dev/null /etc/encrypted-mover/key
+read -rsp 'Encryption password: ' ENCRYPT_PASSWORD; echo
+printf '%s' "$ENCRYPT_PASSWORD" > /etc/encrypted-mover/key
+unset ENCRYPT_PASSWORD
+encrypt-tool enc --password-file /etc/encrypted-mover/key -i video.mp4
+
 # 加密单个文件（默认 aesctr，输出追加 .bin 后缀）
 encrypt-tool enc -p mypass -i video.mp4
 
@@ -186,6 +194,10 @@ encrypt-tool dec -p mypass -i ./encrypted -o ./decrypted --log errors.log -v -w 
 # 手动指定算法（跳过自动检测）
 encrypt-tool dec -p mypass -i video.mp4.bin -t chacha20
 ```
+
+`--password-file` 会移除文件末尾由编辑器追加的一组 `LF` 或 `CRLF`，
+但保留密码中的其他空格和换行。不要同时传入 `--password` 与
+`--password-file`。建议密码文件权限设置为 `0600`，且不要放入 Git 仓库。
 
 ## 与代理服务的兼容性
 

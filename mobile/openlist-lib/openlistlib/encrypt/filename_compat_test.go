@@ -6,282 +6,229 @@ import (
 	"testing"
 )
 
-// TestFilenameDecryptCompat 测试文件名解密兼容性
-// 使用用户提供的真实测试数据
+// TestFilenameDecryptCompat tests filename decryption compatibility.
+// Uses synthetic test data — no real passwords or filenames.
 func TestFilenameDecryptCompat(t *testing.T) {
 	password := "testpass123"
 	encType := EncTypeAESCTR
 
-	testCases := []struct {
-		cipherName string // 服务器上的加密文件名（不含扩展名）
-		plainName  string // 期望解密后的明文文件名
-	}{
-		{
-			cipherName: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y",
-			plainName:  "sample_PPX-024.mp4",
-		},
-		{
-			cipherName: "F6~klZ33OGXyIf03H",
-			plainName:  "waaa-458.mp4",
-		},
-		{
-			cipherName: "87kdQg0Y5VOWIUjiGUwG5GMHOZHtage-r",
-			plainName:  "sample_YMDS-195.mp4",
-		},
-		// 用户提供的谷歌云盘测试用例
-		{
-			cipherName: "cGlHlVLp5VOWIUjGG3H~5GUbQmRIO7tF5V+AFX--r",
-			plainName:  "sample_SONE-519_[4k].mkv",
-		},
+	// Generate cipher names at runtime so the test is self-consistent.
+	plainNames := []string{
+		"sample-video.mp4",
+		"document.pdf",
+		"photo_2024.jpg",
 	}
 
-	// 先打印 passwdOutward
-	passwdOutward := GetPasswdOutward(password, encType)
-	t.Logf("Password: %s", password)
-	t.Logf("EncType: %s", encType)
-	t.Logf("PasswdOutward: %s (len=%d)", passwdOutward, len(passwdOutward))
+	for _, plainName := range plainNames {
+		cipherName := EncodeName(password, encType, plainName)
+		if cipherName == "" {
+			t.Fatalf("EncodeName returned empty for %q", plainName)
+		}
 
-	for _, tc := range testCases {
-		t.Run(tc.cipherName, func(t *testing.T) {
-			// 测试解码
-			decoded := DecodeName(password, encType, tc.cipherName)
-			t.Logf("Cipher: %s", tc.cipherName)
-			t.Logf("Expected: %s", tc.plainName)
-			t.Logf("Decoded: %s", decoded)
-
-			if decoded != tc.plainName {
+		t.Run(plainName, func(t *testing.T) {
+			decoded := DecodeName(password, encType, cipherName)
+			if decoded != plainName {
 				t.Errorf("Decode mismatch!\n  Cipher: %s\n  Expected: %s\n  Got: %s",
-					tc.cipherName, tc.plainName, decoded)
+					cipherName, plainName, decoded)
 			}
 
-			// 如果解码成功，验证编码能否还原
-			if decoded != "" {
-				encoded := EncodeName(password, encType, decoded)
-				t.Logf("Re-encoded: %s", encoded)
-				if encoded != tc.cipherName {
-					t.Errorf("Encode mismatch!\n  Plain: %s\n  Expected cipher: %s\n  Got: %s",
-						decoded, tc.cipherName, encoded)
-				}
+			// Verify re-encoding produces the same cipher
+			reEncoded := EncodeName(password, encType, decoded)
+			if reEncoded != cipherName {
+				t.Errorf("Encode mismatch!\n  Plain: %s\n  Expected cipher: %s\n  Got: %s",
+					decoded, cipherName, reEncoded)
 			}
 		})
 	}
 }
 
-// TestFilenameDecryptWithStringEncType 测试使用字符串 "aesctr" 作为加密类型
-// 这模拟了实际配置中可能出现的情况
+// TestFilenameKnownSyntheticVectors protects filename compatibility without
+// embedding user passwords, private paths, or real media names. Unlike a
+// runtime-generated round trip, these constants detect accidental format changes.
+func TestFilenameKnownSyntheticVectors(t *testing.T) {
+	const password = "testpass123"
+	tests := []struct {
+		plain  string
+		cipher string
+	}{
+		{plain: "sample-video.mp4", cipher: "gMFVgb26CX9e9bQ-Cw1xUriiU"},
+		{plain: "document.pdf", cipher: "9bIGlq16BSvhgbYwi"},
+		{plain: "photo_2024.jpg", cipher: "gbp-lbIjtGraUH+Rgbgi4"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.plain, func(t *testing.T) {
+			if got := EncodeName(password, EncTypeAESCTR, tc.plain); got != tc.cipher {
+				t.Fatalf("EncodeName(%q) = %q, want fixed compatibility vector %q", tc.plain, got, tc.cipher)
+			}
+			if got := DecodeName(password, EncTypeAESCTR, tc.cipher); got != tc.plain {
+				t.Fatalf("DecodeName(%q) = %q, want %q", tc.cipher, got, tc.plain)
+			}
+		})
+	}
+}
+
+// TestFilenameDecryptWithStringEncType tests using string "aesctr" as encryption type,
+// simulating values read from JSON config.
 func TestFilenameDecryptWithStringEncType(t *testing.T) {
 	password := "testpass123"
-	// 模拟从 JSON 配置读取的字符串值
 	encTypeFromConfig := EncryptionType("aesctr")
 
-	testCases := []struct {
-		cipherName string
-		plainName  string
-	}{
-		{
-			cipherName: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y",
-			plainName:  "sample_PPX-024.mp4",
-		},
-		{
-			cipherName: "F6~klZ33OGXyIf03H",
-			plainName:  "waaa-458.mp4",
-		},
+	plainName := "sample-video.mp4"
+	cipherName := EncodeName(password, encTypeFromConfig, plainName)
+	if cipherName == "" {
+		t.Fatalf("EncodeName returned empty for %q", plainName)
 	}
 
+	// Compare passwdOutward with const version
 	passwdOutward := GetPasswdOutward(password, encTypeFromConfig)
-	t.Logf("EncType from config: %q", encTypeFromConfig)
-	t.Logf("PasswdOutward: %s", passwdOutward)
-
-	// 对比使用常量的结果
 	passwdOutwardConst := GetPasswdOutward(password, EncTypeAESCTR)
-	t.Logf("PasswdOutward (const): %s", passwdOutwardConst)
-	t.Logf("Match: %v", passwdOutward == passwdOutwardConst)
+	if passwdOutward != passwdOutwardConst {
+		t.Errorf("passwdOutward mismatch between string and const encType")
+	}
 
-	for _, tc := range testCases {
-		t.Run(tc.cipherName, func(t *testing.T) {
-			decoded := DecodeName(password, encTypeFromConfig, tc.cipherName)
-			t.Logf("Cipher: %s", tc.cipherName)
-			t.Logf("Expected: %s", tc.plainName)
-			t.Logf("Decoded: %s", decoded)
-
-			if decoded != tc.plainName {
-				t.Errorf("Decode mismatch with string encType!\n  Cipher: %s\n  Expected: %s\n  Got: %s",
-					tc.cipherName, tc.plainName, decoded)
-			}
-		})
+	decoded := DecodeName(password, encTypeFromConfig, cipherName)
+	if decoded != plainName {
+		t.Errorf("Decode mismatch with string encType!\n  Cipher: %s\n  Expected: %s\n  Got: %s",
+			cipherName, plainName, decoded)
 	}
 }
 
-// TestFilenameEncryptCompat 测试文件名加密兼容性
+// TestFilenameEncryptCompat tests filename encryption compatibility.
 func TestFilenameEncryptCompat(t *testing.T) {
 	password := "testpass123"
 	encType := EncTypeAESCTR
 
-	testCases := []struct {
-		plainName  string
-		cipherName string
-	}{
-		{
-			plainName:  "sample_PPX-024.mp4",
-			cipherName: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y",
-		},
-		{
-			plainName:  "waaa-458.mp4",
-			cipherName: "F6~klZ33OGXyIf03H",
-		},
-		{
-			plainName:  "sample_YMDS-195.mp4",
-			cipherName: "87kdQg0Y5VOWIUjiGUwG5GMHOZHtage-r",
-		},
+	plainNames := []string{
+		"sample-video.mp4",
+		"document.pdf",
+		"photo_2024.jpg",
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.plainName, func(t *testing.T) {
-			encoded := EncodeName(password, encType, tc.plainName)
-			t.Logf("Plain: %s", tc.plainName)
-			t.Logf("Expected cipher: %s", tc.cipherName)
-			t.Logf("Encoded: %s", encoded)
+	for _, plainName := range plainNames {
+		t.Run(plainName, func(t *testing.T) {
+			encoded := EncodeName(password, encType, plainName)
+			if encoded == "" {
+				t.Fatalf("EncodeName returned empty for %q", plainName)
+			}
 
-			if encoded != tc.cipherName {
-				t.Errorf("Encode mismatch!\n  Plain: %s\n  Expected: %s\n  Got: %s",
-					tc.plainName, tc.cipherName, encoded)
+			// Verify roundtrip: decode should return original
+			decoded := DecodeName(password, encType, encoded)
+			if decoded != plainName {
+				t.Errorf("Roundtrip failed!\n  Plain: %s\n  Encoded: %s\n  Decoded: %s",
+					plainName, encoded, decoded)
 			}
 		})
 	}
 }
 
-// TestConvertShowNameCompat 测试 ConvertShowName 兼容性
+// TestConvertShowNameCompat tests ConvertShowName compatibility.
 func TestConvertShowNameCompat(t *testing.T) {
 	password := "testpass123"
 	encType := EncTypeAESCTR
 
-	// 服务器返回的完整文件名（密文+扩展名）
-	testCases := []struct {
-		serverFileName string // 服务器上的完整文件名
-		expectedShow   string // 期望的显示名
-	}{
-		{
-			serverFileName: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
-			expectedShow:   "sample_PPX-024.mp4",
-		},
-		{
-			serverFileName: "F6~klZ33OGXyIf03H.mp4",
-			expectedShow:   "waaa-458.mp4",
-		},
-		{
-			serverFileName: "87kdQg0Y5VOWIUjiGUwG5GMHOZHtage-r.mp4",
-			expectedShow:   "sample_YMDS-195.mp4",
-		},
+	plainNames := []string{
+		"sample-video.mp4",
+		"document.pdf",
+		"photo_2024.jpg",
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.serverFileName, func(t *testing.T) {
-			showName := ConvertShowName(password, encType, tc.serverFileName)
-			t.Logf("Server file: %s", tc.serverFileName)
-			t.Logf("Expected show: %s", tc.expectedShow)
-			t.Logf("Got show: %s", showName)
+	for _, plainName := range plainNames {
+		// Generate the server-side encrypted filename
+		cipherBase := EncodeName(password, encType, plainName)
+		ext := path.Ext(plainName)
+		serverFileName := cipherBase + ext
 
-			if showName != tc.expectedShow {
+		t.Run(serverFileName, func(t *testing.T) {
+			showName := ConvertShowName(password, encType, serverFileName)
+			if showName != plainName {
 				t.Errorf("ConvertShowName mismatch!\n  Input: %s\n  Expected: %s\n  Got: %s",
-					tc.serverFileName, tc.expectedShow, showName)
+					serverFileName, plainName, showName)
 			}
 		})
 	}
 }
 
-// TestMixBase64Compat 测试 MixBase64 编码解码
+// TestMixBase64Compat tests MixBase64 encode/decode roundtrip.
 func TestMixBase64Compat(t *testing.T) {
 	password := "testpass123"
 	encType := EncTypeAESCTR
 	passwdOutward := GetPasswdOutward(password, encType)
 
-	t.Logf("PasswdOutward: %s", passwdOutward)
-
 	mix64 := NewMixBase64(passwdOutward)
 
-	// 测试简单字符串
-	testStr := "test123"
-	encoded := mix64.Encode(testStr)
-	decoded, err := mix64.Decode(encoded)
-
-	t.Logf("Original: %s", testStr)
-	t.Logf("Encoded: %s", encoded)
-	t.Logf("Decoded: %s, err: %v", string(decoded), err)
-
-	if string(decoded) != testStr {
-		t.Errorf("MixBase64 roundtrip failed: got %s, want %s", string(decoded), testStr)
+	// Test simple strings
+	testStrings := []string{"test123", "hello_world", "file.mp4"}
+	for _, testStr := range testStrings {
+		encoded := mix64.Encode(testStr)
+		decoded, err := mix64.Decode(encoded)
+		if err != nil {
+			t.Errorf("MixBase64 decode error for %q: %v", testStr, err)
+		}
+		if string(decoded) != testStr {
+			t.Errorf("MixBase64 roundtrip failed: got %s, want %s", string(decoded), testStr)
+		}
 	}
 }
 
-// TestCRC6Compat 测试 CRC6 校验
+// TestCRC6Compat tests CRC6 checksum.
 func TestCRC6Compat(t *testing.T) {
 	password := "testpass123"
 	encType := EncTypeAESCTR
 	passwdOutward := GetPasswdOutward(password, encType)
 
-	// 测试 CRC6 校验
 	testData := "testEncodedString" + passwdOutward
 	checksum := crc6.Checksum([]byte(testData))
 	checkChar := MixBase64GetSourceChar(int(checksum))
 
-	t.Logf("Test data: %s", testData)
-	t.Logf("CRC6 checksum: %d", checksum)
-	t.Logf("Check char: %c", checkChar)
-
-	// 验证范围
+	// Verify range
 	if checksum > 63 {
 		t.Errorf("CRC6 checksum out of range: %d > 63", checksum)
 	}
+	_ = checkChar // just ensure it doesn't panic
 }
 
-// TestConvertRealNameBehavior 测试 ConvertRealName 的行为
-// 与 alist-encrypt 一致：总是加密（除非有 orig_ 前缀）
+// TestConvertRealNameBehavior tests ConvertRealName behavior:
+// always encrypts (unless orig_ prefix present).
 func TestConvertRealNameBehavior(t *testing.T) {
 	password := "testpass123"
 	encType := EncTypeAESCTR
 
+	// Generate expected cipher at runtime
+	plainName := "sample-video.mp4"
+	expectedCipher := EncodeName(password, encType, plainName) + ".mp4"
+
 	testCases := []struct {
 		name           string
 		inputPath      string
-		expectedOutput string // 期望输出的文件名
+		expectedOutput string // expected output filename, or "!ENCRYPTED!" for any encrypted result
 		description    string
 	}{
 		{
 			name:           "plain filename gets encrypted",
-			inputPath:      "/user_storage/encrypt/sample_PPX-024.mp4",
-			expectedOutput: "87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4", // 明文加密后的结果
-			description:    "明文文件名应该被加密",
+			inputPath:      "/storage/encrypt/sample-video.mp4",
+			expectedOutput: expectedCipher,
+			description:    "plain filename should be encrypted",
 		},
 		{
 			name:           "orig prefix stripped",
-			inputPath:      "/user_storage/encrypt/orig_test.mp4",
-			expectedOutput: "test.mp4", // orig_ 前缀被移除
-			description:    "orig_ 前缀的文件名去掉前缀后返回",
+			inputPath:      "/storage/encrypt/orig_test.mp4",
+			expectedOutput: "test.mp4",
+			description:    "orig_ prefix filename should have prefix removed",
 		},
 		{
 			name:           "encrypted-looking filename still gets encrypted",
-			inputPath:      "/user_storage/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
-			expectedOutput: "!ENCRYPTED!", // 即使看起来像加密名，也会被加密
-			description:    "即使文件名看起来像加密名，也应该被加密（与 alist-encrypt 一致）",
-		},
-		{
-			name:           "waaa filename gets encrypted",
-			inputPath:      "/user_storage/encrypt/waaa-458.mp4",
-			expectedOutput: "F6~klZ33OGXyIf03H.mp4", // 明文加密后的结果
-			description:    "waaa-458.mp4 应该被加密为 F6~klZ33OGXyIf03H.mp4",
+			inputPath:      "/storage/encrypt/" + expectedCipher,
+			expectedOutput: "!ENCRYPTED!",
+			description:    "even if filename looks encrypted, it should be encrypted again",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := ConvertRealName(password, encType, tc.inputPath)
-			t.Logf("Input path: %s", tc.inputPath)
-			t.Logf("Expected: %s", tc.expectedOutput)
-			t.Logf("Got: %s", result)
-			t.Logf("Description: %s", tc.description)
 
 			if tc.expectedOutput == "!ENCRYPTED!" {
-				// 特殊情况：只验证结果不是原文件名
 				inputFileName := path.Base(tc.inputPath)
 				if result == inputFileName {
 					t.Errorf("ConvertRealName failed! Filename was not encrypted!\n  Input: %s\n  Got: %s (same as input)\n  Description: %s",

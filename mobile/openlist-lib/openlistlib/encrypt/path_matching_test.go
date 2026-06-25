@@ -30,7 +30,7 @@ func TestPathMatchingWithoutLeadingSlash(t *testing.T) {
 			configPath: "/user_storage/encrypt/*",
 			testPaths: []string{
 				"/user_storage/encrypt/test.mp4",
-				"/user_storage/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
+				"/user_storage/encrypt/XkQ9BfN3pLm2Rw7YsVtG5Hc8J.mp4",
 			},
 			shouldMatch: true,
 		},
@@ -39,7 +39,7 @@ func TestPathMatchingWithoutLeadingSlash(t *testing.T) {
 			configPath: "user_storage/encrypt/*",
 			testPaths: []string{
 				"/user_storage/encrypt/test.mp4",
-				"/user_storage/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
+				"/user_storage/encrypt/XkQ9BfN3pLm2Rw7YsVtG5Hc8J.mp4",
 			},
 			shouldMatch: true,
 		},
@@ -48,7 +48,7 @@ func TestPathMatchingWithoutLeadingSlash(t *testing.T) {
 			configPath: "user_storage/encrypt/",
 			testPaths: []string{
 				"/user_storage/encrypt/test.mp4",
-				"/user_storage/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4",
+				"/user_storage/encrypt/XkQ9BfN3pLm2Rw7YsVtG5Hc8J.mp4",
 			},
 			shouldMatch: true,
 		},
@@ -131,7 +131,7 @@ func TestActualPathConfig(t *testing.T) {
 
 	// 模拟的文件路径
 	testFiles := map[string]string{
-		"/user_storage/encrypt/87kdQg0Y5VOWIUjeU~Xtcg435V+YO0--y.mp4": "user_storage/encrypt/",
+		"/user_storage/encrypt/XkQ9BfN3pLm2Rw7YsVtG5Hc8J.mp4": "user_storage/encrypt/",
 		"/unicom_cloud/encrypt/test.mp4":                              "/unicom_cloud/encrypt/",
 		"/google_drive_2/test.mp4":                                     "/google_drive_2/",
 	}

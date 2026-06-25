@@ -15,10 +15,10 @@ func TestBuildRealPathCandidatesWithExternalSuffixSamples(t *testing.T) {
 		Enable:    true,
 	}
 	samples := []string{
-		"/enc/cGlHlVLp5VOWIUjjGMwQ5GehcmRIOMtFfhjkaCwucg0b5V+AFX--P.mkv",
-		"/enc/cGlHlVLp5VOWIUjGmdw9wx3HOGiu9pw5uZHt8hl-W_20250426_070756.mkv",
-		"/enc/cGlHlVLp5VOWIUjOGUt85GM+c~RIOMtF5V+AFX--5_20250427_005342.mkv",
-		"/enc/cGlHlVLp5VOWIUjGmM~Zmx3ocgFu9pw5fZHt8hl-F_20250427_005434.mkv",
+		"/enc/XkQ9BfN3pLm2Rw7YsVtG5Hc8JA.mkv",
+		"/enc/XkQ9BfN3pLm2Rw7YsVtG5Hc8JBW_20250426_070756.mkv",
+		"/enc/XkQ9BfN3pLm2Rw7YsVtG5Hc8JC5_20250427_005342.mkv",
+		"/enc/XkQ9BfN3pLm2Rw7YsVtG5Hc8JDF_20250427_005434.mkv",
 	}
 	for _, sample := range samples {
 		candidates := buildRealPathCandidates(ep, sample)
@@ -43,14 +43,14 @@ func TestBuildRealPathCandidatesPrefersCachedRealName(t *testing.T) {
 		Enable:    true,
 	}
 
-	showPath := "/enc/MFCW-019.mp4"
-	CacheNameMapping("/enc", "MFCW-019.mp4", "GUigmo3YcGdyIf03s")
+	showPath := "/enc/SAMPLE-001.mp4"
+	CacheNameMapping("/enc", "SAMPLE-001.mp4", "XkQ9BfN3pLm2Rw7YsVtG5Hc8J")
 
 	candidates := buildRealPathCandidates(ep, showPath)
 	if len(candidates) < 2 {
 		t.Fatalf("expected multiple candidates, got %v", candidates)
 	}
-	if candidates[1] != "/enc/GUigmo3YcGdyIf03s" {
+	if candidates[1] != "/enc/XkQ9BfN3pLm2Rw7YsVtG5Hc8J" {
 		t.Fatalf("expected cached real name candidate first, got %v", candidates)
 	}
 }
