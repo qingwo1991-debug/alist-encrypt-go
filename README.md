@@ -170,6 +170,9 @@ encrypt-tool enc -p mypass -i video.mp4
 # 自动化脚本：从受限权限文件读取密码，避免出现在进程参数中
 encrypt-tool enc --password-file /etc/encrypted-mover/key -i video.mp4
 
+# 流式加密到标准输出（不落第二份完整密文）
+encrypt-tool enc --password-file /etc/encrypted-mover/key -i video.mp4 --stdout
+
 # 解密（全自动检测，只需密码）
 encrypt-tool dec -p mypass -i video.mp4.bin
 

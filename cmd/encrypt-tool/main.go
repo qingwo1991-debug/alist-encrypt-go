@@ -96,6 +96,7 @@ type flags struct {
 	passwordFile string // read password from file instead of exposing it in process arguments
 	input        string
 	output       string
+	stdout       bool   // enc only: write encrypted bytes to stdout without creating a file
 	encType      string // "auto" for dec; "aesctr"/"chacha20"/"rc4md5" for enc
 	encName      bool   // enc only: encrypt filenames
 	suffix       string // enc only: suffix to append
@@ -114,6 +115,8 @@ func main() {
 	switch cmd {
 	case "enc", "dec":
 		run(cmd)
+	case "name":
+		runName()
 	case "-h", "--help", "help":
 		printUsage()
 	case "-v", "--version":
@@ -123,6 +126,21 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+func runName() {
+	f := parseFlags("name")
+	if err := loadPassword(f); err != nil {
+		fatal("%s", err)
+	}
+	if f.input == "" {
+		fatal("-i/--input is required")
+	}
+	if f.encType == "" || f.encType == "auto" {
+		f.encType = "aesctr"
+	}
+	f.encName = true
+	fmt.Println(encryptOutputName(filepath.Base(f.input), f))
 }
 
 func run(command string) {
@@ -170,9 +188,38 @@ func run(command string) {
 	}
 
 	if info.IsDir() {
+		if f.stdout {
+			fatal("--stdout only supports a single input file")
+		}
 		runBatch(command, f)
 	} else {
+		if f.stdout {
+			if command != "enc" {
+				fatal("--stdout is only supported by the enc command")
+			}
+			runEncryptStdout(f, info.Size())
+			return
+		}
 		runSingle(command, f, info.Size())
+	}
+}
+
+func runEncryptStdout(f *flags, fileSize int64) {
+	in, err := os.Open(f.input)
+	if err != nil {
+		fatal("open source: %v", err)
+	}
+	defer in.Close()
+	enc, err := encryption.NewLatestContentEncryptor(f.password, f.encType, fileSize)
+	if err != nil {
+		fatal("create encryptor: %v", err)
+	}
+	reader, err := enc.EncryptReader(in, 0)
+	if err != nil {
+		fatal("encrypt reader: %v", err)
+	}
+	if _, err := io.CopyBuffer(os.Stdout, reader, make([]byte, 512*1024)); err != nil {
+		fatal("write encrypted stream: %v", err)
 	}
 }
 
@@ -925,6 +972,7 @@ func parseFlags(command string) *flags {
 	fs.StringVar(&f.input, "input", "", "input file or directory (required)")
 	fs.StringVar(&f.output, "o", "", "output path (default: alongside source)")
 	fs.StringVar(&f.output, "output", "", "output path")
+	fs.BoolVar(&f.stdout, "stdout", false, "enc: write encrypted bytes to stdout (single file only)")
 	fs.StringVar(&f.encType, "t", "auto", "algorithm: aesctr (enc default) | chacha20 | rc4md5 | auto (dec default)")
 	fs.StringVar(&f.encType, "type", "auto", "algorithm: aesctr | chacha20 | rc4md5 | auto")
 	fs.BoolVar(&f.encName, "n", false, "enc: encrypt filenames")
@@ -989,6 +1037,7 @@ Usage:
 Commands:
   enc    Encrypt file(s) or directory
   dec    Decrypt file(s) — fully automatic (V1/V2, type, suffix, filename)
+  name   Print the deterministic encrypted filename for -i
 
 Encrypt flags:
   -p, --password <str>   Password (mutually exclusive with --password-file)
@@ -996,6 +1045,7 @@ Encrypt flags:
                          Read password from file (recommended for scripts)
   -i, --input <path>     Input file or directory (required)
   -o, --output <path>    Output path (default: alongside source)
+      --stdout           Stream V2 ciphertext to stdout (single file only)
   -t, --type <algo>      aesctr (default) | chacha20 | rc4md5
   -n, --enc-name         Encrypt filenames (matches proxy's ConvertRealNameWithSuffix)
   -s, --suffix <str>     Encrypted suffix (default: .bin, "" = none)
@@ -1027,6 +1077,8 @@ Verification:
 Examples:
   # Read password from a protected file (recommended for automation)
   encrypt-tool enc --password-file /etc/encrypted-mover/key -i oceans.mp4
+  encrypt-tool enc --password-file /etc/encrypted-mover/key -i oceans.mp4 --stdout
+  encrypt-tool name --password-file /etc/encrypted-mover/key -i oceans.mp4 -t aesctr -s .bin
 
   # Encrypt single file → oceans.mp4.bin
   encrypt-tool enc -p mypass -i oceans.mp4

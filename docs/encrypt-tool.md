@@ -46,6 +46,7 @@ encrypt-tool <command> [flags]
 | `--password-file` | — | 二选一 | 从文件读取密码，适合自动化脚本，与 `--password` 互斥 |
 | `--input` | `-i` | （必填） | 输入文件或目录路径 |
 | `--output` | `-o` | 源文件同目录 | 输出路径：文件、目录或不指定 |
+| `--stdout` | — | false | 仅加密单文件：把 V2 密文写到标准输出，不创建完整密文文件 |
 | `--workers` | `-w` | NumCPU | 批量模式并发工作线程数 |
 | `--log` | — | 无 | 错误日志输出路径，带时间戳记录检测过程、警告和错误 |
 | `--verbose` | `-v` | false | 显示详细进度 |
@@ -166,6 +167,12 @@ read -rsp 'Encryption password: ' ENCRYPT_PASSWORD; echo
 printf '%s' "$ENCRYPT_PASSWORD" > /etc/encrypted-mover/key
 unset ENCRYPT_PASSWORD
 encrypt-tool enc --password-file /etc/encrypted-mover/key -i video.mp4
+
+# 流式输出，密文长度严格等于明文长度 + 32 字节
+encrypt-tool enc --password-file /etc/encrypted-mover/key -i video.mp4 --stdout
+
+# 仅生成与代理兼容的加密文件名
+encrypt-tool name --password-file /etc/encrypted-mover/key -i video.mp4 -t aesctr -s .bin
 
 # 加密单个文件（默认 aesctr，输出追加 .bin 后缀）
 encrypt-tool enc -p mypass -i video.mp4

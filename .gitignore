@@ -44,3 +44,10 @@ openlist_logs_*.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local Codex build scratch
+.gocache/
+.tmp-stream-test/
+/outputs/
+__pycache__/
+*.pyc

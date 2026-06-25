@@ -1,0 +1,20 @@
+[Unit]
+Description=aria2 download service for encrypted mover
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=encrypted-mover
+Group=encrypted-mover
+ExecStart=/usr/bin/aria2c --conf-path=/etc/encrypted-mover/aria2.conf
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/encrypted-mover /var/log/encrypted-mover
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

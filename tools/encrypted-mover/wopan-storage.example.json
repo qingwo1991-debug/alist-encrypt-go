@@ -1,0 +1,20 @@
+{
+  "mount_path": "/156联通云盘",
+  "order": 0,
+  "driver": "WoPan",
+  "cache_expiration": 30,
+  "custom_cache_policies": "",
+  "addition": "{\"root_folder_id\":\"0\",\"refresh_token\":\"REPLACE_ME\",\"family_id\":\"\",\"sort_rule\":\"name_asc\",\"access_token\":\"REPLACE_ME\"}",
+  "remark": "encrypted-mover",
+  "disabled": false,
+  "disable_index": false,
+  "enable_sign": true,
+  "order_by": "",
+  "order_direction": "",
+  "extract_folder": "",
+  "web_proxy": false,
+  "webdav_policy": "302_redirect",
+  "proxy_range": false,
+  "down_proxy_url": "",
+  "disable_proxy_sign": false
+}

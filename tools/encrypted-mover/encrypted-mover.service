@@ -1,0 +1,22 @@
+[Unit]
+Description=Encrypted Mover Scheduler
+After=network-online.target aria2.service openlist.service
+Wants=network-online.target
+Requires=aria2.service openlist.service
+
+[Service]
+Type=simple
+User=encrypted-mover
+Group=encrypted-mover
+ExecStart=/usr/local/bin/encrypted-mover --config /etc/encrypted-mover/config.json daemon
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/encrypted-mover /var/log/encrypted-mover
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

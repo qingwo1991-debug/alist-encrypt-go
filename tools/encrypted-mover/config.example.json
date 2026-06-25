@@ -1,0 +1,25 @@
+{
+  "node": {"id": "NODE_ID", "parity": "PARITY"},
+  "sources": [
+    {"name": "top250", "url": "https://gist.githubusercontent.com/jinjier/7a405fad753f996d85ed43073e3bf009/raw/c5a4af143df136f314df08a51235cc833250cc46/top250-magnet.txt", "refresh_seconds": 3600}
+  ],
+  "schedule": {"timezone": "Asia/Shanghai", "start": "01:00", "end": "07:00"},
+  "paths": {"database": "/var/lib/encrypted-mover/mover.db", "work_dir": "/var/lib/encrypted-mover/work", "log": "/var/log/encrypted-mover/mover.log"},
+  "limits": {
+    "max_task_bytes": 12884901888,
+    "reserve_bytes": 5368709120,
+    "metadata_timeout_seconds": 600,
+    "no_progress_seconds": 900,
+    "low_speed_window_seconds": 1200,
+    "min_average_bytes_per_second": 65536,
+    "max_runtime_seconds": 21600,
+    "retry_cooldown_seconds": 86400,
+    "max_attempts": 3,
+    "poll_seconds": 10
+  },
+  "filters": {"min_video_bytes": 209715200},
+  "aria2": {"rpc_url": "http://127.0.0.1:6800/jsonrpc", "secret": "ARIA2_SECRET"},
+  "openlist": {"base_url": "http://127.0.0.1:5244", "username": "admin", "password_file": "/etc/encrypted-mover/openlist-password", "target_dir": "/156联通云盘/encrypt"},
+  "encryption": {"tool": "/usr/local/bin/encrypt-tool", "password_file": "/etc/encrypted-mover/encryption-key", "type": "aesctr", "suffix": ".bin"},
+  "upload": {"task_appear_timeout_seconds": 60, "task_timeout_seconds": 21600, "stream_timeout_seconds": 21600, "poll_seconds": 5}
+}

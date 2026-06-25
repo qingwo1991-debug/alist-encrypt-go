@@ -1,0 +1,22 @@
+[Unit]
+Description=OpenList local upload gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=encrypted-mover
+Group=encrypted-mover
+WorkingDirectory=/var/lib/openlist
+ExecStart=/opt/openlist/openlist server --data /var/lib/openlist
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/openlist
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
