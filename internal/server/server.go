@@ -172,12 +172,12 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 	{
 		// Public routes (no auth required)
 		encAPI.POST("/login", ginWrap(apiHandler.Login))
+		encAPI.Any("/getBuildInfo", ginWrap(apiHandler.GetBuildInfo))
 
 		// Protected routes (auth required)
 		protected := encAPI.Group("")
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
 		{
-			protected.Any("/getBuildInfo", ginWrap(apiHandler.GetBuildInfo))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
 			protected.Any("/updatePasswd", ginWrap(apiHandler.UpdatePasswd))
 			protected.Any("/updateUsername", ginWrap(apiHandler.UpdateUsername))

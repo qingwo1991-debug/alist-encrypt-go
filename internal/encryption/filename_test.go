@@ -344,6 +344,24 @@ func TestConvertShowNameWithSuffixOptionsBranching(t *testing.T) {
 	}
 }
 
+func TestEncTypeAliasesDecodeFilename(t *testing.T) {
+	password := "testpass"
+	original := "movie.mp4"
+
+	encrypted := ConvertRealNameWithSuffix(password, "aesctr", original, ".bin")
+	if got := ConvertShowNameWithSuffixOptions(password, "aes-ctr", encrypted, ".bin", false); got != original {
+		t.Fatalf("aes-ctr alias decode failed: got %q, want %q", got, original)
+	}
+	if got := ConvertShowNameWithSuffixOptions(password, "aes_ctr", encrypted, ".bin", false); got != original {
+		t.Fatalf("aes_ctr alias decode failed: got %q, want %q", got, original)
+	}
+
+	encryptedFromAlias := ConvertRealNameWithSuffix(password, "aes-ctr", original, ".bin")
+	if got := ConvertShowNameWithSuffixOptions(password, "aesctr", encryptedFromAlias, ".bin", false); got != original {
+		t.Fatalf("aesctr decode of aes-ctr encoded name failed: got %q, want %q", got, original)
+	}
+}
+
 func TestNormalizeEncSuffix(t *testing.T) {
 	cases := map[string]string{
 		"":      "",

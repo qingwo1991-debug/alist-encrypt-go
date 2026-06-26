@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -219,10 +220,15 @@ func GetPasswdOutward(password, encType string) string {
 }
 
 func normalizeEncType(encType string) string {
+	encType = strings.ToLower(strings.TrimSpace(encType))
 	switch encType {
 	case "", "aesctr", "chacha20", "rc4md5":
 		return encType
+	case "aes-ctr", "aes_ctr":
+		return "aesctr"
 	case "rc4":
+		return "rc4md5"
+	case "rc4-md5", "rc4_md5":
 		return "rc4md5"
 	default:
 		return encType
