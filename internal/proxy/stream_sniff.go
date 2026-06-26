@@ -22,9 +22,13 @@ func sniffDecrypted(r io.Reader) (io.Reader, bool) {
 	}
 	sample := buf[:n]
 
+	if looksLikeKnownPlaintext(sample) {
+		return io.MultiReader(bytes.NewReader(sample), r), true
+	}
+
 	// Count unique byte values and zero bytes.
 	// Encrypted data: ~200+ unique bytes in 512 samples, few zeros.
-	// Valid plaintext: 30-120 unique bytes, many zero bytes (headers, structures).
+	// Valid plaintext usually has lower entropy, but media payloads can be high-entropy.
 	// Use fixed array instead of map for zero-GC stack allocation.
 	var seen [256]bool
 	zeros := 0
@@ -49,7 +53,7 @@ func sniffDecrypted(r io.Reader) (io.Reader, bool) {
 		log.Warn().Int("unique_bytes", unique).Int("zeros", zeros).
 			Int("sample_len", n).
 			Float64("unique_ratio", uniqueRatio).
-			Msg("Decrypted data looks encrypted — wrong password or file size?")
+			Msg("Decrypted data looks encrypted; wrong password or file size?")
 		return nil, false
 	}
 
@@ -57,6 +61,43 @@ func sniffDecrypted(r io.Reader) (io.Reader, bool) {
 	return io.MultiReader(bytes.NewReader(sample), r), true
 }
 
+func looksLikeKnownPlaintext(sample []byte) bool {
+	if len(sample) >= 12 && bytes.Equal(sample[4:8], []byte("ftyp")) {
+		return true
+	}
+	if len(sample) >= 4 {
+		switch {
+		case bytes.Equal(sample[:4], []byte{0x1a, 0x45, 0xdf, 0xa3}): // Matroska/WebM EBML
+			return true
+		case bytes.Equal(sample[:4], []byte("OggS")):
+			return true
+		case bytes.Equal(sample[:4], []byte("fLaC")):
+			return true
+		case bytes.Equal(sample[:4], []byte("%PDF")):
+			return true
+		case bytes.Equal(sample[:4], []byte("PK\x03\x04")):
+			return true
+		}
+	}
+	if len(sample) >= 12 && bytes.Equal(sample[:4], []byte("RIFF")) {
+		kind := sample[8:12]
+		if bytes.Equal(kind, []byte("AVI ")) || bytes.Equal(kind, []byte("WAVE")) || bytes.Equal(kind, []byte("WEBP")) {
+			return true
+		}
+	}
+	if len(sample) >= 3 {
+		if bytes.Equal(sample[:3], []byte("ID3")) || bytes.Equal(sample[:3], []byte{0xff, 0xd8, 0xff}) {
+			return true
+		}
+	}
+	if len(sample) >= 8 && bytes.Equal(sample[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return true
+	}
+	if len(sample) >= 6 && (bytes.Equal(sample[:6], []byte("GIF87a")) || bytes.Equal(sample[:6], []byte("GIF89a"))) {
+		return true
+	}
+	return false
+}
 func shouldSniffDecryptedContent(method, contentType string, startOffset int64) bool {
 	if method != http.MethodGet {
 		return false

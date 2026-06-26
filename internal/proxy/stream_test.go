@@ -180,6 +180,24 @@ func TestSniffDecryptedRejectsHighEntropyShortSample(t *testing.T) {
 	}
 }
 
+func TestSniffDecryptedAcceptsHighEntropyMP4Plaintext(t *testing.T) {
+	sample := make([]byte, 512)
+	copy(sample, []byte("\x00\x00\x00 ftypisom\x00\x00\x02\x00isomiso2avc1mp41\x00\x00\x00\x08free\x00\xfc9Nmdat"))
+	for i := 64; i < len(sample); i++ {
+		sample[i] = byte((i*37 + 11) % 251)
+	}
+	reader, ok := sniffDecrypted(bytes.NewReader(sample))
+	if !ok {
+		t.Fatal("expected MP4 plaintext to pass sniffing even with high-entropy media payload")
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read sniffed data: %v", err)
+	}
+	if !bytes.Equal(got, sample) {
+		t.Fatal("sniff reader did not preserve the consumed bytes")
+	}
+}
 func TestInspectEncryptedContentFollowsRedirectForV2Probe(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)
