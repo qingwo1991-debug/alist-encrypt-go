@@ -293,15 +293,22 @@ func TestHandleGetUsesInternalDavWhenRawURLAuthFails(t *testing.T) {
 	}
 	cfg.AlistServer.PasswdList = []config.PasswdInfo{passwd}
 
-	var fsGetCalls, dCalls, davCalls int
+	var (
+		callMu                       sync.Mutex
+		fsGetCalls, dCalls, davCalls int
+	)
 	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/fs/get":
+			callMu.Lock()
 			fsGetCalls++
+			callMu.Unlock()
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"code":401}`))
 		case "/d/encrypt/enc_movie.bin":
+			callMu.Lock()
 			dCalls++
+			callMu.Unlock()
 			if r.Method == http.MethodHead {
 				w.Header().Set("Content-Length", "4096")
 				w.WriteHeader(http.StatusOK)
@@ -316,7 +323,9 @@ func TestHandleGetUsesInternalDavWhenRawURLAuthFails(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusUnauthorized)
 		case "/dav/encrypt/enc_movie.bin":
+			callMu.Lock()
 			davCalls++
+			callMu.Unlock()
 			if r.Method == http.MethodHead {
 				w.Header().Set("Content-Length", "4096")
 				w.WriteHeader(http.StatusOK)
@@ -353,6 +362,18 @@ func TestHandleGetUsesInternalDavWhenRawURLAuthFails(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		callMu.Lock()
+		got := fsGetCalls
+		callMu.Unlock()
+		if got >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	callMu.Lock()
+	defer callMu.Unlock()
 	if fsGetCalls != 1 {
 		t.Fatalf("fsGetCalls=%d, want 1", fsGetCalls)
 	}
