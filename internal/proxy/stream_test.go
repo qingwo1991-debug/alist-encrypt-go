@@ -166,6 +166,96 @@ func TestNormalizePlainFileSizeUsesCiphertextTotalForV2(t *testing.T) {
 	}
 }
 
+func TestBuildUpstreamRangeHeaderMapsV2SuffixRange(t *testing.T) {
+	meta := encryption.ContentMeta{
+		EncType:        encryption.EncTypeAESCTR,
+		Version:        encryption.ContentVersionV2,
+		HeaderLen:      encryption.ContentHeaderSize(),
+		PlainSize:      2048,
+		CiphertextSize: 2080,
+	}
+
+	got := buildUpstreamRangeHeader("bytes=-64", meta)
+	if got != "bytes=2016-2079" {
+		t.Fatalf("upstream range=%q, want bytes=2016-2079", got)
+	}
+}
+
+func TestNormalizeV2ClientRangeHeaderMapsCiphertextTailRange(t *testing.T) {
+	meta := encryption.ContentMeta{
+		EncType:        encryption.EncTypeAESCTR,
+		Version:        encryption.ContentVersionV2,
+		HeaderLen:      encryption.ContentHeaderSize(),
+		PlainSize:      2048,
+		CiphertextSize: 2080,
+	}
+
+	got := normalizeV2ClientRangeHeader("bytes=2048-2079", meta)
+	if got != "bytes=2016-2047" {
+		t.Fatalf("normalized range=%q, want bytes=2016-2047", got)
+	}
+}
+
+func TestV2CiphertextTailRangeReturnsPlainTail(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(2048)
+	plain := bytes.Repeat([]byte{0, 1, 2, 3, 4, 5, 6, 7}, 256)
+	encryptor, err := encryption.NewLatestContentEncryptor("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("new content encryptor: %v", err)
+	}
+	encryptedReader, err := encryptor.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(encryptedReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Range"); got != "bytes=2048-2079" {
+			t.Fatalf("upstream Range=%q, want bytes=2048-2079", got)
+		}
+		headers := make(http.Header)
+		headers.Set("Content-Type", "video/mp4")
+		headers.Set("Content-Range", "bytes 2048-2079/2080")
+		headers.Set("Content-Length", "32")
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     headers,
+			Body:       io.NopCloser(bytes.NewReader(ciphertext[2048:2080])),
+			Request:    r,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/d/test.mp4", nil)
+	req.Header.Set("Range", "bytes=2048-2079")
+	req = req.WithContext(WithContentMeta(req.Context(), encryptor.Meta))
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/file", passwd, fileSize, StreamStrategyRange, "/encrypt/test.mp4")
+	if result.Err != nil {
+		t.Fatalf("unexpected stream error: %v", result.Err)
+	}
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d", rr.Code, http.StatusPartialContent)
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 2016-2047/2048" {
+		t.Fatalf("Content-Range=%q, want bytes 2016-2047/2048", got)
+	}
+	if body := rr.Body.Bytes(); !bytes.Equal(body, plain[2016:2048]) {
+		t.Fatalf("decrypted tail mismatch: got %d bytes", len(body))
+	}
+}
+
 func TestSniffDecryptedRejectsHighEntropyShortSample(t *testing.T) {
 	sample := make([]byte, 256)
 	for i := range sample {

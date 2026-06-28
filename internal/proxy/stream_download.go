@@ -44,6 +44,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	if meta.PlainSize > 0 {
 		fileSize = meta.PlainSize
 	}
+	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
 	rangeSkipped := strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey)
 
 	if rangeSkipped {
@@ -131,6 +132,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	if meta.PlainSize > 0 {
 		fileSize = meta.PlainSize
 	}
+	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
 	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey) {
 		return &StreamOutcome{
 			Err:           errors.NewProxyError("range unsupported"),
@@ -172,6 +174,22 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	defer resp.Body.Close()
 
 	return s.streamDecryptResponse(w, req, resp, passwdInfo, fileSize, meta, rangeHeader, strategy, targetURL, compatStorageKey)
+}
+
+func normalizeV2ClientRangeForPlayback(rangeHeader string, meta encryption.ContentMeta, targetURL string) string {
+	normalized := normalizeV2ClientRangeHeader(rangeHeader, meta)
+	if normalized != rangeHeader {
+		log.Info().
+			Str("category", "playback").
+			Str("target_url", targetURL).
+			Str("client_range", rangeHeader).
+			Str("normalized_range", normalized).
+			Int64("plain_size", meta.PlainSize).
+			Int64("ciphertext_size", meta.TotalCiphertextSize()).
+			Int64("header_len", meta.HeaderLen).
+			Msg("Adjusted V2 client range from ciphertext-sized offsets")
+	}
+	return normalized
 }
 
 func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {

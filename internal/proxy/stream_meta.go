@@ -148,7 +148,19 @@ func buildUpstreamRangeHeader(rangeHeader string, meta encryption.ContentMeta) s
 	startText := strings.TrimSpace(bounds[0])
 	endText := strings.TrimSpace(bounds[1])
 	if startText == "" {
-		return rangeHeader
+		if meta.PlainSize <= 0 {
+			return rangeHeader
+		}
+		suffixLen, err := strconv.ParseInt(endText, 10, 64)
+		if err != nil || suffixLen <= 0 {
+			return rangeHeader
+		}
+		if suffixLen > meta.PlainSize {
+			suffixLen = meta.PlainSize
+		}
+		start := meta.HeaderLen + meta.PlainSize - suffixLen
+		end := meta.HeaderLen + meta.PlainSize - 1
+		return fmt.Sprintf("bytes=%d-%d", start, end)
 	}
 	start, err := strconv.ParseInt(startText, 10, 64)
 	if err != nil || start < 0 {
@@ -163,6 +175,62 @@ func buildUpstreamRangeHeader(rangeHeader string, meta encryption.ContentMeta) s
 		return rangeHeader
 	}
 	end += meta.HeaderLen
+	return fmt.Sprintf("bytes=%d-%d", start, end)
+}
+
+func normalizeV2ClientRangeHeader(rangeHeader string, meta encryption.ContentMeta) string {
+	if !meta.IsV2() || meta.PlainSize <= 0 || meta.HeaderLen <= 0 {
+		return rangeHeader
+	}
+	ciphertextSize := meta.TotalCiphertextSize()
+	if ciphertextSize <= meta.PlainSize {
+		return rangeHeader
+	}
+	rangeHeader = strings.TrimSpace(rangeHeader)
+	if rangeHeader == "" || !strings.HasPrefix(rangeHeader, "bytes=") {
+		return rangeHeader
+	}
+	if strings.Contains(rangeHeader, ",") {
+		return rangeHeader
+	}
+	spec := strings.TrimSpace(strings.TrimPrefix(rangeHeader, "bytes="))
+	bounds := strings.SplitN(spec, "-", 2)
+	if len(bounds) != 2 {
+		return rangeHeader
+	}
+	startText := strings.TrimSpace(bounds[0])
+	endText := strings.TrimSpace(bounds[1])
+	if startText == "" {
+		return rangeHeader
+	}
+	start, err := strconv.ParseInt(startText, 10, 64)
+	if err != nil || start < meta.PlainSize || start >= ciphertextSize {
+		return rangeHeader
+	}
+	start -= meta.HeaderLen
+	if start < 0 {
+		start = 0
+	}
+	if start >= meta.PlainSize {
+		start = meta.PlainSize - 1
+	}
+	if endText == "" {
+		return fmt.Sprintf("bytes=%d-", start)
+	}
+	end, err := strconv.ParseInt(endText, 10, 64)
+	if err != nil || end < 0 {
+		return rangeHeader
+	}
+	if end >= ciphertextSize {
+		end = ciphertextSize - 1
+	}
+	end -= meta.HeaderLen
+	if end >= meta.PlainSize {
+		end = meta.PlainSize - 1
+	}
+	if end < start {
+		end = start
+	}
 	return fmt.Sprintf("bytes=%d-%d", start, end)
 }
 

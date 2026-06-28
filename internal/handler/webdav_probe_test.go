@@ -385,6 +385,35 @@ func TestHandleGetUsesInternalDavWhenRawURLAuthFails(t *testing.T) {
 	}
 }
 
+func TestPreferCachedV2PlainSizeForWebDAVPlayback(t *testing.T) {
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer backend.Close()
+
+	h := newProbeTestHandler(t, backend.URL)
+	if err := h.fileDAO.Set(&dao.FileInfo{
+		Path:              "/encrypt/movie.mp4",
+		Name:              "movie.mp4",
+		Size:              4096,
+		CiphertextSize:    4128,
+		ContentVersion:    encryption.ContentVersionV2,
+		HeaderLen:         encryption.ContentHeaderSize(),
+		NonceField:        []byte("1234567890abcdef"),
+		UpstreamFetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("set cached info: %v", err)
+	}
+
+	size, strategy := h.preferCachedV2PlainSize("/encrypt/movie.mp4", 4128, StrategyPROPFIND)
+	if size != 4096 {
+		t.Fatalf("size=%d, want 4096", size)
+	}
+	if strategy != StrategyFileInfoCache {
+		t.Fatalf("strategy=%s, want %s", strategy, StrategyFileInfoCache)
+	}
+}
+
 func TestConvertToRealPathKeepsEncryptedNamePassthrough(t *testing.T) {
 	passwd := &config.PasswdInfo{
 		Password: "123456",

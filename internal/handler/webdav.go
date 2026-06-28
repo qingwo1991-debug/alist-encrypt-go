@@ -336,6 +336,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// Look up file info using DISPLAY path (davPath), not realPath
 	// PROPFIND caches entries by display path after decrypting filenames
 	fileSize, usedStrategy := h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
+	fileSize, usedStrategy = h.preferCachedV2PlainSize(davPath, fileSize, usedStrategy)
 	if fileSize == 0 {
 		if probed := h.fetchWebDAVFileSize(r, davPath, realPath); probed > 0 {
 			fileSize = probed
@@ -432,6 +433,26 @@ func (h *WebDAVHandler) resolveRawURLFromAlist(r *http.Request, displayPath, rea
 		StatusCode:    result.StatusCode,
 		FailureReason: result.FailureReason,
 	}
+}
+
+func (h *WebDAVHandler) preferCachedV2PlainSize(displayPath string, resolvedSize int64, strategy StrategyType) (int64, StrategyType) {
+	if h == nil || h.fileDAO == nil {
+		return resolvedSize, strategy
+	}
+	cachedInfo, ok := h.fileDAO.Get(displayPath)
+	if !ok || cachedInfo == nil || cachedInfo.ContentVersion != encryption.ContentVersionV2 || cachedInfo.Size <= 0 {
+		return resolvedSize, strategy
+	}
+	if resolvedSize != cachedInfo.Size {
+		log.Info().
+			Str("category", "webdav_get").
+			Str("display_path", displayPath).
+			Int64("resolved_size", resolvedSize).
+			Int64("plain_size", cachedInfo.Size).
+			Int64("ciphertext_size", cachedInfo.CiphertextSize).
+			Msg("Using cached V2 plaintext size for WebDAV playback")
+	}
+	return cachedInfo.Size, StrategyFileInfoCache
 }
 
 func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, realPath string) {
