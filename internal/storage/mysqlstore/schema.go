@@ -280,21 +280,21 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
   (key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, status_code, raw_url, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
   VALUES %s
   ON DUPLICATE KEY UPDATE
-    encrypted_path=VALUES(encrypted_path),
-    name=VALUES(name),
-    size=VALUES(size),
-    ciphertext_size=VALUES(ciphertext_size),
-    content_version=VALUES(content_version),
-    header_len=VALUES(header_len),
-    nonce_field=VALUES(nonce_field),
+    encrypted_path=IF(VALUES(encrypted_path) <> '', VALUES(encrypted_path), encrypted_path),
+    name=IF(VALUES(name) <> '', VALUES(name), name),
+    size=IF(content_version = 2 AND VALUES(content_version) = 0 AND header_len > 0 AND (VALUES(size) = ciphertext_size OR VALUES(size) = size + header_len), size, VALUES(size)),
+    ciphertext_size=IF(VALUES(ciphertext_size) > 0, VALUES(ciphertext_size), ciphertext_size),
+    content_version=IF(VALUES(content_version) > 0, VALUES(content_version), content_version),
+    header_len=IF(VALUES(header_len) > 0, VALUES(header_len), header_len),
+    nonce_field=IF(VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0, VALUES(nonce_field), nonce_field),
     etag=VALUES(etag),
     content_type=VALUES(content_type),
     status_code=VALUES(status_code),
-    raw_url=VALUES(raw_url),
-    sign=VALUES(sign),
+    raw_url=IF(VALUES(raw_url) <> '', VALUES(raw_url), raw_url),
+    sign=IF(VALUES(sign) <> '', VALUES(sign), sign),
     last_accessed=VALUES(last_accessed),
     updated_at=VALUES(updated_at),
-    upstream_fetched_at=VALUES(upstream_fetched_at),
+    upstream_fetched_at=IF(VALUES(upstream_fetched_at) IS NOT NULL, VALUES(upstream_fetched_at), upstream_fetched_at),
     is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(19, len(records)))
 
 	args := make([]interface{}, 0, len(records)*19)

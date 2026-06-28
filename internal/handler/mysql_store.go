@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 )
@@ -200,6 +201,42 @@ func (s *MySQLFileMetaStore) Get(ctx context.Context, providerKey, originalPath 
 	}, true, nil
 }
 
+func preserveV2FileMetaRecord(existing *mysqlstore.FileMetaRecord, incoming *mysqlstore.FileMetaRecord) {
+	if existing == nil || incoming == nil || existing.ContentVersion != encryption.ContentVersionV2 {
+		return
+	}
+	if incoming.ContentVersion <= 0 {
+		incoming.ContentVersion = existing.ContentVersion
+	}
+	if incoming.CiphertextSize <= 0 {
+		incoming.CiphertextSize = existing.CiphertextSize
+	}
+	if incoming.HeaderLen <= 0 {
+		incoming.HeaderLen = existing.HeaderLen
+	}
+	if len(incoming.NonceField) == 0 && len(existing.NonceField) > 0 {
+		incoming.NonceField = append([]byte(nil), existing.NonceField...)
+	}
+	if incoming.Size == existing.CiphertextSize && existing.Size > 0 {
+		incoming.Size = existing.Size
+	}
+	if incoming.EncryptedPath == "" {
+		incoming.EncryptedPath = existing.EncryptedPath
+	}
+	if incoming.Name == "" {
+		incoming.Name = existing.Name
+	}
+	if incoming.RawURL == "" {
+		incoming.RawURL = existing.RawURL
+	}
+	if incoming.Sign == "" {
+		incoming.Sign = existing.Sign
+	}
+	if incoming.UpstreamFetchedAt.IsZero() {
+		incoming.UpstreamFetchedAt = existing.UpstreamFetchedAt
+	}
+}
+
 func (s *MySQLFileMetaStore) Upsert(ctx context.Context, meta FileMeta) error {
 	if meta.Size <= 0 {
 		return nil
@@ -233,6 +270,9 @@ func (s *MySQLFileMetaStore) Upsert(ctx context.Context, meta FileMeta) error {
 		UpdatedAt:    time.Now(),
 		LastAccessed: time.Now(),
 		Active:       true,
+	}
+	if existing, ok, err := s.store.GetFileMeta(ctx, meta.ProviderKey, meta.OriginalPath); err == nil && ok {
+		preserveV2FileMetaRecord(existing, &record)
 	}
 	return s.store.UpsertFileMeta(ctx, record)
 }
