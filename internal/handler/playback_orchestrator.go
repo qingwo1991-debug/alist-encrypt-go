@@ -474,9 +474,10 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 	if req.Request == nil || req.FileDAO == nil || req.FileItem.DisplayPath == "" {
 		return false
 	}
-	// seek 请求（带 Range 头）：如果 FileDAO 已有该文件的缓存结论（首帧已检测过），
+	// seek 请求（带 Range 但非首帧）：如果 FileDAO 已有该文件的缓存结论（首帧已检测过），
 	// 跳过耗时的 V2 探测，避免每次快进都触发 2-3 秒延迟导致播放器超时断开。
-	if req.Request.Header.Get("Range") != "" {
+	rangeHeader := req.Request.Header.Get("Range")
+	if rangeHeader != "" && !proxy.IsFirstFrameRangeHint(req.Request.Method, rangeHeader) {
 		info, ok := req.FileDAO.Get(req.FileItem.DisplayPath)
 		if !ok || info == nil {
 			return false
