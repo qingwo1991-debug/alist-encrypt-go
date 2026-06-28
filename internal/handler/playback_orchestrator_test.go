@@ -745,6 +745,101 @@ func TestExecuteDecryptPlaybackUsesCachedV2MetaWithNonce(t *testing.T) {
 	}
 }
 
+func TestExecuteDecryptPlaybackDoesNotCacheRangeLengthAsFileSize(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	sizeResolver := NewFileSizeResolver(cfg, fileDAO, nil, 2, 0, 2)
+	sp := proxy.NewStreamProxy(cfg)
+
+	passwd := &config.PasswdInfo{
+		Password: "testpass",
+		EncType:  "aesctr",
+		Enable:   true,
+	}
+	plain := bytes.Repeat([]byte("v2-tail-cache-"), 320)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new latest encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("encrypt reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	plainStart := int64(len(plain) - 12)
+	plainEnd := int64(len(plain) - 1)
+	cipherStart := plainStart + encryption.ContentHeaderSize()
+	cipherEnd := plainEnd + encryption.ContentHeaderSize()
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Range"); got != "bytes="+strconv.FormatInt(cipherStart, 10)+"-" {
+			t.Fatalf("upstream Range=%q", got)
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Range", "bytes "+strconv.FormatInt(cipherStart, 10)+"-"+strconv.FormatInt(cipherEnd, 10)+"/"+strconv.Itoa(len(ciphertext)))
+		w.Header().Set("Content-Length", "12")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(ciphertext[cipherStart : cipherEnd+1])
+	}))
+	defer srv.Close()
+
+	fileDAO.Set(&dao.FileInfo{
+		Path:              "/demo-tail.mp4",
+		Name:              "demo-tail.mp4",
+		Size:              int64(len(plain)),
+		CiphertextSize:    int64(len(ciphertext)),
+		ContentVersion:    encryption.ContentVersionV2,
+		HeaderLen:         encryption.ContentHeaderSize(),
+		NonceField:        append([]byte(nil), contentEnc.Meta.NonceField...),
+		RawURL:            srv.URL,
+		UpstreamFetchedAt: time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/demo-tail.mp4", nil)
+	req.Header.Set("Range", "bytes="+strconv.FormatInt(plainStart, 10)+"-")
+	rr := httptest.NewRecorder()
+
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter:   rr,
+		Request:          req,
+		Config:           cfg,
+		StreamProxy:      sp,
+		FileDAO:          fileDAO,
+		SizeResolver:     sizeResolver,
+		PasswdInfo:       passwd,
+		FileItem:         FileItem{DisplayPath: "/demo-tail.mp4", TargetURL: srv.URL, FileName: "demo-tail.mp4"},
+		TargetURL:        srv.URL,
+		ProviderKey:      ProviderKey(srv.URL, "/demo-tail.mp4"),
+		Path:             "/demo-tail.mp4",
+		InitialSize:      int64(len(plain)),
+		OverridePath:     "/demo-tail.mp4",
+		CompatKey:        "/encrypt",
+		ConsumerScenario: consumerScenarioWebDAV,
+		FailureLogMsg:    "test playback failed",
+	})
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d body=%s", rr.Code, http.StatusPartialContent, rr.Body.String())
+	}
+	if got := rr.Body.Bytes(); !bytes.Equal(got, plain[plainStart:]) {
+		t.Fatalf("tail body mismatch: got %d bytes", len(got))
+	}
+	if got, ok := fileDAO.GetFileSize("/demo-tail.mp4"); !ok || got != int64(len(plain)) {
+		t.Fatalf("cached size=%d ok=%v, want %d", got, ok, len(plain))
+	}
+	if result, ok := sizeResolver.tryFastPath(req.Context(), FileItem{DisplayPath: "/demo-tail.mp4", FileName: "demo-tail.mp4"}); !ok || result.Size != int64(len(plain)) {
+		t.Fatalf("fast path size=%d ok=%v, want %d", result.Size, ok, len(plain))
+	}
+}
+
 func TestInspectPlaybackContentMetaPrefersCurrentTargetURL(t *testing.T) {
 	cfg := config.DefaultConfig()
 	store, err := storage.NewStore(t.TempDir())

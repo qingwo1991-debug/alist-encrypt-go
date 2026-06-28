@@ -143,12 +143,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				req.StrategySel.RecordSuccess(req.ProviderKey, strategy)
 			}
 			if req.SizeResolver != nil && r.Method == http.MethodGet && !result.NoLearning {
-				metaSize := size
-				if result.ExpectedBytes > 0 {
-					metaSize = result.ExpectedBytes
-				}
 				req.SizeResolver.RecordPlaybackSuccess(
-					r.Context(), req.FileItem, metaSize, result.StatusCode, result.ContentType, result.ETag,
+					r.Context(), req.FileItem, size, result.StatusCode, result.ContentType, result.ETag,
 				)
 			}
 			if req.Probe != nil {
@@ -185,12 +181,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 						req.StrategySel.RecordSuccess(fallbackProvider, strategy)
 					}
 					if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
-						metaSize := size
-						if fallback.ExpectedBytes > 0 {
-							metaSize = fallback.ExpectedBytes
-						}
 						req.SizeResolver.RecordPlaybackSuccess(
-							r.Context(), fallbackFile, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+							r.Context(), fallbackFile, size, fallback.StatusCode, fallback.ContentType, fallback.ETag,
 						)
 					}
 					if req.Probe != nil {
@@ -219,12 +211,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyChunked)
 				}
 				if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
-					metaSize := size
-					if fallback.ExpectedBytes > 0 {
-						metaSize = fallback.ExpectedBytes
-					}
 					req.SizeResolver.RecordPlaybackSuccess(
-						r.Context(), req.FileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+						r.Context(), req.FileItem, size, fallback.StatusCode, fallback.ContentType, fallback.ETag,
 					)
 				}
 				if req.Probe != nil {
@@ -249,12 +237,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyFull)
 				}
 				if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
-					metaSize := size
-					if fallback.ExpectedBytes > 0 {
-						metaSize = fallback.ExpectedBytes
-					}
 					req.SizeResolver.RecordPlaybackSuccess(
-						r.Context(), req.FileItem, metaSize, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+						r.Context(), req.FileItem, size, fallback.StatusCode, fallback.ContentType, fallback.ETag,
 					)
 				}
 				if req.Probe != nil {
