@@ -782,6 +782,12 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	if found && passwdInfo.EncName && resp.StatusCode == http.StatusMultiStatus {
 		respBody = h.decryptPropfindResponse(respBody, passwdInfo)
 	}
+	// Adjust getcontentlength for V2 files only (subtract 32-byte header).
+	// Independent of filename encryption; uses cached metadata to confirm V2 format,
+	// so V1 files keep their original reported size.
+	if found && resp.StatusCode == http.StatusMultiStatus {
+		respBody = []byte(h.adjustPropfindContentLengthForV2(string(respBody)))
+	}
 	decryptCost := time.Since(decryptStart)
 	trace.Logf(r.Context(), "propfind", "Timings upstream=%s parse=%s decrypt=%s entries=%d bytes=%d",
 		upstreamCost, parseCost, decryptCost, len(entries), len(respBody))
@@ -1247,15 +1253,7 @@ func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.
 			b.WriteString(content)
 			b.WriteString(bestEndTag)
 
-		case 2: // getcontentlength
-			valStr := strings.TrimSpace(content)
-			size, err := strconv.ParseInt(valStr, 10, 64)
-			if err == nil && size > headerSize {
-				b.WriteString(strconv.FormatInt(size-headerSize, 10))
-				b.WriteString(bestEndTag)
-				searchPos = bestEnd + len(bestEndTag)
-				continue
-			}
+		case 2: // getcontentlength — preserve original; V2-only adjustment is done separately by adjustPropfindContentLengthForV2
 			b.WriteString(content)
 			b.WriteString(bestEndTag)
 		}

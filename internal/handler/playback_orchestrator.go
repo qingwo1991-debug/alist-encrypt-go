@@ -198,17 +198,25 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			}
 		}
 
-		if reason == "range_unsupported" && !result.ResponseStarted && firstFrameHint && strategy == proxy.StreamStrategyRange {
+		if reason == "range_unsupported" && !result.ResponseStarted && strategy == proxy.StreamStrategyRange {
 			if req.FirstFrameFallbacks != nil {
 				atomic.AddUint64(req.FirstFrameFallbacks, 1)
 			}
+			fallbackStrategy := proxy.StreamStrategyChunked
 			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
-				w, r, req.TargetURL, req.PasswdInfo, size, proxy.StreamStrategyChunked, req.CompatKey,
+				w, r, req.TargetURL, req.PasswdInfo, size, fallbackStrategy, req.CompatKey,
 			)
+			// Chunked 偏移太大时，二次回退到 Full 策略（下载整个文件再 seek）
+			if fallback.Err != nil && fallback.FailureReason == "chunked_seek_too_large" {
+				fallbackStrategy = proxy.StreamStrategyFull
+				fallback = req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
+					w, r, req.TargetURL, req.PasswdInfo, size, fallbackStrategy, req.CompatKey,
+				)
+			}
 			if fallback.Err == nil && !fallback.Retryable {
-				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, proxy.StreamStrategyChunked)
+				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, fallbackStrategy)
 				if req.StrategySel != nil && !fallback.NoLearning {
-					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyChunked)
+					req.StrategySel.RecordSuccess(req.ProviderKey, fallbackStrategy)
 				}
 				if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
 					req.SizeResolver.RecordPlaybackSuccess(
@@ -251,6 +259,33 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				return false, "range_unsatisfiable", fallback.Err
 			}
 			return false, "range_unsatisfiable", result.Err
+		}
+
+		// 当策略直接选了 Chunked 但 seek 偏移超过 maxDiscard 时，回退到 Full 策略
+		if reason == "chunked_seek_too_large" && !result.ResponseStarted && strategy == proxy.StreamStrategyChunked {
+			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
+				w, r, req.TargetURL, req.PasswdInfo, size, proxy.StreamStrategyFull, req.CompatKey,
+			)
+			if fallback.Err == nil && !fallback.Retryable {
+				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, proxy.StreamStrategyFull)
+				if req.StrategySel != nil && !fallback.NoLearning {
+					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyFull)
+				}
+				if req.SizeResolver != nil && r.Method == http.MethodGet && !fallback.NoLearning {
+					req.SizeResolver.RecordPlaybackSuccess(
+						r.Context(), req.FileItem, size, fallback.StatusCode, fallback.ContentType, fallback.ETag,
+					)
+				}
+				if req.Probe != nil {
+					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
+				}
+				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+				return true, "", nil
+			}
+			if fallback.Err != nil {
+				return false, "chunked_seek_too_large", fallback.Err
+			}
+			return false, "chunked_seek_too_large", result.Err
 		}
 
 		if result.Err != nil {
@@ -436,10 +471,23 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 }
 
 func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSize int64) bool {
-	if req.ConsumerScenario != consumerScenarioHTTP || req.Request == nil || req.FileDAO == nil || req.FileItem.DisplayPath == "" {
+	if req.Request == nil || req.FileDAO == nil || req.FileItem.DisplayPath == "" {
 		return false
 	}
+	// seek 请求（带 Range 头）：如果 FileDAO 已有该文件的缓存结论（首帧已检测过），
+	// 跳过耗时的 V2 探测，避免每次快进都触发 2-3 秒延迟导致播放器超时断开。
 	if req.Request.Header.Get("Range") != "" {
+		info, ok := req.FileDAO.Get(req.FileItem.DisplayPath)
+		if !ok || info == nil {
+			return false
+		}
+		if fallbackSize > 0 && info.Size > 0 && info.Size != fallbackSize {
+			return false
+		}
+		return true
+	}
+	// 首帧请求：保持原有逻辑，仅对 HTTP 场景且已有 V1 缓存结论时跳过
+	if req.ConsumerScenario != consumerScenarioHTTP {
 		return false
 	}
 	info, ok := req.FileDAO.Get(req.FileItem.DisplayPath)
@@ -549,7 +597,7 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 		return
 	}
 	switch reason {
-	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout", "stream_error":
+	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout":
 		req.FileDAO.InvalidateDisplayPath(req.FileItem.DisplayPath)
 	}
 }
