@@ -406,7 +406,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	result.ContentType = resp.Header.Get("Content-Type")
 	result.ETag = resp.Header.Get("ETag")
 
-	if req.Method == http.MethodGet && statusCode == http.StatusOK && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
+	if req.Method == http.MethodGet && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
 		showName := displayNameFromContext(req.Context())
 		if showName == "" {
 			allowLoose := s.cfg != nil && s.cfg.AlistServer.AllowLooseDecode

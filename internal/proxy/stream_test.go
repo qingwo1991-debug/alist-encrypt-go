@@ -372,6 +372,64 @@ func TestDecryptRequestUsesDisplayNameFromContext(t *testing.T) {
 	}
 }
 
+func TestDecryptRangeRequestUsesDisplayNameFromContext(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+
+	fileSize := int64(16)
+	plain := []byte("0123456789abcdef")
+	ciphertext := append([]byte(nil), plain...)
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to create flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Range"); got != "bytes=4-9" {
+			t.Fatalf("upstream Range=%q, want bytes=4-9", got)
+		}
+		headers := make(http.Header)
+		headers.Set("Content-Length", "6")
+		headers.Set("Content-Range", "bytes 4-9/16")
+		headers.Set("Content-Type", "video/mp4")
+		headers.Set("Content-Disposition", `attachment; filename="I6O1l9Hp5V+YO0--P.bin"`)
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     headers,
+			Body:       io.NopCloser(bytes.NewReader(ciphertext[4:10])),
+			Request:    r,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/d/test.bin", nil)
+	req.Header.Set("Range", "bytes=4-9")
+	req = req.WithContext(WithDisplayName(req.Context(), "oceans.mp4"))
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{
+		Password: "123456",
+		EncType:  "aesctr",
+		Enable:   true,
+		EncName:  true,
+	}
+	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/file", passwd, fileSize, StreamStrategyRange, "/")
+	if result.Err != nil {
+		t.Fatalf("unexpected stream error: %v", result.Err)
+	}
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d, want %d", rr.Code, http.StatusPartialContent)
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 4-9/16" {
+		t.Fatalf("Content-Range=%q, want bytes 4-9/16", got)
+	}
+	if got := rr.Header().Get("Content-Disposition"); !strings.Contains(got, "oceans.mp4") {
+		t.Fatalf("Content-Disposition=%q, want rewritten display name", got)
+	}
+	if body := rr.Body.String(); body != "456789" {
+		t.Fatalf("body=%q, want 456789", body)
+	}
+}
+
 func TestStripForeignHeadersPreservesAuthForAlistTargets(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AlistServer.ServerHost = "openalist"
