@@ -86,6 +86,45 @@ func preserveLargerMediaSize(existingSize, incomingSize int64, isDir bool, pathH
 	return existingSize
 }
 
+func mergeCachedFileSize(existing *FileInfo, incoming *FileInfo) int64 {
+	if incoming == nil {
+		return 0
+	}
+	if existing == nil {
+		return incoming.Size
+	}
+	if incoming.Size <= 0 {
+		return existing.Size
+	}
+	if incoming.ContentVersion == encryption.ContentVersionV2 {
+		return incoming.Size
+	}
+	if existing.ContentVersion == encryption.ContentVersionV2 && existing.Size > 0 {
+		if existing.CiphertextSize > 0 && incoming.Size == existing.CiphertextSize {
+			return existing.Size
+		}
+		if existing.HeaderLen > 0 && incoming.Size == existing.Size+existing.HeaderLen {
+			return existing.Size
+		}
+	}
+	return preserveLargerMediaSize(existing.Size, incoming.Size, incoming.IsDir, incoming.Path, incoming.Name, existing.Name)
+}
+
+func mergeCachedPathSize(existing *PathEntry, incomingSize int64, isDir bool, pathHints ...string) int64 {
+	if existing == nil || incomingSize <= 0 {
+		return incomingSize
+	}
+	if existing.ContentVersion == encryption.ContentVersionV2 && existing.Size > 0 {
+		if existing.CiphertextSize > 0 && incomingSize == existing.CiphertextSize {
+			return existing.Size
+		}
+		if existing.HeaderLen > 0 && incomingSize == existing.Size+existing.HeaderLen {
+			return existing.Size
+		}
+	}
+	return preserveLargerMediaSize(existing.Size, incomingSize, isDir, append(pathHints, existing.Name)...)
+}
+
 // NewFileDAO creates a new file DAO
 func NewFileDAO(store *storage.Store) *FileDAO {
 	dao := &FileDAO{
@@ -151,7 +190,7 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		if info.Size <= 0 {
 			info.Size = existing.Size
 		} else {
-			info.Size = preserveLargerMediaSize(existing.Size, info.Size, info.IsDir, info.Path, info.Name, existing.Name)
+			info.Size = mergeCachedFileSize(existing, info)
 		}
 		if info.CiphertextSize <= 0 {
 			info.CiphertextSize = existing.CiphertextSize
@@ -289,10 +328,13 @@ func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 
 // SetEncPathMappingWithInfo caches mapping with full file info (recommended)
 func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name string, size int64, isDir bool) {
-	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok && existing != nil {
-		size = preserveLargerMediaSize(existing.Size, size, isDir, displayPath, encryptedPath, name, existing.Name)
-	} else if existing, ok := d.pathCache.GetByEncPath(encryptedPath); ok && existing != nil {
-		size = preserveLargerMediaSize(existing.Size, size, isDir, displayPath, encryptedPath, name, existing.Name)
+	var existing *PathEntry
+	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok && cached != nil {
+		existing = cached
+		size = mergeCachedPathSize(existing, size, isDir, displayPath, encryptedPath, name)
+	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok && cached != nil {
+		existing = cached
+		size = mergeCachedPathSize(existing, size, isDir, displayPath, encryptedPath, name)
 	}
 	entry := &PathEntry{
 		EncryptedPath: encryptedPath,
@@ -300,6 +342,15 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 		Name:          name,
 		Size:          size,
 		IsDir:         isDir,
+	}
+	if existing != nil {
+		entry.CiphertextSize = existing.CiphertextSize
+		entry.ContentVersion = existing.ContentVersion
+		entry.HeaderLen = existing.HeaderLen
+		entry.NonceField = append([]byte(nil), existing.NonceField...)
+		entry.RawURL = existing.RawURL
+		entry.Sign = existing.Sign
+		entry.UpstreamFetchedAt = existing.UpstreamFetchedAt
 	}
 	d.pathCache.Set(entry, 24*time.Hour)
 }
