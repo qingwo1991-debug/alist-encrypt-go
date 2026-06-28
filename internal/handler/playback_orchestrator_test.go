@@ -840,6 +840,66 @@ func TestExecuteDecryptPlaybackDoesNotCacheRangeLengthAsFileSize(t *testing.T) {
 	}
 }
 
+func TestShouldSkipPlaybackMetaInspectionRequiresContentMetaForSeek(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path: "/size-only.mp4",
+		Name: "size-only.mp4",
+		Size: 4096,
+	}); err != nil {
+		t.Fatalf("set file info: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/size-only.mp4", nil)
+	req.Header.Set("Range", "bytes=2048-")
+	if shouldSkipHTTPContentMetaInspection(decryptPlaybackRequest{
+		Request:          req,
+		FileDAO:          fileDAO,
+		FileItem:         FileItem{DisplayPath: "/size-only.mp4"},
+		Path:             "/size-only.mp4",
+		ConsumerScenario: consumerScenarioWebDAV,
+	}, 4096) {
+		t.Fatal("size-only cache must not skip playback meta inspection for seek")
+	}
+}
+
+func TestShouldSkipPlaybackMetaInspectionAllowsCachedV2NonceForSeek(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path:           "/cached-v2.mp4",
+		Name:           "cached-v2.mp4",
+		Size:           4096,
+		CiphertextSize: 4128,
+		ContentVersion: encryption.ContentVersionV2,
+		HeaderLen:      encryption.ContentHeaderSize(),
+		NonceField:     bytes.Repeat([]byte{1}, 16),
+	}); err != nil {
+		t.Fatalf("set file info: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dav/cached-v2.mp4", nil)
+	req.Header.Set("Range", "bytes=2048-")
+	if !shouldSkipHTTPContentMetaInspection(decryptPlaybackRequest{
+		Request:          req,
+		FileDAO:          fileDAO,
+		FileItem:         FileItem{DisplayPath: "/cached-v2.mp4"},
+		Path:             "/cached-v2.mp4",
+		ConsumerScenario: consumerScenarioWebDAV,
+	}, 4096) {
+		t.Fatal("cached V2 meta with nonce should skip playback meta inspection for seek")
+	}
+}
+
 func TestInspectPlaybackContentMetaPrefersCurrentTargetURL(t *testing.T) {
 	cfg := config.DefaultConfig()
 	store, err := storage.NewStore(t.TempDir())

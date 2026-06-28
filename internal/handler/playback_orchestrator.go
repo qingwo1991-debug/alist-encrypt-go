@@ -85,6 +85,16 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
 				req.Request = r
 				metaLoaded = true
+				log.Info().
+					Str("category", "playback").
+					Str("consumer_scenario", req.ConsumerScenario).
+					Str("path", req.Path).
+					Int("content_version", info.ContentVersion).
+					Int64("plain_size", info.Size).
+					Int64("ciphertext_size", info.CiphertextSize).
+					Int64("header_len", info.HeaderLen).
+					Int("nonce_len", len(info.NonceField)).
+					Msg("Loaded cached playback content meta")
 			} else {
 				log.Info().
 					Str("category", "playback").
@@ -134,6 +144,17 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	}
 
 	trySingle := func(size int64) (bool, string, error) {
+		log.Info().
+			Str("category", "playback").
+			Str("consumer_scenario", req.ConsumerScenario).
+			Str("path", req.Path).
+			Str("target_url", req.TargetURL).
+			Str("range", r.Header.Get("Range")).
+			Str("strategy", string(strategy)).
+			Int64("file_size", size).
+			Bool("meta_loaded", metaLoaded).
+			Bool("first_frame_hint", firstFrameHint).
+			Msg("Starting decrypt playback attempt")
 		result := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 			w, r, req.TargetURL, req.PasswdInfo, size, strategy, req.CompatKey,
 		)
@@ -485,6 +506,35 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 		if fallbackSize > 0 && info.Size > 0 && info.Size != fallbackSize {
 			return false
 		}
+		if info.ContentVersion == encryption.ContentVersionV2 && len(info.NonceField) != 16 {
+			log.Info().
+				Str("category", "playback").
+				Str("consumer_scenario", req.ConsumerScenario).
+				Str("path", req.Path).
+				Str("range", rangeHeader).
+				Int("content_version", info.ContentVersion).
+				Int("nonce_len", len(info.NonceField)).
+				Msg("Will probe V2 meta for seek because cached nonce is missing")
+			return false
+		}
+		if info.ContentVersion <= 0 {
+			log.Info().
+				Str("category", "playback").
+				Str("consumer_scenario", req.ConsumerScenario).
+				Str("path", req.Path).
+				Str("range", rangeHeader).
+				Int64("cached_size", info.Size).
+				Msg("Will probe playback meta for seek because cache has size only")
+			return false
+		}
+		log.Info().
+			Str("category", "playback").
+			Str("consumer_scenario", req.ConsumerScenario).
+			Str("path", req.Path).
+			Str("range", rangeHeader).
+			Int("content_version", info.ContentVersion).
+			Int64("cached_size", info.Size).
+			Msg("Skipping playback meta probe for seek with cached content meta")
 		return true
 	}
 	// 首帧请求：保持原有逻辑，仅对 HTTP 场景且已有 V1 缓存结论时跳过

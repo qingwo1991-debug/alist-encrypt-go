@@ -67,7 +67,19 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	}
 	applyStrategyHeaders(req, strategy)
 	if strategy == StreamStrategyRange {
-		req.Header.Set("Range", buildUpstreamRangeHeader(rangeHeader, meta))
+		upstreamRange := buildUpstreamRangeHeader(rangeHeader, meta)
+		req.Header.Set("Range", upstreamRange)
+		log.Info().
+			Str("category", "playback").
+			Str("target_url", targetURL).
+			Str("strategy", string(strategy)).
+			Str("client_range", rangeHeader).
+			Str("upstream_range", upstreamRange).
+			Int("meta_version", meta.Version).
+			Int64("plain_size", meta.PlainSize).
+			Int64("ciphertext_size", meta.CiphertextSize).
+			Int64("header_len", meta.HeaderLen).
+			Msg("Prepared upstream decrypt request")
 	}
 
 	// Retry transient network errors with jittered exponential backoff
@@ -131,7 +143,19 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	}
 	applyStrategyHeaders(req, strategy)
 	if strategy == StreamStrategyRange {
-		req.Header.Set("Range", buildUpstreamRangeHeader(rangeHeader, meta))
+		upstreamRange := buildUpstreamRangeHeader(rangeHeader, meta)
+		req.Header.Set("Range", upstreamRange)
+		log.Info().
+			Str("category", "playback").
+			Str("target_url", targetURL).
+			Str("strategy", string(strategy)).
+			Str("client_range", rangeHeader).
+			Str("upstream_range", upstreamRange).
+			Int("meta_version", meta.Version).
+			Int64("plain_size", meta.PlainSize).
+			Int64("ciphertext_size", meta.CiphertextSize).
+			Int64("header_len", meta.HeaderLen).
+			Msg("Prepared upstream decrypt request")
 	}
 	// Strip WebDAV-specific headers for CDN requests (raw_url targets).
 	// WebDAV players send Depth, Translate etc. that confuse cloud CDNs.
@@ -405,6 +429,25 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	result.StatusCode = statusCode
 	result.ContentType = resp.Header.Get("Content-Type")
 	result.ETag = resp.Header.Get("ETag")
+
+	log.Info().
+		Str("category", "playback").
+		Str("target_url", targetURL).
+		Str("strategy", string(strategy)).
+		Str("client_range", rangeHeader).
+		Str("upstream_content_range", resp.Header.Get("Content-Range")).
+		Int("upstream_status", resp.StatusCode).
+		Int("response_status", statusCode).
+		Str("response_content_range", w.Header().Get("Content-Range")).
+		Str("response_content_length", w.Header().Get("Content-Length")).
+		Int64("file_size", fileSize).
+		Int64("expected_bytes", result.ExpectedBytes).
+		Int("meta_version", meta.Version).
+		Int64("plain_size", meta.PlainSize).
+		Int64("ciphertext_size", meta.CiphertextSize).
+		Int64("header_len", meta.HeaderLen).
+		Bool("upstream_shifted_range", upstreamShiftedRange).
+		Msg("Prepared decrypt response headers")
 
 	if req.Method == http.MethodGet && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
 		showName := displayNameFromContext(req.Context())

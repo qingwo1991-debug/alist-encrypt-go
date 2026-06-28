@@ -9,6 +9,7 @@ import (
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/rs/zerolog/log"
 )
 
 // RedirectRewriter can rewrite upstream redirect locations for decrypt streams.
@@ -72,7 +73,19 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 		sanitizeRedirectHeaders(newReq, req.URL, currentURL)
 		applyStrategyHeaders(newReq, strategy)
 		if strategy == StreamStrategyRange {
-			newReq.Header.Set("Range", buildUpstreamRangeHeader(rangeHeader, meta))
+			upstreamRange := buildUpstreamRangeHeader(rangeHeader, meta)
+			newReq.Header.Set("Range", upstreamRange)
+			log.Info().
+				Str("category", "playback").
+				Str("target_url", currentURL).
+				Str("strategy", string(strategy)).
+				Str("client_range", rangeHeader).
+				Str("upstream_range", upstreamRange).
+				Int("meta_version", meta.Version).
+				Int64("plain_size", meta.PlainSize).
+				Int64("ciphertext_size", meta.CiphertextSize).
+				Int64("header_len", meta.HeaderLen).
+				Msg("Prepared redirected upstream decrypt request")
 		}
 		if rangeHeader != "" && s.shouldSkipRange(currentURL, compatStorageKey) {
 			newReq.Header.Del("Range")
