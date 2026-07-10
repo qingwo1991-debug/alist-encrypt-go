@@ -1,6 +1,11 @@
 package handler
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/alist-encrypt-go/internal/proxy"
+)
 
 func TestShouldRetryFreshResolveForSizeRelatedFailures(t *testing.T) {
 	cases := []string{
@@ -55,5 +60,35 @@ func TestShouldRetryFreshResolveAllowsRedirectMetadataRecovery(t *testing.T) {
 		if !shouldRetryFreshResolve(reason, true, consumerScenarioRedirect) {
 			t.Fatalf("expected redirect retry for %q", reason)
 		}
+	}
+}
+
+func TestShouldRetryFreshResolveRefreshesExpiredHTTPRawURL(t *testing.T) {
+	if !shouldRetryFreshResolve("upstream_4xx", true, consumerScenarioHTTP) {
+		t.Fatal("HTTP playback should refresh a signed raw URL after upstream 4xx")
+	}
+}
+
+func TestPlaybackOutcomeServedAcceptsPlayerCancellationAfterBytes(t *testing.T) {
+	result := &proxy.StreamOutcome{
+		Err:             errors.New("context canceled"),
+		FailureReason:   "client_disconnect",
+		ResponseStarted: true,
+		BytesWritten:    4096,
+	}
+	if !playbackOutcomeServed(result) {
+		t.Fatal("expected cancellation after streamed bytes to count as served")
+	}
+
+	result.BytesWritten = 0
+	if playbackOutcomeServed(result) {
+		t.Fatal("cancellation before any bytes must remain a failure")
+	}
+}
+
+func TestPlaybackOutcomeServedRejectsFailureReasonWithoutError(t *testing.T) {
+	result := &proxy.StreamOutcome{FailureReason: "upstream_4xx", NoLearning: true}
+	if playbackOutcomeServed(result) {
+		t.Fatal("failure reason must not be counted as successful playback")
 	}
 }

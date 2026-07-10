@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1173,5 +1174,198 @@ func TestExecuteDecryptPlaybackWebDAVFallsBackToInternalDavOnRawURLUpstream4xx(t
 	}
 	if davHits == 0 {
 		t.Fatal("expected internal /dav fallback")
+	}
+}
+
+func TestExecuteDecryptPlaybackHTTPRefreshesExpiredRawURL(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store, cfg)
+	sp := proxy.NewStreamProxy(cfg)
+
+	const fileSize = int64(4096)
+	plain := bytes.Repeat([]byte("R"), int(fileSize))
+	ciphertext := append([]byte(nil), plain...)
+	flow, err := encryption.NewFlowEnc("123456", "aesctr", fileSize)
+	if err != nil {
+		t.Fatalf("failed to build flow enc: %v", err)
+	}
+	flow.Encrypt(ciphertext)
+
+	var backendURL string
+	var expiredHits, metadataHits, freshHits int
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/expired":
+			expiredHits++
+			http.Error(w, "expired", http.StatusForbidden)
+		case "/api/fs/get":
+			metadataHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"` + backendURL + `/fresh","size":4096}}`))
+		case "/fresh":
+			freshHits++
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Range", "bytes 0-1023/4096")
+			w.Header().Set("Content-Length", "1024")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[:1024])
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+	backendURL = backend.URL
+
+	cfg.AlistServer.ServerHost = strings.TrimPrefix(backend.URL, "http://")
+	cfg.AlistServer.HTTPS = false
+	if host, port, splitErr := net.SplitHostPort(cfg.AlistServer.ServerHost); splitErr == nil {
+		cfg.AlistServer.ServerHost = host
+		cfg.AlistServer.ServerPort, _ = strconv.Atoi(port)
+	}
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path:              "/movie.mp4",
+		EncryptedPath:     "/movie.bin",
+		Name:              "movie.mp4",
+		Size:              fileSize,
+		ContentVersion:    encryption.ContentVersionV1,
+		RawURL:            backend.URL + "/expired",
+		UpstreamFetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed file cache: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/d/movie.mp4", nil)
+	req.Header.Set("Range", "bytes=0-1023")
+	rr := httptest.NewRecorder()
+	passwd := &config.PasswdInfo{Password: "123456", EncType: "aesctr", Enable: true}
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter: rr,
+		Request:        req,
+		Config:         cfg,
+		StreamProxy:    sp,
+		FileDAO:        fileDAO,
+		PasswdInfo:     passwd,
+		FileItem: FileItem{
+			DisplayPath:   "/movie.mp4",
+			EncryptedPath: "/movie.bin",
+			TargetURL:     backend.URL + "/expired",
+			FileName:      "movie.mp4",
+			PasswdInfo:    passwd,
+		},
+		TargetURL:        backend.URL + "/expired",
+		ProviderKey:      ProviderKey(backend.URL+"/expired", "/movie.mp4"),
+		Path:             "/movie.mp4",
+		InitialSize:      fileSize,
+		CompatKey:        "/encrypt",
+		ConsumerScenario: consumerScenarioHTTP,
+		FailureLogMsg:    "test playback failed",
+	})
+
+	if rr.Code != http.StatusPartialContent || !bytes.Equal(rr.Body.Bytes(), plain[:1024]) {
+		t.Fatalf("status=%d body=%d, expected refreshed decrypted range", rr.Code, rr.Body.Len())
+	}
+	if expiredHits != 1 || metadataHits != 1 || freshHits != 1 {
+		t.Fatalf("hits expired=%d metadata=%d fresh=%d, want 1/1/1", expiredHits, metadataHits, freshHits)
+	}
+}
+
+func TestExecuteDecryptPlaybackHTTPRefreshesExpiredRawURLAndReprobesV2(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store, cfg)
+	sp := proxy.NewStreamProxy(cfg)
+	passwd := &config.PasswdInfo{Password: "123456", EncType: "aesctr", Enable: true}
+	plain := bytes.Repeat([]byte("v2-refresh-"), 512)
+	contentEnc, err := encryption.NewLatestContentEncryptor(passwd.Password, passwd.EncType, int64(len(plain)))
+	if err != nil {
+		t.Fatalf("new V2 encryptor: %v", err)
+	}
+	cipherReader, err := contentEnc.EncryptReader(bytes.NewReader(plain), 0)
+	if err != nil {
+		t.Fatalf("create encrypted reader: %v", err)
+	}
+	ciphertext, err := io.ReadAll(cipherReader)
+	if err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+
+	var backendURL string
+	var expiredHits, metadataHits int
+	freshRanges := make(map[string]int)
+	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/expired":
+			expiredHits++
+			http.Error(w, "expired", http.StatusForbidden)
+		case "/api/fs/get":
+			metadataHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"code":200,"data":{"raw_url":%q,"size":%d}}`, backendURL+"/fresh", len(ciphertext))
+		case "/fresh":
+			rangeHeader := r.Header.Get("Range")
+			freshRanges[rangeHeader]++
+			var start, end int
+			switch rangeHeader {
+			case "bytes=0-31":
+				start, end = 0, 31
+			case "bytes=32-1055":
+				start, end = 32, 1055
+			default:
+				t.Fatalf("unexpected fresh range: %q", rangeHeader)
+			}
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(ciphertext)))
+			w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(ciphertext[start : end+1])
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+	backendURL = backend.URL
+
+	cfg.AlistServer.ServerHost = strings.TrimPrefix(backend.URL, "http://")
+	cfg.AlistServer.HTTPS = false
+	if host, port, splitErr := net.SplitHostPort(cfg.AlistServer.ServerHost); splitErr == nil {
+		cfg.AlistServer.ServerHost = host
+		cfg.AlistServer.ServerPort, _ = strconv.Atoi(port)
+	}
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path: "/movie.mp4", EncryptedPath: "/movie.bin", Name: "movie.mp4",
+		Size: int64(len(ciphertext)), RawURL: backend.URL + "/expired", UpstreamFetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed size-only cache: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/d/movie.mp4", nil)
+	req.Header.Set("Range", "bytes=0-1023")
+	rr := httptest.NewRecorder()
+	executeDecryptPlayback(decryptPlaybackRequest{
+		ResponseWriter: rr, Request: req, Config: cfg, StreamProxy: sp, FileDAO: fileDAO, PasswdInfo: passwd,
+		FileItem:  FileItem{DisplayPath: "/movie.mp4", EncryptedPath: "/movie.bin", TargetURL: backend.URL + "/expired", FileName: "movie.mp4", PasswdInfo: passwd},
+		TargetURL: backend.URL + "/expired", ProviderKey: ProviderKey(backend.URL+"/expired", "/movie.mp4"),
+		Path: "/movie.mp4", InitialSize: int64(len(ciphertext)), CompatKey: "/encrypt",
+		ConsumerScenario: consumerScenarioHTTP, FailureLogMsg: "test V2 playback failed",
+	})
+
+	if rr.Code != http.StatusPartialContent || !bytes.Equal(rr.Body.Bytes(), plain[:1024]) {
+		t.Fatalf("status=%d body=%d, expected refreshed V2 decrypted range", rr.Code, rr.Body.Len())
+	}
+	if expiredHits != 1 || metadataHits != 1 || freshRanges["bytes=0-31"] != 1 || freshRanges["bytes=32-1055"] != 1 {
+		t.Fatalf("hits expired=%d metadata=%d fresh=%v", expiredHits, metadataHits, freshRanges)
+	}
+	info, ok := fileDAO.Get("/movie.mp4")
+	if !ok || info.ContentVersion != encryption.ContentVersionV2 || len(info.NonceField) != 16 || info.Size != int64(len(plain)) {
+		t.Fatalf("V2 metadata not cached after refresh: %#v", info)
 	}
 }

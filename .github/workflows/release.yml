@@ -174,6 +174,25 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: enc-webui/package-lock.json
+
+      - name: Build embedded Web UI
+        working-directory: enc-webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install embedded Web UI
+        run: |
+          rm -rf web/public
+          mkdir -p web/public
+          cp -a enc-webui/dist/. web/public/
+
       - name: Build binaries
         env:
           CGO_ENABLED: '0'

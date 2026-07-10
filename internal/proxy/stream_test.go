@@ -68,6 +68,16 @@ func TestClassifyStreamErrorClientDisconnectBeforeGenericNetError(t *testing.T) 
 	}
 }
 
+func TestClassifyStreamErrorContextCancellationAsClientDisconnect(t *testing.T) {
+	reason, retryable := classifyStreamError(context.Canceled)
+	if reason != "client_disconnect" {
+		t.Fatalf("expected client_disconnect reason, got %q", reason)
+	}
+	if retryable {
+		t.Fatal("client cancellation must not be retried")
+	}
+}
+
 func TestProxyUploadEncryptUsesStartOffsetForChunkedUpload(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)

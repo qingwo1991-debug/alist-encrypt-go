@@ -44,15 +44,20 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config) (*Server, error) {
-	// Try MySQL first.
+	// When MySQL is explicitly configured it is the authoritative persistence
+	// backend. Starting with a silent BoltDB fallback would split runtime state
+	// and make the failure easy to miss.
 	mysqlStore, mysqlErr := mysqlstore.NewStore(cfg)
 	if mysqlErr != nil {
-		log.Warn().Err(mysqlErr).Msg("MySQL unavailable, falling back to BoltDB")
+		return nil, fmt.Errorf("failed to initialize MySQL store: %w", mysqlErr)
 	}
 
 	// BoltDB is always created for users/passwd/config (minimal, always needed).
 	store, err := storage.NewStore(cfg.DataDir)
 	if err != nil {
+		if mysqlStore != nil {
+			_ = mysqlStore.Close()
+		}
 		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 
@@ -65,8 +70,8 @@ func New(cfg *config.Config) (*Server, error) {
 		engine:      gin.New(),
 		streamProxy: proxy.NewStreamProxy(cfg),
 		userDAO:     dao.NewUserDAO(store),
-		fileDAO:     dao.NewFileDAO(store),
-		passwdDAO:   dao.NewPasswdDAO(store),
+		fileDAO:     dao.NewFileDAO(store, cfg),
+		passwdDAO:   dao.NewPasswdDAO(store, cfg),
 		mysqlStore:  mysqlStore,
 	}
 
@@ -250,7 +255,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 	r.POST("/api/fs/move", ginWrap(alistHandler.HandleFsMove))
 	r.POST("/api/fs/copy", ginWrap(alistHandler.HandleFsCopy))
 	r.GET("/api/encrypt/dir-sync/overview", ginWrap(alistHandler.HandleDirSyncOverview))
-	r.POST("/api/encrypt/dir-sync/run", ginWrap(alistHandler.HandleDirSyncRun))
+	r.POST("/api/encrypt/dir-sync/run", AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire), ginWrap(alistHandler.HandleDirSyncRun))
 	r.GET("/api/encrypt/dir-sync/page", ginWrap(alistHandler.HandleDirSyncPage))
 
 	// Catch-all - Proxy to Alist with version injection

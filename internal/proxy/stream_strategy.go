@@ -23,6 +23,10 @@ type recentPlaybackHint struct {
 }
 
 const firstFrameWindowBytes int64 = 2 * 1024 * 1024
+
+// A small allowance covers players that skip a short container/header prefix
+// (observed as bytes=48-) without classifying ordinary seeks as startup.
+const firstFrameStartSlackBytes int64 = 1024
 const recentPlaybackHintTTL = 2 * time.Minute
 
 // SelectOptimalStrategy picks the single best strategy based on cached range
@@ -43,9 +47,6 @@ func (s *StreamProxy) SelectOptimalStrategy(targetURL, storageKey, method, range
 	}
 
 	if s.shouldSkipRange(targetURL, storageKey) {
-		if profile.IsFirstFrameHint {
-			return StreamStrategyChunked
-		}
 		maxDiscard := s.chunkedSeekMaxDiscardBytes()
 		if maxDiscard <= 0 || profile.Start <= maxDiscard {
 			return StreamStrategyChunked
@@ -57,9 +58,26 @@ func (s *StreamProxy) SelectOptimalStrategy(targetURL, storageKey, method, range
 }
 
 // IsFirstFrameRangeHint reports whether the request looks like a first-frame
-// read, such as bytes=0- or a small bounded window starting at 0.
+// read, such as bytes=0-, bytes=48-, or a small bounded window beginning near
+// the container header.
 func IsFirstFrameRangeHint(method, rangeHeader string) bool {
 	return classifyRequestRange(method, rangeHeader).IsFirstFrameHint
+}
+
+// IsInitialPlaybackHint reports whether a GET is likely part of playback
+// startup. Real players commonly request the whole resource without Range or
+// begin just after a small container/header prefix (for example bytes=48-).
+// This is intentionally broader than IsFirstFrameRangeHint and is only used
+// for observability and background warmup, not strategy selection.
+func IsInitialPlaybackHint(method, rangeHeader string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	if strings.TrimSpace(rangeHeader) == "" {
+		return true
+	}
+	profile := classifyRequestRange(method, rangeHeader)
+	return profile.HasRange && profile.Start <= firstFrameWindowBytes
 }
 
 // RecordPlaybackHint records a successful playback strategy for quick reuse.
@@ -119,9 +137,6 @@ func (s *StreamProxy) recentPlaybackStrategy(targetURL, storageKey string, profi
 	case StreamStrategyChunked:
 		if !rangeSkipped {
 			return "", false
-		}
-		if profile.IsFirstFrameHint {
-			return strategy, true
 		}
 		maxDiscard := s.chunkedSeekMaxDiscardBytes()
 		if maxDiscard <= 0 || profile.Start <= maxDiscard {
@@ -196,7 +211,7 @@ func classifyRequestRange(method, rangeHeader string) requestRangeProfile {
 		}
 	}
 
-	if start == 0 {
+	if start <= firstFrameStartSlackBytes {
 		if !profile.HasExplicitEnd {
 			profile.IsFirstFrameHint = true
 		} else if profile.EstimatedLength > 0 && profile.EstimatedLength <= firstFrameWindowBytes {

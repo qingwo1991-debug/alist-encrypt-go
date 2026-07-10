@@ -25,6 +25,8 @@ type Store struct {
 	cancelLoops       context.CancelFunc // cancels background flush/cleanup goroutines
 }
 
+var openDB = sql.Open
+
 func NewStore(cfg *config.Config) (*Store, error) {
 	if cfg == nil || cfg.Database == nil {
 		return nil, nil
@@ -41,7 +43,7 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		log.Info().Msg("DB_DSN normalized with parseTime/loc parameters")
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	db, err := openDB("mysql", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +70,7 @@ func NewStore(cfg *config.Config) (*Store, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		return nil, err
+		return nil, closeDBAfterInitError(db, err)
 	}
 	log.Info().Msg("MySQL connected")
 
@@ -101,7 +103,7 @@ func NewStore(cfg *config.Config) (*Store, error) {
 	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer schemaCancel()
 	if err := store.ensureSchema(schemaCtx); err != nil {
-		return nil, err
+		return nil, closeDBAfterInitError(db, err)
 	}
 	if !store.disableCleanup {
 		if err := store.cleanup(context.Background()); err != nil {
@@ -117,6 +119,16 @@ func NewStore(cfg *config.Config) (*Store, error) {
 
 	store.startLoops(loopsCtx)
 	return store, nil
+}
+
+func closeDBAfterInitError(db *sql.DB, initErr error) error {
+	if db == nil {
+		return initErr
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		return fmt.Errorf("%w; additionally failed to close database: %v", initErr, closeErr)
+	}
+	return initErr
 }
 
 func (s *Store) Close() error {

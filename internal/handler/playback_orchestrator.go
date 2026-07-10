@@ -139,9 +139,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		strategy = override
 	}
 	firstFrameHint := proxy.IsFirstFrameRangeHint(r.Method, r.Header.Get("Range"))
-	if firstFrameHint && req.FirstFrameCount != nil {
+	initialPlaybackHint := proxy.IsInitialPlaybackHint(r.Method, r.Header.Get("Range"))
+	if initialPlaybackHint && req.FirstFrameCount != nil {
 		atomic.AddUint64(req.FirstFrameCount, 1)
 	}
+	lastUpstreamStatus := 0
 
 	trySingle := func(size int64) (bool, string, error) {
 		log.Info().
@@ -154,11 +156,15 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			Int64("file_size", size).
 			Bool("meta_loaded", metaLoaded).
 			Bool("first_frame_hint", firstFrameHint).
+			Bool("initial_playback_hint", initialPlaybackHint).
 			Msg("Starting decrypt playback attempt")
 		result := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 			w, r, req.TargetURL, req.PasswdInfo, size, strategy, req.CompatKey,
 		)
-		if result.Err == nil && !result.Retryable {
+		if result.StatusCode != 0 {
+			lastUpstreamStatus = result.StatusCode
+		}
+		if playbackOutcomeServed(result) {
 			req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, strategy)
 			if req.StrategySel != nil && !result.NoLearning {
 				req.StrategySel.RecordSuccess(req.ProviderKey, strategy)
@@ -171,7 +177,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			if req.Probe != nil {
 				req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 			}
-			maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, result.ExpectedBytes)
+			maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, result.ExpectedBytes)
 			return true, "", nil
 		}
 
@@ -196,7 +202,10 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 					w, r, fallbackTarget, req.PasswdInfo, size, strategy, req.CompatKey,
 				)
-				if fallback.Err == nil && !fallback.Retryable {
+				if fallback.StatusCode != 0 {
+					lastUpstreamStatus = fallback.StatusCode
+				}
+				if playbackOutcomeServed(fallback) {
 					req.StreamProxy.RecordPlaybackHint(fallbackTarget, req.CompatKey, strategy)
 					if req.StrategySel != nil && !fallback.NoLearning {
 						req.StrategySel.RecordSuccess(fallbackProvider, strategy)
@@ -209,11 +218,15 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					if req.Probe != nil {
 						req.Probe.RecordConsumerHit(fallbackFile, req.ConsumerScenario)
 					}
-					maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+					maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
 					return true, "", nil
 				}
 				if fallback.Err != nil {
-					return false, reason, fallback.Err
+					fallbackReason := fallback.FailureReason
+					if fallbackReason == "" {
+						fallbackReason = reason
+					}
+					return false, fallbackReason, fallback.Err
 				}
 				return false, reason, result.Err
 			}
@@ -227,14 +240,20 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 				w, r, req.TargetURL, req.PasswdInfo, size, fallbackStrategy, req.CompatKey,
 			)
+			if fallback.StatusCode != 0 {
+				lastUpstreamStatus = fallback.StatusCode
+			}
 			// Chunked 偏移太大时，二次回退到 Full 策略（下载整个文件再 seek）
 			if fallback.Err != nil && fallback.FailureReason == "chunked_seek_too_large" {
 				fallbackStrategy = proxy.StreamStrategyFull
 				fallback = req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 					w, r, req.TargetURL, req.PasswdInfo, size, fallbackStrategy, req.CompatKey,
 				)
+				if fallback.StatusCode != 0 {
+					lastUpstreamStatus = fallback.StatusCode
+				}
 			}
-			if fallback.Err == nil && !fallback.Retryable {
+			if playbackOutcomeServed(fallback) {
 				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, fallbackStrategy)
 				if req.StrategySel != nil && !fallback.NoLearning {
 					req.StrategySel.RecordSuccess(req.ProviderKey, fallbackStrategy)
@@ -247,7 +266,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				if req.Probe != nil {
 					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
-				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+				maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
 				return true, "", nil
 			}
 			if fallback.Err != nil {
@@ -260,7 +279,10 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 				w, r, req.TargetURL, req.PasswdInfo, size, proxy.StreamStrategyFull, req.CompatKey,
 			)
-			if fallback.Err == nil && !fallback.Retryable {
+			if fallback.StatusCode != 0 {
+				lastUpstreamStatus = fallback.StatusCode
+			}
+			if playbackOutcomeServed(fallback) {
 				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, proxy.StreamStrategyFull)
 				if req.StrategySel != nil && !fallback.NoLearning {
 					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyFull)
@@ -273,7 +295,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				if req.Probe != nil {
 					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
-				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+				maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
 				return true, "", nil
 			}
 			if fallback.Err != nil {
@@ -287,7 +309,10 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			fallback := req.StreamProxy.ProxyDownloadDecryptWithStrategyForStorage(
 				w, r, req.TargetURL, req.PasswdInfo, size, proxy.StreamStrategyFull, req.CompatKey,
 			)
-			if fallback.Err == nil && !fallback.Retryable {
+			if fallback.StatusCode != 0 {
+				lastUpstreamStatus = fallback.StatusCode
+			}
+			if playbackOutcomeServed(fallback) {
 				req.StreamProxy.RecordPlaybackHint(req.TargetURL, req.CompatKey, proxy.StreamStrategyFull)
 				if req.StrategySel != nil && !fallback.NoLearning {
 					req.StrategySel.RecordSuccess(req.ProviderKey, proxy.StreamStrategyFull)
@@ -300,7 +325,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				if req.Probe != nil {
 					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
-				maybeEnqueueFirstFrameWarmup(req, authHeaders, firstFrameHint, size, fallback.ExpectedBytes)
+				maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
 				return true, "", nil
 			}
 			if fallback.Err != nil {
@@ -322,20 +347,58 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	if shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
 		logDecryptFailure(req, strategy, lastFailure, true)
-		if req.ConsumerScenario == consumerScenarioRedirect && req.FileDAO != nil && req.FileItem.DisplayPath != "" && req.Config != nil {
+		retryWithFreshState := false
+		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP) &&
+			req.FileDAO != nil && req.FileItem.DisplayPath != "" && req.Config != nil {
 			authCopy := cloneHeader(authHeaders)
+			probeFreshContent := true
+			if cached, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && cached != nil {
+				probeFreshContent = cached.ContentVersion <= 0 ||
+					(cached.ContentVersion == encryption.ContentVersionV2 && len(cached.NonceField) != 16)
+			}
 			freshRaw := fetchRawURL(r.Context(), req.Config.GetAlistURL(), req.FileItem.DisplayPath, req.FileItem.EncryptedPath, authCopy, req.FileDAO, 0)
 			if strings.TrimSpace(freshRaw.RawURL) != "" {
+				retryWithFreshState = !strings.EqualFold(req.TargetURL, freshRaw.RawURL)
 				req.TargetURL = freshRaw.RawURL
 				req.FileItem.TargetURL = freshRaw.RawURL
+				req.ProviderKey = ProviderKey(freshRaw.RawURL, req.FileItem.DisplayPath)
+
+				// The expired URL may have prevented the initial V2 header probe.
+				// Inspect the fresh URL without letting a legacy size-only cache entry
+				// suppress detection, then attach the new nonce before retrying.
+				if probeFreshContent {
+					inspectReq := req
+					inspectReq.FileDAO = nil
+					if inspectedMeta, ok := inspectPlaybackContentMeta(inspectReq, authHeaders, freshRaw.Size); ok {
+						r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
+						req.Request = r
+						metaLoaded = true
+						if inspectedMeta.PlainSize > 0 {
+							fileSize = inspectedMeta.PlainSize
+						}
+						cachePlaybackContentMeta(req, inspectedMeta)
+						retryWithFreshState = true
+					}
+				}
 			}
 			if freshRaw.Size > 0 {
-				fileSize = freshRaw.Size
+				freshSize := freshRaw.Size
+				// Metadata APIs normally report ciphertext size for V2. Preserve the
+				// cached plaintext size/nonce that the decrypt stream requires.
+				if cached, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && cached != nil &&
+					cached.ContentVersion == encryption.ContentVersionV2 && cached.Size > 0 {
+					freshSize = cached.Size
+				}
+				if freshSize != fileSize {
+					retryWithFreshState = true
+				}
+				fileSize = freshSize
 			}
 		}
 		if req.SizeResolver != nil {
 			fresh := req.SizeResolver.ResolveSingleFresh(r.Context(), req.FileItem, authHeaders)
 			if fresh.Error == nil && fresh.Size > 0 {
+				retryWithFreshState = true
 				if fileSize > 0 && fresh.Size != fileSize {
 					req.SizeResolver.RecordMetaConflict(req.ProviderKey)
 					if req.SizeConflictCount != nil {
@@ -347,12 +410,15 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					if refreshed, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && refreshed != nil && strings.TrimSpace(refreshed.RawURL) != "" {
 						req.TargetURL = refreshed.RawURL
 						req.FileItem.TargetURL = refreshed.RawURL
+						req.ProviderKey = ProviderKey(refreshed.RawURL, req.FileItem.DisplayPath)
 					}
 				}
-				success, lastFailure, lastErr = trySingle(fileSize)
-				if success {
-					return
-				}
+			}
+		}
+		if retryWithFreshState {
+			success, lastFailure, lastErr = trySingle(fileSize)
+			if success {
+				return
 			}
 		}
 	}
@@ -360,6 +426,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if lastFailure == "range_unsatisfiable" {
 		invalidatePlaybackState(req, lastFailure)
 		RespondHTTPErrorWithStatus(w, "Range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if lastFailure == "upstream_4xx" && lastUpstreamStatus >= http.StatusBadRequest && lastUpstreamStatus < http.StatusInternalServerError {
+		invalidatePlaybackState(req, lastFailure)
+		RespondHTTPErrorWithStatus(w, "Upstream "+http.StatusText(lastUpstreamStatus), lastUpstreamStatus)
 		return
 	}
 	if lastErr != nil {
@@ -371,6 +442,20 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	invalidatePlaybackState(req, lastFailure)
 	log.Error().Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
 	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
+}
+
+// playbackOutcomeServed treats a player cancel after response bytes were sent
+// as a completed handoff. Seeking naturally cancels the previous HTTP request;
+// attempting a fallback or appending an error response at that point only adds
+// noise and can corrupt the already-started response.
+func playbackOutcomeServed(result *proxy.StreamOutcome) bool {
+	if result == nil {
+		return false
+	}
+	if result.Err == nil && !result.Retryable && result.FailureReason == "" {
+		return true
+	}
+	return result.ResponseStarted && result.BytesWritten > 0 && result.FailureReason == "client_disconnect"
 }
 
 func isWebDAVUpstreamFailure(reason string) bool {
@@ -399,6 +484,9 @@ func shouldRetryFreshResolve(failureReason string, firstFrameHint bool, consumer
 		case "range_unsatisfiable", "decrypt_validation_failed", "upstream_4xx", "upstream_5xx", "stream_error", "unknown", "":
 			return true
 		}
+	}
+	if consumerScenario == consumerScenarioHTTP && failureReason == "upstream_4xx" {
+		return true
 	}
 	switch failureReason {
 	case "range_unsatisfiable", "decrypt_validation_failed":

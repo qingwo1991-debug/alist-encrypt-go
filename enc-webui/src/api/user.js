@@ -1,16 +1,15 @@
 //获取用户信息
 import axiosReq from '@/utils/axios-req'
 export const userInfoReq = () => {
-  return new Promise((resolve) => {
-    const reqConfig = {
-      url: '/enc-api/getUserInfo',
-      params: { plateFormId: 2 },
-      method: 'post'
-    }
-    axiosReq(reqConfig).then(({ data }) => {
-      resolve(data)
-    })
-  })
+  const reqConfig = {
+    url: '/enc-api/getUserInfo',
+    params: { plateFormId: 2 },
+    method: 'post'
+  }
+  // Return the original chain so an expired token rejects into the router
+  // guard. Wrapping only the resolve path leaves the outer promise pending and
+  // turns a normal 401 into an unhandled rejection.
+  return axiosReq(reqConfig).then(({ data }) => data)
 }
 // 更新密码
 export const upatePasswordReq = (subForm) => {

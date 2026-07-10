@@ -35,8 +35,9 @@ type ProbeScheduler struct {
 	minDelay time.Duration
 	maxDelay time.Duration
 
-	seenMu sync.Mutex
-	seen   map[string]time.Time
+	seenMu  sync.Mutex
+	seen    map[string]time.Time
+	pending map[string]struct{}
 
 	providerLimit int
 	providerMu    sync.Mutex
@@ -100,6 +101,7 @@ const (
 	probeSourceUnspecified   = "unspecified"
 	probeSourceFSList        = "fs_list"
 	probeSourcePropfind      = "propfind"
+	probeSourceDirSync       = "dir_sync"
 	probeSourceStartupScan   = "startup_scan"
 	probeSourceFirstFrame    = "first_frame_warmup"
 	consumerScenarioHTTP     = "http_download"
@@ -213,6 +215,7 @@ func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileM
 		stream:                 stream,
 		enabled:                cfg != nil && cfg.AlistServer.EnableBackgroundProbe,
 		seen:                   make(map[string]time.Time),
+		pending:                make(map[string]struct{}),
 		providerSem:            make(map[string]chan struct{}),
 		recentRecords:          make([]ProbeRecord, probeRecordBufferSize),
 		recentConsumerHits:     make([]ProbeConsumerHit, probeRecordBufferSize),
@@ -264,51 +267,66 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 		return
 	}
 	atomic.AddUint64(&ps.filesDiscoveredTotal, 1)
-	sizeProbeNeeded := ps.shouldProbeSize(reportedSize)
+	forcePlaybackWarmup := source == probeSourceFirstFrame
+	if !forcePlaybackWarmup && ps.cfg != nil && ps.cfg.AlistServer.ScanVideoOnly && !isVideoFile(file.FileName) {
+		ps.recordTerminal(file, source, probeStatusSkippedSize, reportedSize, probeExecutionResult{})
+		atomic.AddUint64(&ps.filesSkippedTotal, 1)
+		return
+	}
+
+	effectiveSize := reportedSize
 	rangeProbeNeeded := ps.shouldProbeRange(file, reportedSize)
 
-	if size, ok := ps.fileDAO.GetFileSize(file.DisplayPath); ok {
-		if !sizeProbeNeeded {
-			// no-op
-		} else {
-			sizeProbeNeeded = ps.shouldProbeSize(size)
-		}
-		if !rangeProbeNeeded {
-			rangeProbeNeeded = ps.shouldProbeRange(file, size)
+	if ps.fileDAO != nil {
+		if size, ok := ps.fileDAO.GetFileSize(file.DisplayPath); ok && size > 0 {
+			effectiveSize = size
+			if !rangeProbeNeeded {
+				rangeProbeNeeded = ps.shouldProbeRange(file, size)
+			}
 		}
 	}
 	if ps.metaStore != nil {
 		providerKey := ProviderKey(file.TargetURL, file.DisplayPath)
 		if meta, ok, _ := ps.metaStore.Get(context.Background(), providerKey, file.DisplayPath); ok {
-			if sizeProbeNeeded {
-				sizeProbeNeeded = ps.shouldProbeSize(meta.Size)
+			if meta.Size > 0 {
+				effectiveSize = meta.Size
 			}
 			if !rangeProbeNeeded {
 				rangeProbeNeeded = ps.shouldProbeRange(file, meta.Size)
 			}
 		}
 	}
+	sizeProbeNeeded := forcePlaybackWarmup || ps.shouldProbeSize(effectiveSize)
 	if !sizeProbeNeeded && !rangeProbeNeeded {
 		ps.recordTerminal(file, source, probeStatusSkippedSize, reportedSize, probeExecutionResult{})
 		atomic.AddUint64(&ps.filesSkippedTotal, 1)
 		return
 	}
+	if effectiveSize > 0 {
+		// The listing/PROPFIND size is already useful input. Without carrying it
+		// into FileItem the resolver performs redundant HEAD/Range requests and
+		// can report a false size_resolve failure for an otherwise known file.
+		file.PropfindSize = effectiveSize
+	}
 
-	key := ProviderKey(file.TargetURL, file.DisplayPath)
-	if ps.isCoolingDown(key) {
-		atomic.AddUint64(&ps.cooldownSkips, 1)
+	key := probeCooldownKey(file)
+	reservedAt, skipStatus := ps.reserveProbe(key, ps.warmNeedsRefresh(file.DisplayPath))
+	if skipStatus != "" {
+		if skipStatus == probeStatusSkippedCD {
+			atomic.AddUint64(&ps.cooldownSkips, 1)
+		}
 		atomic.AddUint64(&ps.filesSkippedTotal, 1)
-		ps.recordTerminal(file, source, probeStatusSkippedCD, reportedSize, probeExecutionResult{})
+		ps.recordTerminal(file, source, skipStatus, reportedSize, probeExecutionResult{})
 		return
 	}
 
 	select {
 	case ps.queue <- probeItem{file: file, authHeaders: authHeaders, source: source, queuedAt: time.Now()}:
-		ps.markSeen(key)
 		atomic.AddUint64(&ps.enqueuedTotal, 1)
 		atomic.AddUint64(&ps.filesQueuedTotal, 1)
 		ps.recordTerminal(file, source, probeStatusQueued, reportedSize, probeExecutionResult{})
 	default:
+		ps.releaseProbeReservation(key, reservedAt, true)
 		atomic.AddUint64(&ps.droppedTotal, 1)
 		atomic.AddUint64(&ps.filesSkippedTotal, 1)
 		ps.recordTerminal(file, source, probeStatusDropped, reportedSize, probeExecutionResult{})
@@ -369,9 +387,9 @@ func (ps *ProbeScheduler) shouldProbeSize(size int64) bool {
 		return true
 	}
 	if ps.minSizeBytes <= 0 {
-		return false
+		return true
 	}
-	return size < ps.minSizeBytes
+	return size >= ps.minSizeBytes
 }
 
 func (ps *ProbeScheduler) shouldProbeRange(file FileItem, size int64) bool {
@@ -392,6 +410,7 @@ func (ps *ProbeScheduler) worker() {
 
 func (ps *ProbeScheduler) runItem(item probeItem) {
 	ps.ensureRecordState()
+	defer ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
 	atomic.AddUint64(&ps.runningCount, 1)
 	startedAt := time.Now()
 	ps.recordRunning(item, startedAt)
@@ -406,19 +425,16 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		return
 	}
 
-	select {
-	case sem <- struct{}{}:
-		defer func() { <-sem }()
-	default:
-		ps.finishRecord(item, startedAt, probeStatusSkippedDup, probeExecutionResult{failureReason: "provider_busy"})
-		atomic.AddUint64(&ps.filesSkippedTotal, 1)
-		return
-	}
+	// Workers wait for their provider slot. Dropping here permanently loses an
+	// item that was already marked as seen for the full cooldown window.
+	sem <- struct{}{}
+	defer func() { <-sem }()
 
-	// Only delay re-probes (items that already have cached data).
+	// Only delay files that were already successfully warmed. A directory
+	// listing populates the size cache before the first warmup, so using size
+	// presence here incorrectly delays every first-time file.
 	// First-time probes execute immediately to warm the cache before user clicks download.
-	_, hasCache := ps.fileDAO.GetFileSize(item.file.DisplayPath)
-	if hasCache && ps.maxDelay > 0 {
+	if ps.hasSuccessfulWarm(item.file.DisplayPath) && ps.maxDelay > 0 {
 		delay := ps.minDelay
 		if ps.maxDelay > ps.minDelay {
 			delta := ps.maxDelay - ps.minDelay
@@ -497,14 +513,17 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 			ps.invalidateJWTCache()
 		}
 	}
-	if ps.stream != nil {
-		ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, authHeaders, item.file.CompatStorageKey)
+	if ps.stream != nil && ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, authHeaders, item.file.CompatStorageKey) {
 		resultState.rangeProbed = true
 		atomic.AddUint64(&ps.filesRangeProbed, 1)
 	}
+	usefulWarmArtifact := resultState.rawURLFetched || resultState.rangeProbed || (resultState.resolvedSize > 0 && item.file.PropfindSize <= 0)
 	status := probeStatusSuccess
-	if resultState.failureReason != "" && resultState.resolvedSize <= 0 && !resultState.rawURLFetched && !resultState.rangeProbed {
+	if !usefulWarmArtifact || (resultState.failureReason != "" && !resultState.rawURLFetched) {
 		status = probeStatusFailed
+		if resultState.failureReason == "" {
+			resultState.failureReason = "no_warm_artifact"
+		}
 		atomic.AddUint64(&ps.filesFailedTotal, 1)
 	} else {
 		atomic.AddUint64(&ps.filesSucceededTotal, 1)
@@ -534,10 +553,94 @@ func (ps *ProbeScheduler) isCoolingDown(key string) bool {
 	return time.Since(last) < ps.cooldown
 }
 
-func (ps *ProbeScheduler) markSeen(key string) {
+// reserveProbe atomically de-duplicates queued/running work and starts the
+// cooldown. Stale or invalid state may bypass cooldown, but never an already
+// pending refresh for the same file.
+func (ps *ProbeScheduler) reserveProbe(key string, bypassCooldown bool) (time.Time, string) {
 	ps.seenMu.Lock()
 	defer ps.seenMu.Unlock()
-	ps.seen[key] = time.Now()
+	if ps.pending == nil {
+		ps.pending = make(map[string]struct{})
+	}
+	if _, ok := ps.pending[key]; ok {
+		return time.Time{}, probeStatusSkippedDup
+	}
+	if last, ok := ps.seen[key]; ok && time.Since(last) < ps.cooldown && !bypassCooldown {
+		return time.Time{}, probeStatusSkippedCD
+	}
+	now := time.Now()
+	ps.pending[key] = struct{}{}
+	ps.seen[key] = now
+	return now, ""
+}
+
+func (ps *ProbeScheduler) releaseProbeReservation(key string, reservedAt time.Time, rollbackCooldown bool) {
+	if ps == nil {
+		return
+	}
+	ps.seenMu.Lock()
+	defer ps.seenMu.Unlock()
+	delete(ps.pending, key)
+	if rollbackCooldown {
+		if seenAt, ok := ps.seen[key]; ok && seenAt.Equal(reservedAt) {
+			delete(ps.seen, key)
+		}
+	}
+}
+
+func (ps *ProbeScheduler) clearCooldownForFile(file FileItem) {
+	if ps == nil {
+		return
+	}
+	key := probeCooldownKey(file)
+	ps.seenMu.Lock()
+	delete(ps.seen, key)
+	ps.seenMu.Unlock()
+}
+
+func (ps *ProbeScheduler) clearCooldownForDisplayPath(displayPath string) {
+	if ps == nil || strings.TrimSpace(displayPath) == "" {
+		return
+	}
+	suffix := "::" + strings.TrimSpace(displayPath)
+	ps.seenMu.Lock()
+	for key := range ps.seen {
+		if strings.HasSuffix(key, suffix) {
+			delete(ps.seen, key)
+		}
+	}
+	ps.seenMu.Unlock()
+}
+
+func probeCooldownKey(file FileItem) string {
+	provider := ProviderKey(file.TargetURL, file.DisplayPath)
+	displayPath := strings.TrimSpace(file.DisplayPath)
+	if displayPath == "" {
+		displayPath = strings.TrimSpace(file.EncryptedPath)
+	}
+	return provider + "::" + displayPath
+}
+
+func (ps *ProbeScheduler) hasSuccessfulWarm(displayPath string) bool {
+	if ps == nil || strings.TrimSpace(displayPath) == "" {
+		return false
+	}
+	ps.ensureRecordState()
+	ps.recordMu.Lock()
+	defer ps.recordMu.Unlock()
+	warm, ok := ps.successfulWarm[displayPath]
+	return ok && warm.State != warmStateInvalid
+}
+
+func (ps *ProbeScheduler) warmNeedsRefresh(displayPath string) bool {
+	if ps == nil || strings.TrimSpace(displayPath) == "" {
+		return false
+	}
+	ps.ensureRecordState()
+	ps.recordMu.Lock()
+	defer ps.recordMu.Unlock()
+	warm, ok := ps.successfulWarm[displayPath]
+	return ok && probeWarmStateStatus(warm, ps.stalenessThreshold(), time.Now()) != warmStateReady
 }
 
 func clampInt(value, min, max int) int {
@@ -723,6 +826,12 @@ func (ps *ProbeScheduler) recordRunning(item probeItem, startedAt time.Time) {
 
 func (ps *ProbeScheduler) finishRecord(item probeItem, startedAt time.Time, status string, result probeExecutionResult) {
 	ps.ensureRecordState()
+	if status == probeStatusFailed {
+		// A failed attempt must not suppress this file for the full configured
+		// cooldown. The next scan or real playback can retry after credentials or
+		// a signed URL have recovered.
+		ps.clearCooldownForFile(item.file)
+	}
 	now := time.Now()
 	record := ProbeRecord{
 		DisplayPath:   item.file.DisplayPath,
@@ -805,6 +914,13 @@ func (ps *ProbeScheduler) recordTerminal(file FileItem, source, status string, r
 	if result.failureReason != "" {
 		ps.recentFailureReasons[result.failureReason]++
 	}
+	// Routine scan skips can outnumber useful events by millions and otherwise
+	// evict every success/failure from the small recent-record ring. Keep their
+	// aggregate counters without flooding the diagnostic sample.
+	if status == probeStatusSkippedSize || status == probeStatusSkippedCD {
+		atomic.StoreInt64(&ps.lastRecordFinishedNano, now.UnixNano())
+		return
+	}
 	if warm, ok := ps.successfulWarm[file.DisplayPath]; ok {
 		applyWarmStateToRecord(&record, warm, now, ps.stalenessThreshold())
 	}
@@ -884,6 +1000,9 @@ func (ps *ProbeScheduler) RecordConsumerHit(file FileItem, scenario string) {
 		return
 	}
 	now := time.Now()
+	if probeWarmStateStatus(warm, ps.stalenessThreshold(), now) != warmStateReady {
+		return
+	}
 	if !warm.LastConsumerHitAt.IsZero() && now.Sub(warm.LastConsumerHitAt) < consumerHitDedupeWindow {
 		return
 	}
@@ -916,6 +1035,9 @@ func (ps *ProbeScheduler) InvalidateWarm(displayPath, reason string) {
 	if displayPath == "" {
 		return
 	}
+	// Invalidation is an explicit signal that a cached raw URL/meta result can
+	// no longer help playback, so it must also release the per-file cooldown.
+	ps.clearCooldownForDisplayPath(displayPath)
 	ps.ensureRecordState()
 	ps.recordMu.Lock()
 	defer ps.recordMu.Unlock()
@@ -966,6 +1088,8 @@ func probePriority(source string) string {
 	case probeSourceFirstFrame:
 		return "high"
 	case probeSourceStartupScan:
+		return "low"
+	case probeSourceDirSync:
 		return "low"
 	default:
 		return "normal"
@@ -1105,15 +1229,18 @@ func fetchAlistJWT(alistURL, username, password string) string {
 
 // fetchRawURL calls alist metadata APIs to get the signed raw_url and caches it.
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
-// staleThreshold: if cached raw_url is fresher than this, skip the fetch.
+// staleThreshold: if positive and the cached raw_url is fresher than this,
+// skip the fetch. A zero/negative value explicitly forces an upstream refresh.
 func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO, staleThreshold time.Duration) rawURLFetchResult {
 	if alistURL == "" || fileDAO == nil {
 		return rawURLFetchResult{}
 	}
 	// Check if cached raw_url is still fresh.
-	if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
-		cachedRawURLFresh(cached, staleThreshold) {
-		return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size, Source: "cache"}
+	if staleThreshold > 0 {
+		if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
+			cachedRawURLFresh(cached, staleThreshold) {
+			return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size, Source: "cache"}
+		}
 	}
 
 	result := fetchRawURLViaAPI(ctx, alistURL, displayPath, realPath, authHeaders, fileDAO, "/api/fs/get")
@@ -1125,7 +1252,11 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	if strings.TrimSpace(linkResult.RawURL) != "" {
 		return linkResult
 	}
-	redirectResult := resolveFinalRawURL(ctx, config.Get(), alistURL, displayPath, realPath, authHeaders, fileDAO)
+	resolverCfg := fileDAO.Config()
+	if resolverCfg == nil {
+		resolverCfg = config.Get()
+	}
+	redirectResult := resolveFinalRawURL(ctx, resolverCfg, alistURL, displayPath, realPath, authHeaders, fileDAO)
 	if strings.TrimSpace(redirectResult.RawURL) != "" {
 		return redirectResult
 	}

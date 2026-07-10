@@ -351,6 +351,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		TargetURL:        targetURL,
 		FileName:         path.Base(davPath),
 		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, davPath),
+		PasswdInfo:       passwdInfo,
 	}
 	trace.Logf(r.Context(), "webdav-get", "Proxying with decryption, target=%s", targetURL)
 	executeDecryptPlayback(decryptPlaybackRequest{
@@ -1074,6 +1075,7 @@ func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPat
 		TargetURL:        targetURL,
 		FileName:         path.Base(displayPath),
 		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
+		PasswdInfo:       passwdInfo,
 	}
 	authHeaders := make(http.Header)
 	if auth := ctx.Value(webdavAuthContextKey); auth != nil {

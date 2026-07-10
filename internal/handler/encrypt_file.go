@@ -22,7 +22,6 @@ import (
 type EncryptTask struct {
 	ID         string    `json:"id"`
 	Operation  string    `json:"operation"` // "enc" or "dec"
-	Password   string    `json:"-"`
 	EncType    string    `json:"encType"`
 	SrcPath    string    `json:"srcPath"`
 	DstPath    string    `json:"dstPath"`
@@ -35,8 +34,48 @@ type EncryptTask struct {
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	cancel     chan struct{}
+}
+
+// EncryptTaskView is an immutable snapshot used by status APIs. Keeping API
+// serialization separate from the live task prevents races with the worker.
+type EncryptTaskView struct {
+	ID         string    `json:"id"`
+	Operation  string    `json:"operation"`
+	EncType    string    `json:"encType"`
+	SrcPath    string    `json:"srcPath"`
+	DstPath    string    `json:"dstPath"`
+	EncName    bool      `json:"encName"`
+	TotalFiles int       `json:"totalFiles"`
+	DoneFiles  int       `json:"doneFiles"`
+	TotalBytes int64     `json:"totalBytes"`
+	DoneBytes  int64     `json:"doneBytes"`
+	Status     string    `json:"status"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+func (t *EncryptTask) snapshot() EncryptTaskView {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return EncryptTaskView{
+		ID:         t.ID,
+		Operation:  t.Operation,
+		EncType:    t.EncType,
+		SrcPath:    t.SrcPath,
+		DstPath:    t.DstPath,
+		EncName:    t.EncName,
+		TotalFiles: t.TotalFiles,
+		DoneFiles:  t.DoneFiles,
+		TotalBytes: t.TotalBytes,
+		DoneBytes:  t.DoneBytes,
+		Status:     t.Status,
+		Error:      t.Error,
+		CreatedAt:  t.CreatedAt,
+		UpdatedAt:  t.UpdatedAt,
+	}
 }
 
 // EncryptTaskStore manages encrypt/decrypt tasks.
@@ -129,18 +168,27 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 	// Count files and total bytes first
 	var files []string
 	var totalBytes int64
-	filepath.WalkDir(req.SrcPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	if err := filepath.WalkDir(req.SrcPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, err := d.Info()
-		if err != nil || info.Size() == 0 {
+		if err != nil {
+			return err
+		}
+		if info.Size() == 0 {
 			return nil
 		}
 		files = append(files, path)
 		totalBytes += info.Size()
 		return nil
-	})
+	}); err != nil {
+		RespondAPIError(w, 500, "Cannot scan source directory: "+err.Error())
+		return
+	}
 
 	if len(files) == 0 {
 		RespondAPIError(w, 200, "No files to process")
@@ -154,7 +202,6 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 	task := &EncryptTask{
 		ID:         generateTaskID(),
 		Operation:  req.Operation,
-		Password:   req.Password,
 		EncType:    req.EncType,
 		SrcPath:    req.SrcPath,
 		DstPath:    req.DstPath,
@@ -174,7 +221,7 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 		Int("files", len(files)).Int64("bytes", totalBytes).
 		Msg("Encrypt task started")
 
-	go runEncryptTask(task, files)
+	go runEncryptTask(task, files, req.Password)
 
 	RespondSuccess(w, map[string]interface{}{
 		"taskId":     task.ID,
@@ -198,24 +245,29 @@ func HandleEncryptTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	snapshot := task.snapshot()
 	RespondSuccess(w, map[string]interface{}{
-		"taskId":     task.ID,
-		"operation":  task.Operation,
-		"status":     task.Status,
-		"totalFiles": task.TotalFiles,
-		"doneFiles":  task.DoneFiles,
-		"totalBytes": task.TotalBytes,
-		"doneBytes":  task.DoneBytes,
-		"percent":    calcPercent(task.DoneBytes, task.TotalBytes),
-		"error":      task.Error,
+		"taskId":     snapshot.ID,
+		"operation":  snapshot.Operation,
+		"status":     snapshot.Status,
+		"totalFiles": snapshot.TotalFiles,
+		"doneFiles":  snapshot.DoneFiles,
+		"totalBytes": snapshot.TotalBytes,
+		"doneBytes":  snapshot.DoneBytes,
+		"percent":    calcPercent(snapshot.DoneBytes, snapshot.TotalBytes),
+		"error":      snapshot.Error,
 	})
 }
 
 // HandleEncryptTaskList returns all encrypt tasks.
 func HandleEncryptTaskList(w http.ResponseWriter, r *http.Request) {
 	tasks := encryptTaskStore.List()
+	snapshots := make([]EncryptTaskView, 0, len(tasks))
+	for _, task := range tasks {
+		snapshots = append(snapshots, task.snapshot())
+	}
 	RespondSuccess(w, map[string]interface{}{
-		"tasks": tasks,
+		"tasks": snapshots,
 	})
 }
 
@@ -226,31 +278,27 @@ func calcPercent(done, total int64) float64 {
 	return float64(done) / float64(total) * 100
 }
 
-func runEncryptTask(task *EncryptTask, files []string) {
+func runEncryptTask(task *EncryptTask, files []string, password string) {
 	defer func() {
 		if r := recover(); r != nil {
-			task.mu.Lock()
-			task.Status = "error"
-			task.Error = fmt.Sprintf("panic: %v", r)
-			task.UpdatedAt = time.Now()
-			task.mu.Unlock()
+			setEncryptTaskError(task, fmt.Sprintf("panic: %v", r))
 		}
 	}()
 
-	converter := encryption.NewFileNameConverter(task.Password, task.EncType, "")
+	converter := encryption.NewFileNameConverter(password, task.EncType, "")
 	srcPath := filepath.Clean(task.SrcPath)
 	dstPath := filepath.Clean(task.DstPath)
-	tempDir := filepath.Join(dstPath, ".temp")
-	os.MkdirAll(tempDir, 0755)
+	tempDir, err := os.MkdirTemp(dstPath, ".encrypt-"+task.ID+"-")
+	if err != nil {
+		setEncryptTaskError(task, fmt.Sprintf("create temporary directory: %v", err))
+		return
+	}
+	defer os.RemoveAll(tempDir)
 
 	for _, filePath := range files {
 		select {
 		case <-task.cancel:
-			task.mu.Lock()
-			task.Status = "error"
-			task.Error = "canceled"
-			task.UpdatedAt = time.Now()
-			task.mu.Unlock()
+			setEncryptTaskError(task, "canceled")
 			return
 		default:
 		}
@@ -280,30 +328,30 @@ func runEncryptTask(task *EncryptTask, files []string) {
 		outTemp := filepath.Join(tempDir, relPath)
 
 		if err := os.MkdirAll(filepath.Dir(outTemp), 0755); err != nil {
-			task.mu.Lock()
-			task.Status = "error"
-			task.Error = fmt.Sprintf("mkdir %s: %v", filepath.Dir(outTemp), err)
-			task.UpdatedAt = time.Now()
-			task.mu.Unlock()
+			setEncryptTaskError(task, fmt.Sprintf("mkdir %s: %v", filepath.Dir(outTemp), err))
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(outFile), 0755); err != nil {
+			setEncryptTaskError(task, fmt.Sprintf("mkdir %s: %v", filepath.Dir(outFile), err))
 			return
 		}
 
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
-			continue
+			setEncryptTaskError(task, fmt.Sprintf("stat %s: %v", filePath, err))
+			return
 		}
 		fileSize := fileInfo.Size()
 
-		if err := processFile(filePath, outTemp, task.Password, task.EncType, fileSize, task.Operation); err != nil {
-			task.mu.Lock()
-			task.Status = "error"
-			task.Error = fmt.Sprintf("process %s: %v", filePath, err)
-			task.UpdatedAt = time.Now()
-			task.mu.Unlock()
+		if err := processFile(filePath, outTemp, password, task.EncType, fileSize, task.Operation); err != nil {
+			setEncryptTaskError(task, fmt.Sprintf("process %s: %v", filePath, err))
 			return
 		}
 
-		os.Rename(outTemp, outFile)
+		if err := os.Rename(outTemp, outFile); err != nil {
+			setEncryptTaskError(task, fmt.Sprintf("publish %s: %v", outFile, err))
+			return
+		}
 
 		task.mu.Lock()
 		task.DoneFiles++
@@ -312,18 +360,26 @@ func runEncryptTask(task *EncryptTask, files []string) {
 		task.mu.Unlock()
 	}
 
-	os.RemoveAll(tempDir)
-
 	task.mu.Lock()
 	task.Status = "done"
 	task.UpdatedAt = time.Now()
+	doneFiles := task.DoneFiles
+	doneBytes := task.DoneBytes
 	task.mu.Unlock()
 
-	log.Info().Str("task_id", task.ID).Int("files", task.DoneFiles).
-		Int64("bytes", task.DoneBytes).Msg("Encrypt task completed")
+	log.Info().Str("task_id", task.ID).Int("files", doneFiles).
+		Int64("bytes", doneBytes).Msg("Encrypt task completed")
 }
 
-func processFile(src, dst, password, encType string, fileSize int64, operation string) error {
+func setEncryptTaskError(task *EncryptTask, message string) {
+	task.mu.Lock()
+	task.Status = "error"
+	task.Error = message
+	task.UpdatedAt = time.Now()
+	task.mu.Unlock()
+}
+
+func processFile(src, dst, password, encType string, fileSize int64, operation string) (retErr error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open src: %w", err)
@@ -334,7 +390,11 @@ func processFile(src, dst, password, encType string, fileSize int64, operation s
 	if err != nil {
 		return fmt.Errorf("create dst: %w", err)
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close dst: %w", err)
+		}
+	}()
 
 	if operation == "enc" {
 		enc, err := encryption.NewLatestContentEncryptor(password, encType, fileSize)

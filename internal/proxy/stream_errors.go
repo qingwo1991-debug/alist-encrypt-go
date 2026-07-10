@@ -2,11 +2,9 @@ package proxy
 
 import (
 	"context"
-	"net"
-	"net/http"
-	"strings"
-
 	stderrors "errors"
+	"net"
+	"strings"
 )
 
 func classifyStreamError(err error) (string, bool) {
@@ -15,6 +13,11 @@ func classifyStreamError(err error) (string, bool) {
 	}
 	if stderrors.Is(err, context.DeadlineExceeded) {
 		return "timeout", false
+	}
+	// Media players routinely cancel the previous request when seeking. Treat
+	// that as a client-side disconnect, not an upstream network failure.
+	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, net.ErrClosed) {
+		return "client_disconnect", false
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset by peer") {
@@ -31,13 +34,4 @@ func classifyStreamError(err error) (string, bool) {
 		return "timeout", false
 	}
 	return "network_error", false
-}
-
-func isPassthroughStatus(status int) bool {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
-		return true
-	default:
-		return false
-	}
 }

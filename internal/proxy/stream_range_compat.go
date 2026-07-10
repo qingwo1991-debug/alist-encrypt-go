@@ -271,10 +271,12 @@ func (s *StreamProxy) ShouldBackgroundProbeRange(targetURL, storageKey string) b
 	return false
 }
 
-// ProbeRangeCompatibility sends a lightweight range probe and updates learning state.
-func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL string, authHeaders http.Header, storageKey string) {
+// ProbeRangeCompatibility sends a lightweight range probe and updates learning
+// state. It returns true only when the upstream produced a definitive range
+// result; transport/auth failures are not reported as a successful warmup.
+func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL string, authHeaders http.Header, storageKey string) bool {
 	if !s.ShouldBackgroundProbeRange(targetURL, storageKey) {
-		return
+		return false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -289,7 +291,7 @@ func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL str
 		WithContext(probeCtx).
 		Build()
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Set("Range", "bytes=0-0")
 	req.Header.Set("Accept-Encoding", "identity")
@@ -300,26 +302,26 @@ func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL str
 		if s.rangeStats != nil {
 			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
 		}
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		return
+		return false
 	}
 	if resp.StatusCode == http.StatusPartialContent && resp.Header.Get("Content-Range") != "" {
 		s.recordRangeSuccess(targetURL, storageKey)
 		if s.rangeStats != nil {
 			atomic.AddUint64(&s.rangeStats.probeSuccess, 1)
 		}
-		return
+		return true
 	}
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") == "" {
 		s.recordRangeFailure(targetURL, storageKey, "range_unsupported")
 		if s.rangeStats != nil {
 			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
 		}
-		return
+		return true
 	}
 	if resp.StatusCode == http.StatusPartialContent && resp.Header.Get("Content-Range") == "" {
 		s.recordRangeFailure(targetURL, storageKey, "range_unsupported")
@@ -327,18 +329,19 @@ func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL str
 			atomic.AddUint64(&s.rangeStats.pseudoRangeCount, 1)
 			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
 		}
-		return
+		return true
 	}
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		s.recordRangeFailure(targetURL, storageKey, "range_unsatisfiable")
 		if s.rangeStats != nil {
 			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
 		}
-		return
+		return true
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		if s.rangeStats != nil {
 			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
 		}
 	}
+	return false
 }

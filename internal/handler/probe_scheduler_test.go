@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -195,6 +196,37 @@ func TestFetchRawURLUsesAuthHeaders(t *testing.T) {
 	}
 }
 
+func TestFetchRawURLZeroThresholdForcesUpstreamRefresh(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+	if err := fileDAO.Set(&dao.FileInfo{
+		Path:              "/movie.mp4",
+		EncryptedPath:     "/enc/movie.bin",
+		RawURL:            "https://cdn.example/expired-unparseable-signature",
+		Size:              4096,
+		UpstreamFetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed cached raw URL: %v", err)
+	}
+
+	calls := 0
+	srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"https://cdn.example/fresh","size":4096}}`))
+	}))
+	defer srv.Close()
+
+	result := fetchRawURL(context.Background(), srv.URL, "/movie.mp4", "/enc/movie.bin", nil, fileDAO, 0)
+	if calls != 1 || result.RawURL != "https://cdn.example/fresh" || result.Source == "cache" {
+		t.Fatalf("calls=%d result=%+v, expected forced upstream refresh", calls, result)
+	}
+}
+
 func TestFetchRawURLFallsBackToFsLinkWhenFsGetReturnsEmpty(t *testing.T) {
 	store, err := storage.NewStore(t.TempDir())
 	if err != nil {
@@ -370,5 +402,141 @@ func TestProbeSchedulerRunItemUsesEffectiveAuthForRawURLAndRangeProbe(t *testing
 	}
 	if rangeProbeAuth != "Bearer scan-token" {
 		t.Fatalf("range probe auth=%q", rangeProbeAuth)
+	}
+}
+
+func TestProbeSchedulerCooldownIsScopedPerFile(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.ScanVideoOnly = true
+
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ps := &ProbeScheduler{
+		cfg:          cfg,
+		fileDAO:      dao.NewFileDAO(store),
+		enabled:      true,
+		queue:        make(chan probeItem, 4),
+		seen:         make(map[string]time.Time),
+		cooldown:     24 * time.Hour,
+		minSizeBytes: 100 * 1024 * 1024,
+	}
+	first := FileItem{DisplayPath: "/media/one.mp4", EncryptedPath: "/media/one.bin", TargetURL: "https://same.example/d/one", FileName: "one.mp4"}
+	second := FileItem{DisplayPath: "/media/two.mp4", EncryptedPath: "/media/two.bin", TargetURL: "https://same.example/d/two", FileName: "two.mp4"}
+
+	ps.EnqueueWithSource(first, nil, 200*1024*1024, probeSourceFSList)
+	ps.EnqueueWithSource(second, nil, 300*1024*1024, probeSourceFSList)
+	ps.EnqueueWithSource(first, nil, 200*1024*1024, probeSourceFSList)
+
+	if got := len(ps.queue); got != 2 {
+		t.Fatalf("queue length=%d, want two different files from the same provider", got)
+	}
+	statusCounts := ps.Stats()["status_counts"].(map[string]uint64)
+	if got := statusCounts[probeStatusSkippedDup]; got != 1 {
+		t.Fatalf("duplicate skips=%d, want only the duplicate file to be skipped", got)
+	}
+	queued := <-ps.queue
+	if queued.file.PropfindSize != 200*1024*1024 {
+		t.Fatalf("queued listing size=%d, want it carried into the resolver", queued.file.PropfindSize)
+	}
+}
+
+func TestProbeSchedulerHonorsVideoAndMinimumSizeFilters(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.ScanVideoOnly = true
+
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ps := &ProbeScheduler{
+		cfg:          cfg,
+		fileDAO:      dao.NewFileDAO(store),
+		enabled:      true,
+		queue:        make(chan probeItem, 4),
+		seen:         make(map[string]time.Time),
+		cooldown:     time.Hour,
+		minSizeBytes: 100 * 1024 * 1024,
+	}
+	ps.EnqueueWithSource(FileItem{DisplayPath: "/small.mp4", TargetURL: "https://example.test/small", FileName: "small.mp4"}, nil, 10*1024*1024, probeSourceFSList)
+	ps.EnqueueWithSource(FileItem{DisplayPath: "/large.jpg", TargetURL: "https://example.test/image", FileName: "large.jpg"}, nil, 200*1024*1024, probeSourceFSList)
+	if got := len(ps.queue); got != 0 {
+		t.Fatalf("queue length=%d, want scan filters to skip small/non-video files", got)
+	}
+
+	// A real playback request is always allowed to refresh its own file, even if
+	// the filename/size would be filtered out of a broad background scan.
+	ps.EnqueueWithSource(FileItem{DisplayPath: "/clip.bin", TargetURL: "https://example.test/clip", FileName: "clip.bin"}, nil, 1024, probeSourceFirstFrame)
+	if got := len(ps.queue); got != 1 {
+		t.Fatalf("queue length=%d, want demand-driven playback warmup", got)
+	}
+}
+
+func TestProbeSchedulerRefreshesStaleWarmDespiteLongCooldown(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.UpstreamStalenessMinutes = 1
+
+	ps := &ProbeScheduler{
+		cfg:            cfg,
+		enabled:        true,
+		queue:          make(chan probeItem, 2),
+		seen:           make(map[string]time.Time),
+		cooldown:       24 * time.Hour,
+		recentRecords:  make([]ProbeRecord, probeRecordBufferSize),
+		successfulWarm: make(map[string]probeWarmState),
+	}
+	file := FileItem{DisplayPath: "/movie.mp4", TargetURL: "https://example.test/movie", FileName: "movie.mp4"}
+	key := probeCooldownKey(file)
+	ps.seen[key] = time.Now()
+	ps.successfulWarm[file.DisplayPath] = probeWarmState{State: warmStateReady, FinishedAt: time.Now().Add(-2 * time.Minute)}
+
+	ps.EnqueueWithSource(file, nil, 200*1024*1024, probeSourceDirSync)
+	if got := len(ps.queue); got != 1 {
+		t.Fatalf("queue length=%d, stale warm should bypass the longer cooldown", got)
+	}
+	ps.EnqueueWithSource(file, nil, 200*1024*1024, probeSourceDirSync)
+	if got := len(ps.queue); got != 1 {
+		t.Fatalf("queue length=%d, pending stale refresh must be de-duplicated", got)
+	}
+	if got := atomic.LoadUint64(&ps.enqueuedTotal); got != 1 {
+		t.Fatalf("enqueued total=%d, want one stale refresh", got)
+	}
+}
+
+func TestProbeSchedulerQueueFullReleasesReservation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ps := &ProbeScheduler{
+		cfg: cfg, enabled: true, queue: make(chan probeItem, 1),
+		seen: make(map[string]time.Time), cooldown: time.Hour,
+	}
+	blocker := FileItem{DisplayPath: "/blocker.mp4", TargetURL: "https://example.test/blocker", FileName: "blocker.mp4"}
+	retry := FileItem{DisplayPath: "/retry.mp4", TargetURL: "https://example.test/retry", FileName: "retry.mp4"}
+	ps.EnqueueWithSource(blocker, nil, 200*1024*1024, probeSourceFSList)
+	ps.EnqueueWithSource(retry, nil, 200*1024*1024, probeSourceFSList)
+	<-ps.queue
+	ps.EnqueueWithSource(retry, nil, 200*1024*1024, probeSourceFSList)
+	if got := len(ps.queue); got != 1 {
+		t.Fatalf("queue length=%d, dropped reservation should be retryable", got)
+	}
+}
+
+func TestProbeSchedulerInvalidationReleasesCooldown(t *testing.T) {
+	ps := &ProbeScheduler{
+		seen:           make(map[string]time.Time),
+		recentRecords:  make([]ProbeRecord, probeRecordBufferSize),
+		successfulWarm: make(map[string]probeWarmState),
+	}
+	file := FileItem{DisplayPath: "/movie.mp4", TargetURL: "https://example.test/movie"}
+	ps.seen[probeCooldownKey(file)] = time.Now()
+	ps.successfulWarm[file.DisplayPath] = probeWarmState{State: warmStateReady, FinishedAt: time.Now()}
+
+	ps.InvalidateWarm(file.DisplayPath, "upstream_4xx")
+	if ps.isCoolingDown(probeCooldownKey(file)) {
+		t.Fatal("invalidated warm state must not retain its cooldown")
 	}
 }
