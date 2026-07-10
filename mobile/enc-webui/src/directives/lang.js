@@ -8,7 +8,7 @@ const componentToProps = {
   ElTableColumn: 'label'
 }
 
-function checkPermission(el, { value }) {
+function checkPermission(el) {
   let saveOriginTitle = ''
   const { language } = storeToRefs(useConfigStore())
   //save the original title

@@ -13,7 +13,7 @@ export const isJWTExpired = (rawToken, nowMs = Date.now(), skewMs = 5000) => {
     const match = decoded.match(/"exp"\s*:\s*(\d+)/)
     if (!match) return true
     return Number(match[1]) * 1000 <= nowMs + skewMs
-  } catch (_) {
+  } catch {
     return true
   }
 }

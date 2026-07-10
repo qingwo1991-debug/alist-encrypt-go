@@ -143,22 +143,15 @@
   </div>
 </template>
 <script setup>
-import { ref } from 'vue'
+import { reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useConfigStore } from '@/store/config'
-import { getAlistConfigReq, saveAlistConfigReq, encodeFoldNameReq, decodeFoldNameReq } from '@/api/user'
+import { decodeFoldNameReq, encodeFoldNameReq, getAlistConfigReq, saveAlistConfigReq } from '@/api/user'
 import { Delete } from '@element-plus/icons-vue'
 
 const labelPosition = ref('right')
 const dialogFolderFormVisible = ref(false)
 const activeName = ref('encode')
 const expandedSections = ref(['connection', 'password'])
-
-const { setLanguage } = useConfigStore()
-const changeLanguage = (langParam) => {
-  setLanguage(langParam)
-}
-void changeLanguage
 
 const folderForm = reactive({
   folderName: 'my video',

@@ -7,7 +7,7 @@
 
 const props = defineProps({
   name: {
-    require: true,
+    required: true,
     default: 'fai',
     type: String
   }

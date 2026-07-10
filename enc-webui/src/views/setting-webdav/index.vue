@@ -167,7 +167,7 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { delWebdavConfigReq, getWebdavConfigReq, saveWebdavConfigReq, updateWebdavConfigReq } from '@/api/user'
-import { ElMessageBox, ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 
 const dialogFormVisible = ref(false)

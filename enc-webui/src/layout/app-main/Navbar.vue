@@ -2,7 +2,7 @@
   <div class="navbar reset-el-dropdown">
     <div class="navbar__left">
       <!--  切换sidebar按钮  -->
-      <hamburger v-if="settings.showHamburger" :is-active="sidebar.opened" class="hamburger-container" @toggleClick="toggleSideBar" />
+      <hamburger v-if="settings.showHamburger" :is-active="sidebar.opened" class="hamburger-container" @toggle-click="toggleSideBar" />
       <!--  面包屑导航  -->
       <breadcrumb class="breadcrumb-container" />
     </div>
