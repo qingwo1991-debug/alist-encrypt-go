@@ -1,6 +1,4 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import basicDemo from './modules/basic-demo'
-
 import Layout from '@/layout/index.vue'
 
 export const constantRoutes = [

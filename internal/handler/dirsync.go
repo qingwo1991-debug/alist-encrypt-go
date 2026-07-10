@@ -21,7 +21,7 @@ import (
 
 const (
 	dirSyncRequestTTL = 2 * time.Minute
-	dirSyncScanTTL    = 10 * time.Minute
+	dirSyncScanTTL    = 30 * time.Minute
 	dirSyncScanEvery  = 15 * time.Minute
 	dirSyncPageRoute  = "/api/encrypt/dir-sync/page"
 	dirSyncModeMixed  = "mixed"
@@ -390,15 +390,6 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 						if cached, ok := h.fileDAO.Get(filePath); ok && cached != nil && cached.ContentVersion == encryption.ContentVersionV2 && cached.Size > 0 {
 							fileData["size"] = float64(cached.Size)
 						}
-						if !isDir && allowDecrypt && enableProbe {
-							if sizeVal, ok := fileData["size"].(float64); ok {
-								size := int64(sizeVal)
-								if size > 0 {
-									h.upsertMetaFromListing(r.Context(), filePath, size)
-								}
-								h.enqueueProbeFromList(r, filePath, size)
-							}
-						}
 						if isDir || !allowDecrypt {
 							continue
 						}
@@ -453,6 +444,33 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 						name, _ := fileData["name"].(string)
 						isDir, _ := fileData["is_dir"].(bool)
 						fileType, _ := fileData["type"].(float64)
+						if name == "" {
+							continue
+						}
+						displayPath := path.Join(dirPath, name)
+						// OpenList commonly omits item.path. Background snapshots require a
+						// canonical child path and were otherwise guaranteed to fail their
+						// own validation on the next read.
+						fileData["path"] = displayPath
+						content[i] = fileData
+
+						if allowDecrypt {
+							size := int64(0)
+							if sizeVal, ok := fileData["size"].(float64); ok {
+								size = int64(sizeVal)
+							}
+							encryptedPath := displayPath
+							if mapped, ok := h.fileDAO.GetEncPath(displayPath); ok && mapped != "" {
+								encryptedPath = mapped
+							}
+							h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, name, size, isDir)
+							if !isDir && enableProbe {
+								if size > 0 {
+									h.upsertMetaFromListing(r.Context(), displayPath, size)
+								}
+								h.enqueueProbeFromList(r, displayPath, size)
+							}
+						}
 						if isDir {
 							continue
 						}
@@ -540,6 +558,11 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 	if h == nil || h.dirSyncStore == nil || !h.scanConfigured() {
 		return
 	}
+	if !h.dirSyncRunning.CompareAndSwap(false, true) {
+		log.Info().Str("job_type", jobType).Msg("Directory sync scan already running; coalescing trigger")
+		return
+	}
+	defer h.dirSyncRunning.Store(false)
 	roots := h.collectEncryptedSearchRoots()
 	status := DirSyncStatus{
 		Name:              dirSyncPrimaryStatusName,
@@ -609,7 +632,8 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 			"per_page": 1000,
 			"refresh":  false,
 		})
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(reqBody))
+		scanCtx := withProbeSource(context.Background(), probeSourceDirSync)
+		req, _ := http.NewRequestWithContext(scanCtx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(reqBody))
 		req.Header = headers
 		req.Header.Set("Content-Type", "application/json")
 		respStatus, respData, payload, itemCount, err := h.liveFsListResponse(req, reqBody, node.path, true)
@@ -697,8 +721,15 @@ func (h *AlistHandler) HandleDirSyncOverview(w http.ResponseWriter, r *http.Requ
 		total, fresh, stale, syncing, _ = h.dirSyncStore.CountSnapshots(r.Context())
 	}
 	progress := 0
-	if status.TotalDirsEstimate > 0 {
-		progress = status.DirsScanned * 100 / status.TotalDirsEstimate
+	progressTotal := status.TotalDirsEstimate
+	if status.TotalDirsDiscovered > progressTotal {
+		progressTotal = status.TotalDirsDiscovered
+	}
+	if progressTotal > 0 {
+		progress = status.DirsScanned * 100 / progressTotal
+		if progress > 100 {
+			progress = 100
+		}
 	}
 	RespondSuccess(w, map[string]interface{}{
 		"enabled":         h.dirSyncStore != nil,

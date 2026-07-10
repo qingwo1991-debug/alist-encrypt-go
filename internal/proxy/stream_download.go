@@ -288,34 +288,16 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 	if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
-		if !isPassthroughStatus(resp.StatusCode) {
-			return &StreamOutcome{
-				Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
-				Retryable:     true,
-				FailureReason: "upstream_4xx",
-				NoLearning:    true,
-				StatusCode:    resp.StatusCode,
-			}
+		// Do not commit an upstream auth/not-found response to the player. A raw
+		// URL may have expired, and the orchestrator can still refresh it or fall
+		// back to the internal WebDAV target while no response has started.
+		return &StreamOutcome{
+			Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
+			Retryable:     true,
+			FailureReason: "upstream_4xx",
+			NoLearning:    true,
+			StatusCode:    resp.StatusCode,
 		}
-	}
-	if isPassthroughStatus(resp.StatusCode) {
-		httputil.CopyResponseHeaders(w, resp)
-		w.WriteHeader(resp.StatusCode)
-		result.ResponseStarted = true
-		result.StatusCode = resp.StatusCode
-		result.FailureReason = "upstream_4xx"
-		result.NoLearning = true
-		if req.Method == http.MethodHead {
-			return result
-		}
-		buf := getBuffer()
-		defer putBuffer(buf)
-		written, err := io.CopyBuffer(w, resp.Body, *buf)
-		result.BytesWritten = written
-		if err != nil {
-			result.Err = err
-		}
-		return result
 	}
 
 	// Upstream responded successfully (< 500), reset circuit breaker
@@ -565,9 +547,13 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	written, err := io.CopyBuffer(w, readerToStream, *buf)
 	result.BytesWritten = written
 	if err != nil {
-		log.Error().Err(err).Msg("Error streaming decrypted content")
 		result.Err = err
 		reason, retryable := classifyStreamError(err)
+		if reason == "client_disconnect" {
+			log.Debug().Err(err).Int64("bytes_written", written).Msg("Client ended decrypt stream")
+		} else {
+			log.Error().Err(err).Int64("bytes_written", written).Msg("Error streaming decrypted content")
+		}
 		if result.FailureReason == "" {
 			result.FailureReason = reason
 		}

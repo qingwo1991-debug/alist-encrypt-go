@@ -8,17 +8,17 @@
 import * as ElSvg from '@element-plus/icons-vue'
 const props = defineProps({
   name: {
-    require: true,
+    required: true,
     default: 'Fold',
     type: String
   },
   size: {
-    require: false,
+    required: false,
     default: 18,
     type: Number
   },
   color: {
-    require: false,
+    required: false,
     default: '',
     type: String
   }

@@ -3,7 +3,7 @@
     <div class="font-bold mb-10px">call child method</div>
     <el-button @click="childMethod">call childMethod</el-button>
     <!--v-model sync -->
-    <Children ref="refChildren" v-model:childrenTitle="parentTitle" father-name="Vue3Template" @emitParent="emitParent">
+    <Children ref="refChildren" v-model:childrenTitle="parentTitle" father-name="Vue3Template" @emit-parent="emitParent">
       <!--默认插槽 v-slot -->
       <template #default>
         <div>默认插槽</div>

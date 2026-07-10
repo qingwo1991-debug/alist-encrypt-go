@@ -14,15 +14,13 @@ services:
       - ./conf:/app/conf
       - ./data:/app/data
     environment:
-      # Override config via environment variables (optional)
-      # ALIST_ENCRYPT_SCHEME_HTTP_PORT: 5344
-      # ALIST_ENCRYPT_SCHEME_ENABLE_H2C: "false"
-      # ALIST_ENCRYPT_ALIST_HOST: alist
-      # ALIST_ENCRYPT_ALIST_PORT: 5244
-      # Enable MySQL only when BOTH variables are set:
+      TZ: Asia/Shanghai
+      # ALIST_HOST/PORT seed the upstream address on first startup.
+      ALIST_HOST: alist
+      ALIST_PORT: "5244"
+      # For a race-free MySQL deployment, use the health-gated example in README.
       # DB_TYPE: mysql
       # DB_DSN: user:password@tcp(mysql:3306)/alist_encrypt?charset=utf8mb4&parseTime=True&loc=Local
-      - TZ=Asia/Shanghai
     networks:
       - alist-network
     depends_on:
@@ -51,7 +49,8 @@ services:
     networks:
       - alist-network
 
-  # Optional: MySQL metadata store. Enable with: docker compose --profile mysql up -d
+  # Optional database service only. Enabling this profile does not automatically
+  # switch alist-encrypt to MySQL; see the health-gated README example.
   mysql:
     image: mysql:8.4
     container_name: alist-encrypt-mysql

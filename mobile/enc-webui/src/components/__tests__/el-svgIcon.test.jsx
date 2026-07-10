@@ -1,7 +1,6 @@
-import { markRaw, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
-import { describe, expect, it, test } from 'vitest'
-import { Loading, Search } from '@element-plus/icons-vue'
+import { describe, expect, it } from 'vitest'
+import { ElIcon } from 'element-plus'
 
 import ElSvgIcon from '../ElSvgIcon.vue'
 
@@ -9,10 +8,11 @@ import ElSvgIcon from '../ElSvgIcon.vue'
 
 describe('ElSvgIcon.vue', () => {
   it('create', () => {
-    const wrapper = mount(() => <ElSvgIcon name="Edit" size={30} color={'red'} />)
-
-    // console.log(111111, wrapper.classes())
-    // expect(wrapper.classes()).toContain('el-icon')
+    const wrapper = mount(() => <ElSvgIcon name="Edit" size={30} color={'red'} />, {
+      global: { components: { ElIcon } }
+    })
+    expect(wrapper.find('.el-icon').exists()).toBe(true)
+    expect(wrapper.find('svg').exists()).toBe(true)
   })
 
   // it('icon', () => {

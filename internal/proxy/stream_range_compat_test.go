@@ -58,7 +58,7 @@ func TestRangeCompatDowngradeAfterConsecutivePseudoRangeFailures(t *testing.T) {
 	}
 }
 
-func TestPassthroughStatusNoLearning(t *testing.T) {
+func TestUpstreamNotFoundRemainsRetryableBeforeResponseStarts(t *testing.T) {
 	cfg := config.DefaultConfig()
 	sp := NewStreamProxy(cfg)
 
@@ -82,14 +82,17 @@ func TestPassthroughStatusNoLearning(t *testing.T) {
 	}
 
 	result := sp.ProxyDownloadDecryptWithStrategyForStorage(rr, req, "http://upstream.local/missing", passwd, 123, StreamStrategyRange, "/encrypt")
-	if result.Err != nil {
-		t.Fatalf("unexpected err: %v", result.Err)
+	if result.Err == nil {
+		t.Fatal("expected upstream 404 error")
 	}
-	if !result.NoLearning {
-		t.Fatalf("expected no-learning=true for 404 passthrough")
+	if !result.Retryable || result.FailureReason != "upstream_4xx" || !result.NoLearning {
+		t.Fatalf("unexpected outcome: %#v", result)
 	}
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status=%d, want %d", rr.Code, http.StatusNotFound)
+	if result.ResponseStarted {
+		t.Fatal("404 must not commit the response before fallback")
+	}
+	if rr.Code != http.StatusOK || rr.Body.Len() != 0 {
+		t.Fatalf("recorder was unexpectedly written: status=%d body=%q", rr.Code, rr.Body.String())
 	}
 }
 
@@ -165,6 +168,13 @@ func TestClassifyRequestRangeMarksFirstFrameWindow(t *testing.T) {
 	}
 }
 
+func TestClassifyRequestRangeMarksNearHeaderOpenRangeAsFirstFrame(t *testing.T) {
+	profile := classifyRequestRange(http.MethodGet, "bytes=48-")
+	if !profile.HasRange || !profile.IsFirstFrameHint {
+		t.Fatalf("expected bytes=48- to be a first-frame request, got %#v", profile)
+	}
+}
+
 func TestClassifyRequestRangeDoesNotMarkLargeStartAsFirstFrame(t *testing.T) {
 	profile := classifyRequestRange(http.MethodGet, "bytes=2097152-4194304")
 	if !profile.HasRange {
@@ -172,6 +182,51 @@ func TestClassifyRequestRangeDoesNotMarkLargeStartAsFirstFrame(t *testing.T) {
 	}
 	if profile.IsFirstFrameHint {
 		t.Fatalf("did not expect first-frame hint, got %#v", profile)
+	}
+}
+
+func TestInitialPlaybackHintCoversRealPlayerRequestShapes(t *testing.T) {
+	for _, rangeHeader := range []string{"", "bytes=0-", "bytes=48-", "bytes=65536-1048575"} {
+		if !IsInitialPlaybackHint(http.MethodGet, rangeHeader) {
+			t.Errorf("range %q was not recognized as initial playback", rangeHeader)
+		}
+	}
+	if IsInitialPlaybackHint(http.MethodHead, "") {
+		t.Fatal("HEAD must not be treated as initial playback")
+	}
+	if IsInitialPlaybackHint(http.MethodGet, "bytes=4194304-") {
+		t.Fatal("large seek must not be treated as initial playback")
+	}
+}
+
+func TestProbeRangeCompatibilityOnlyReportsDefinitiveResult(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableRangeCompatCache = true
+
+	sp := NewStreamProxy(cfg)
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header:     http.Header{"Content-Range": []string{"bytes 0-0/10"}},
+			Body:       io.NopCloser(strings.NewReader("x")),
+			Request:    r,
+		}, nil
+	})
+	if !sp.ProbeRangeCompatibility(t.Context(), "https://example.test/video", nil, "/encrypt") {
+		t.Fatal("expected valid 206 response to be a definitive probe")
+	}
+
+	unauthorized := NewStreamProxy(cfg)
+	unauthorized.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("unauthorized")),
+			Request:    r,
+		}, nil
+	})
+	if unauthorized.ProbeRangeCompatibility(t.Context(), "https://example.test/video", nil, "/encrypt") {
+		t.Fatal("401 must not be counted as a completed range probe")
 	}
 }
 

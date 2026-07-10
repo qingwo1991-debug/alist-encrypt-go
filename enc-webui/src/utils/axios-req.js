@@ -1,11 +1,27 @@
 import axios from 'axios'
-import { ElLoading, ElMessage, ElMessageBox } from 'element-plus'
+import { ElLoading, ElMessage } from 'element-plus'
 import { useBasicStore } from '@/store/basic'
 
 //使用axios.create()创建一个axios请求实例
 const service = axios.create()
 let loadingInstance = null //loading实例
 let tempReqUrlSave = ''
+let authResetting = false
+
+const codeMatches = (code, candidates) => candidates.has(String(code))
+
+const errorMessage = (err) => {
+  return err?.response?.data?.msg || err?.response?.data?.message || err?.message || String(err || '请求失败')
+}
+
+const resetExpiredSession = () => {
+  if (authResetting) return
+  authResetting = true
+  useBasicStore().resetStateAndToLogin()
+  window.setTimeout(() => {
+    authResetting = false
+  }, 500)
+}
 //请求前拦截
 service.interceptors.request.use(
   (req) => {
@@ -39,7 +55,7 @@ service.interceptors.request.use(
   },
   (err) => {
     //发送请求失败
-    Promise.reject(err)
+    return Promise.reject(err)
   }
 )
 //请求后拦截
@@ -56,21 +72,13 @@ service.interceptors.response.use(
       return res
     }
     const { code, msg } = res.data
-    const successCode = '0,200,20000'
-    const noAuthCode = '401,403'
-    if (successCode.includes(code)) {
+    const successCodes = new Set(['0', '200', '20000'])
+    const noAuthCodes = new Set(['401', '403'])
+    if (codeMatches(code, successCodes)) {
       return res.data
     } else {
-      if (noAuthCode.includes(code)) {
-        ElMessageBox.confirm('请重新登录', {
-          confirmButtonText: '重新登录',
-          closeOnClickModal: false,
-          showCancelButton: false,
-          showClose: false,
-          type: 'warning'
-        }).then(() => {
-          useBasicStore().resetStateAndToLogin()
-        })
+      if (codeMatches(code, noAuthCodes)) {
+        resetExpiredSession()
       }
       // @ts-ignore
       if (!res.config?.isNotTipErrorMsg) {
@@ -89,10 +97,16 @@ service.interceptors.response.use(
     if (loadingInstance) {
       loadingInstance && loadingInstance.close()
     }
-    ElMessage.error({
-      message: err,
-      duration: 2 * 1000
-    })
+    const unauthorized = [401, 403].includes(err?.response?.status)
+    if (unauthorized) {
+      resetExpiredSession()
+    }
+    if (!err?.config?.isNotTipErrorMsg) {
+      ElMessage.error({
+        message: unauthorized ? '登录已过期，请重新登录' : errorMessage(err),
+        duration: 2 * 1000
+      })
+    }
     return Promise.reject(err)
   }
 )

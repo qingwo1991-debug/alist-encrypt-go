@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import momentMini from 'moment-mini'
+import axiosReq from '@/utils/axios-req'
 import { elConfirm, elMessage } from './use-element'
 export const useTable = (searchForm, selectPageReq) => {
   /*define ref*/

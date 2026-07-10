@@ -43,6 +43,7 @@
     "h": true,
     "inject": true,
     "isExternal": true,
+    "isJWTExpired": true,
     "isProxy": true,
     "isReactive": true,
     "isReadonly": true,

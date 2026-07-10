@@ -26,20 +26,21 @@ import (
 
 // AlistHandler handles Alist API interception
 type AlistHandler struct {
-	cfg          *config.Config
-	streamProxy  *proxy.StreamProxy
-	httpClient   *http.Client
-	fileDAO      *dao.FileDAO
-	passwdDAO    *dao.PasswdDAO
-	proxyHandler *ProxyHandler
-	metaStore    FileMetaStore
-	probe        *ProbeScheduler
-	dirSyncStore DirSyncStore
-	dirSyncStart sync.Once
-	dirSyncGroup singleflight.Group
-	fsMetaGroup  singleflight.Group
-	fsMetaMu     sync.Mutex
-	fsMetaCache  map[string]fsMetaCacheEntry
+	cfg            *config.Config
+	streamProxy    *proxy.StreamProxy
+	httpClient     *http.Client
+	fileDAO        *dao.FileDAO
+	passwdDAO      *dao.PasswdDAO
+	proxyHandler   *ProxyHandler
+	metaStore      FileMetaStore
+	probe          *ProbeScheduler
+	dirSyncStore   DirSyncStore
+	dirSyncStart   sync.Once
+	dirSyncRunning atomic.Bool
+	dirSyncGroup   singleflight.Group
+	fsMetaGroup    singleflight.Group
+	fsMetaMu       sync.Mutex
+	fsMetaCache    map[string]fsMetaCacheEntry
 
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
@@ -1137,7 +1138,7 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		authHeaders.Set("Cookie", cookie)
 	}
-	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, probeSourceFSList)
+	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, probeSourceFromContext(r.Context(), probeSourceFSList))
 }
 
 // HandleFsPut handles /api/fs/put for encrypted uploads with filename encryption

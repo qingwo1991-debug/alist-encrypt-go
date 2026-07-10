@@ -12,7 +12,7 @@ export default {
   /*
    * 传入一串num四个 一个空格
    * */
-  toSplitNumFor(num, numToSpace) {
+  toSplitNumFor(num) {
     return num.replace(/(.{4})/g, '$1 ')
   },
   // 匹配银行卡号

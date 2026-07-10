@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -311,22 +309,14 @@ func (s *Service) CleanupLegacyBoltDB() (string, error) {
 	if s.mysqlStore == nil {
 		return "", fmt.Errorf("MySQL 未连接，请先配置 MySQL 后再试")
 	}
-	dbPath := "data/alist-encrypt.db"
-	if s.cfg != nil && s.cfg.DataDir != "" {
-		dbPath = filepath.Join(s.cfg.DataDir, "alist-encrypt.db")
-	}
-	info, err := os.Stat(dbPath)
-	if os.IsNotExist(err) {
-		return "没有旧数据需要清理", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	sizeKB := info.Size() / 1024
-	if err := os.Remove(dbPath); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("已清理旧数据（%d KB），清理后无法找回", sizeKB), nil
+
+	// alist-encrypt.db is not a legacy cache database. Server.New always opens it
+	// for users, password rules, configuration metadata and directory snapshots,
+	// even when MySQL is enabled for playback metadata. Removing an open BoltDB
+	// file succeeds on Unix, but unlinks the live user database and makes all
+	// subsequent writes disappear at process exit. There is currently no separate
+	// legacy BoltDB artifact that this endpoint can safely remove.
+	return "", fmt.Errorf("安全拒绝清理：alist-encrypt.db 是当前用户与配置主库，即使启用 MySQL 也不能删除")
 }
 
 func (s *Service) GetProxyDomainDictionary() (interface{}, error) {

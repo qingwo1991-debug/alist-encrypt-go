@@ -5,7 +5,7 @@
 <script setup lang="ts">
 const props = defineProps({
   msg: {
-    require: true,
+    required: true,
     default: 'fai',
     type: String
   }

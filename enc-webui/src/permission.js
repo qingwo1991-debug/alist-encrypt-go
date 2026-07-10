@@ -2,6 +2,7 @@ import router from '@/router'
 import { filterAsyncRouter, progressClose, progressStart } from '@/hooks/use-permission'
 import { useBasicStore } from '@/store/basic'
 import { userInfoReq } from '@/api/user'
+import { isJWTExpired } from '@/utils/auth-token'
 import { langTitle } from '@/hooks/use-common'
 import settings from './settings'
 
@@ -16,6 +17,12 @@ router.beforeEach(async (to) => {
   if (!settings.isNeedLogin) {
     basicStore.setFilterAsyncRoutes([])
     return true
+  }
+  // Clear an expired persisted token before issuing getUserInfo. The server
+  // remains authoritative, but a known-expired JWT need not generate a noisy
+  // 401 on every normal-browser reload.
+  if (basicStore.token && isJWTExpired(basicStore.token)) {
+    basicStore.resetState()
   }
   //1.判断token
   if (basicStore.token) {
@@ -33,7 +40,9 @@ router.beforeEach(async (to) => {
           //5.再次执行路由跳转
           return { ...to, replace: true }
         } catch (e) {
-          console.error(`route permission error${e}`)
+          if (![401, 403].includes(e?.response?.status)) {
+            console.error(`route permission error${e}`)
+          }
           basicStore.resetState()
           progressClose()
           return `/login?redirect=${to.path}`

@@ -285,6 +285,7 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		TargetURL:        info.URL,
 		FileName:         path.Base(displayPath),
 		CompatStorageKey: info.CompatKey,
+		PasswdInfo:       passwdInfo,
 	}
 	executeDecryptPlayback(decryptPlaybackRequest{
 		ResponseWriter:        w,
@@ -538,6 +539,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		TargetURL:        targetURL,
 		FileName:         path.Base(displayPath),
 		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
+		PasswdInfo:       passwdInfo,
 	}
 	executeDecryptPlayback(decryptPlaybackRequest{
 		ResponseWriter:        w,

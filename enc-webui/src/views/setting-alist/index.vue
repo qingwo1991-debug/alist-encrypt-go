@@ -492,24 +492,23 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useConfigStore } from '@/store/config'
 import {
-  getAlistConfigReq,
-  saveAlistConfigReq,
-  validateScanConfigReq,
-  encodeFoldNameReq,
-  decodeFoldNameReq,
-  getSchemeConfigReq,
-  saveSchemeConfigReq,
-  getProxyDomainDictionaryReq,
-  refreshProxyDomainDictionaryReq,
-  getProxyRoutingConfigReq,
-  saveProxyRoutingConfigReq,
-  getStatsReq,
   cleanupLegacyBoltDBReq,
-  runDirSyncReq
+  decodeFoldNameReq,
+  encodeFoldNameReq,
+  getAlistConfigReq,
+  getProxyDomainDictionaryReq,
+  getProxyRoutingConfigReq,
+  getSchemeConfigReq,
+  getStatsReq,
+  refreshProxyDomainDictionaryReq,
+  runDirSyncReq,
+  saveAlistConfigReq,
+  saveProxyRoutingConfigReq,
+  saveSchemeConfigReq,
+  validateScanConfigReq
 } from '@/api/user'
 import { Delete } from '@element-plus/icons-vue'
 
@@ -525,12 +524,6 @@ const cleanupOk = ref(false)
 const refreshingProbeStats = ref(false)
 const scanTriggering = ref(false)
 const refSearchForm = ref()
-
-const { setLanguage } = useConfigStore()
-const changeLanguage = (langParam) => {
-  setLanguage(langParam)
-}
-void changeLanguage
 
 const logPageSizes = {
   records: 12,

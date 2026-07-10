@@ -30,12 +30,12 @@
 import SubChildren from './SubChildren.vue'
 const props = defineProps({
   fatherName: {
-    require: true,
+    required: true,
     default: '',
     type: String
   },
   childrenTitle: {
-    require: true,
+    required: true,
     default: '',
     type: String
   }
@@ -55,9 +55,9 @@ const getFatherMethod = () => {
 }
 //emit
 // 定义emit事件
-const emit = defineEmits(['emitParent', 'update:childrenTitle'])
+const emit = defineEmits(['emit-parent', 'update:childrenTitle'])
 const emitFather = () => {
-  emit('emitParent', { val: '子组件传递的信息' })
+  emit('emit-parent', { val: '子组件传递的信息' })
 }
 onMounted(() => {
   console.log('得到父元素的prop', props.fatherName)

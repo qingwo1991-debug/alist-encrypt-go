@@ -1,7 +1,7 @@
 <template>
   <div class="navbar reset-el-dropdown">
     <div class="navbar__left">
-      <hamburger v-if="settings.showHamburger" :is-active="sidebar.opened" class="hamburger-container" @toggleClick="toggleSideBar" />
+      <hamburger v-if="settings.showHamburger" :is-active="sidebar.opened" class="hamburger-container" @toggle-click="toggleSideBar" />
       <breadcrumb class="breadcrumb-container" />
     </div>
     <div class="navbar__center">

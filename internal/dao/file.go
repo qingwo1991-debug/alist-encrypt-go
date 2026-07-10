@@ -52,6 +52,7 @@ type FileMetaStoreWriter interface {
 // FileDAO handles file information caching
 type FileDAO struct {
 	store          *storage.Store
+	cfg            *config.Config
 	pathCache      *PathCache // Unified high-performance cache
 	fileMetaWriter FileMetaStoreWriter
 }
@@ -125,10 +126,13 @@ func mergeCachedPathSize(existing *PathEntry, incomingSize int64, isDir bool, pa
 	return preserveLargerMediaSize(existing.Size, incomingSize, isDir, append(pathHints, existing.Name)...)
 }
 
-// NewFileDAO creates a new file DAO
-func NewFileDAO(store *storage.Store) *FileDAO {
+// NewFileDAO creates a new file DAO. Callers that own a configuration instance
+// should pass it so the DAO observes the same live config as the server. The
+// optional form preserves compatibility for tests and embedded callers.
+func NewFileDAO(store *storage.Store, configs ...*config.Config) *FileDAO {
 	dao := &FileDAO{
 		store:     store,
+		cfg:       selectConfig(configs...),
 		pathCache: NewPathCache(32, 1000), // 32 shards, 1000 entries per shard = 32k max
 	}
 
@@ -136,6 +140,14 @@ func NewFileDAO(store *storage.Store) *FileDAO {
 	go dao.cleanupPathCache()
 
 	return dao
+}
+
+// Config returns the configuration instance owned by the DAO.
+func (d *FileDAO) Config() *config.Config {
+	if d == nil {
+		return nil
+	}
+	return d.cfg
 }
 
 // SetFileMetaWriter injects an external store for persisting file metadata (e.g. MySQL).
@@ -387,7 +399,10 @@ func (d *FileDAO) GetFileSize(path string) (int64, bool) {
 		return size, true
 	}
 
-	cfg := config.Get()
+	cfg := d.cfg
+	if cfg == nil {
+		cfg = config.Get()
+	}
 	if cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
 		var entry FileSizeEntry
 		if err := d.store.GetJSON(storage.BucketFileSize, path, &entry); err == nil && entry.Size > 0 {
@@ -424,7 +439,10 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 		d.pathCache.Set(cacheEntry, ttl)
 	}
 
-	cfg := config.Get()
+	cfg := d.cfg
+	if cfg == nil {
+		cfg = config.Get()
+	}
 	if d.fileMetaWriter == nil && cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
 		persistEntry := FileSizeEntry{Path: path, Size: size, UpdatedAt: time.Now()}
 		_ = d.store.SetJSON(storage.BucketFileSize, path, persistEntry)
@@ -523,12 +541,22 @@ type PasswdDAO struct {
 	cache *storage.Cache
 }
 
-// NewPasswdDAO creates a new password DAO
-func NewPasswdDAO(store *storage.Store) *PasswdDAO {
+// NewPasswdDAO creates a new password DAO. Callers that own a configuration
+// instance should pass it to avoid falling back to the package singleton.
+func NewPasswdDAO(store *storage.Store, configs ...*config.Config) *PasswdDAO {
 	return &PasswdDAO{
-		cfg:   config.Get(),
+		cfg:   selectConfig(configs...),
 		cache: storage.NewCache(5 * time.Minute),
 	}
+}
+
+func selectConfig(configs ...*config.Config) *config.Config {
+	for _, cfg := range configs {
+		if cfg != nil {
+			return cfg
+		}
+	}
+	return config.Get()
 }
 
 // Stop terminates background goroutines owned by the DAO (cache cleanup).

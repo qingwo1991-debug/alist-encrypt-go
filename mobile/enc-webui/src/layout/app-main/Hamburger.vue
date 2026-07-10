@@ -12,10 +12,10 @@ defineProps({
     default: false
   }
 })
-const emit = defineEmits(['toggleClick'])
+const emit = defineEmits(['toggle-click'])
 //切换左侧栏关闭和隐藏
 const toggleClick = () => {
-  emit('toggleClick')
+  emit('toggle-click')
 }
 </script>
 
