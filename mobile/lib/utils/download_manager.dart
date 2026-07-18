@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:developer';
+
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:get/get.dart' as getx;
@@ -18,6 +20,32 @@ enum DownloadStatus {
   completed,   // 已完成
   failed,      // 失败
   cancelled,   // 已取消
+}
+
+class _DownloadChunk {
+  final int index;
+  final int start;
+  final int end;
+
+  const _DownloadChunk({
+    required this.index,
+    required this.start,
+    required this.end,
+  });
+
+  int get length => end - start + 1;
+}
+
+class _ContentRange {
+  final int start;
+  final int end;
+  final int total;
+
+  const _ContentRange({
+    required this.start,
+    required this.end,
+    required this.total,
+  });
 }
 
 /// 下载任务
@@ -87,6 +115,202 @@ class DownloadManager {
   static final List<DownloadTask> _completedTasks = [];
   static const int _downloadThreads = 4;
   static const int _minMultiThreadSize = 10 * 1024 * 1024;
+
+  @visibleForTesting
+  static String sanitizeFilename(String? candidate) {
+    var filename = (candidate ?? '').trim();
+    try {
+      filename = Uri.decodeComponent(filename);
+    } on FormatException {
+      // Keep malformed percent escapes as literal filename characters.
+    }
+
+    filename = filename.replaceAll('\\', '/');
+    filename = filename.split('/').last.trim();
+    filename = filename.replaceAll(RegExp(r'[\x00-\x1f\x7f]'), '_');
+    if (filename.isEmpty || filename == '.' || filename == '..') {
+      return 'download_${DateTime.now().millisecondsSinceEpoch}';
+    }
+    return filename;
+  }
+
+  static List<_DownloadChunk> _buildDownloadChunks(int totalBytes) {
+    return List.generate(_downloadThreads, (index) {
+      final start = index * (totalBytes ~/ _downloadThreads);
+      final end = index == _downloadThreads - 1
+          ? totalBytes - 1
+          : (index + 1) * (totalBytes ~/ _downloadThreads) - 1;
+      return _DownloadChunk(index: index, start: start, end: end);
+    });
+  }
+
+  static _ContentRange? _parseContentRange(String? value) {
+    if (value == null) return null;
+    final match = RegExp(
+      r'^bytes\s+(\d+)-(\d+)/(\d+)$',
+      caseSensitive: false,
+    ).firstMatch(value.trim());
+    if (match == null) return null;
+    return _ContentRange(
+      start: int.parse(match.group(1)!),
+      end: int.parse(match.group(2)!),
+      total: int.parse(match.group(3)!),
+    );
+  }
+
+  static void _throwIfCancelled(CancelToken? cancelToken) {
+    final cancellation = cancelToken?.cancelError;
+    if (cancellation != null) {
+      throw cancellation;
+    }
+  }
+
+  static Future<void> _discardResponseBody(ResponseBody? body) async {
+    if (body == null) return;
+    final subscription = body.stream.listen((_) {});
+    await subscription.cancel();
+  }
+
+  static Future<void> _downloadChunk({
+    required String url,
+    required Directory partsDirectory,
+    required _DownloadChunk chunk,
+    required int totalBytes,
+    required String? ifRange,
+    required CancelToken? cancelToken,
+    required void Function(int received) onReceived,
+  }) async {
+    _throwIfCancelled(cancelToken);
+    final headers = <String, dynamic>{
+      'Accept-Encoding': 'identity',
+      'Range': 'bytes=${chunk.start}-${chunk.end}',
+    };
+    if (ifRange != null && ifRange.isNotEmpty) {
+      headers['If-Range'] = ifRange;
+    }
+
+    final response = await _dio.get<ResponseBody>(
+      url,
+      cancelToken: cancelToken,
+      options: Options(
+        headers: headers,
+        responseType: ResponseType.stream,
+        followRedirects: true,
+        validateStatus: (status) => status != null,
+      ),
+    );
+
+    final responseBody = response.data;
+    final contentRange = _parseContentRange(
+      response.headers.value('content-range'),
+    );
+    final validRange = response.statusCode == HttpStatus.partialContent &&
+        contentRange != null &&
+        contentRange.start == chunk.start &&
+        contentRange.end == chunk.end &&
+        contentRange.total == totalBytes;
+    if (!validRange) {
+      await _discardResponseBody(responseBody);
+      throw StateError(
+        'invalid range response for bytes=${chunk.start}-${chunk.end}: '
+        'status=${response.statusCode} '
+        'content-range=${response.headers.value('content-range')}',
+      );
+    }
+
+    final declaredLength = int.tryParse(
+      response.headers.value(Headers.contentLengthHeader) ?? '',
+    );
+    if (declaredLength != null && declaredLength != chunk.length) {
+      await _discardResponseBody(responseBody);
+      throw StateError(
+        'invalid range length for bytes=${chunk.start}-${chunk.end}',
+      );
+    }
+    if (responseBody == null) {
+      throw StateError(
+        'missing range body for bytes=${chunk.start}-${chunk.end}',
+      );
+    }
+
+    final partFile = File(
+      '${partsDirectory.path}/part-${chunk.index.toString().padLeft(2, '0')}',
+    );
+    final sink = partFile.openWrite();
+    var received = 0;
+    try {
+      final stream = responseBody.stream.map((bytes) {
+        _throwIfCancelled(cancelToken);
+        received += bytes.length;
+        if (received > chunk.length) {
+          throw StateError(
+            'range body exceeded expected length for '
+            'bytes=${chunk.start}-${chunk.end}',
+          );
+        }
+        onReceived(received);
+        return bytes;
+      });
+      await sink.addStream(stream);
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+
+    _throwIfCancelled(cancelToken);
+    final actualLength = await partFile.length();
+    if (received != chunk.length || actualLength != chunk.length) {
+      throw StateError(
+        'incomplete range body for bytes=${chunk.start}-${chunk.end}: '
+        'received=$received file=$actualLength expected=${chunk.length}',
+      );
+    }
+  }
+
+  static Future<void> _mergeDownloadChunks({
+    required String filePath,
+    required Directory partsDirectory,
+    required List<_DownloadChunk> chunks,
+    required int totalBytes,
+    required CancelToken? cancelToken,
+  }) async {
+    final outputFile = File(filePath);
+    await outputFile.parent.create(recursive: true);
+    final sink = outputFile.openWrite();
+    var mergedBytes = 0;
+    try {
+      for (final chunk in chunks) {
+        _throwIfCancelled(cancelToken);
+        final partFile = File(
+          '${partsDirectory.path}/part-${chunk.index.toString().padLeft(2, '0')}',
+        );
+        final partLength = await partFile.length();
+        if (partLength != chunk.length) {
+          throw StateError(
+            'part ${chunk.index} length changed before merge: '
+            '$partLength != ${chunk.length}',
+          );
+        }
+        await sink.addStream(partFile.openRead().map((bytes) {
+          _throwIfCancelled(cancelToken);
+          return bytes;
+        }));
+        mergedBytes += partLength;
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+
+    _throwIfCancelled(cancelToken);
+    final outputLength = await outputFile.length();
+    if (mergedBytes != totalBytes || outputLength != totalBytes) {
+      throw StateError(
+        'merged download length mismatch: '
+        'merged=$mergedBytes file=$outputLength expected=$totalBytes',
+      );
+    }
+  }
   
   /// 获取所有活跃的下载任务
   static List<DownloadTask> get activeTasks => _activeTasks.values.toList();
@@ -106,7 +330,7 @@ class DownloadManager {
     await NotificationManager.initialize();
     
     // 生成任务ID
-    String taskId = DateTime.now().millisecondsSinceEpoch.toString();
+    String taskId = DateTime.now().microsecondsSinceEpoch.toString();
     
     // 获取下载目录
     Directory? downloadDir = await _getOpenListDownloadDirectory();
@@ -119,7 +343,7 @@ class DownloadManager {
     }
 
     // 确定文件名和路径
-    String finalFilename = filename ?? _getFilenameFromUrl(url);
+    String finalFilename = sanitizeFilename(filename ?? _getFilenameFromUrl(url));
     String filePath = '${downloadDir.path}/$finalFilename';
     filePath = _getUniqueFilePath(filePath);
     finalFilename = filePath.split('/').last;
@@ -222,7 +446,7 @@ class DownloadManager {
         // 用户取消下载
         task.status = DownloadStatus.cancelled;
         task.endTime = DateTime.now();
-        log('下载已取消: $url');
+        log('下载已取消: $finalFilename');
       } else {
         // 下载失败
         task.status = DownloadStatus.failed;
@@ -280,7 +504,7 @@ class DownloadManager {
     }
 
     // 确定文件名和路径
-    String finalFilename = filename ?? _getFilenameFromUrl(url);
+    String finalFilename = sanitizeFilename(filename ?? _getFilenameFromUrl(url));
     String filePath = '${downloadDir.path}/$finalFilename';
     filePath = _getUniqueFilePath(filePath);
 
@@ -322,7 +546,7 @@ class DownloadManager {
     } catch (e) {
       if (e is DioException && e.type == DioExceptionType.cancel) {
         // 用户取消下载
-        log('下载已取消: $url');
+        log('下载已取消: $finalFilename');
         return null;
       } else {
         // 下载失败
@@ -340,90 +564,96 @@ class DownloadManager {
     CancelToken? cancelToken,
     required void Function(int received, int total) onProgress,
   }) async {
+    Directory? partsDirectory;
     try {
       final headResp = await _dio.head(
         url,
+        cancelToken: cancelToken,
         options: Options(
+          headers: {'Accept-Encoding': 'identity'},
           followRedirects: true,
           validateStatus: (s) => s != null && s < 400,
         ),
       );
+
+      _throwIfCancelled(cancelToken);
+      if (headResp.statusCode != HttpStatus.ok) {
+        return false;
+      }
 
       final contentLength =
           int.tryParse(headResp.headers.value('content-length') ?? '') ?? 0;
       final acceptRanges = headResp.headers.value('accept-ranges') ?? '';
 
       if (contentLength < _minMultiThreadSize ||
-          acceptRanges.toLowerCase() != 'bytes') {
+          acceptRanges.trim().toLowerCase() != 'bytes') {
+        _throwIfCancelled(cancelToken);
         return false;
       }
 
-      final chunkSize = contentLength ~/ _downloadThreads;
-      final file = File(filePath);
-      await file.create(recursive: true);
-      final raf = await file.open(mode: FileMode.writeOnly);
+      final chunks = _buildDownloadChunks(contentLength);
+      final currentPartsDirectory = Directory(
+        '$filePath.parts-${DateTime.now().microsecondsSinceEpoch}',
+      );
+      partsDirectory = currentPartsDirectory;
+      await currentPartsDirectory.create(recursive: true);
 
-      try {
-        await raf.truncate(contentLength);
-
-        final receivedPerChunk = List.filled(_downloadThreads, 0);
-        final futures = <Future<void>>[];
-
-        for (int i = 0; i < _downloadThreads; i++) {
-          final start = i * chunkSize;
-          final end = (i == _downloadThreads - 1)
-              ? contentLength - 1
-              : (i + 1) * chunkSize - 1;
-
-          futures.add(() async {
-            final resp = await _dio.get<List<int>>(
-              url,
-              cancelToken: cancelToken,
-              options: Options(
-                headers: {'Range': 'bytes=$start-$end'},
-                responseType: ResponseType.bytes,
-                followRedirects: true,
-              ),
-              onReceiveProgress: (received, total) {
-                receivedPerChunk[i] = received;
-                final totalReceived = receivedPerChunk.fold<int>(
-                    0, (sum, v) => sum + v);
-                onProgress(totalReceived, contentLength);
-              },
-            );
-
-            final bytes = resp.data;
-            if (bytes != null && bytes.isNotEmpty) {
-              await raf.setPosition(start);
-              await raf.writeFrom(bytes);
-            }
-          }());
-        }
-
-        await Future.wait(futures);
-
-        if (cancelToken?.isCancelled == true) {
-          try {
-            await file.delete();
-          } catch (_) {}
-          return false;
-        }
-
-        return true;
-      } finally {
-        try {
-          await raf.close();
-        } catch (_) {}
+      String? ifRange = headResp.headers.value('etag')?.trim();
+      if (ifRange == null || ifRange.isEmpty || ifRange.startsWith('W/')) {
+        ifRange = null;
       }
+      ifRange ??= headResp.headers.value('last-modified')?.trim();
+
+      final receivedPerChunk = List.filled(chunks.length, 0);
+      await Future.wait(chunks.map((chunk) {
+        return _downloadChunk(
+          url: url,
+          partsDirectory: currentPartsDirectory,
+          chunk: chunk,
+          totalBytes: contentLength,
+          ifRange: ifRange,
+          cancelToken: cancelToken,
+          onReceived: (received) {
+            receivedPerChunk[chunk.index] = received;
+            final totalReceived = receivedPerChunk.fold<int>(
+              0,
+              (sum, value) => sum + value,
+            );
+            onProgress(totalReceived, contentLength);
+          },
+        );
+      }));
+
+      await _mergeDownloadChunks(
+        filePath: filePath,
+        partsDirectory: currentPartsDirectory,
+        chunks: chunks,
+        totalBytes: contentLength,
+        cancelToken: cancelToken,
+      );
+      onProgress(contentLength, contentLength);
+      return true;
     } catch (e) {
-      if (e is DioException && e.type == DioExceptionType.cancel) {
-        rethrow;
+      final cancellation = cancelToken?.cancelError;
+      if (cancellation != null) {
+        throw cancellation;
       }
       log('多线程下载失败，将回退到单线程: $e');
       try {
         await File(filePath).delete();
       } catch (_) {}
       return false;
+    } finally {
+      final directoryToDelete = partsDirectory;
+      if (directoryToDelete != null) {
+        try {
+          if (await directoryToDelete.exists()) {
+            await directoryToDelete.delete(recursive: true);
+          }
+        } catch (e) {
+          log('清理下载分片失败: $e');
+        }
+      }
     }
   }
 
@@ -526,7 +756,7 @@ class DownloadManager {
       if (path.isNotEmpty && path.contains('/')) {
         String filename = path.split('/').last;
         if (filename.isNotEmpty) {
-          return filename;
+          return sanitizeFilename(filename);
         }
       }
     } catch (e) {
@@ -774,9 +1004,14 @@ class DownloadManager {
   /// 删除指定文件
   static Future<bool> deleteFile(String filename) async {
     try {
+      final safeFilename = sanitizeFilename(filename);
+      if (safeFilename != filename) {
+        log('拒绝删除下载目录外的文件名');
+        return false;
+      }
       Directory? downloadDir = await _getOpenListDownloadDirectory();
       if (downloadDir != null) {
-        File file = File('${downloadDir.path}/$filename');
+        File file = File('${downloadDir.path}/$safeFilename');
         if (await file.exists()) {
           await file.delete();
           log('已删除文件: $filename');

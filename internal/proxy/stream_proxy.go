@@ -24,12 +24,20 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 	if err != nil {
 		return errors.NewInternalWithCause("failed to create request", err)
 	}
+	req.ContentLength = r.ContentLength
+	req.GetBody = r.GetBody
 
-	// Retry transient network errors with jittered exponential backoff
+	// Retry only requests that are both safe and replayable. Reusing a consumed
+	// upload/PROPFIND body sends an empty or truncated second request.
 	var resp *http.Response
 	var doErr error
-	_ = s.retrier.Do(r.Context(), func() error {
-		resp, doErr = s.client.Do(req)
+	doRequest := func() error {
+		attemptReq, cloneErr := cloneProxyAttempt(req)
+		if cloneErr != nil {
+			doErr = cloneErr
+			return nil
+		}
+		resp, doErr = s.client.Do(attemptReq)
 		if doErr != nil {
 			if backoff.IsTransient(doErr) {
 				return doErr
@@ -38,11 +46,18 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 		}
 		if backoff.IsTransientStatus(resp.StatusCode) {
 			resp.Body.Close()
-			doErr = fmt.Errorf("upstream status %d", resp.StatusCode)
+			doErr = &backoff.HTTPStatusError{StatusCode: resp.StatusCode}
 			return doErr
 		}
 		return nil
-	})
+	}
+	if canRetryProxyRequest(req) {
+		_ = s.retrier.Do(r.Context(), doRequest)
+	} else {
+		// A single attempt preserves the original body and upstream status. In
+		// particular, a non-idempotent 5xx must not trigger a second write.
+		resp, doErr = s.client.Do(req)
+	}
 	if doErr != nil {
 		s.cbGate.RecordFailure()
 		return errors.NewProxyErrorWithCause("failed to proxy request", doErr)
@@ -64,4 +79,33 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 	defer putBuffer(buf)
 	_, err = io.CopyBuffer(w, resp.Body, *buf)
 	return err
+}
+
+func canRetryProxyRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+	default:
+		return false
+	}
+	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+}
+
+func cloneProxyAttempt(req *http.Request) (*http.Request, error) {
+	clone := req.Clone(req.Context())
+	if req.Body == nil || req.Body == http.NoBody {
+		clone.Body = req.Body
+		return clone, nil
+	}
+	if req.GetBody == nil {
+		return nil, fmt.Errorf("request body is not replayable")
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, fmt.Errorf("recreate request body: %w", err)
+	}
+	clone.Body = body
+	return clone, nil
 }

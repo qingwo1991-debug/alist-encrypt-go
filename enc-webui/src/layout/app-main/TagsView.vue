@@ -6,7 +6,7 @@
         ref="refTag"
         :key="tag.path"
         v-slot="{ navigate }"
-        :to="{ path: tag.path, query: tag.query, fullPath: tag.fullPath }"
+        :to="{ path: tag.path, query: tag.query }"
         custom
       >
         <div
@@ -160,7 +160,7 @@ const closeSelectedTag = (view) => {
         basicStore.delCachedView(view.name)
       }
       if (routerLevel === 3) {
-        basicStore.setCacheViewDeep(view.name)
+        basicStore.delCacheViewDeep(view.name)
       }
     }
   })

@@ -126,3 +126,35 @@ func TestAuthMiddlewareStoresTokenWithoutMutatingRequestHeaders(t *testing.T) {
 		t.Fatalf("status=%d, want %d", rr.Code, http.StatusNoContent)
 	}
 }
+
+func TestForceHTTPSMiddlewareReplacesIncomingPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      string
+		httpsPort int
+		want      string
+	}{
+		{name: "custom port", host: "proxy.local:8080", httpsPort: 8443, want: "https://proxy.local:8443/library?q=1"},
+		{name: "default port", host: "proxy.local:8080", httpsPort: 443, want: "https://proxy.local/library?q=1"},
+		{name: "ipv6", host: "[2001:db8::1]:8080", httpsPort: 8443, want: "https://[2001:db8::1]:8443/library?q=1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.Use(ForceHTTPSMiddleware(tc.httpsPort))
+			r.GET("/library", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+			req := httptest.NewRequest(http.MethodGet, "http://"+tc.host+"/library?q=1", nil)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusMovedPermanently {
+				t.Fatalf("status=%d, want %d", rr.Code, http.StatusMovedPermanently)
+			}
+			if got := rr.Header().Get("Location"); got != tc.want {
+				t.Fatalf("Location=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}

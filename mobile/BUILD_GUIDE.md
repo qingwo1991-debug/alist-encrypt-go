@@ -11,14 +11,22 @@
 ## Android Library
 
 ```bash
-cd mobile/openlist-lib/scripts
-./init_openlist.sh
-./init_web.sh
+cd mobile/enc-webui
+npm ci
+npm run build
+
+cd ../openlist-lib
+bash scripts/install_enc_web.sh
+
+cd scripts
 ./init_gomobile.sh
-./gobind.sh
+./gobind.sh release all
 ```
 
-This populates `mobile/android/app/libs/` with the AAR used by the app.
+This installs the reviewed mobile Web UI and populates
+`mobile/android/app/libs/` with the AAR used by the app. The `init_openlist.sh`
+and `init_web.sh` scripts are only for an explicit upstream refresh and are not
+part of a reproducible release build.
 
 ## APK
 

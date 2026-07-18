@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +16,42 @@ import (
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 )
+
+func TestProbeSchedulerJWTCacheFollowsCredentialUpdates(t *testing.T) {
+	var loginCalls int32
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	alist := cfg.AlistServerSnapshot()
+	alist.ScanUsername = "first-user"
+	alist.ScanPassword = "first-password"
+	if err := cfg.UpdateAlistServer(alist); err != nil {
+		t.Fatal(err)
+	}
+
+	ps := &ProbeScheduler{
+		cfg: cfg,
+		jwtFetcher: func(_ string, username, _ string) string {
+			call := atomic.AddInt32(&loginCalls, 1)
+			return fmt.Sprintf("token-%d-%s", call, username)
+		},
+	}
+	first, mode := ps.ensureAuth(make(http.Header))
+	if mode != "scan_jwt" || first.Get("Authorization") != "token-1-first-user" {
+		t.Fatalf("first auth mode=%q header=%q", mode, first.Get("Authorization"))
+	}
+
+	alist.ScanUsername = "second-user"
+	alist.ScanPassword = "second-password"
+	if err := cfg.UpdateAlistServer(alist); err != nil {
+		t.Fatal(err)
+	}
+	second, mode := ps.ensureAuth(make(http.Header))
+	if mode != "scan_jwt" || second.Get("Authorization") != "token-2-second-user" {
+		t.Fatalf("updated auth mode=%q header=%q", mode, second.Get("Authorization"))
+	}
+	if got := atomic.LoadInt32(&loginCalls); got != 2 {
+		t.Fatalf("login calls=%d, want 2 after credential update", got)
+	}
+}
 
 func TestProbeSchedulerWarmStateLifecycleAndRecordBackfill(t *testing.T) {
 	cfg := config.DefaultConfig()
@@ -207,6 +244,7 @@ func TestFetchRawURLZeroThresholdForcesUpstreamRefresh(t *testing.T) {
 		Path:              "/movie.mp4",
 		EncryptedPath:     "/enc/movie.bin",
 		RawURL:            "https://cdn.example/expired-unparseable-signature",
+		RawURLAuthScope:   "anon",
 		Size:              4096,
 		UpstreamFetchedAt: time.Now(),
 	}); err != nil {
@@ -505,6 +543,32 @@ func TestProbeSchedulerRefreshesStaleWarmDespiteLongCooldown(t *testing.T) {
 	}
 	if got := atomic.LoadUint64(&ps.enqueuedTotal); got != 1 {
 		t.Fatalf("enqueued total=%d, want one stale refresh", got)
+	}
+}
+
+func TestProbeSchedulerStopPreventsNewWork(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableBackgroundProbe = true
+	cfg.AlistServer.ProbeConcurrency = 2
+	cfg.AlistServer.ProbeMinDelayMs = 0
+	cfg.AlistServer.ProbeMaxDelayMs = 0
+
+	ps := NewProbeScheduler(cfg, nil, nil, nil)
+	ps.Stop()
+	// Stop is deliberately idempotent because the shared scheduler is reachable
+	// through more than one server handler.
+	ps.Stop()
+	ps.EnqueueWithSource(FileItem{
+		DisplayPath: "/movie.mp4",
+		TargetURL:   "https://example.test/movie",
+		FileName:    "movie.mp4",
+	}, nil, 200*1024*1024, probeSourceFSList)
+
+	if got := atomic.LoadUint64(&ps.enqueuedTotal); got != 0 {
+		t.Fatalf("enqueued after Stop = %d, want 0", got)
+	}
+	if got := len(ps.queue); got != 0 {
+		t.Fatalf("queue length after Stop = %d, want 0", got)
 	}
 }
 

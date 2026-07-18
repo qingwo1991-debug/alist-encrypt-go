@@ -36,9 +36,9 @@ const getBreadcrumb = () => {
   // only show routes with has  meta.title
   let matched: RouterTypes = route.matched.filter((item) => item.meta?.title)
   //如果首页Dashboard,如果没有，添加Dashboard路由到第一个路由
-  const isHasDashboard = matched[0]?.name?.toLocaleLowerCase() === 'Dashboard'.toLocaleLowerCase()
+  const isHasDashboard = String(matched[0]?.name ?? '').toLocaleLowerCase() === 'dashboard'
   if (!isHasDashboard) {
-    matched = [{ path: '/dashboard', meta: { title: 'Dashboard' } }].concat(matched)
+    matched = [{ path: '/dashboard', meta: { title: 'Dashboard' } }, ...matched]
   }
   //过滤面包屑显示的数组
   levelList.value = matched.filter((item) => item.meta && item.meta.title && item.meta.breadcrumb !== false)

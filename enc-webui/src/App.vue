@@ -10,7 +10,6 @@ import { onBeforeMount, onMounted } from 'vue'
 import zh from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
 import { storeToRefs } from 'pinia/dist/pinia'
-import { useRoute } from 'vue-router'
 import { useBasicStore } from '@/store/basic'
 import { useConfigStore } from '@/store/config'
 import { useErrorLog } from '@/hooks/use-error-log'
@@ -29,11 +28,10 @@ onMounted(() => {
   //lanch the errorLog collection
   useErrorLog()
 })
-const route = useRoute()
 onMounted(() => {
   const { setTheme, theme, setSize, size, setLanguage, language } = useConfigStore()
   setTheme(theme)
-  setLanguage(language, route.meta?.title)
+  setLanguage(language)
   setSize(size)
   toggleHtmlClass(theme)
 })

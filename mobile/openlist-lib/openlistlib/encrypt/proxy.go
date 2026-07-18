@@ -67,7 +67,11 @@ const (
 )
 
 // streamBufferSize 流传输缓冲区大小 (默认 512KB)
-var streamBufferSize = 512 * 1024
+var streamBufferSize atomic.Int64
+
+func init() {
+	streamBufferSize.Store(512 * 1024)
+}
 
 func pathScopeKey(rawPath string) string {
 	trimmed := strings.Trim(strings.TrimSpace(rawPath), "/")
@@ -241,7 +245,7 @@ var (
 	// largeBufferPool 大文件缓冲区池 (512KB)
 	largeBufferPool = sync.Pool{
 		New: func() interface{} {
-			buf := make([]byte, streamBufferSize)
+			buf := make([]byte, int(streamBufferSize.Load()))
 			return &buf
 		},
 	}
@@ -1184,11 +1188,33 @@ func (p *ProxyServer) persistConfigSnapshot() error {
 
 // getAlistURL 获取 Alist 服务 URL
 func (p *ProxyServer) getAlistURL() string {
+	if p == nil {
+		return ""
+	}
+	p.mutex.RLock()
+	if p.config == nil {
+		p.mutex.RUnlock()
+		return ""
+	}
 	protocol := "http"
 	if p.config.AlistHttps {
 		protocol = "https"
 	}
-	return fmt.Sprintf("%s://%s:%d", protocol, p.config.AlistHost, p.config.AlistPort)
+	host := p.config.AlistHost
+	port := p.config.AlistPort
+	p.mutex.RUnlock()
+	return fmt.Sprintf("%s://%s:%d", protocol, host, port)
+}
+
+func getAlistURLFromConfig(cfg *ProxyConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	protocol := "http"
+	if cfg.AlistHttps {
+		protocol = "https"
+	}
+	return fmt.Sprintf("%s://%s:%d", protocol, cfg.AlistHost, cfg.AlistPort)
 }
 
 // getProbeStrategy 获取加密路径的探测策略（如果已学习）
@@ -1359,9 +1385,10 @@ func (p *ProxyServer) probeWithHeadCtx(ctx context.Context, targetURL string, he
 			req.Header.Add(key, v)
 		}
 	}
-	client := p.probeClient
+	runtime := p.clientSnapshot()
+	client := runtime.probeClient
 	if client == nil {
-		client = p.httpClient
+		client = runtime.httpClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1410,9 +1437,10 @@ func (p *ProxyServer) probeWithRangeCtx(ctx context.Context, targetURL string, h
 		}
 	}
 	req.Header.Set("Range", "bytes=0-0")
-	client := p.probeClient
+	runtime := p.clientSnapshot()
+	client := runtime.probeClient
 	if client == nil {
-		client = p.httpClient
+		client = runtime.httpClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1485,9 +1513,10 @@ func (p *ProxyServer) fetchWebDAVFileSizeCtx(ctx context.Context, targetURL stri
 	req.Header.Set("Depth", "0")
 	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
 
-	client := p.probeClient
+	runtime := p.clientSnapshot()
+	client := runtime.probeClient
 	if client == nil {
-		client = p.httpClient
+		client = runtime.httpClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1723,11 +1752,12 @@ func (p *ProxyServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 	active, remain, reason := p.upstreamBackoffState()
 	reachable := false
+	runtime := p.runtimeSnapshot()
 	ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.getAlistURL()+"/ping", nil)
-	if err == nil {
-		if resp, reqErr := p.httpClient.Do(req); reqErr == nil {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, getAlistURLFromConfig(runtime.config)+"/ping", nil)
+	if err == nil && runtime.httpClient != nil {
+		if resp, reqErr := runtime.httpClient.Do(req); reqErr == nil {
 			reachable = resp.StatusCode >= 200 && resp.StatusCode < 500
 			resp.Body.Close()
 		}
@@ -1737,7 +1767,12 @@ func (p *ProxyServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"proxy": map[string]interface{}{
 			"running": p.IsRunning(),
-			"port":    p.config.ProxyPort,
+			"port": func() int {
+				if runtime.config != nil {
+					return runtime.config.ProxyPort
+				}
+				return 0
+			}(),
 		},
 		"upstream": map[string]interface{}{
 			"url":                       p.getAlistURL(),
@@ -2632,6 +2667,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		applyLearningDefaults(p.config)
 		p.mutex.Unlock()
+		p.UpdateConfig(p.configSnapshot())
 		if err := p.persistConfigSnapshot(); err != nil {
 			log.Warnf("[%s] Failed to persist config snapshot: %v", internal.TagConfig, err)
 		} else {
@@ -2697,8 +2733,8 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 	}
 
 	ctx := r.Context()
-	log.Infof("%s handleRedirect: key=%s, fileSize=%d, encType=%s, url=%s",
-		internal.LogPrefix(ctx, internal.TagDownload), key, info.FileSize, info.PasswdInfo.EncType, info.RedirectURL)
+	log.Infof("%s handleRedirect: fileSize=%d, encType=%s, url=%s",
+		internal.LogPrefix(ctx, internal.TagDownload), info.FileSize, info.PasswdInfo.EncType, safeURLForLog(info.RedirectURL))
 
 	// 获取 Range 头
 	clientRangeHeader := r.Header.Get("Range")
@@ -2754,7 +2790,12 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 
 	// 发送请求
 	// Use streamClient for downloads to avoid client-side timeouts for large/long streams
-	resp, err := p.streamClient.Do(req)
+	streamClient := p.streamClientSnapshot()
+	if streamClient == nil {
+		http.Error(w, "upstream stream client unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		log.Errorf("%s handleRedirect: request failed: %v", internal.LogPrefix(ctx, internal.TagDownload), err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -2913,7 +2954,7 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 					if strings.Contains(info.RedirectURL, "baidupcs.com") {
 						req2.Header.Set("User-Agent", "pan.baidu.com")
 					}
-					resp, err = p.streamClient.Do(req2)
+					resp, err = streamClient.Do(req2)
 					if err != nil {
 						http.Error(w, err.Error(), http.StatusBadGateway)
 						return
@@ -2953,7 +2994,7 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 
 		// 如果仍然为 0，跳过解密直接代理（记录更详细的警告信息）
 		if fileSize == 0 {
-			log.Warnf("%s handleRedirect: fileSize is 0, skipping decryption. originalURL=%s, redirectURL=%s", internal.LogPrefix(ctx, internal.TagDownload), info.OriginalURL, info.RedirectURL)
+			log.Warnf("%s handleRedirect: fileSize is 0, skipping decryption. originalURL=%s, redirectURL=%s", internal.LogPrefix(ctx, internal.TagDownload), safeURLForLog(info.OriginalURL), safeURLForLog(info.RedirectURL))
 			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
@@ -3505,7 +3546,11 @@ func (p *ProxyServer) noteDriverCandidate(driver string) {
 }
 
 func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHeaders http.Header) {
-	if p == nil || p.config == nil || p.httpClient == nil {
+	p.refreshStorageDriverMapIfNeededWithRuntime(ctx, srcHeaders, p.runtimeSnapshot())
+}
+
+func (p *ProxyServer) refreshStorageDriverMapIfNeededWithRuntime(ctx context.Context, srcHeaders http.Header, runtime proxyRuntimeSnapshot) {
+	if p == nil || runtime.config == nil || runtime.httpClient == nil {
 		return
 	}
 	p.routingMu.RLock()
@@ -3515,7 +3560,7 @@ func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHe
 		return
 	}
 
-	reqURL := p.getAlistURL() + "/api/admin/storage/list?page=1&per_page=1000"
+	reqURL := getAlistURLFromConfig(runtime.config) + "/api/admin/storage/list?page=1&per_page=1000"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return
@@ -3528,7 +3573,7 @@ func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHe
 			req.Header.Add(key, value)
 		}
 	}
-	resp, err := p.httpClient.Do(req)
+	resp, err := runtime.httpClient.Do(req)
 	if err != nil {
 		return
 	}
@@ -3569,8 +3614,8 @@ func (p *ProxyServer) refreshStorageDriverMapIfNeeded(ctx context.Context, srcHe
 		return
 	}
 	refreshMinutes := 30
-	if p.config.StorageMapRefreshMinutes > 0 {
-		refreshMinutes = p.config.StorageMapRefreshMinutes
+	if runtime.config.StorageMapRefreshMinutes > 0 {
+		refreshMinutes = runtime.config.StorageMapRefreshMinutes
 	}
 	p.routingMu.Lock()
 	p.storageDriverMap = nextMap
@@ -3611,15 +3656,19 @@ func buildProviderLabel(provider string) string {
 }
 
 func (p *ProxyServer) fetchAdminDriverNames(ctx context.Context, srcHeaders http.Header) ([]string, bool) {
-	if p == nil || p.httpClient == nil {
+	return p.fetchAdminDriverNamesWithRuntime(ctx, srcHeaders, p.runtimeSnapshot())
+}
+
+func (p *ProxyServer) fetchAdminDriverNamesWithRuntime(ctx context.Context, srcHeaders http.Header, runtime proxyRuntimeSnapshot) ([]string, bool) {
+	if p == nil || runtime.config == nil || runtime.httpClient == nil {
 		return nil, true
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.getAlistURL()+"/api/admin/driver/names", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, getAlistURLFromConfig(runtime.config)+"/api/admin/driver/names", nil)
 	if err != nil {
 		return nil, true
 	}
 	copyForwardHeaders(req.Header, srcHeaders)
-	resp, err := p.httpClient.Do(req)
+	resp, err := runtime.httpClient.Do(req)
 	if err != nil {
 		return nil, true
 	}
@@ -3682,7 +3731,12 @@ func (p *ProxyServer) proxyFSJSON(w http.ResponseWriter, r *http.Request, apiPat
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClientSnapshot()
+	if client == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -3714,7 +3768,11 @@ func (p *ProxyServer) doFSRemoveRequest(ctx context.Context, srcHeaders http.Hea
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClientSnapshot()
+	if client == nil {
+		return 0, nil, errors.New("upstream client unavailable")
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -3899,7 +3957,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					RawURL: rawURL,
 				})
 				log.Infof("%s WebDAV GET resolved raw_url via fs/get: display=%s rawURL=%s size=%d",
-					internal.LogPrefix(ctx, internal.TagProxy), noDav, rawURL, size)
+					internal.LogPrefix(ctx, internal.TagProxy), noDav, safeURLForLog(rawURL), size)
 			}
 		}
 	}
@@ -4157,9 +4215,14 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	client := p.httpClient
+	runtime := p.clientSnapshot()
+	client := runtime.httpClient
 	if r.Method == http.MethodGet {
-		client = p.streamClient
+		client = runtime.streamClient
+	}
+	if client == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -4364,7 +4427,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")
 		log.Infof("WebDAV backend redirect: method=%s path=%s statusCode=%d location=%s",
-			r.Method, filePath, resp.StatusCode, location)
+			r.Method, filePath, resp.StatusCode, safeURLForLog(location))
 
 		if r.Method == "GET" && encPath != nil && encPath.Enable && location != "" {
 			driver := p.inferDriverFromPath(ctx, filePath, r.Header)
@@ -4422,7 +4485,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			log.Infof("%s WebDAV redirect planning: path=%s location=%s fileSize=%d range=%q",
-				internal.LogPrefix(ctx, internal.TagProxy), filePath, location, fileSize, clientRangeHeader)
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(location), fileSize, clientRangeHeader)
 
 			// 生成唯一的重定向 key
 			redirectKey := fmt.Sprintf("%d-%s", time.Now().UnixNano(), path.Base(filePath))
@@ -4451,7 +4514,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 						if cachedMeta.PlainSize > 0 {
 							redirectInfo.FileSize = cachedMeta.PlainSize
 						}
-						log.Infof("WebDAV redirect: pre-populated V2 meta from cache: key=%s version=%d cipherSize=%d plainSize=%d", cacheKey, cached.ContentVersion, redirectInfo.CiphertextSize, cachedMeta.PlainSize)
+						log.Infof("WebDAV redirect: pre-populated V2 meta from cache: version=%d cipherSize=%d plainSize=%d", cached.ContentVersion, redirectInfo.CiphertextSize, cachedMeta.PlainSize)
 						break
 					}
 				}
@@ -4463,7 +4526,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				redirectKey, url.QueryEscape(r.URL.Path))
 
 			log.Infof("WebDAV proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
-				filePath, location, proxyLocation, fileSize)
+				filePath, safeURLForLog(location), proxyLocation, fileSize)
 
 			// 返回修改后的重定向响应
 			w.Header().Set("Location", proxyLocation)
@@ -4485,7 +4548,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		// 非 2xx 状态码（如 4xx、5xx 错误）直接透传，不尝试解密
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			log.Warnf("%s WebDAV GET non-2xx: path=%s target=%s status=%d contentType=%s",
-				internal.LogPrefix(ctx, internal.TagProxy), filePath, targetURL, resp.StatusCode, resp.Header.Get("Content-Type"))
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(targetURL), resp.StatusCode, resp.Header.Get("Content-Type"))
 			w.WriteHeader(statusCode)
 			copyWithBuffer(w, resp.Body)
 			return
@@ -4565,7 +4628,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					noDav := strings.TrimPrefix(filePath, "/dav")
 					p.storeFileCache(noDav, &FileInfo{Name: path.Base(noDav), Size: size, IsDir: false, Path: noDav})
 				}
-				log.Infof("handleWebDAV: propfind fileSize=%d for %s", fileSize, targetURL)
+				log.Infof("handleWebDAV: propfind fileSize=%d for %s", fileSize, safeURLForLog(targetURL))
 			}
 		}
 
@@ -4574,11 +4637,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			probed := p.forceProbeRemoteFileSizeWithPath(targetURL, req.Header, encPath.Path)
 			if probed > 0 {
 				fileSize = probed
-				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, targetURL)
+				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, safeURLForLog(targetURL))
 			}
 		}
 		log.Infof("%s WebDAV GET planning: path=%s target=%s fileSize=%d range=%q contentRange=%q",
-			internal.LogPrefix(ctx, internal.TagProxy), filePath, targetURL, fileSize, clientRangeHeader, resp.Header.Get("Content-Range"))
+			internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(targetURL), fileSize, clientRangeHeader, resp.Header.Get("Content-Range"))
 
 		// 只有当服务端返回了内容，且知道大小，才解密
 		if fileSize > 0 {
@@ -4636,7 +4699,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					})
 				}
 				log.Infof("WebDAV decrypt v2 meta: path=%s target=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d fileSize=%d->%d",
-					filePath, targetURL, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
+					filePath, safeURLForLog(targetURL), clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
 			}
 			var encryptor FlowEncryptor
 			if meta.IsV2() {
@@ -4731,7 +4794,7 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	log.Debugf("Proxying %s %s to %s", r.Method, r.URL.Path, targetURL)
+	log.Debugf("Proxying %s %s to %s", r.Method, r.URL.Path, safeURLForLog(targetURL))
 
 	ctx, cancel := context.WithTimeout(r.Context(), p.upstreamTimeout())
 	defer cancel()
@@ -4751,7 +4814,12 @@ func (p *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClientSnapshot()
+	if client == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Errorf("Proxy request failed: %v", err)
 		p.markUpstreamFailure(err)

@@ -33,7 +33,9 @@ router.beforeEach(async (to) => {
           //5.再次执行路由跳转
           return { ...to, replace: true }
         } catch (e) {
-          console.error(`route permission error${e}`)
+          if (![401, 403].includes(e?.response?.status)) {
+            console.error(`route permission error${e}`)
+          }
           basicStore.resetState()
           progressClose()
           return `/login?redirect=${to.path}`

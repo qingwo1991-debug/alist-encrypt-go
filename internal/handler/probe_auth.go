@@ -47,13 +47,14 @@ func buildProbeAuthVariants(cfg *config.Config, requestHeaders http.Header) []ht
 	add(requestAuth)
 
 	if cfg != nil {
-		if raw := strings.TrimSpace(cfg.AlistServer.ScanAuthHeader); raw != "" {
+		alist := cfg.AlistServerSnapshot()
+		if raw := strings.TrimSpace(alist.ScanAuthHeader); raw != "" {
 			h := make(http.Header)
 			h.Set("Authorization", extractAuthorizationValue(raw))
 			add(h)
 		}
-		username := strings.TrimSpace(cfg.AlistServer.ScanUsername)
-		password := strings.TrimSpace(cfg.AlistServer.ScanPassword)
+		username := strings.TrimSpace(alist.ScanUsername)
+		password := strings.TrimSpace(alist.ScanPassword)
 		if username != "" && password != "" {
 			if token := fetchAlistJWT(cfg.GetAlistURL(), username, password); token != "" {
 				h := make(http.Header)

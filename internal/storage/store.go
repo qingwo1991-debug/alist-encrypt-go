@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -21,8 +22,10 @@ var (
 
 // Store represents the BoltDB storage
 type Store struct {
-	db   *bolt.DB
-	path string
+	db        *bolt.DB
+	path      string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // BucketTx exposes scoped operations within a single BoltDB write transaction.
@@ -70,7 +73,13 @@ func (s *Store) initBuckets() error {
 
 // Close closes the database
 func (s *Store) Close() error {
-	return s.db.Close()
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 // Get retrieves a value from a bucket

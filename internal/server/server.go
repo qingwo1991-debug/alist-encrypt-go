@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/gzip"
@@ -26,20 +27,23 @@ import (
 
 // Server represents the HTTP/2 server
 type Server struct {
-	cfg           *config.Config
-	store         *storage.Store
-	mysqlStore    *mysqlstore.Store
-	engine        *gin.Engine
-	httpServer    *http.Server
-	httpsServer   *http.Server
-	unixServer    *http.Server
-	streamProxy   *proxy.StreamProxy
-	userDAO       *dao.UserDAO
-	fileDAO       *dao.FileDAO
-	passwdDAO     *dao.PasswdDAO
-	proxyHandler  *handler.ProxyHandler
-	webdavHandler *handler.WebDAVHandler
-	probeCancel   context.CancelFunc
+	cfg            *config.Config
+	store          *storage.Store
+	mysqlStore     *mysqlstore.Store
+	engine         *gin.Engine
+	httpServer     *http.Server
+	httpsServer    *http.Server
+	unixServer     *http.Server
+	streamProxy    *proxy.StreamProxy
+	userDAO        *dao.UserDAO
+	fileDAO        *dao.FileDAO
+	passwdDAO      *dao.PasswdDAO
+	proxyHandler   *handler.ProxyHandler
+	alistHandler   *handler.AlistHandler
+	webdavHandler  *handler.WebDAVHandler
+	probeScheduler *handler.ProbeScheduler
+	probeCancel    context.CancelFunc
+	probeWG        sync.WaitGroup
 }
 
 // New creates a new server instance
@@ -100,8 +104,9 @@ func (s *Server) setupRoutes() {
 	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/dav"})))
 
 	// Force HTTPS redirect if enabled
-	if s.cfg.Scheme != nil && s.cfg.Scheme.ForceHTTPS && s.cfg.IsHTTPSEnabled() {
-		r.Use(ForceHTTPSMiddleware(s.cfg.Scheme.HTTPSPort))
+	scheme := s.cfg.SchemeSnapshot()
+	if scheme.ForceHTTPS && scheme.HTTPSPort > 0 && scheme.CertFile != "" && scheme.KeyFile != "" {
+		r.Use(ForceHTTPSMiddleware(scheme.HTTPSPort))
 	}
 
 	// Health check endpoints (no auth required)
@@ -145,9 +150,11 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 		strategySelector, _ = handler.NewStrategySelector(s.cfg, handler.NewMemoryStrategyStore())
 	}
 	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy)
+	s.probeScheduler = probeScheduler
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	proxyHandler.SetProbeScheduler(probeScheduler)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
+	s.alistHandler = alistHandler
 	var dirSyncStore handler.DirSyncStore
 	if s.mysqlStore != nil {
 		dirSyncStore = handler.NewMySQLDirSyncStore(s.mysqlStore)
@@ -264,11 +271,17 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 
 // startStartupProbe launches a background goroutine for startup probing if enabled.
 func (s *Server) startStartupProbe(webdavHandler *handler.WebDAVHandler) {
-	if s.cfg != nil && s.cfg.AlistServer.EnableStartupProbe {
+	if s.cfg != nil {
+		alist := s.cfg.AlistServerSnapshot()
+		if !alist.EnableStartupProbe {
+			return
+		}
 		prefixes := s.passwdDAO.GetEncPathPrefixes()
 		probeCtx, probeCancel := context.WithCancel(context.Background())
 		s.probeCancel = probeCancel
+		s.probeWG.Add(1)
 		go func(ctx context.Context, paths []string) {
+			defer s.probeWG.Done()
 			defer func() {
 				if r := recover(); r != nil {
 					log.Error().Interface("panic", r).Msg("Startup probe scheduler panicked")
@@ -277,7 +290,7 @@ func (s *Server) startStartupProbe(webdavHandler *handler.WebDAVHandler) {
 			if len(paths) == 0 {
 				return
 			}
-			delay := time.Duration(s.cfg.AlistServer.StartupProbeDelaySeconds) * time.Second
+			delay := time.Duration(alist.StartupProbeDelaySeconds) * time.Second
 			if delay > 0 {
 				select {
 				case <-ctx.Done():
@@ -285,7 +298,7 @@ func (s *Server) startStartupProbe(webdavHandler *handler.WebDAVHandler) {
 				case <-time.After(delay):
 				}
 			}
-			interval := time.Duration(s.cfg.AlistServer.StartupProbeIntervalMinutes) * time.Minute
+			interval := time.Duration(alist.StartupProbeIntervalMinutes) * time.Minute
 			if interval <= 0 {
 				log.Info().Int("paths", len(paths)).Msg("Startup probe running")
 				webdavHandler.StartupProbe(ctx, paths)
@@ -317,7 +330,7 @@ func migrateStrategyStore(cfg *config.Config, store handler.StrategyStore) error
 	if cfg == nil || store == nil {
 		return nil
 	}
-	path := cfg.AlistServer.StrategyStoreFile
+	path := cfg.AlistServerSnapshot().StrategyStoreFile
 	if path == "" {
 		path = filepath.Join(cfg.DataDir, "strategy_cache.json")
 	}
@@ -422,6 +435,7 @@ func (s *Server) startHTTP() error {
 
 func (s *Server) startHTTPS() error {
 	addr := s.cfg.GetHTTPSAddr()
+	scheme := s.cfg.SchemeSnapshot()
 
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -446,11 +460,12 @@ func (s *Server) startHTTPS() error {
 
 	log.Info().Str("addr", addr).Msg("Starting HTTPS server with HTTP/2")
 
-	return s.httpsServer.ListenAndServeTLS(s.cfg.Scheme.CertFile, s.cfg.Scheme.KeyFile)
+	return s.httpsServer.ListenAndServeTLS(scheme.CertFile, scheme.KeyFile)
 }
 
 func (s *Server) startUnix() error {
-	socketPath := s.cfg.Scheme.UnixFile
+	scheme := s.cfg.SchemeSnapshot()
+	socketPath := scheme.UnixFile
 
 	// Remove existing socket file
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
@@ -463,9 +478,9 @@ func (s *Server) startUnix() error {
 	}
 
 	// Set socket permissions if specified
-	if s.cfg.Scheme.UnixFilePerm != "" {
+	if scheme.UnixFilePerm != "" {
 		var perm os.FileMode
-		if _, err := fmt.Sscanf(s.cfg.Scheme.UnixFilePerm, "%o", &perm); err == nil {
+		if _, err := fmt.Sscanf(scheme.UnixFilePerm, "%o", &perm); err == nil {
 			os.Chmod(socketPath, perm)
 		}
 	}
@@ -494,15 +509,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.probeCancel != nil {
 		s.probeCancel()
 	}
-	if s.proxyHandler != nil {
-		s.proxyHandler.Stop()
-	}
-	if s.webdavHandler != nil {
-		s.webdavHandler.Stop()
-	}
 
 	var lastErr error
 
+	// Stop accepting requests and let in-flight handlers finish before tearing
+	// down the background workers and caches they use.
 	if s.httpServer != nil {
 		if err := s.httpServer.Shutdown(ctx); err != nil {
 			lastErr = err
@@ -520,9 +531,28 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			lastErr = err
 		}
 	}
+	s.probeWG.Wait()
 
-	if err := s.store.Close(); err != nil {
-		lastErr = err
+	if s.proxyHandler != nil {
+		s.proxyHandler.Stop()
+	}
+	if s.webdavHandler != nil {
+		s.webdavHandler.Stop()
+	}
+	if s.alistHandler != nil {
+		s.alistHandler.Stop()
+	}
+	if s.probeScheduler != nil {
+		s.probeScheduler.Stop()
+	}
+	if s.fileDAO != nil {
+		s.fileDAO.Stop()
+	}
+
+	if s.store != nil {
+		if err := s.store.Close(); err != nil {
+			lastErr = err
+		}
 	}
 
 	// Flush and close MySQL store if active (prevents data loss from write-behind buffers).
@@ -539,7 +569,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Clean up Unix socket
 	if s.cfg.IsUnixSocketEnabled() {
-		os.Remove(s.cfg.Scheme.UnixFile)
+		os.Remove(s.cfg.SchemeSnapshot().UnixFile)
 	}
 
 	return lastErr

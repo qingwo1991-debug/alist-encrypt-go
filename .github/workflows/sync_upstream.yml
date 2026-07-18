@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Sync upstream version markers
         shell: bash
@@ -36,20 +36,24 @@ jobs:
 
           update_version_file "OpenListTeam/OpenList" "upstream_versions/openlist.txt"
           update_version_file "OpenListTeam/OpenList-Mobile" "upstream_versions/openlist_mobile.txt"
-          update_version_file "OpenListTeam/OpenList" "mobile/openlist_version"
 
       - name: Commit updates
         shell: bash
         run: |
           set -euo pipefail
 
-          if git diff --quiet -- upstream_versions; then
+          # Stage first so brand-new marker files are included in the change
+          # check. `git diff` alone ignores untracked files.
+          # These files advertise available upstream releases only. The
+          # embedded build version must change together with a reviewed source
+          # update, otherwise released APK metadata lies about its source.
+          git add -- upstream_versions
+          if git diff --cached --quiet; then
             echo "No upstream version changes."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add upstream_versions
           git commit -m "chore: sync upstream version markers"
           git push

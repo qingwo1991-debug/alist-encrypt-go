@@ -429,7 +429,7 @@ func (d *QuarkOpen) refreshToken() error {
 	if err != nil {
 		return err
 	}
-	log.Infof("[quark_open] token exchange: %s -> %s", d.RefreshToken, refresh)
+	log.Info("[quark_open] token exchange succeeded")
 	d.RefreshToken, d.AccessToken = refresh, access
 	op.MustSaveDriverStorage(d)
 	return nil

@@ -136,10 +136,10 @@
                 <span class="helper-text">用于启动扫描、后台探测和 WebDAV 预热</span>
               </el-form-item>
               <el-form-item label="扫描密码">
-                <el-input v-model="alistConfigForm.scanPassword" style="max-width: 280px" type="password" show-password placeholder="password" />
+                <el-input v-model="alistConfigForm.scanPassword" style="max-width: 280px" type="password" show-password autocomplete="new-password" placeholder="password" />
               </el-form-item>
               <el-form-item label="授权头">
-                <el-input v-model="alistConfigForm.scanAuthHeader" style="max-width: 540px" placeholder="Bearer xxx 或 Basic xxxxxx" />
+                <el-input v-model="alistConfigForm.scanAuthHeader" style="max-width: 540px" type="password" show-password autocomplete="off" placeholder="Bearer xxx 或 Basic xxxxxx" />
                 <span class="helper-text">填写后优先于扫描账号密码</span>
               </el-form-item>
               <el-form-item label="配置校验">
@@ -404,7 +404,7 @@
                     <el-switch v-model="item.enable" class="ml-2" />
                   </el-form-item>
                   <el-form-item label="密码">
-                    <el-input v-model="item.password" style="max-width: 280px" placeholder="12341234" />
+                    <el-input v-model="item.password" style="max-width: 280px" type="password" show-password autocomplete="new-password" placeholder="请输入加密密码" />
                   </el-form-item>
                   <el-form-item label="文件名">
                     <span class="helper-inline">加密</span>
@@ -462,7 +462,7 @@
                   </el-radio-group>
                 </el-form-item>
                 <el-form-item label="文件夹密码">
-                  <el-input v-model="folderForm.folderPasswd" style="max-width: 260px" placeholder="123456" />
+                  <el-input v-model="folderForm.folderPasswd" style="max-width: 260px" type="password" show-password autocomplete="new-password" placeholder="请输入文件夹密码" />
                 </el-form-item>
                 <el-form-item label="加密结果">
                   {{ folderForm.folderNameEnc }}
@@ -511,6 +511,7 @@ import {
   validateScanConfigReq
 } from '@/api/user'
 import { Delete } from '@element-plus/icons-vue'
+import { createPasswordRule, hasEnabledRuleWithoutPassword } from '@/utils/password-rules'
 
 const labelPosition = ref('right')
 const dialogFolderFormVisible = ref(false)
@@ -549,7 +550,7 @@ const logPages = reactive({
 const folderForm = reactive({
   folderName: 'my video',
   encType: 'aesctr',
-  folderPasswd: '123456',
+  folderPasswd: '',
   folderNameEnc: '',
   folderEncType: 'rc4',
   password: ''
@@ -578,18 +579,7 @@ const alistConfigForm = reactive({
   scanUsername: '',
   scanPassword: '',
   scanAuthHeader: '',
-  passwdList: [
-    {
-      id: Math.random(),
-      password: '123456',
-      encType: 'aesctr',
-      enable: false,
-      encName: false,
-      encSuffix: '',
-      describe: 'my video',
-      encPath: '333'
-    }
-  ]
+  passwdList: [createPasswordRule({ describe: 'my video', encPath: '333' })]
 })
 
 const probeStats = reactive({
@@ -698,16 +688,7 @@ const handleLogPageChange = (name, page) => {
 }
 
 const addPasswd = () => {
-  alistConfigForm.passwdList.push({
-    id: Math.random(),
-    password: '123456',
-    encType: 'aesctr',
-    enable: true,
-    encName: false,
-    encSuffix: '',
-    describe: 'my video',
-    encPath: '/aliyun/encrypt/*'
-  })
+  alistConfigForm.passwdList.push(createPasswordRule({ describe: 'my video', encPath: '/aliyun/encrypt/*' }))
 }
 
 const delPasswd = (index) => {
@@ -732,6 +713,11 @@ const decodeFoldName = async () => {
 }
 
 const saveAlistConfig = async () => {
+  if (hasEnabledRuleWithoutPassword(alistConfigForm.passwdList)) {
+    ElMessage.error('已启用的密码规则必须填写密码')
+    return
+  }
+
   const toInt = (v, d) => {
     const n = Number.parseInt(v, 10)
     return Number.isFinite(n) ? n : d
@@ -752,9 +738,12 @@ const saveAlistConfig = async () => {
     }
   }
 
-  saveAlistConfigReq(alistConfigForm).then((res) => {
-    ElMessage.success(res.msg)
-  })
+  let res
+  try {
+    res = await saveAlistConfigReq(alistConfigForm)
+  } catch {
+    return
+  }
   try {
     const schemeRes = await getSchemeConfigReq()
     const schemeData = schemeRes.data || {}
@@ -763,6 +752,7 @@ const saveAlistConfig = async () => {
   } catch (err) {
     console.error('Failed to save proxy H2C setting:', err)
   }
+  ElMessage.success(res.msg)
 }
 
 const loadProxyDictionary = async () => {

@@ -72,22 +72,9 @@ func DefaultConfig() *ProxyConfig {
 		DBExportAuthEnabled:             false,
 		DBExportUsername:                "admin",
 		DBExportPassword:                "",
-		EncryptPaths: []*EncryptPath{
-			{
-				Path:     "encrypt_folder/*",
-				Password: "123456",
-				EncType:  EncTypeAESCTR,
-				EncName:  false,
-				Enable:   true,
-			},
-			{
-				Path:     "movie_encrypt/*",
-				Password: "123456",
-				EncType:  EncTypeAESCTR,
-				EncName:  false,
-				Enable:   true,
-			},
-		},
+		// Encryption is opt-in. Shipping enabled rules with a public default
+		// password silently exposes every new installation to weak encryption.
+		EncryptPaths:  []*EncryptPath{},
 		AdminPassword: randomAdminPassword(),
 	}
 }

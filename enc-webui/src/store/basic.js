@@ -10,18 +10,18 @@ export const useBasicStore = defineStore('basic', {
       getUserInfo: false,
       userInfo: { username: '', avatar: '', version: '0.1.0' },
       //router
-      allRoutes: [],
-      buttonCodes: [],
-      filterAsyncRoutes: [],
-      roles: [],
-      codes: [],
+      allRoutes: /** @type {import('vue-router').RouteRecordRaw[]} */ ([]),
+      buttonCodes: /** @type {(string | number)[]} */ ([]),
+      filterAsyncRoutes: /** @type {import('vue-router').RouteRecordRaw[]} */ ([]),
+      roles: /** @type {string[]} */ ([]),
+      codes: /** @type {(string | number)[]} */ ([]),
       //keep-alive
-      cachedViews: [],
-      cachedViewsDeep: [],
+      cachedViews: /** @type {string[]} */ ([]),
+      cachedViewsDeep: /** @type {string[]} */ ([]),
       //other
       sidebar: { opened: true },
       //axios req collection
-      axiosPromiseArr: [],
+      axiosPromiseArr: /** @type {{ url?: string, cancel?: (message?: string) => void }[]} */ ([]),
       settings: defaultSettings
     }
   },

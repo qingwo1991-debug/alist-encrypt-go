@@ -61,7 +61,8 @@ const (
 // Value: 真实加密文件名（包含外部后缀，如 "Z3LZ5G0YQxHtage-N (1).mp4"）
 type ShowNameCache struct {
 	cache sync.Map
-	size  int64
+	mu    sync.Mutex
+	size  int
 }
 
 // 全局显示名缓存实例
@@ -102,11 +103,20 @@ func CacheNameMapping(dir, showName, realEncName string) {
 		return
 	}
 	key := path.Join(dir, showName)
-	showNameCache.cache.Store(key, realEncName)
-	// 简单计数，不精确但足够
-	if showNameCache.size < showNameCacheMaxSize {
-		showNameCache.size++
+	showNameCache.mu.Lock()
+	defer showNameCache.mu.Unlock()
+
+	// Existing entries can always be refreshed. New entries are rejected once
+	// the hard limit is reached so the cache cannot silently grow without bound.
+	if _, exists := showNameCache.cache.Load(key); exists {
+		showNameCache.cache.Store(key, realEncName)
+		return
 	}
+	if showNameCache.size >= showNameCacheMaxSize {
+		return
+	}
+	showNameCache.cache.Store(key, realEncName)
+	showNameCache.size++
 }
 
 // GetCachedRealName 从缓存获取真实加密名
@@ -120,9 +130,11 @@ func GetCachedRealName(dir, showName string) (string, bool) {
 
 // ClearShowNameCache 清除显示名缓存（用于测试或刷新）
 func ClearShowNameCache() {
-	showNameCache.cache = sync.Map{}
+	showNameCache.mu.Lock()
+	showNameCache.cache.Clear()
 	showNameCache.size = 0
-	showNameDecodeCache = sync.Map{}
+	showNameCache.mu.Unlock()
+	showNameDecodeCache.Clear()
 }
 
 // stripExternalSuffix 尝试剥离外部添加的后缀，返回剥离后的字符串和剥离的后缀
@@ -464,8 +476,8 @@ func EncodeName(password string, encType EncryptionType, plainName string) strin
 	crc6Bit := crc6.Checksum([]byte(encodeName + passwdOutward))
 	crc6Check := MixBase64GetSourceChar(int(crc6Bit))
 	result := encodeName + string(crc6Check)
-	log.Debugf("[%s] EncodeName: password=%q, encType=%q, plainName=%q -> passwdOutward=%q, encoded=%q, crc6=%d, result=%q",
-		internal.TagEncrypt, password, encType, plainName, passwdOutward, encodeName, crc6Bit, result)
+	log.Debugf("[%s] EncodeName: encType=%q plainLen=%d encodedLen=%d crc6=%d",
+		internal.TagEncrypt, encType, len(plainName), len(result), crc6Bit)
 	return result
 }
 
@@ -484,8 +496,7 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	crc6Bit := crc6.Checksum([]byte(subEncName + passwdOutward))
 	expectedCrc6Check := MixBase64GetSourceChar(int(crc6Bit))
 	if expectedCrc6Check != crc6Check {
-		log.Debugf("[%s] DecodeName: CRC6 mismatch for %q: expected %c, got %c (passwdOutward=%q)",
-			internal.TagDecrypt, encodedName, expectedCrc6Check, crc6Check, passwdOutward)
+		log.Debugf("[%s] DecodeName: CRC6 mismatch encodedLen=%d", internal.TagDecrypt, len(encodedName))
 		return ""
 	}
 
@@ -497,7 +508,7 @@ func DecodeName(password string, encType EncryptionType, encodedName string) str
 	}
 
 	result := string(decoded)
-	log.Debugf("[%s] DecodeName: %q -> %q (passwdOutward=%q)", internal.TagDecrypt, encodedName, result, passwdOutward)
+	log.Debugf("[%s] DecodeName: encodedLen=%d decodedLen=%d", internal.TagDecrypt, len(encodedName), len(result))
 	return result
 }
 

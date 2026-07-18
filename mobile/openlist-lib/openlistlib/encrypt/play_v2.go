@@ -171,39 +171,95 @@ func (o *PlayOrchestrator) ServePlayback(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-func parseRange(header string, size int64) (start, end int64, hasRange bool) {
-	if header == "" || !strings.HasPrefix(header, "bytes=") {
-		return 0, 0, false
+func parseSingleRange(header string, size int64) (start, end int64, hasRange bool, err error) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0, 0, false, nil
 	}
-	parts := strings.Split(strings.TrimPrefix(header, "bytes="), "-")
-	if len(parts) != 2 {
-		return 0, 0, false
+	if size <= 0 || !strings.HasPrefix(header, "bytes=") {
+		return 0, 0, false, fmt.Errorf("invalid byte range %q", header)
 	}
-	sStr := strings.TrimSpace(parts[0])
-	eStr := strings.TrimSpace(parts[1])
 
-	start = 0
-	if sStr != "" {
-		if v, err := strconv.ParseInt(sStr, 10, 64); err == nil {
-			start = v
-		}
+	spec := strings.TrimSpace(strings.TrimPrefix(header, "bytes="))
+	if spec == "" || strings.Contains(spec, ",") {
+		return 0, 0, false, fmt.Errorf("multiple or empty byte ranges are not supported")
 	}
-	end = size - 1
-	if eStr != "" {
-		if v, err := strconv.ParseInt(eStr, 10, 64); err == nil {
-			end = v
-		}
+	dash := strings.IndexByte(spec, '-')
+	if dash < 0 || strings.IndexByte(spec[dash+1:], '-') >= 0 {
+		return 0, 0, false, fmt.Errorf("invalid byte range %q", header)
 	}
-	if start < 0 {
-		start = 0
+	startText := strings.TrimSpace(spec[:dash])
+	endText := strings.TrimSpace(spec[dash+1:])
+
+	parseDecimal := func(value string) (int64, error) {
+		if value == "" {
+			return 0, fmt.Errorf("empty range value")
+		}
+		for _, ch := range value {
+			if ch < '0' || ch > '9' {
+				return 0, fmt.Errorf("invalid range value %q", value)
+			}
+		}
+		parsed, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		return parsed, nil
+	}
+
+	if startText == "" {
+		suffixLength, parseErr := parseDecimal(endText)
+		if parseErr != nil || suffixLength <= 0 {
+			return 0, 0, false, fmt.Errorf("invalid suffix byte range %q", header)
+		}
+		if suffixLength >= size {
+			return 0, size - 1, true, nil
+		}
+		return size - suffixLength, size - 1, true, nil
+	}
+
+	start, err = parseDecimal(startText)
+	if err != nil || start >= size {
+		return 0, 0, false, fmt.Errorf("byte range %q does not overlap representation", header)
+	}
+	if endText == "" {
+		return start, size - 1, true, nil
+	}
+	end, err = parseDecimal(endText)
+	if err != nil || start > end {
+		return 0, 0, false, fmt.Errorf("invalid byte range %q", header)
 	}
 	if end >= size {
 		end = size - 1
 	}
-	if start > end {
+	return start, end, true, nil
+}
+
+// parseRange is retained for legacy call sites. Playback V2 uses
+// parseSingleRange directly so malformed or unsupported ranges can produce a
+// proper 416 instead of being mistaken for a request for the full file.
+func parseRange(header string, size int64) (start, end int64, hasRange bool) {
+	start, end, hasRange, err := parseSingleRange(header, size)
+	if err != nil {
 		return 0, 0, false
 	}
-	return start, end, true
+	return start, end, hasRange
+}
+
+func writeRangeNotSatisfiable(w http.ResponseWriter, size int64) {
+	if size < 0 {
+		size = 0
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+	w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+}
+
+func shouldDecryptRedirect(r *http.Request, info *RedirectInfo) bool {
+	if info == nil || info.PasswdInfo == nil || !info.PasswdInfo.Enable {
+		return false
+	}
+	return r == nil || r.URL == nil || r.URL.Query().Get("decode") != "0"
 }
 
 func isFirstFrameRangeHint(method, rangeHeader string) bool {
@@ -239,29 +295,6 @@ func isFirstFrameRangeHint(method, rangeHeader string) bool {
 		}
 	}
 	return false
-}
-
-const firstFrameOpenRangeBytes int64 = 2 * 1024 * 1024
-
-func capOpenEndedFirstFrameRange(method, rangeHeader string, fileSize int64) string {
-	if fileSize <= firstFrameOpenRangeBytes || !isFirstFrameRangeHint(method, rangeHeader) {
-		return rangeHeader
-	}
-	rangeHeader = strings.TrimSpace(rangeHeader)
-	if rangeHeader == "" {
-		return rangeHeader
-	}
-	if rangeHeader != "bytes=0-" {
-		return rangeHeader
-	}
-	end := firstFrameOpenRangeBytes - 1
-	if end >= fileSize {
-		end = fileSize - 1
-	}
-	if end < 0 {
-		return rangeHeader
-	}
-	return fmt.Sprintf("bytes=0-%d", end)
 }
 
 func appendUniquePathVariant(out []string, value string) []string {
@@ -335,7 +368,147 @@ func fileInfoContentMeta(cached *FileInfo, encType EncryptionType) (ContentMeta,
 	}, true
 }
 
+// playbackFileInfoContentMeta accepts a cached V1 conclusion only when it is
+// tied to the exact raw URL being played. A path-only V1 cache may be stale
+// after a file is replaced by V2 content, while a same-URL conclusion safely
+// eliminates the repeated 32-byte format probe on every seek.
+func playbackFileInfoContentMeta(cached *FileInfo, encType EncryptionType, redirectURL string) (ContentMeta, bool) {
+	if meta, ok := fileInfoContentMeta(cached, encType); ok {
+		return meta, true
+	}
+	if cached == nil || cached.ContentVersion != ContentVersionV1 || cached.Size <= 0 {
+		return ContentMeta{}, false
+	}
+	if strings.TrimSpace(cached.RawURL) == "" || strings.TrimSpace(cached.RawURL) != strings.TrimSpace(redirectURL) {
+		return ContentMeta{}, false
+	}
+	cipherSize := cached.CiphertextSize
+	if cipherSize <= 0 {
+		cipherSize = cached.Size
+	}
+	return LegacyContentMeta(encType, cipherSize), true
+}
+
+func redirectInfoContentMeta(info *RedirectInfo) (ContentMeta, bool) {
+	if info == nil || info.PasswdInfo == nil {
+		return ContentMeta{}, false
+	}
+	encType := EncryptionType(info.PasswdInfo.EncType)
+	switch info.ContentVersion {
+	case ContentVersionV1:
+		size := info.CiphertextSize
+		if size <= 0 {
+			size = info.FileSize
+		}
+		if size <= 0 {
+			return ContentMeta{}, false
+		}
+		return LegacyContentMeta(encType, size), true
+	case ContentVersionV2:
+		if len(info.NonceField) != 16 || info.HeaderLen <= 0 {
+			return ContentMeta{}, false
+		}
+		cipherSize := info.CiphertextSize
+		plainSize := info.FileSize
+		if cipherSize <= 0 && plainSize > 0 {
+			cipherSize = plainSize + info.HeaderLen
+		}
+		if plainSize <= 0 && cipherSize > info.HeaderLen {
+			plainSize = cipherSize - info.HeaderLen
+		}
+		if plainSize <= 0 || cipherSize <= 0 {
+			return ContentMeta{}, false
+		}
+		return ContentMeta{
+			EncType:        encType,
+			Version:        ContentVersionV2,
+			HeaderLen:      info.HeaderLen,
+			PlainSize:      plainSize,
+			CiphertextSize: cipherSize,
+			NonceField:     cloneNonceField(info.NonceField),
+		}, true
+	default:
+		return ContentMeta{}, false
+	}
+}
+
+func cloneRedirectInfo(info *RedirectInfo) *RedirectInfo {
+	if info == nil {
+		return nil
+	}
+	cloned := *info
+	cloned.NonceField = cloneNonceField(info.NonceField)
+	cloned.Headers = info.Headers.Clone()
+	if info.PasswdInfo != nil {
+		passwd := *info.PasswdInfo
+		cloned.PasswdInfo = &passwd
+	}
+	return &cloned
+}
+
+func redirectDisplayPath(info *RedirectInfo) string {
+	if info == nil {
+		return ""
+	}
+	displayPath := strings.TrimSpace(info.OriginalURL)
+	if parsed, err := url.Parse(displayPath); err == nil && parsed.Path != "" {
+		displayPath = parsed.Path
+	}
+	for _, prefix := range []string{"/dav/", "/dav2/", "/d/", "/p/"} {
+		if strings.HasPrefix(displayPath, prefix) {
+			displayPath = "/" + strings.TrimPrefix(displayPath, prefix)
+			break
+		}
+	}
+	if decoded, err := url.PathUnescape(displayPath); err == nil {
+		displayPath = decoded
+	}
+	return normalizeCacheKey(displayPath)
+}
+
+func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey string, requestHeaders http.Header, info *RedirectInfo) (*RedirectInfo, bool) {
+	displayPath := redirectDisplayPath(info)
+	if p == nil || info == nil || displayPath == "" {
+		return nil, false
+	}
+	headers := info.Headers.Clone()
+	for key, values := range requestHeaders {
+		if strings.EqualFold(key, "Range") || strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		headers.Del(key)
+		for _, value := range values {
+			headers.Add(key, value)
+		}
+	}
+	rawURL, size := p.resolveRawURLViaFsGet(ctx, headers, displayPath)
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, false
+	}
+	refreshed := cloneRedirectInfo(info)
+	refreshed.RedirectURL = rawURL
+	if size > 0 {
+		if refreshed.ContentVersion == ContentVersionV2 && refreshed.HeaderLen > 0 {
+			refreshed.CiphertextSize = size
+			if size > refreshed.HeaderLen {
+				refreshed.FileSize = size - refreshed.HeaderLen
+			}
+		} else {
+			refreshed.FileSize = size
+			refreshed.CiphertextSize = size
+		}
+	}
+	refreshed.Headers = headers
+	if redirectKey != "" {
+		p.storeRedirectCache(redirectKey, refreshed)
+	}
+	return refreshed, true
+}
+
 func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request, info *RedirectInfo) int64 {
+	if o == nil || o.proxy == nil || info == nil {
+		return 0
+	}
 	fileSize := info.FileSize
 	if fileSize > 0 {
 		return fileSize
@@ -359,6 +532,10 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 		return fileSize
 	}
 
+	encPathPattern := ""
+	if info.PasswdInfo != nil {
+		encPathPattern = info.PasswdInfo.Path
+	}
 	if info.OriginalURL != "" {
 		origPath := info.OriginalURL
 		if u, err := url.Parse(info.OriginalURL); err == nil {
@@ -369,7 +546,7 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 			webdavPath = "/dav" + webdavPath
 		}
 		webdavURL := p.getAlistURL() + webdavPath
-		if size := p.fetchWebDAVFileSizeWithPath(webdavURL, info.Headers, info.PasswdInfo.Path); size > 0 {
+		if size := p.fetchWebDAVFileSizeWithPathCtx(ctx, webdavURL, info.Headers, encPathPattern); size > 0 {
 			fileSize = size
 		}
 	}
@@ -377,7 +554,11 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 		return fileSize
 	}
 
-	probed := p.forceProbeRemoteFileSizeWithPath(info.RedirectURL, r.Header, info.PasswdInfo.Path)
+	headers := info.Headers
+	if r != nil {
+		headers = r.Header
+	}
+	probed := p.forceProbeRemoteFileSizeWithPathCtx(ctx, info.RedirectURL, headers, encPathPattern)
 	if probed > 0 {
 		fileSize = probed
 	}
@@ -388,6 +569,7 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	w http.ResponseWriter,
 	r *http.Request,
+	redirectKey string,
 	info *RedirectInfo,
 	fileSize int64,
 	strategy StreamStrategy,
@@ -395,44 +577,33 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	p := o.proxy
 	ctx := r.Context()
 
-	if p.shouldFastFailUpstream() {
-		_, remain, reason := p.upstreamBackoffState()
-		retryAfter := int(remain.Seconds())
-		if retryAfter < 1 {
-			retryAfter = 1
-		}
-		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-		return &StreamOutcome{
-			Err:           fmt.Errorf("upstream temporarily unavailable: %s", reason),
-			FailureReason: "network_error",
-			Retryable:     true,
-			StatusCode:    http.StatusServiceUnavailable,
-		}
-	}
-
-	clientRangeHeader := capOpenEndedFirstFrameRange(r.Method, r.Header.Get("Range"), fileSize)
+	// Do not let failures from one signed cloud URL trip the process-wide
+	// control-plane breaker. A newly selected video may use a healthy provider,
+	// and request cancellation already bounds abandoned seek attempts.
+	clientRangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	upstreamRangeHeader := clientRangeHeader
-	startPos, endPos, hasRange := parseRange(clientRangeHeader, fileSize)
-	meta := LegacyContentMeta(EncryptionType(info.PasswdInfo.EncType), fileSize)
-	if info.ContentVersion == ContentVersionV2 && len(info.NonceField) == 16 {
-		cipherSize := info.CiphertextSize
-		if cipherSize <= 0 {
-			cipherSize = info.FileSize
-		}
-		plainSize := cipherSize - info.HeaderLen
-		if plainSize <= 0 {
-			plainSize = cipherSize
-		}
-		meta = ContentMeta{
-			EncType:        EncryptionType(info.PasswdInfo.EncType),
-			Version:        info.ContentVersion,
-			HeaderLen:      info.HeaderLen,
-			PlainSize:      plainSize,
-			CiphertextSize: cipherSize,
-			NonceField:     cloneNonceField(info.NonceField),
+	startPos, endPos, hasRange, rangeErr := parseSingleRange(clientRangeHeader, fileSize)
+	if rangeErr != nil {
+		writeRangeNotSatisfiable(w, fileSize)
+		return &StreamOutcome{
+			Err:             rangeErr,
+			FailureReason:   "range_invalid",
+			Retryable:       false,
+			ResponseStarted: true,
+			StatusCode:      http.StatusRequestedRangeNotSatisfiable,
 		}
 	}
-	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil && (!meta.IsV2() || len(meta.NonceField) != 16) {
+	encType := EncryptionType("")
+	if info.PasswdInfo != nil {
+		encType = EncryptionType(info.PasswdInfo.EncType)
+	}
+	meta := LegacyContentMeta(encType, fileSize)
+	trustedRedirectMeta := false
+	if cachedMeta, ok := redirectInfoContentMeta(info); ok {
+		meta = cachedMeta
+		trustedRedirectMeta = true
+	}
+	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil && !trustedRedirectMeta {
 		encProbePath := info.EncryptedPath
 		if strings.HasPrefix(encProbePath, "/dav") {
 			encProbePath = strings.TrimPrefix(encProbePath, "/dav")
@@ -450,23 +621,23 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		cachedMetaLoaded := false
 		for _, cacheKey := range playbackCachePathVariants(info) {
 			if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
-				if cachedMeta, ok := fileInfoContentMeta(cached, info.PasswdInfo.EncType); ok {
+				if cachedMeta, ok := playbackFileInfoContentMeta(cached, info.PasswdInfo.EncType, info.RedirectURL); ok {
 					meta = cachedMeta
 					cachedMetaLoaded = true
-					log.Infof("[v2-cache] loaded V2 meta from cache: path=%s headerLen=%d plainSize=%d cipherSize=%d",
-						cacheKey, meta.HeaderLen, meta.PlainSize, meta.CiphertextSize)
+					log.Debugf("[v2-cache] loaded content meta from cache: path=%s version=%d headerLen=%d plainSize=%d cipherSize=%d",
+						cacheKey, meta.Version, meta.HeaderLen, meta.PlainSize, meta.CiphertextSize)
 					break
 				} else if cached.ContentVersion == ContentVersionV1 {
-					log.Infof("[v2-cache] ignoring V1 cache for encrypted playback path=%s (will inspect)", cacheKey)
+					log.Debugf("[v2-cache] ignoring path-only V1 cache for encrypted playback path=%s (will inspect)", cacheKey)
 				}
 			}
 		}
 
 		if !cachedMetaLoaded {
-			log.Infof("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%.120s encProbePath=%q",
-				info.PasswdInfo.EncType, fileSize, info.RedirectURL, encProbePath)
+			log.Debugf("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%s encProbePath=%q",
+				info.PasswdInfo.EncType, fileSize, safeURLForLog(info.RedirectURL), encProbePath)
 			meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, encProbePath)
-			log.Infof("[v2-diag] inspection result: isV2=%v version=%d plainSize=%d cipherSize=%d headerLen=%d",
+			log.Debugf("[v2-diag] inspection result: isV2=%v version=%d plainSize=%d cipherSize=%d headerLen=%d",
 				meta.IsV2(), meta.Version, meta.PlainSize, meta.CiphertextSize, meta.HeaderLen)
 
 			// --- Cache inspection result for future requests ---
@@ -481,6 +652,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 					NonceField:     cloneNonceField(meta.NonceField),
 					IsDir:          false,
 					Path:           displayPath,
+					RawURL:         info.RedirectURL,
 				}
 				for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
 					infoCopy := &FileInfo{
@@ -492,17 +664,28 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 						NonceField:     cloneNonceField(cacheInfo.NonceField),
 						IsDir:          false,
 						Path:           cachePath,
+						RawURL:         cacheInfo.RawURL,
 					}
 					p.storeFileCache(cachePath, infoCopy)
 				}
-				log.Infof("[v2-cache] cached inspection result: path=%s version=%d plainSize=%d cipherSize=%d",
+				log.Debugf("[v2-cache] cached inspection result: path=%s version=%d plainSize=%d cipherSize=%d",
 					displayPath, meta.Version, meta.PlainSize, meta.CiphertextSize)
+			}
+			if redirectKey != "" && meta.Version > 0 {
+				updated := cloneRedirectInfo(info)
+				updated.ContentVersion = meta.Version
+				updated.HeaderLen = meta.HeaderLen
+				updated.NonceField = cloneNonceField(meta.NonceField)
+				updated.CiphertextSize = meta.CiphertextSize
+				updated.FileSize = meta.PlainSize
+				p.storeRedirectCache(redirectKey, updated)
+				info = updated
 			}
 		}
 
 		if meta.IsV2() {
-			log.Infof("V2 redirect meta (inspected): url=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d",
-				info.RedirectURL, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
+			log.Debugf("V2 redirect meta (inspected): url=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d",
+				safeURLForLog(info.RedirectURL), clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
 		}
 	}
 
@@ -512,11 +695,34 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		if meta.PlainSize > 0 {
 			fileSize = meta.PlainSize
 		}
-		if hasRange && strategy == StreamStrategyRange {
-			upstreamRangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
+	}
+	startPos, endPos, hasRange, rangeErr = parseSingleRange(clientRangeHeader, fileSize)
+	if rangeErr != nil {
+		writeRangeNotSatisfiable(w, fileSize)
+		return &StreamOutcome{
+			Err:             rangeErr,
+			FailureReason:   "range_invalid",
+			Retryable:       false,
+			ResponseStarted: true,
+			StatusCode:      http.StatusRequestedRangeNotSatisfiable,
 		}
-		log.Infof("V2 redirect meta: url=%s clientRange=%q upstreamRange=%q headerLen=%d cipherSize=%d plainSize=%d",
-			info.RedirectURL, clientRangeHeader, upstreamRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
+	}
+	if meta.IsV2() {
+		if hasRange && strategy == StreamStrategyRange {
+			// Canonicalize bounded and suffix client ranges to an explicit
+			// ciphertext interval. Passing a suffix range through as-is would
+			// count the V2 header as part of a small representation.
+			rangeSpec := strings.TrimSpace(strings.TrimPrefix(clientRangeHeader, "bytes="))
+			if strings.HasSuffix(rangeSpec, "-") && !strings.HasPrefix(rangeSpec, "-") {
+				// Preserve open-ended ranges for compatibility with providers that
+				// distinguish them from an explicit end at EOF.
+				upstreamRangeHeader = fmt.Sprintf("bytes=%d-", meta.UpstreamOffset(startPos))
+			} else {
+				upstreamRangeHeader = fmt.Sprintf("bytes=%d-%d", meta.UpstreamOffset(startPos), meta.UpstreamOffset(endPos))
+			}
+		}
+		log.Debugf("V2 redirect meta: url=%s clientRange=%q upstreamRange=%q headerLen=%d cipherSize=%d plainSize=%d",
+			safeURLForLog(info.RedirectURL), clientRangeHeader, upstreamRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
 	}
 
 	if hasRange {
@@ -525,52 +731,116 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", info.RedirectURL, nil)
-	if err != nil {
-		return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: false}
-	}
-	p.applyRoutingHints(req, info.Provider, info.Driver)
-
-	// Copy headers
-	for key, values := range r.Header {
-		lowerKey := strings.ToLower(key)
-		if lowerKey == "host" || lowerKey == "referer" || lowerKey == "authorization" {
-			continue
+	if r.Method == http.MethodHead {
+		statusCode := http.StatusOK
+		w.Header().Set("Accept-Ranges", "bytes")
+		if hasRange {
+			statusCode = http.StatusPartialContent
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
+			w.Header().Set("Content-Length", strconv.FormatInt(endPos-startPos+1, 10))
+		} else {
+			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 		}
-		for _, value := range values {
-			req.Header.Add(key, value)
+		w.WriteHeader(statusCode)
+		return &StreamOutcome{StatusCode: statusCode, ResponseStarted: true}
+	}
+
+	client := p.streamClientSnapshot()
+	if client == nil {
+		return &StreamOutcome{Err: fmt.Errorf("stream client unavailable"), FailureReason: "stream_error", Retryable: true}
+	}
+	buildRequest := func(targetURL string, current *RedirectInfo) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			return nil, err
 		}
+		p.applyRoutingHints(req, current.Provider, current.Driver)
+		for key, values := range r.Header {
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "host" || lowerKey == "referer" || lowerKey == "authorization" {
+				continue
+			}
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+		if upstreamRangeHeader == "" {
+			req.Header.Del("Range")
+		} else {
+			req.Header.Set("Range", upstreamRangeHeader)
+		}
+		if strings.Contains(targetURL, "baidupcs.com") {
+			req.Header.Set("User-Agent", "pan.baidu.com")
+		}
+		return req, nil
+	}
+	doStreamRequest := func(current *RedirectInfo) (*http.Response, error) {
+		targetURL := current.RedirectURL
+		for redirectCount := 0; redirectCount <= 5; redirectCount++ {
+			req, err := buildRequest(targetURL, current)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			if resp.StatusCode < http.StatusMultipleChoices || resp.StatusCode >= http.StatusBadRequest {
+				return resp, nil
+			}
+			location := strings.TrimSpace(resp.Header.Get("Location"))
+			if location == "" || redirectCount == 5 {
+				return resp, nil
+			}
+			next, err := req.URL.Parse(location)
+			if err != nil || (next.Scheme != "http" && next.Scheme != "https") {
+				resp.Body.Close()
+				if err == nil {
+					err = fmt.Errorf("unsupported redirect scheme %q", next.Scheme)
+				}
+				return nil, err
+			}
+			resp.Body.Close()
+			targetURL = next.String()
+		}
+		return nil, fmt.Errorf("too many upstream redirects")
 	}
 
-	if upstreamRangeHeader == "" {
-		req.Header.Del("Range")
-	} else {
-		req.Header.Set("Range", upstreamRangeHeader)
-	}
-
-	if strings.Contains(info.RedirectURL, "baidupcs.com") {
-		req.Header.Set("User-Agent", "pan.baidu.com")
-	}
-
-	resp, err := p.streamClient.Do(req)
+	resp, err := doStreamRequest(info)
 	if err != nil {
-		p.markUpstreamFailure(err)
 		return &StreamOutcome{
 			Err:           err,
 			FailureReason: "network_error",
 			Retryable:     true,
 		}
 	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		resp.Body.Close()
+		if refreshed, ok := p.refreshRedirectInfo(ctx, redirectKey, r.Header, info); ok {
+			info = refreshed
+			resp, err = doStreamRequest(info)
+			if err != nil {
+				return &StreamOutcome{Err: err, FailureReason: "network_error", Retryable: true}
+			}
+		}
+	}
 	defer resp.Body.Close()
-	p.markUpstreamSuccess()
 
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
 		statusCode = http.StatusPartialContent
 	}
 	upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
-	log.Infof("V2 redirect attempt: url=%s strategy=%s range=%q upstreamStatus=%d contentRange=%q contentLength=%q fileSize=%d",
-		info.RedirectURL, strategy, clientRangeHeader, resp.StatusCode, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize)
+	log.Debugf("V2 redirect attempt: url=%s strategy=%s range=%q upstreamStatus=%d contentRange=%q contentLength=%q fileSize=%d",
+		safeURLForLog(info.RedirectURL), strategy, clientRangeHeader, resp.StatusCode, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize)
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		return &StreamOutcome{
+			Err:           fmt.Errorf("upstream range unsatisfiable"),
+			FailureReason: "range_unsatisfiable",
+			Retryable:     true,
+			StatusCode:    resp.StatusCode,
+		}
+	}
 	if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
 		return &StreamOutcome{
 			Err:           fmt.Errorf("upstream returned %d", resp.StatusCode),
@@ -585,6 +855,14 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			FailureReason: "upstream_5xx",
 			Retryable:     true,
 			StatusCode:    statusCode,
+		}
+	}
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		return &StreamOutcome{
+			Err:           fmt.Errorf("upstream redirect failed with %d", resp.StatusCode),
+			FailureReason: "redirect_invalid",
+			Retryable:     true,
+			StatusCode:    resp.StatusCode,
 		}
 	}
 
@@ -654,10 +932,20 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	originalSize := fileSize
 	fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
 	if meta.IsV2() {
-		log.Infof("V2 redirect normalized size: url=%s contentRange=%q fileSize=%d->%d cipherSize=%d plainSize=%d",
-			info.RedirectURL, resp.Header.Get("Content-Range"), originalSize, fileSize, meta.CiphertextSize, meta.PlainSize)
+		log.Debugf("V2 redirect normalized size: url=%s contentRange=%q fileSize=%d->%d cipherSize=%d plainSize=%d",
+			safeURLForLog(info.RedirectURL), resp.Header.Get("Content-Range"), originalSize, fileSize, meta.CiphertextSize, meta.PlainSize)
 	}
-	startPos, endPos, hasRange = parseRange(clientRangeHeader, fileSize)
+	startPos, endPos, hasRange, rangeErr = parseSingleRange(clientRangeHeader, fileSize)
+	if rangeErr != nil {
+		writeRangeNotSatisfiable(w, fileSize)
+		return &StreamOutcome{
+			Err:             rangeErr,
+			FailureReason:   "range_invalid",
+			Retryable:       false,
+			ResponseStarted: true,
+			StatusCode:      http.StatusRequestedRangeNotSatisfiable,
+		}
+	}
 
 	var encryptor FlowEncryptor
 	if meta.IsV2() {
@@ -670,12 +958,15 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	}
 
 	var readerToStream io.Reader = resp.Body
-	upstreamShiftedRange := meta.IsV2() && strategy == StreamStrategyRange && buildUpstreamRangeHeader(clientRangeHeader, meta) != clientRangeHeader
+	upstreamPayloadRange := meta.IsV2() && strategy == StreamStrategyRange && hasRange && upstreamIsRange
+	localRangePrepared := false
 
 	if clientRangeHeader != "" {
 		if strategy == StreamStrategyRange {
 			if startPos > 0 {
-				encryptor.SetPosition(startPos)
+				if err := encryptor.SetPosition(startPos); err != nil {
+					return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: false}
+				}
 			}
 		} else if strategy == StreamStrategyChunked {
 			maxDiscard := p.rangeSkipMaxBytes()
@@ -686,35 +977,42 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 					Retryable:     true,
 				}
 			}
-			if startPos > 0 {
-				if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
-					return &StreamOutcome{
-						Err:           err,
-						FailureReason: "stream_error",
-						Retryable:     true,
-					}
+			discardLength := startPos
+			if meta.IsV2() {
+				discardLength += meta.HeaderLen
+			}
+			if discardLength > 0 {
+				if _, err := io.CopyN(io.Discard, resp.Body, discardLength); err != nil {
+					return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true}
 				}
 			}
-			encryptor.SetPosition(startPos)
+			if err := encryptor.SetPosition(startPos); err != nil {
+				return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: false}
+			}
 			length := endPos - startPos + 1
 			readerToStream = io.LimitReader(resp.Body, length)
+			localRangePrepared = true
 			statusCode = http.StatusPartialContent
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
 			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		} else if strategy == StreamStrategyFull {
-			if startPos > 0 {
-				if _, err := io.CopyN(io.Discard, resp.Body, startPos); err != nil {
-					return &StreamOutcome{
-						Err:           err,
-						FailureReason: "stream_error",
-						Retryable:     true,
-					}
+			discardLength := startPos
+			if meta.IsV2() {
+				discardLength += meta.HeaderLen
+			}
+			if discardLength > 0 {
+				if _, err := io.CopyN(io.Discard, resp.Body, discardLength); err != nil {
+					return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true}
 				}
 			}
-			encryptor.SetPosition(startPos)
-			length := fileSize - startPos
+			if err := encryptor.SetPosition(startPos); err != nil {
+				return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: false}
+			}
+			length := endPos - startPos + 1
+			readerToStream = io.LimitReader(resp.Body, length)
+			localRangePrepared = true
 			statusCode = http.StatusPartialContent
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, fileSize-1, fileSize))
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
 			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		}
 	} else {
@@ -728,11 +1026,19 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 	}
 
-	if meta.IsV2() && !(upstreamShiftedRange && upstreamIsRange) {
+	if meta.IsV2() && !upstreamPayloadRange && !localRangePrepared {
 		if err := discardBytes(readerToStream, meta.HeaderLen); err != nil {
 			return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true}
 		}
 	}
+	expectedLength := fileSize
+	if hasRange {
+		expectedLength = endPos - startPos + 1
+	}
+	if expectedLength < 0 {
+		return &StreamOutcome{Err: fmt.Errorf("invalid expected stream length %d", expectedLength), FailureReason: "stream_error", Retryable: false}
+	}
+	readerToStream = io.LimitReader(readerToStream, expectedLength)
 
 	decryptReader := NewDecryptReader(readerToStream, encryptor)
 	w.WriteHeader(statusCode)
@@ -740,16 +1046,31 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	written, err := copyWithBuffer(w, decryptReader)
 	if err != nil {
 		log.Warnf("V2 redirect stream copy failed: url=%s strategy=%s written=%d ctxErr=%v err=%v",
-			info.RedirectURL, strategy, written, r.Context().Err(), err)
+			safeURLForLog(info.RedirectURL), strategy, written, r.Context().Err(), err)
 		return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true, ResponseStarted: true}
 	}
-	log.Infof("V2 redirect stream copy complete: url=%s strategy=%s written=%d status=%d",
-		info.RedirectURL, strategy, written, statusCode)
+	if written != expectedLength {
+		err = fmt.Errorf("decrypted stream truncated: wrote %d of %d bytes: %w", written, expectedLength, io.ErrUnexpectedEOF)
+		log.Warnf("V2 redirect stream truncated: url=%s strategy=%s written=%d expected=%d ctxErr=%v",
+			safeURLForLog(info.RedirectURL), strategy, written, expectedLength, r.Context().Err())
+		return &StreamOutcome{Err: err, FailureReason: "stream_truncated", Retryable: true, ResponseStarted: true}
+	}
+	log.Debugf("V2 redirect stream copy complete: url=%s strategy=%s written=%d status=%d",
+		safeURLForLog(info.RedirectURL), strategy, written, statusCode)
 
 	return &StreamOutcome{StatusCode: statusCode}
 }
 
 func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request) {
+	if o == nil || o.proxy == nil || r == nil || r.URL == nil {
+		http.Error(w, "play orchestrator unavailable", http.StatusInternalServerError)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) < 3 {
 		http.Error(w, "Invalid redirect key", http.StatusBadRequest)
@@ -762,21 +1083,37 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Redirect key not found or expired", http.StatusNotFound)
 		return
 	}
+	info = cloneRedirectInfo(info)
 
 	fileSize := o.resolveFileSize(r.Context(), r, info)
-	log.Infof("V2 redirect resolve: key=%s original=%s redirect=%s size=%d range=%q", key, info.OriginalURL, info.RedirectURL, fileSize, r.Header.Get("Range"))
+	log.Debugf("V2 redirect resolve: original=%s redirect=%s size=%d range=%q", safeURLForLog(info.OriginalURL), safeURLForLog(info.RedirectURL), fileSize, r.Header.Get("Range"))
 	if fileSize == 0 {
+		if shouldDecryptRedirect(r, info) {
+			log.Warnf("V2 play: refusing encrypted passthrough because file size is unknown")
+			http.Error(w, "unable to determine encrypted file size", http.StatusBadGateway)
+			return
+		}
 		log.Warnf("V2 play: fileSize is 0, skipping decryption and proxying raw stream")
-		req, _ := http.NewRequestWithContext(r.Context(), "GET", info.RedirectURL, nil)
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, info.RedirectURL, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
 		o.proxy.applyRoutingHints(req, info.Provider, info.Driver)
-		for key, values := range r.Header {
-			if strings.ToLower(key) != "host" {
+		for headerKey, values := range r.Header {
+			lowerKey := strings.ToLower(headerKey)
+			if lowerKey != "host" && lowerKey != "authorization" && lowerKey != "referer" {
 				for _, value := range values {
-					req.Header.Add(key, value)
+					req.Header.Add(headerKey, value)
 				}
 			}
 		}
-		resp, err := o.proxy.streamClient.Do(req)
+		client := o.proxy.streamClientSnapshot()
+		if client == nil {
+			http.Error(w, "stream client unavailable", http.StatusBadGateway)
+			return
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -788,7 +1125,13 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = copyWithBuffer(w, resp.Body)
+		if r.Method != http.MethodHead {
+			_, _ = copyWithBuffer(w, resp.Body)
+		}
+		return
+	}
+	if _, _, _, err := parseSingleRange(r.Header.Get("Range"), fileSize); err != nil {
+		writeRangeNotSatisfiable(w, fileSize)
 		return
 	}
 
@@ -797,22 +1140,39 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		provider = ProviderKey(info.RedirectURL, "")
 	}
 
-	strategies := o.proxy.strategySelector.Select(provider)
+	strategies := []StreamStrategy{StreamStrategyRange}
+	if o.proxy.strategySelector != nil {
+		strategies = o.proxy.strategySelector.Select(provider)
+	}
 
 	firstFrameHint := isFirstFrameRangeHint(r.Method, r.Header.Get("Range"))
 
 	tryStrategy := func(strategy StreamStrategy) *StreamOutcome {
-		outcome := o.proxyDownloadDecryptWithStrategy(w, r, info, fileSize, strategy)
+		if latest, ok := o.proxy.loadRedirectCache(key); ok {
+			info = cloneRedirectInfo(latest)
+		}
+		attemptSize := fileSize
+		if info.ContentVersion == ContentVersionV1 && info.FileSize > 0 {
+			attemptSize = info.FileSize
+		}
+		outcome := o.proxyDownloadDecryptWithStrategy(w, r, key, info, attemptSize, strategy)
+		if outcome == nil {
+			return &StreamOutcome{Err: fmt.Errorf("empty stream outcome"), FailureReason: "stream_error", Retryable: true}
+		}
 		if outcome != nil && outcome.Err != nil {
-			log.Warnf("V2 redirect strategy failed: key=%s strategy=%s reason=%s retryable=%v responseStarted=%v err=%v",
-				key, strategy, outcome.FailureReason, outcome.Retryable, outcome.ResponseStarted, outcome.Err)
+			log.Warnf("V2 redirect strategy failed: strategy=%s reason=%s retryable=%v responseStarted=%v err=%v",
+				strategy, outcome.FailureReason, outcome.Retryable, outcome.ResponseStarted, outcome.Err)
 		}
 		if outcome.Err == nil && !outcome.Retryable {
-			o.proxy.strategySelector.RecordSuccess(provider, strategy)
+			if o.proxy.strategySelector != nil {
+				o.proxy.strategySelector.RecordSuccess(provider, strategy)
+			}
 			return outcome
 		}
 		if !outcome.ResponseStarted && outcome.Retryable {
-			o.proxy.strategySelector.RecordFailure(provider, strategy, outcome.FailureReason)
+			if o.proxy.strategySelector != nil {
+				o.proxy.strategySelector.RecordFailure(provider, strategy, outcome.FailureReason)
+			}
 		}
 		return outcome
 	}
@@ -841,18 +1201,31 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if outcome != nil && !outcome.ResponseStarted && o.proxy.config != nil && o.proxy.config.PlayFirstFallback {
+	unsafeEncryptedPassthrough := shouldDecryptRedirect(r, info)
+	cfg := o.proxy.runtimeSnapshot().config
+	playFirstFallback := cfg != nil && cfg.PlayFirstFallback
+	if outcome != nil && !outcome.ResponseStarted && playFirstFallback && !unsafeEncryptedPassthrough {
 		log.Warnf("V2 play: all strategies failed, playing raw stream as final fallback")
-		req, _ := http.NewRequestWithContext(r.Context(), "GET", info.RedirectURL, nil)
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, info.RedirectURL, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
 		o.proxy.applyRoutingHints(req, info.Provider, info.Driver)
-		for key, values := range r.Header {
-			if strings.ToLower(key) != "host" {
+		for headerKey, values := range r.Header {
+			lowerKey := strings.ToLower(headerKey)
+			if lowerKey != "host" && lowerKey != "authorization" && lowerKey != "referer" {
 				for _, value := range values {
-					req.Header.Add(key, value)
+					req.Header.Add(headerKey, value)
 				}
 			}
 		}
-		resp, err := o.proxy.streamClient.Do(req)
+		client := o.proxy.streamClientSnapshot()
+		if client == nil {
+			http.Error(w, "stream client unavailable", http.StatusBadGateway)
+			return
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -864,8 +1237,13 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		_, _ = copyWithBuffer(w, resp.Body)
+		if r.Method != http.MethodHead {
+			_, _ = copyWithBuffer(w, resp.Body)
+		}
 		return
+	}
+	if unsafeEncryptedPassthrough && outcome != nil && !outcome.ResponseStarted {
+		log.Warnf("V2 play: refusing raw encrypted fallback for decode request")
 	}
 
 	if outcome != nil && outcome.Err != nil {

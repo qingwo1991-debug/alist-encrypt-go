@@ -100,6 +100,17 @@ func TestProxyUploadEncryptUsesStartOffsetForChunkedUpload(t *testing.T) {
 
 	var received []byte
 	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet {
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range":  []string{"bytes 0-31/64"},
+					"Content-Length": []string{"32"},
+				},
+				Body:    io.NopCloser(bytes.NewReader(fullEncrypted[:32])),
+				Request: r,
+			}, nil
+		}
 		body, _ := io.ReadAll(r.Body)
 		received = append([]byte(nil), body...)
 		return &http.Response{
@@ -117,7 +128,7 @@ func TestProxyUploadEncryptUsesStartOffsetForChunkedUpload(t *testing.T) {
 		EncType:  "aesctr",
 		Enable:   true,
 	}
-	if err := sp.ProxyUploadEncrypt(rr, req, "http://upstream.local/put", passwd, fileSize, start); err != nil {
+	if err := sp.ProxyUploadEncrypt(rr, req, "http://upstream.local/dav/file", passwd, fileSize, start); err != nil {
 		t.Fatalf("ProxyUploadEncrypt failed: %v", err)
 	}
 	if string(received) != string(expectedChunk) {
@@ -603,6 +614,9 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 	copy(fullPlain[secondStart:], secondChunk)
 
 	received := map[int][]byte{}
+	receivedRanges := map[int]string{}
+	receivedContentLengths := map[int]int64{}
+	receivedContentLengthHeaders := map[int]string{}
 	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
 		body, _ := io.ReadAll(r.Body)
 		parsed, _ := url.Parse(r.URL.String())
@@ -612,6 +626,9 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 			receivedPart = 2
 		}
 		received[receivedPart] = append([]byte(nil), body...)
+		receivedRanges[receivedPart] = r.Header.Get("Content-Range")
+		receivedContentLengths[receivedPart] = r.ContentLength
+		receivedContentLengthHeaders[receivedPart] = r.Header.Get("Content-Length")
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -627,12 +644,15 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 	}
 
 	req1 := httptest.NewRequest(http.MethodPut, "/api/fs/put", strings.NewReader(string(firstChunk)))
+	req1.Header.Set("Content-Range", "bytes 0-"+strconv.Itoa(len(firstChunk)-1)+"/"+strconv.FormatInt(fileSize, 10))
 	rr1 := httptest.NewRecorder()
 	if err := sp.ProxyUploadEncrypt(rr1, req1, "http://upstream.local/put?part=1", passwd, fileSize, firstStart); err != nil {
 		t.Fatalf("first chunk upload failed: %v", err)
 	}
 
 	req2 := httptest.NewRequest(http.MethodPut, "/api/fs/put", strings.NewReader(string(secondChunk)))
+	secondEnd := secondStart + int64(len(secondChunk)) - 1
+	req2.Header.Set("Content-Range", "bytes "+strconv.FormatInt(secondStart, 10)+"-"+strconv.FormatInt(secondEnd, 10)+"/"+strconv.FormatInt(fileSize, 10))
 	rr2 := httptest.NewRecorder()
 	if err := sp.ProxyUploadEncrypt(rr2, req2, "http://upstream.local/put?part=2", passwd, fileSize, secondStart); err != nil {
 		t.Fatalf("second chunk upload failed: %v", err)
@@ -667,6 +687,60 @@ func TestProxyUploadEncryptMultiChunkOffsetsRebuildFullCiphertext(t *testing.T) 
 	cipher2.Decrypt(secondCipher)
 	if !bytes.Equal(secondCipher, secondChunk) {
 		t.Fatalf("second decrypted chunk mismatch")
+	}
+
+	headerLen := encryption.ContentHeaderSize()
+	wantFirstRange := "bytes 0-" + strconv.FormatInt(int64(len(firstChunk))-1+headerLen, 10) + "/" + strconv.FormatInt(fileSize+headerLen, 10)
+	if got := receivedRanges[1]; got != wantFirstRange {
+		t.Fatalf("first Content-Range=%q, want %q", got, wantFirstRange)
+	}
+	wantSecondRange := "bytes " + strconv.FormatInt(secondStart+headerLen, 10) + "-" + strconv.FormatInt(secondEnd+headerLen, 10) + "/" + strconv.FormatInt(fileSize+headerLen, 10)
+	if got := receivedRanges[2]; got != wantSecondRange {
+		t.Fatalf("second Content-Range=%q, want %q", got, wantSecondRange)
+	}
+	wantFirstLength := int64(len(firstChunk)) + headerLen
+	if got := receivedContentLengths[1]; got != wantFirstLength {
+		t.Fatalf("first ContentLength=%d, want %d", got, wantFirstLength)
+	}
+	if got := receivedContentLengthHeaders[1]; got != strconv.FormatInt(wantFirstLength, 10) {
+		t.Fatalf("first Content-Length header=%q, want %d", got, wantFirstLength)
+	}
+	wantSecondLength := int64(len(secondChunk))
+	if got := receivedContentLengths[2]; got != wantSecondLength {
+		t.Fatalf("second ContentLength=%d, want %d", got, wantSecondLength)
+	}
+	if got := receivedContentLengthHeaders[2]; got != strconv.FormatInt(wantSecondLength, 10) {
+		t.Fatalf("second Content-Length header=%q, want %d", got, wantSecondLength)
+	}
+}
+
+func TestProxyUploadEncryptReturnsErrorForUpstreamNon2xx(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"code":400,"message":"rejected"}`)),
+			Request:    r,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/fs/put", strings.NewReader("upload-body"))
+	rec := httptest.NewRecorder()
+	err := sp.ProxyUploadEncrypt(
+		rec,
+		req,
+		"http://upstream.local/api/fs/put",
+		&config.PasswdInfo{Password: "123456", EncType: "aesctr", Enable: true},
+		int64(len("upload-body")),
+		0,
+	)
+	if err == nil {
+		t.Fatal("expected non-2xx upstream response to return an error")
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("non-2xx response was committed before caller handled error: %q", rec.Body.String())
 	}
 }
 

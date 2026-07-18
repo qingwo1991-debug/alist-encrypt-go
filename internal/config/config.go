@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -201,6 +202,101 @@ type Config struct {
 	mu         sync.RWMutex
 }
 
+// PasswdListSnapshot returns a deep copy suitable for lock-free request
+// matching. Callers must not retain pointers into the live configuration,
+// because management updates replace its slices at runtime.
+func (c *Config) PasswdListSnapshot() []PasswdInfo {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]PasswdInfo, len(c.AlistServer.PasswdList))
+	copy(out, c.AlistServer.PasswdList)
+	for i := range out {
+		out[i].EncPath = append([]string(nil), out[i].EncPath...)
+	}
+	return out
+}
+
+// AlistServerSnapshot returns a deep copy of the live upstream configuration.
+func (c *Config) AlistServerSnapshot() AlistServer {
+	if c == nil {
+		return AlistServer{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := c.AlistServer
+	out.PasswdList = clonePasswdList(c.AlistServer.PasswdList)
+	out.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), c.AlistServer.StreamStrategyOverrides...)
+	return out
+}
+
+// WebDAVServersSnapshot returns a deep copy suitable for API responses.
+func (c *Config) WebDAVServersSnapshot() []WebDAVServer {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := append([]WebDAVServer(nil), c.WebDAVServer...)
+	for i := range out {
+		out[i].PasswdList = clonePasswdList(out[i].PasswdList)
+	}
+	return out
+}
+
+func clonePasswdList(list []PasswdInfo) []PasswdInfo {
+	out := append([]PasswdInfo(nil), list...)
+	for i := range out {
+		out[i].EncPath = append([]string(nil), out[i].EncPath...)
+	}
+	return out
+}
+
+// ProxySnapshot returns a deep copy of the current proxy routing settings.
+// Proxy routing is consulted for every outbound request, so callers must not
+// keep references to slices that can be replaced by a management update.
+func (c *Config) ProxySnapshot() ProxyConfig {
+	if c == nil {
+		return ProxyConfig{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.Proxy == nil {
+		return ProxyConfig{}
+	}
+	out := *c.Proxy
+	out.NoProxy = append([]string(nil), c.Proxy.NoProxy...)
+	out.Rules = append([]ProxyRule(nil), c.Proxy.Rules...)
+	out.SelectedProviderIDs = append([]string(nil), c.Proxy.SelectedProviderIDs...)
+	out.SelectedDomains = append([]string(nil), c.Proxy.SelectedDomains...)
+	return out
+}
+
+// HasProxyConfig reports whether an explicit proxy configuration exists.
+func (c *Config) HasProxyConfig() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Proxy != nil
+}
+
+// SchemeSnapshot returns a copy of the listener/TLS configuration.
+func (c *Config) SchemeSnapshot() SchemeConfig {
+	if c == nil {
+		return SchemeConfig{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.Scheme == nil {
+		return SchemeConfig{}
+	}
+	return *c.Scheme
+}
+
 var (
 	cfg     *Config
 	cfgOnce sync.Once
@@ -292,16 +388,7 @@ func DefaultConfig() *Config {
 			MaxActiveStreams:            32,
 			StreamOverloadStatus:        429,
 			V2KeyCacheTTLMinutes:        1440,
-			PasswdList: []PasswdInfo{
-				{
-					Password: "123456",
-					Describe: "my video",
-					EncType:  "aesctr",
-					Enable:   true,
-					EncName:  false,
-					EncPath:  []string{"/encrypt/*"},
-				},
-			},
+			PasswdList:                  []PasswdInfo{},
 		},
 		WebDAVServer: []WebDAVServer{},
 		Port:         5344,
@@ -500,25 +587,20 @@ func normalizePasswdListEncSuffix(list []PasswdInfo) bool {
 func (c *Config) Save() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.saveLocked()
+}
 
+// saveLocked persists a point-in-time copy while c.mu is held. Keeping the
+// lock through the atomic rename makes runtime updates and their disk state a
+// single transaction from other goroutines' perspective.
+func (c *Config) saveLocked() error {
 	configPath := c.configPath
 	if configPath == "" {
 		configPath = filepath.Join(getWorkDir(), "conf", "config.json")
 	}
 
 	// Create a snapshot for saving (without expanded paths)
-	snapshot := &Config{
-		AlistServer:  c.AlistServer,
-		WebDAVServer: c.WebDAVServer,
-		Port:         c.Port,
-		Scheme:       c.Scheme,
-		Proxy:        c.Proxy,
-		Log:          c.Log,
-		Database:     c.Database,
-		DataDir:      c.DataDir,
-		JWTSecret:    c.JWTSecret,
-		JWTExpire:    c.JWTExpire,
-	}
+	snapshot := c.snapshotLocked()
 	snapshot.normalizeEncPaths()
 
 	data, err := json.MarshalIndent(snapshot, "", "\t")
@@ -527,6 +609,129 @@ func (c *Config) Save() error {
 	}
 
 	return writeFileAtomic(configPath, data, 0600)
+}
+
+func (c *Config) snapshotLocked() *Config {
+	alistServer := c.AlistServer
+	alistServer.PasswdList = clonePasswdList(c.AlistServer.PasswdList)
+	alistServer.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), c.AlistServer.StreamStrategyOverrides...)
+	webDAVServers := append([]WebDAVServer(nil), c.WebDAVServer...)
+	for i := range webDAVServers {
+		webDAVServers[i].PasswdList = clonePasswdList(webDAVServers[i].PasswdList)
+	}
+	snapshot := &Config{
+		AlistServer:  alistServer,
+		WebDAVServer: webDAVServers,
+		Port:         c.Port,
+		DataDir:      c.DataDir,
+		JWTSecret:    c.JWTSecret,
+		JWTExpire:    c.JWTExpire,
+		configPath:   c.configPath,
+	}
+	if c.Scheme != nil {
+		value := *c.Scheme
+		snapshot.Scheme = &value
+	}
+	if c.Proxy != nil {
+		value := *c.Proxy
+		value.NoProxy = append([]string(nil), c.Proxy.NoProxy...)
+		value.Rules = append([]ProxyRule(nil), c.Proxy.Rules...)
+		value.SelectedProviderIDs = append([]string(nil), c.Proxy.SelectedProviderIDs...)
+		value.SelectedDomains = append([]string(nil), c.Proxy.SelectedDomains...)
+		snapshot.Proxy = &value
+	}
+	if c.Log != nil {
+		value := *c.Log
+		snapshot.Log = &value
+	}
+	if c.Database != nil {
+		value := *c.Database
+		snapshot.Database = &value
+	}
+	return snapshot
+}
+
+// MarshalJSONSnapshot serializes a deep, race-free copy of the live config.
+func (c *Config) MarshalJSONSnapshot() ([]byte, error) {
+	if c == nil {
+		return []byte("null"), nil
+	}
+	c.mu.RLock()
+	snapshot := c.snapshotLocked()
+	c.mu.RUnlock()
+	snapshot.normalizeEncPaths()
+	return json.Marshal(snapshot)
+}
+
+// ReplaceFromJSON validates and atomically persists a complete config update.
+// Missing JSON fields retain their current values for compatibility with the
+// previous in-place unmarshalling behavior used by the mobile binding.
+func (c *Config) ReplaceFromJSON(data []byte) error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
+	c.mu.RLock()
+	candidate := c.snapshotLocked()
+	c.mu.RUnlock()
+	if err := json.Unmarshal(data, candidate); err != nil {
+		return err
+	}
+	if err := validateServerEndpoint(candidate.AlistServer.ServerHost, candidate.AlistServer.ServerPort, "alist"); err != nil {
+		return err
+	}
+	if err := validateEnabledPasswdList(candidate.AlistServer.PasswdList); err != nil {
+		return err
+	}
+	for i := range candidate.WebDAVServer {
+		server := &candidate.WebDAVServer[i]
+		if server.Enable {
+			if err := validateServerEndpoint(server.ServerHost, server.ServerPort, "webdav"); err != nil {
+				return fmt.Errorf("webdav server %d: %w", i+1, err)
+			}
+		}
+		if err := validateEnabledPasswdList(server.PasswdList); err != nil {
+			return fmt.Errorf("webdav server %d: %w", i+1, err)
+		}
+	}
+	if strings.TrimSpace(candidate.JWTSecret) == "" {
+		return fmt.Errorf("jwt_secret must not be empty")
+	}
+	if candidate.Scheme == nil {
+		candidate.Scheme = &SchemeConfig{Address: "0.0.0.0", HTTPPort: candidate.Port, HTTPSPort: -1}
+	}
+	if err := validateSchemeConfig(*candidate.Scheme); err != nil {
+		return err
+	}
+	candidate.normalizeEncPaths()
+	candidate.normalizeAlistServerTuning()
+	candidate.normalizeProxyConfig()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	old := c.snapshotLocked()
+	c.assignSnapshotLocked(candidate)
+	if err := c.saveLocked(); err != nil {
+		c.assignSnapshotLocked(old)
+		return err
+	}
+	encryption.SetV2KeyCacheTTL(time.Duration(c.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
+	return nil
+}
+
+func (c *Config) assignSnapshotLocked(src *Config) {
+	if c == nil || src == nil {
+		return
+	}
+	c.AlistServer = src.AlistServer
+	c.WebDAVServer = src.WebDAVServer
+	c.Port = src.Port
+	c.Scheme = src.Scheme
+	c.Proxy = src.Proxy
+	c.Log = src.Log
+	c.Database = src.Database
+	c.DataDir = src.DataDir
+	c.JWTSecret = src.JWTSecret
+	c.JWTExpire = src.JWTExpire
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
@@ -894,121 +1099,258 @@ func Get() *Config {
 
 // GetAlistURL returns the Alist base URL
 func (c *Config) GetAlistURL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return BuildAlistURL(c.AlistServer)
+}
+
+// BuildAlistURL formats an upstream endpoint, including IPv6 literals and only
+// omitting the port when it is the default for the selected scheme.
+func BuildAlistURL(server AlistServer) string {
 	scheme := "http"
-	if c.AlistServer.HTTPS {
+	defaultPort := 80
+	if server.HTTPS {
 		scheme = "https"
+		defaultPort = 443
 	}
-	if c.AlistServer.ServerPort == 80 || c.AlistServer.ServerPort == 443 {
-		return fmt.Sprintf("%s://%s", scheme, c.AlistServer.ServerHost)
+	host := strings.Trim(strings.TrimSpace(server.ServerHost), "[]")
+	authority := host
+	if server.ServerPort > 0 && server.ServerPort != defaultPort {
+		authority = net.JoinHostPort(host, strconv.Itoa(server.ServerPort))
+	} else if strings.Contains(host, ":") {
+		authority = "[" + host + "]"
 	}
-	return fmt.Sprintf("%s://%s:%d", scheme, c.AlistServer.ServerHost, c.AlistServer.ServerPort)
+	return scheme + "://" + authority
 }
 
 // GetHTTPAddr returns the HTTP listen address
 func (c *Config) GetHTTPAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.Scheme != nil {
-		return fmt.Sprintf("%s:%d", c.Scheme.Address, c.Scheme.HTTPPort)
+		return net.JoinHostPort(strings.Trim(c.Scheme.Address, "[]"), strconv.Itoa(c.Scheme.HTTPPort))
 	}
-	return fmt.Sprintf("0.0.0.0:%d", c.Port)
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(c.Port))
 }
 
 // GetHTTPSAddr returns the HTTPS listen address
 func (c *Config) GetHTTPSAddr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.Scheme == nil || c.Scheme.HTTPSPort <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s:%d", c.Scheme.Address, c.Scheme.HTTPSPort)
+	return net.JoinHostPort(strings.Trim(c.Scheme.Address, "[]"), strconv.Itoa(c.Scheme.HTTPSPort))
 }
 
 // IsHTTPSEnabled returns whether HTTPS is enabled
 func (c *Config) IsHTTPSEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.Scheme != nil && c.Scheme.HTTPSPort > 0 && c.Scheme.CertFile != "" && c.Scheme.KeyFile != ""
 }
 
 // IsH2CEnabled returns whether h2c is enabled
 func (c *Config) IsH2CEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.Scheme != nil && c.Scheme.EnableH2C
 }
 
 // IsUnixSocketEnabled returns whether Unix socket is enabled
 func (c *Config) IsUnixSocketEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.Scheme != nil && c.Scheme.UnixFile != ""
 }
 
 // UpdateAlistServer updates Alist server config and saves
 func (c *Config) UpdateAlistServer(server AlistServer) error {
+	if err := validateServerEndpoint(server.ServerHost, server.ServerPort, "alist"); err != nil {
+		return err
+	}
+	if err := validateEnabledPasswdList(server.PasswdList); err != nil {
+		return err
+	}
+	server.PasswdList = clonePasswdList(server.PasswdList)
+	server.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), server.StreamStrategyOverrides...)
 	normalizePasswdListEncPaths(server.PasswdList)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	old := c.AlistServer
 	c.AlistServer = server
 	c.normalizeAlistServerTuning()
-	c.mu.Unlock()
-
-	return c.Save()
+	if err := c.saveLocked(); err != nil {
+		c.AlistServer = old
+		return err
+	}
+	encryption.SetV2KeyCacheTTL(time.Duration(c.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
+	return nil
 }
 
 // AddWebDAVServer adds a new WebDAV server config
 func (c *Config) AddWebDAVServer(server WebDAVServer) error {
+	if server.Enable {
+		if err := validateServerEndpoint(server.ServerHost, server.ServerPort, "webdav"); err != nil {
+			return err
+		}
+	}
+	if err := validateEnabledPasswdList(server.PasswdList); err != nil {
+		return err
+	}
+	server.PasswdList = clonePasswdList(server.PasswdList)
 	normalizePasswdListEncPaths(server.PasswdList)
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	old := c.WebDAVServer
 	c.WebDAVServer = append(c.WebDAVServer, server)
-	c.mu.Unlock()
-	return c.Save()
+	if err := c.saveLocked(); err != nil {
+		c.WebDAVServer = old
+		return err
+	}
+	return nil
 }
 
 // UpdateWebDAVServer updates a WebDAV server config
 func (c *Config) UpdateWebDAVServer(server WebDAVServer) error {
-	normalizePasswdListEncPaths(server.PasswdList)
-	c.mu.Lock()
-	for i, s := range c.WebDAVServer {
-		if s.ID == server.ID {
-			c.WebDAVServer[i] = server
-			break
+	if server.Enable {
+		if err := validateServerEndpoint(server.ServerHost, server.ServerPort, "webdav"); err != nil {
+			return err
 		}
 	}
-	c.mu.Unlock()
-	return c.Save()
+	if err := validateEnabledPasswdList(server.PasswdList); err != nil {
+		return err
+	}
+	server.PasswdList = clonePasswdList(server.PasswdList)
+	normalizePasswdListEncPaths(server.PasswdList)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, s := range c.WebDAVServer {
+		if s.ID == server.ID {
+			old := c.WebDAVServer[i]
+			c.WebDAVServer[i] = server
+			if err := c.saveLocked(); err != nil {
+				c.WebDAVServer[i] = old
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("webdav server not found: %s", server.ID)
+}
+
+func validateEnabledPasswdList(list []PasswdInfo) error {
+	for i := range list {
+		if list[i].Enable && strings.TrimSpace(list[i].Password) == "" {
+			return fmt.Errorf("password rule %d is enabled but password is empty", i+1)
+		}
+	}
+	return nil
+}
+
+func validateServerEndpoint(rawHost string, port int, label string) error {
+	host := strings.TrimSpace(rawHost)
+	if host == "" {
+		return fmt.Errorf("%s server host is required", label)
+	}
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("%s server port must be between 1 and 65535", label)
+	}
+	if strings.HasPrefix(host, "[") != strings.HasSuffix(host, "]") {
+		return fmt.Errorf("%s server host has invalid IPv6 brackets", label)
+	}
+	host = strings.Trim(host, "[]")
+	if strings.ContainsAny(host, "/?#@") || strings.IndexFunc(host, func(r rune) bool {
+		return r <= ' ' || r == '\x7f'
+	}) >= 0 {
+		return fmt.Errorf("%s server host must not contain a scheme, path, credentials, or whitespace", label)
+	}
+	if strings.Contains(host, ":") {
+		if _, err := netip.ParseAddr(host); err != nil {
+			return fmt.Errorf("%s server host is not a valid IPv6 address", label)
+		}
+	}
+	return nil
+}
+
+func validateSchemeConfig(scheme SchemeConfig) error {
+	if scheme.HTTPPort <= 0 || scheme.HTTPPort > 65535 {
+		return fmt.Errorf("http port must be between 1 and 65535")
+	}
+	if scheme.HTTPSPort != -1 && (scheme.HTTPSPort <= 0 || scheme.HTTPSPort > 65535) {
+		return fmt.Errorf("https port must be -1 or between 1 and 65535")
+	}
+	hasCert := strings.TrimSpace(scheme.CertFile) != ""
+	hasKey := strings.TrimSpace(scheme.KeyFile) != ""
+	if hasCert != hasKey {
+		return fmt.Errorf("https certificate and key must be configured together")
+	}
+	if scheme.ForceHTTPS && (scheme.HTTPSPort <= 0 || !hasCert || !hasKey) {
+		return fmt.Errorf("force_https requires an enabled https port, certificate, and key")
+	}
+	if value := strings.TrimSpace(scheme.UnixFilePerm); value != "" {
+		parsed, err := strconv.ParseUint(value, 8, 32)
+		if err != nil || parsed > 0777 {
+			return fmt.Errorf("unix socket permissions must be an octal value between 0000 and 0777")
+		}
+	}
+	return nil
 }
 
 // DeleteWebDAVServer deletes a WebDAV server config
 func (c *Config) DeleteWebDAVServer(id string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	for i, s := range c.WebDAVServer {
 		if s.ID == id {
+			old := append([]WebDAVServer(nil), c.WebDAVServer...)
 			c.WebDAVServer = append(c.WebDAVServer[:i], c.WebDAVServer[i+1:]...)
-			break
+			if err := c.saveLocked(); err != nil {
+				c.WebDAVServer = old
+				return err
+			}
+			return nil
 		}
 	}
-	c.mu.Unlock()
-	return c.Save()
+	return fmt.Errorf("webdav server not found: %s", id)
 }
 
-// UpdateScheme updates scheme configuration and saves
-// Returns true if server restart is required (H2C changed)
+// UpdateScheme updates scheme configuration and saves.
+// Listener addresses, TLS files, redirects, Unix sockets, and H2C are all wired
+// at server startup, so any effective scheme change requires a restart.
 func (c *Config) UpdateScheme(scheme SchemeConfig) (bool, error) {
-	c.mu.Lock()
-	oldH2C := c.Scheme != nil && c.Scheme.EnableH2C
-	newH2C := scheme.EnableH2C
-	needRestart := oldH2C != newH2C
-
-	if c.Scheme == nil {
-		c.Scheme = &SchemeConfig{}
+	if err := validateSchemeConfig(scheme); err != nil {
+		return false, err
 	}
-	*c.Scheme = scheme
-	c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	needRestart := c.Scheme == nil || *c.Scheme != scheme
 
-	return needRestart, c.Save()
+	old := c.Scheme
+	c.Scheme = &scheme
+	if err := c.saveLocked(); err != nil {
+		c.Scheme = old
+		return false, err
+	}
+	return needRestart, nil
 }
 
 // UpdateProxy updates proxy configuration and saves.
 func (c *Config) UpdateProxy(proxyCfg ProxyConfig) error {
+	proxyCfg.NoProxy = append([]string(nil), proxyCfg.NoProxy...)
+	proxyCfg.Rules = append([]ProxyRule(nil), proxyCfg.Rules...)
+	proxyCfg.SelectedProviderIDs = append([]string(nil), proxyCfg.SelectedProviderIDs...)
+	proxyCfg.SelectedDomains = append([]string(nil), proxyCfg.SelectedDomains...)
 	c.mu.Lock()
-	if c.Proxy == nil {
-		c.Proxy = &ProxyConfig{}
-	}
-	*c.Proxy = proxyCfg
+	defer c.mu.Unlock()
+	old := c.Proxy
+	c.Proxy = &proxyCfg
 	c.normalizeProxyConfig()
-	c.mu.Unlock()
-	return c.Save()
+	if err := c.saveLocked(); err != nil {
+		c.Proxy = old
+		return err
+	}
+	return nil
 }
 
 func getWorkDir() string {

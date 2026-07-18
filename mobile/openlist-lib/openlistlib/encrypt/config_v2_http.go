@@ -451,6 +451,7 @@ func (p *ProxyServer) handleConfigV2(w http.ResponseWriter, r *http.Request) {
 		p.applyConfigV2Body(cfg)
 		p.rebuildEncryptPathIndex()
 		p.mutex.Unlock()
+		p.UpdateConfig(p.configSnapshot())
 
 		if err := p.persistConfigSnapshot(); err != nil {
 			log.Warnf("[%s] persist v2 config failed: %v", internal.TagConfig, err)

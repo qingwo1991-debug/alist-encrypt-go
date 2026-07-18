@@ -95,7 +95,7 @@ func (s *StreamProxy) shouldPreserveUpstreamAuth(target *url.URL) bool {
 	if targetHost == "" {
 		return false
 	}
-	alistHost := parseHostOnly(s.cfg.AlistServer.ServerHost)
+	alistHost := parseHostOnly(s.cfg.AlistServerSnapshot().ServerHost)
 	if alistHost != "" && strings.EqualFold(targetHost, alistHost) {
 		return true
 	}

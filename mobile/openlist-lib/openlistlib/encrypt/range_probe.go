@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -282,7 +283,14 @@ func (p *ProxyServer) probeRangeCapability(targetURL string) (bool, error) {
 	}
 	req.Header.Set("Range", "bytes=0-1")
 	req.Header.Set("User-Agent", "OpenList-Encrypt-RangeProbe/1.0")
-	resp, err := p.probeClient.Do(req)
+	client := p.probeClientSnapshot()
+	if client == nil {
+		client = p.httpClientSnapshot()
+	}
+	if client == nil {
+		return false, errors.New("upstream probe client unavailable")
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}

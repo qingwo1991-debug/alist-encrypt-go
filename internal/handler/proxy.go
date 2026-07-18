@@ -415,7 +415,7 @@ func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, displayPath stri
 }
 
 func (h *ProxyHandler) convertRedirectDisplayPath(displayPath string, passwdInfo *config.PasswdInfo) string {
-	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 	realPath, _ := resolveEncryptedRealPath(h.fileDAO, passwdInfo, displayPath, allowLoose)
 	return realPath
 }
@@ -459,7 +459,7 @@ func redirectDisplayPathFromURLPath(rawPath string) string {
 
 // convertDisplayToRealPath converts a display path to encrypted path for downloads
 func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *config.PasswdInfo) string {
-	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 	realPath, _ := resolveEncryptedRealPath(h.fileDAO, passwdInfo, displayPath, allowLoose)
 	return realPath
 }
@@ -507,8 +507,9 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch fresh upstream metadata if cache is cold or stale.
+	rawURLScope := rawURLAuthScope(r.Header)
 	cachedInfo, hasCache := h.fileDAO.Get(displayPath)
-	stale := hasCache && cachedInfo != nil && !cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold())
+	stale := hasCache && cachedInfo != nil && !cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold(), rawURLScope)
 	if !hasCache || cachedInfo == nil ||
 		cachedInfo.Size <= 0 || strings.TrimSpace(cachedInfo.RawURL) == "" || stale {
 		h.prefetchDownloadMetadata(r, displayPath, realPath, stale)
@@ -520,7 +521,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	trace.Logf(r.Context(), "download", "File size: %d, strategy: %s", fileInfo.Size, usedStrategy)
 
 	targetURL := ""
-	if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold()) {
+	if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold(), rawURLScope) {
 		targetURL = cachedInfo.RawURL
 		trace.Logf(r.Context(), "download", "Using cached raw_url for target")
 	}
@@ -650,7 +651,7 @@ func (h *ProxyHandler) prefetchDownloadMetadataViaAPI(r *http.Request, displayPa
 		return metadataPrefetchResult{}
 	}
 
-	if err := h.fileDAO.SetFromAlistResponse(displayPath, data); err != nil {
+	if err := h.fileDAO.SetFromAlistResponse(displayPath, data, rawURLAuthScope(r.Header)); err != nil {
 		trace.Logf(r.Context(), "download", "Skip %s metadata warmup: cache update failed: %v", apiPath, err)
 		return metadataPrefetchResult{}
 	}
@@ -674,8 +675,10 @@ func (h *ProxyHandler) prefetchDownloadMetadataViaAPI(r *http.Request, displayPa
 }
 
 func (h *ProxyHandler) upstreamStalenessThreshold() time.Duration {
-	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
-		return time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	if h.cfg != nil {
+		if minutes := h.cfg.AlistServerSnapshot().UpstreamStalenessMinutes; minutes > 0 {
+			return time.Duration(minutes) * time.Minute
+		}
 	}
 	return defaultUpstreamStalenessMins * time.Minute
 }

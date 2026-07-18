@@ -389,6 +389,7 @@ func TestExecuteDecryptPlaybackDoesNotPassthroughEncryptedContentOnFailure(t *te
 		Name:              "broken.bin",
 		Size:              fileSize,
 		RawURL:            srv.URL,
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	})
 	ps.recordTerminal(FileItem{DisplayPath: "/broken.bin", FileName: "broken.bin"}, probeSourceFirstFrame, probeStatusSuccess, fileSize, probeExecutionResult{resolvedSize: fileSize})
@@ -492,6 +493,7 @@ func TestExecuteDecryptPlaybackInspectsAndCachesV2MetaWhenMissing(t *testing.T) 
 		Name:              "demo.mp4",
 		Size:              int64(len(ciphertext)),
 		RawURL:            srv.URL,
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	})
 
@@ -609,6 +611,7 @@ func TestExecuteDecryptPlaybackReprobesCachedV2MetaWithoutNonce(t *testing.T) {
 		ContentVersion:    encryption.ContentVersionV2,
 		HeaderLen:         32,
 		RawURL:            srv.URL,
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	})
 
@@ -706,6 +709,7 @@ func TestExecuteDecryptPlaybackUsesCachedV2MetaWithNonce(t *testing.T) {
 		HeaderLen:         encryption.ContentHeaderSize(),
 		NonceField:        append([]byte(nil), contentEnc.Meta.NonceField...),
 		RawURL:            srv.URL,
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	})
 
@@ -801,6 +805,7 @@ func TestExecuteDecryptPlaybackDoesNotCacheRangeLengthAsFileSize(t *testing.T) {
 		HeaderLen:         encryption.ContentHeaderSize(),
 		NonceField:        append([]byte(nil), contentEnc.Meta.NonceField...),
 		RawURL:            srv.URL,
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	})
 
@@ -1004,6 +1009,7 @@ func TestInvalidatePlaybackStatePreservesEncPathOnUpstream4xx(t *testing.T) {
 		Name:              "demo.mp4",
 		Size:              4096,
 		RawURL:            "https://cdn.example/demo.bin",
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed file info: %v", err)
@@ -1025,8 +1031,8 @@ func TestInvalidatePlaybackStatePreservesEncPathOnUpstream4xx(t *testing.T) {
 	if !ok || info == nil {
 		t.Fatal("expected display path entry to remain cached")
 	}
-	if info.RawURL != "" || info.Size != 0 {
-		t.Fatalf("expected volatile fields cleared, got raw_url=%q size=%d", info.RawURL, info.Size)
+	if info.RawURL != "" || info.Size != 4096 {
+		t.Fatalf("expected scoped raw URL cleared and size preserved, got raw_url=%q size=%d", info.RawURL, info.Size)
 	}
 }
 
@@ -1048,6 +1054,7 @@ func TestInvalidatePlaybackStatePreservesPlaybackMetaOnClientAbort(t *testing.T)
 		HeaderLen:         encryption.ContentHeaderSize(),
 		NonceField:        nonce,
 		RawURL:            "https://cdn.example/demo.bin",
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed file info: %v", err)
@@ -1234,6 +1241,7 @@ func TestExecuteDecryptPlaybackHTTPRefreshesExpiredRawURL(t *testing.T) {
 		Size:              fileSize,
 		ContentVersion:    encryption.ContentVersionV1,
 		RawURL:            backend.URL + "/expired",
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed file cache: %v", err)
@@ -1342,7 +1350,7 @@ func TestExecuteDecryptPlaybackHTTPRefreshesExpiredRawURLAndReprobesV2(t *testin
 	}
 	if err := fileDAO.Set(&dao.FileInfo{
 		Path: "/movie.mp4", EncryptedPath: "/movie.bin", Name: "movie.mp4",
-		Size: int64(len(ciphertext)), RawURL: backend.URL + "/expired", UpstreamFetchedAt: time.Now(),
+		Size: int64(len(ciphertext)), RawURL: backend.URL + "/expired", RawURLAuthScope: "anon", UpstreamFetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed size-only cache: %v", err)
 	}

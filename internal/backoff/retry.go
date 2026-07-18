@@ -2,6 +2,8 @@ package backoff
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"net"
@@ -9,6 +11,16 @@ import (
 	"sync"
 	"time"
 )
+
+// HTTPStatusError keeps a retryable HTTP response status structured so the
+// retrier does not have to infer transience from an error string.
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("upstream status %d", e.StatusCode)
+}
 
 // Retrier handles exponential backoff retries for transient failures.
 type Retrier struct {
@@ -36,6 +48,10 @@ func DefaultRetrier() *Retrier {
 func IsTransient(err error) bool {
 	if err == nil {
 		return false
+	}
+	var statusErr *HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return IsTransientStatus(statusErr.StatusCode)
 	}
 	msg := err.Error()
 	if isTimeoutError(err) {

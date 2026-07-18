@@ -16,10 +16,14 @@ on:
         required: false
         default: ''
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  GO_VERSION: '1.25.0'
+  GO_VERSION: '1.26.5'
+  FLUTTER_VERSION: '3.44.0'
 
 jobs:
   test:
@@ -43,6 +47,108 @@ jobs:
           go test ./...
           go test -tags noembedwebui ./...
 
+  test-mobile-go:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            mobile/openlist-lib/go.sum
+            mobile/openlist-lib/src/go.sum
+
+      - name: Test mobile Go library
+        working-directory: mobile/openlist-lib
+        run: |
+          set -euo pipefail
+          go test -mod=readonly \
+            ./openlistlib/encrypt \
+            ./drivers/139 \
+            ./drivers/189 \
+            ./drivers/aliyundrive_open \
+            ./drivers/dropbox \
+            ./drivers/quark_open \
+            ./internal/op \
+            ./pkg/utils \
+            ./server/...
+
+      - name: Test synchronized upstream source copy
+        working-directory: mobile/openlist-lib/src
+        run: |
+          set -euo pipefail
+          go test -mod=readonly \
+            ./drivers/139 \
+            ./drivers/189 \
+            ./drivers/aliyundrive_open \
+            ./drivers/dropbox \
+            ./drivers/quark_open \
+            ./internal/op \
+            ./pkg/utils \
+            ./server/...
+
+  test-webui:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        directory:
+          - enc-webui
+          - mobile/enc-webui
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.directory }}/package-lock.json
+
+      - name: Test and build Web UI
+        working-directory: ${{ matrix.directory }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test
+          npm run tsc-check
+          npx eslint --config ./eslintrc/eslint-config.js --ext .js,.jsx,.vue,.ts,.tsx src
+          npx vite build --mode build
+
+  test-flutter:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Analyze and test Flutter app
+        working-directory: mobile
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          flutter analyze --no-pub
+          flutter test --no-pub
+
   version:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
@@ -56,18 +162,34 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
+          set -euo pipefail
           export TZ=Asia/Shanghai
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
-            VERSION="${{ github.event.inputs.version }}"
-          elif [ "${{ github.ref_type }}" = "tag" ]; then
-            VERSION="${{ github.ref_name }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            VERSION="$REF_NAME"
           else
             VERSION="v$(date +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
           fi
 
+          if [[ ! "$VERSION" =~ ^[vV]?[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            echo "Invalid release version: $VERSION" >&2
+            exit 1
+          fi
+
           VERSION_NAME="${VERSION#v}"
+          VERSION_NAME="${VERSION_NAME#V}"
+          if [[ ! "$VERSION_NAME" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            echo "Invalid build version name: $VERSION_NAME" >&2
+            exit 1
+          fi
           BUILD_NUMBER=$(date +%y%m%d%H)
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -76,7 +198,7 @@ jobs:
 
   build-docker:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, test-mobile-go, test-webui, test-flutter]
     permissions:
       contents: read
       packages: write
@@ -124,7 +246,7 @@ jobs:
 
   build-binaries:
     runs-on: ubuntu-latest
-    needs: [test, version]
+    needs: [test, test-mobile-go, test-webui, test-flutter, version]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -177,7 +299,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: enc-webui/package-lock.json
 
@@ -219,7 +341,7 @@ jobs:
 
   build-mobile-aar:
     runs-on: ubuntu-latest
-    needs: [test, version]
+    needs: [test, test-mobile-go, test-webui, test-flutter, version]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -251,11 +373,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Initialize mobile Go binding
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/enc-webui/package-lock.json
+
+      - name: Build and install reviewed mobile Web UI
+        run: |
+          set -euo pipefail
+          npm ci --prefix mobile/enc-webui
+          npm run build --prefix mobile/enc-webui
+          bash mobile/openlist-lib/scripts/install_enc_web.sh
+
+      - name: Build mobile Go binding from reviewed repository source
         working-directory: mobile/openlist-lib/scripts
         run: |
-          bash ./init_openlist.sh
-          bash ./init_web.sh
+          set -euo pipefail
           bash ./init_gomobile.sh
           bash ./gobind.sh release ${{ matrix.gomobile_target }}
 
@@ -268,7 +403,7 @@ jobs:
 
   build-mobile:
     runs-on: ubuntu-latest
-    needs: [test, version, build-mobile-aar]
+    needs: [test, test-mobile-go, test-webui, test-flutter, version, build-mobile-aar]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -302,7 +437,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.0'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
       - name: Build APK
@@ -310,8 +445,9 @@ jobs:
         env:
           ABI_FILTERS: ${{ matrix.abi }}
         run: |
-          flutter pub get
-          flutter build apk --release --split-per-abi \
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          flutter build apk --no-pub --release --split-per-abi \
             --target-platform=${{ matrix.target_platform }} \
             --build-name=${{ needs.version.outputs.version_name }} \
             --build-number=${{ needs.version.outputs.build_number }}

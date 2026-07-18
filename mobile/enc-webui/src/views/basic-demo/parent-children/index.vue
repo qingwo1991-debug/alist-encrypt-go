@@ -39,13 +39,14 @@ const fartherMethod = () => {
 }
 //provide
 provide('title', 'provide value')
+provide('fatherMethod', fartherMethod)
 
 //v-model sync
 const parentTitle = ref('parentTitle')
 
 watch(
   () => parentTitle.value,
-  (oldValue, newValue) => {
+  (newValue, oldValue) => {
     console.log('触发parent更新了', oldValue, newValue)
   },
   { immediate: true }

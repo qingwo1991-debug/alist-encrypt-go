@@ -20,6 +20,7 @@ vendor/
 
 # Web UI build artifacts
 enc-webui/dist/
+enc-webui/dist-nominify/
 enc-webui/node_modules/
 
 # IDE

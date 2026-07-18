@@ -40,10 +40,18 @@ func copyProbeAuthHeaders(req *http.Request, src http.Header) {
 }
 
 func (s *StreamProxy) inspectEncryptedContent(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) encryption.ContentMeta {
-	encType := encryption.EncType(passwdInfo.EncType)
+	meta, _ := s.inspectEncryptedContentConfirmed(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
+	return meta
+}
+
+func (s *StreamProxy) inspectEncryptedContentConfirmed(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) (encryption.ContentMeta, bool) {
+	encType := encryption.EncType("")
+	if passwdInfo != nil {
+		encType = encryption.EncType(passwdInfo.EncType)
+	}
 	meta := encryption.LegacyContentMeta(encType, ciphertextSize)
 	if s == nil || passwdInfo == nil || !passwdInfo.Enable || strings.TrimSpace(targetURL) == "" {
-		return meta
+		return meta, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -51,15 +59,17 @@ func (s *StreamProxy) inspectEncryptedContent(ctx context.Context, targetURL str
 	currentURL := strings.TrimSpace(targetURL)
 	currentAuth := authHeaders
 	maxHops := 2
-	if s.cfg != nil && s.cfg.AlistServer.RedirectMaxHops > 0 {
-		maxHops = s.cfg.AlistServer.RedirectMaxHops
+	if s.cfg != nil {
+		if configured := s.cfg.AlistServerSnapshot().RedirectMaxHops; configured > 0 {
+			maxHops = configured
+		}
 	}
 	for hop := 0; hop <= maxHops; hop++ {
 		req, err := httputil.NewRequest(http.MethodGet, currentURL).
 			WithContext(ctx).
 			Build()
 		if err != nil {
-			return meta
+			return meta, false
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", encryption.ContentHeaderSize()-1))
 		req.Header.Set("Accept-Encoding", "identity")
@@ -67,30 +77,34 @@ func (s *StreamProxy) inspectEncryptedContent(ctx context.Context, targetURL str
 
 		resp, err := s.client.Do(req)
 		if err != nil {
-			return meta
+			return meta, false
 		}
 		if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently ||
-			resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect {
+			resp.StatusCode == http.StatusSeeOther || resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect {
 			location := strings.TrimSpace(resp.Header.Get("Location"))
 			resp.Body.Close()
 			if location == "" {
-				return meta
+				return meta, false
 			}
 			nextURL, err := resolveRedirectTarget(currentURL, location)
 			if err != nil {
-				return meta
+				return meta, false
+			}
+			previous, previousErr := url.Parse(currentURL)
+			next, nextErr := url.Parse(nextURL)
+			if previousErr != nil || nextErr != nil || !sameRedirectOrigin(previous, next) {
+				currentAuth = make(http.Header)
 			}
 			currentURL = nextURL
-			currentAuth = make(http.Header)
 			continue
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= http.StatusBadRequest {
-			return meta
+			return meta, false
 		}
 		prefix, err := io.ReadAll(io.LimitReader(resp.Body, encryption.ContentHeaderSize()))
 		if err != nil {
-			return meta
+			return meta, false
 		}
 		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
 			meta.CiphertextSize = total
@@ -101,12 +115,26 @@ func (s *StreamProxy) inspectEncryptedContent(ctx context.Context, targetURL str
 				meta.PlainSize = total
 			}
 		}
-		if parsed, ok, err := encryption.ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
-			return parsed
+		expectedPrefix := encryption.ContentHeaderSize()
+		if meta.CiphertextSize > 0 && meta.CiphertextSize < expectedPrefix {
+			expectedPrefix = meta.CiphertextSize
 		}
-		return meta
+		if expectedPrefix <= 0 || int64(len(prefix)) < expectedPrefix {
+			// io.ReadAll on a LimitReader reports no error for a short body. Do not
+			// classify a truncated probe as a confirmed legacy file, because resumed
+			// encryption would then use incompatible metadata.
+			return meta, false
+		}
+		parsed, ok, err := encryption.ParseContentHeader(encType, prefix, meta.CiphertextSize)
+		if err != nil {
+			return meta, false
+		}
+		if ok {
+			return parsed, true
+		}
+		return meta, true
 	}
-	return meta
+	return meta, false
 }
 
 func (s *StreamProxy) InspectEncryptedContent(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) encryption.ContentMeta {
@@ -264,21 +292,29 @@ func contentMetaFromContext(ctx context.Context, passwdInfo *config.PasswdInfo, 
 	return meta
 }
 
-func uploadMetaKey(targetURL string) string {
+func uploadMetaKey(targetURL, filePath string) string {
 	parsed, err := url.Parse(targetURL)
-	if err != nil {
-		return targetURL
+	baseKey := targetURL
+	if err == nil {
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		baseKey = parsed.String()
 	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String()
+	filePath = strings.TrimSpace(filePath)
+	if decoded, decodeErr := url.QueryUnescape(filePath); decodeErr == nil {
+		filePath = strings.TrimSpace(decoded)
+	}
+	if filePath == "" {
+		return baseKey
+	}
+	return fmt.Sprintf("%s\x00file-path:%s", baseKey, filePath)
 }
 
-func (s *StreamProxy) getUploadMeta(targetURL string) (encryption.ContentMeta, bool) {
+func (s *StreamProxy) getUploadMeta(targetURL, filePath string) (encryption.ContentMeta, bool) {
 	if s == nil {
 		return encryption.ContentMeta{}, false
 	}
-	key := uploadMetaKey(targetURL)
+	key := uploadMetaKey(targetURL, filePath)
 	s.uploadMetaMu.Lock()
 	defer s.uploadMetaMu.Unlock()
 	entry, ok := s.uploadMeta[key]
@@ -289,14 +325,16 @@ func (s *StreamProxy) getUploadMeta(targetURL string) (encryption.ContentMeta, b
 		delete(s.uploadMeta, key)
 		return encryption.ContentMeta{}, false
 	}
+	entry.ExpiresAt = time.Now().Add(uploadMetaTTL)
+	s.uploadMeta[key] = entry
 	return entry.Meta, true
 }
 
-func (s *StreamProxy) putUploadMeta(targetURL string, meta encryption.ContentMeta) {
+func (s *StreamProxy) putUploadMeta(targetURL, filePath string, meta encryption.ContentMeta) {
 	if s == nil || !meta.IsV2() {
 		return
 	}
-	key := uploadMetaKey(targetURL)
+	key := uploadMetaKey(targetURL, filePath)
 	s.uploadMetaMu.Lock()
 	defer s.uploadMetaMu.Unlock()
 	s.uploadMeta[key] = uploadMetaEntry{
@@ -304,6 +342,17 @@ func (s *StreamProxy) putUploadMeta(targetURL string, meta encryption.ContentMet
 		ExpiresAt: time.Now().Add(uploadMetaTTL),
 	}
 }
+
+func (s *StreamProxy) deleteUploadMeta(targetURL, filePath string) {
+	if s == nil {
+		return
+	}
+	key := uploadMetaKey(targetURL, filePath)
+	s.uploadMetaMu.Lock()
+	delete(s.uploadMeta, key)
+	s.uploadMetaMu.Unlock()
+}
+
 func parseContentRangeTotal(contentRange string) int64 {
 	if contentRange == "" {
 		return 0
@@ -324,10 +373,19 @@ func discardBytes(r io.Reader, n int64) error {
 	if n > 4096 {
 		buf := getBuffer()
 		defer putBuffer(buf)
-		_, err := io.CopyBuffer(io.Discard, io.LimitReader(r, n), *buf)
-		return err
+		written, err := io.CopyBuffer(io.Discard, io.LimitReader(r, n), *buf)
+		if err != nil {
+			return err
+		}
+		if written != n {
+			return io.ErrUnexpectedEOF
+		}
+		return nil
 	}
-	_, err := io.CopyN(io.Discard, r, n)
+	written, err := io.CopyN(io.Discard, r, n)
+	if written != n && (err == nil || err == io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
 	return err
 }
 

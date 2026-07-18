@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alist-encrypt-go/internal/auth"
 	"github.com/alist-encrypt-go/internal/buildinfo"
@@ -140,8 +141,8 @@ func (s *Service) UpdatePassword(username, password, newPassword string) error {
 	if s.userDAO == nil {
 		return fmt.Errorf("user dao not initialized")
 	}
-	if len(newPassword) < 7 {
-		return fmt.Errorf("password too short, at less 8 digits")
+	if utf8.RuneCountInString(strings.TrimSpace(newPassword)) < 8 {
+		return fmt.Errorf("password too short, at least 8 characters required")
 	}
 	if err := s.userDAO.Validate(username, password); err != nil {
 		return fmt.Errorf("password error")
@@ -166,7 +167,7 @@ func (s *Service) UpdateUsername(username, password, newUsername string) error {
 }
 
 func (s *Service) GetAlistConfig() interface{} {
-	return s.cfg.AlistServer
+	return s.cfg.AlistServerSnapshot()
 }
 
 func (s *Service) SaveAlistConfig(raw map[string]interface{}) error {
@@ -174,7 +175,13 @@ func (s *Service) SaveAlistConfig(raw map[string]interface{}) error {
 		return fmt.Errorf("rangeCompatTtlMinutes is deprecated, use rangeReprobeMinutes")
 	}
 	server := config.ParseAlistServerFromMap(raw)
-	return s.cfg.UpdateAlistServer(server)
+	if err := s.cfg.UpdateAlistServer(server); err != nil {
+		return err
+	}
+	if s.passwdDAO != nil {
+		s.passwdDAO.Reload()
+	}
+	return nil
 }
 
 func (s *Service) ValidateScanConfig(raw map[string]interface{}, ctx context.Context) (map[string]interface{}, error) {
@@ -195,9 +202,10 @@ func (s *Service) ValidateScanConfig(raw map[string]interface{}, ctx context.Con
 	}
 	req.Header.Set("Depth", "0")
 	req.Header.Set("Authorization", authHeader)
+	proxySnapshot := s.cfg.ProxySnapshot()
 	tempCfg := &config.Config{
 		AlistServer: server,
-		Proxy:       s.cfg.Proxy,
+		Proxy:       &proxySnapshot,
 	}
 	client := proxy.NewHTTPClient(tempCfg, getAlistRequestTimeout(tempCfg))
 	resp, err := client.Do(req)
@@ -237,7 +245,7 @@ func (s *Service) ValidateScanConfig(raw map[string]interface{}, ctx context.Con
 }
 
 func (s *Service) GetWebdavConfig() interface{} {
-	return s.cfg.WebDAVServer
+	return s.cfg.WebDAVServersSnapshot()
 }
 
 func (s *Service) SaveWebdavConfig(raw map[string]interface{}) error {
@@ -277,7 +285,7 @@ func (s *Service) DecodeFolderName(password, encType, folderNameEnc string) (map
 }
 
 func (s *Service) GetSchemeConfig() interface{} {
-	return s.cfg.Scheme
+	return s.cfg.SchemeSnapshot()
 }
 
 func (s *Service) SaveSchemeConfig(scheme config.SchemeConfig) (bool, error) {
@@ -334,7 +342,7 @@ func (s *Service) RefreshProxyDomainDictionary() (interface{}, error) {
 }
 
 func (s *Service) GetProxyRoutingConfig() interface{} {
-	return s.cfg.Proxy
+	return s.cfg.ProxySnapshot()
 }
 
 func (s *Service) SaveProxyRoutingConfig(proxyCfg config.ProxyConfig) error {
@@ -363,6 +371,7 @@ func (s *Service) GetStats() map[string]interface{} {
 		pathStats = s.fileStats.PathCacheStats()
 		fileSizeStats = s.fileStats.FileSizeCacheStats()
 	}
+	playFirstFallback := s.cfg != nil && s.cfg.AlistServerSnapshot().PlayFirstFallback
 	return map[string]interface{}{
 		"version": config.Version,
 		"uptime":  time.Since(s.startTime).Round(time.Second).String(),
@@ -370,7 +379,7 @@ func (s *Service) GetStats() map[string]interface{} {
 			"cleanup_disabled": s.cfg != nil && s.cfg.Database != nil && s.cfg.Database.DisableCleanup,
 		},
 		"stream": map[string]interface{}{
-			"play_first_fallback":     s.cfg != nil && s.cfg.AlistServer.PlayFirstFallback,
+			"play_first_fallback":     playFirstFallback,
 			"final_passthrough_count": getUint64FromMap(proxyStats, "stream", "final_passthrough_count") + getUint64FromMap(webdavStats, "stream", "final_passthrough_count"),
 			"size_conflict_count":     getUint64FromMap(proxyStats, "stream", "size_conflict_count") + getUint64FromMap(webdavStats, "stream", "size_conflict_count"),
 			"strategy_fallback_count": getUint64FromMap(proxyStats, "stream", "strategy_fallback_count") + getUint64FromMap(webdavStats, "stream", "strategy_fallback_count"),
@@ -403,14 +412,7 @@ func buildScanValidationAuth(server config.AlistServer) (string, string) {
 }
 
 func buildAlistURLForServer(server config.AlistServer) string {
-	scheme := "http"
-	if server.HTTPS {
-		scheme = "https"
-	}
-	if server.ServerPort == 80 || server.ServerPort == 443 {
-		return scheme + "://" + server.ServerHost
-	}
-	return scheme + "://" + server.ServerHost + ":" + strconv.Itoa(server.ServerPort)
+	return config.BuildAlistURL(server)
 }
 
 func extractAuthorizationValue(raw string) string {
@@ -426,10 +428,14 @@ func extractAuthorizationValue(raw string) string {
 }
 
 func getAlistRequestTimeout(cfg *config.Config) time.Duration {
-	if cfg == nil || cfg.AlistServer.RequestTimeoutSeconds <= 0 {
+	if cfg == nil {
 		return 20 * time.Second
 	}
-	return time.Duration(cfg.AlistServer.RequestTimeoutSeconds) * time.Second
+	seconds := cfg.AlistServerSnapshot().RequestTimeoutSeconds
+	if seconds <= 0 {
+		return 20 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func (s *Service) buildRulesFromSelection(proxyCfg *config.ProxyConfig) {

@@ -82,30 +82,47 @@ watch(
   { immediate: true }
 )
 
-let subLoading = $ref(false)
-let tipMessage = $ref('')
-const refLoginForm = $ref(null)
+const subLoading = ref(false)
+const tipMessage = ref('')
+const refLoginForm = ref(null)
 const handleLogin = () => {
-  refLoginForm.validate((valid) => {
-    subLoading = true
-    if (valid) loginFunc()
+  refLoginForm.value?.validate((valid) => {
+    if (!valid) {
+      subLoading.value = false
+      return
+    }
+    if (subLoading.value) return
+    subLoading.value = true
+    loginFunc()
   })
 }
 const router = useRouter()
 const basicStore = useBasicStore()
 
+const normalizeLoginError = (err) => {
+  if (typeof err === 'string') return err
+  return err?.msg || err?.message || '登录失败'
+}
+
+const loginRedirect = () => {
+  const redirect = typeof state.redirect === 'string' && state.redirect.startsWith('/') && !state.redirect.startsWith('//')
+    ? state.redirect
+    : '/'
+  return { path: redirect, query: state.otherQuery }
+}
+
 const loginFunc = () => {
-  loginReq(subForm)
+  return loginReq(subForm)
     .then(({ data }) => {
       elMessage('登录成功')
       basicStore.setToken(data?.jwtToken)
-      router.push('/')
+      return router.push(loginRedirect())
     })
     .catch((err) => {
-      tipMessage = err?.msg
+      tipMessage.value = normalizeLoginError(err)
     })
     .finally(() => {
-      subLoading = false
+      subLoading.value = false
     })
 }
 

@@ -31,10 +31,14 @@ func clampStreamBufferKB(kb int) int {
 }
 
 func applyStreamBufferConfig(cfg *config.Config) {
-	if cfg == nil || cfg.AlistServer.StreamBufferKb <= 0 {
+	if cfg == nil {
 		return
 	}
-	effectiveKB := clampStreamBufferKB(cfg.AlistServer.StreamBufferKb)
+	alist := cfg.AlistServerSnapshot()
+	if alist.StreamBufferKb <= 0 {
+		return
+	}
+	effectiveKB := clampStreamBufferKB(alist.StreamBufferKb)
 	newSize := int64(effectiveKB * 1024)
 	atomic.StoreInt64(&streamBufferSize, newSize)
 	// No need to replace bufferPool — the pool's New func already reads
@@ -105,17 +109,18 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 	maxActiveStreams := 32
 	retrier := backoff.DefaultRetrier()
 	if cfg != nil {
-		if cfg.AlistServer.CircuitBreakerThreshold > 0 {
-			cbThreshold = cfg.AlistServer.CircuitBreakerThreshold
+		alist := cfg.AlistServerSnapshot()
+		if alist.CircuitBreakerThreshold > 0 {
+			cbThreshold = alist.CircuitBreakerThreshold
 		}
-		if cfg.AlistServer.CircuitBreakerCooldownSecs > 0 {
-			cbCooldown = time.Duration(cfg.AlistServer.CircuitBreakerCooldownSecs) * time.Second
+		if alist.CircuitBreakerCooldownSecs > 0 {
+			cbCooldown = time.Duration(alist.CircuitBreakerCooldownSecs) * time.Second
 		}
-		if cfg.AlistServer.RetryMaxAttempts >= 0 {
-			retrier.MaxRetries = cfg.AlistServer.RetryMaxAttempts
+		if alist.RetryMaxAttempts >= 0 {
+			retrier.MaxRetries = alist.RetryMaxAttempts
 		}
-		if cfg.AlistServer.MaxActiveStreams > 0 {
-			maxActiveStreams = cfg.AlistServer.MaxActiveStreams
+		if alist.MaxActiveStreams > 0 {
+			maxActiveStreams = alist.MaxActiveStreams
 		}
 	}
 	return &StreamProxy{
@@ -175,10 +180,14 @@ func (s *StreamProxy) StreamLimitStats() map[string]interface{} {
 }
 
 func newDecryptedBlockCacheFromConfig(cfg *config.Config) *decryptedBlockCache {
-	if cfg == nil || !cfg.AlistServer.EnableDecryptedBlockCache {
+	if cfg == nil {
 		return nil
 	}
-	cacheMB := cfg.AlistServer.DecryptedBlockCacheMb
+	alist := cfg.AlistServerSnapshot()
+	if !alist.EnableDecryptedBlockCache {
+		return nil
+	}
+	cacheMB := alist.DecryptedBlockCacheMb
 	if cacheMB <= 0 {
 		cacheMB = 128
 	}
@@ -188,7 +197,7 @@ func newDecryptedBlockCacheFromConfig(cfg *config.Config) *decryptedBlockCache {
 	if cacheMB > 2048 {
 		cacheMB = 2048
 	}
-	blockKB := cfg.AlistServer.DecryptedBlockSizeKb
+	blockKB := alist.DecryptedBlockSizeKb
 	if blockKB <= 0 {
 		blockKB = 256
 	}

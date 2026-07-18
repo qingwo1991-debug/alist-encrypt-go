@@ -43,7 +43,7 @@ func (s *StreamProxy) shouldFollowRedirect(passwdInfo *config.PasswdInfo) bool {
 	if s == nil || s.cfg == nil {
 		return false
 	}
-	if !s.cfg.AlistServer.FollowRedirectForDecrypt {
+	if !s.cfg.AlistServerSnapshot().FollowRedirectForDecrypt {
 		return false
 	}
 	return passwdInfo != nil && passwdInfo.Enable
@@ -57,20 +57,23 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 	}
 
 	maxHops := 2
-	if s.cfg != nil && s.cfg.AlistServer.RedirectMaxHops > 0 {
-		maxHops = s.cfg.AlistServer.RedirectMaxHops
+	if s.cfg != nil {
+		if configured := s.cfg.AlistServerSnapshot().RedirectMaxHops; configured > 0 {
+			maxHops = configured
+		}
 	}
+	currentHeaders := req.Header.Clone()
 
 	for hop := 0; hop < maxHops; hop++ {
 		newReq, err := httputil.NewRequest(req.Method, currentURL).
 			WithContext(req.Context()).
-			CopyHeaders(req).
 			Build()
 		if err != nil {
 			return &StreamOutcome{Err: errors.NewInternalWithCause("failed to create redirect request", err)}
 		}
+		newReq.Header = currentHeaders.Clone()
 
-		sanitizeRedirectHeaders(newReq, req.URL, currentURL)
+		sanitizeRedirectHeaders(newReq, baseURL, currentURL)
 		applyStrategyHeaders(newReq, strategy)
 		if strategy == StreamStrategyRange {
 			upstreamRange := buildUpstreamRangeHeader(rangeHeader, meta)
@@ -90,6 +93,10 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 		if rangeHeader != "" && s.shouldSkipRange(currentURL, compatStorageKey) {
 			newReq.Header.Del("Range")
 		}
+		// Carry the sanitized header set forward. Rebuilding every hop from the
+		// original client request would reintroduce credentials after a
+		// cross-origin redirect followed by a same-origin CDN redirect.
+		currentHeaders = newReq.Header.Clone()
 
 		nextResp, err := s.client.Do(newReq)
 		if err != nil {
@@ -111,6 +118,7 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 			continue
 		}
 
+		defer nextResp.Body.Close()
 		return s.streamDecryptResponse(w, newReq, nextResp, passwdInfo, fileSize, meta, rangeHeader, strategy, currentURL, compatStorageKey)
 	}
 
@@ -151,17 +159,39 @@ func sanitizeRedirectHeaders(req *http.Request, originalURL *url.URL, targetURL 
 	if err != nil {
 		return
 	}
-	originalHost := ""
-	if originalURL != nil {
-		originalHost = originalURL.Host
-	}
-	if target.Host != "" && originalHost != "" && !strings.EqualFold(target.Host, originalHost) {
+	if !sameRedirectOrigin(originalURL, target) {
 		req.Header.Del("Authorization")
 		req.Header.Del("Cookie")
 	}
-	// Always strip WebDAV-specific and other foreign headers on redirect.
-	// CDNs reject requests with unusual headers from WebDAV players.
-	StripWebDAVHeaders(req)
+	// Always strip WebDAV-specific headers. Authentication is removed above only
+	// when the redirect crosses hosts; same-host protected redirects still need it.
+	stripWebDAVHeaders(req)
 	req.Header.Del("Referer")
 	req.Host = ""
+}
+
+func sameRedirectOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil || left.Scheme == "" || right.Scheme == "" {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		redirectOriginPort(left) == redirectOriginPort(right)
+}
+
+func redirectOriginPort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }

@@ -264,9 +264,14 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	}
 	p.debugf("playback", "download attempts path=%s range=%q count=%d", filePath, clientRangeHeader, len(attempts))
 
-	client := p.httpClient
+	runtime := p.clientSnapshot()
+	client := runtime.httpClient
 	if r.Method == http.MethodGet {
-		client = p.streamClient
+		client = runtime.streamClient
+	}
+	if client == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
 	}
 	retryableStatus := map[int]bool{
 		http.StatusBadRequest:                   true,
@@ -321,7 +326,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")
 		log.Infof("%s handleDownload backend redirect: path=%s statusCode=%d location=%s",
-			internal.LogPrefix(ctx, internal.TagDownload), filePath, resp.StatusCode, location)
+			internal.LogPrefix(ctx, internal.TagDownload), filePath, resp.StatusCode, safeURLForLog(location))
 
 		if encPath != nil && encPath.Enable && location != "" {
 			driver := p.inferDriverFromPath(ctx, filePath, r.Header)
@@ -347,7 +352,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 				redirectKey, url.QueryEscape(r.URL.Path))
 
 			log.Infof("%s handleDownload proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
-				internal.LogPrefix(ctx, internal.TagDownload), filePath, location, proxyLocation, fileSize)
+				internal.LogPrefix(ctx, internal.TagDownload), filePath, safeURLForLog(location), proxyLocation, fileSize)
 
 			// 复制响应头（排除 Location）
 			for key, values := range resp.Header {
@@ -416,7 +421,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 					http.Error(w, reqErr.Error(), http.StatusInternalServerError)
 					return
 				}
-				resp, err = p.streamClient.Do(req2)
+				resp, err = client.Do(req2)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadGateway)
 					return
@@ -532,7 +537,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 				RawURL:         targetForMeta,
 			})
 			log.Infof("%s handleDownload: v2 meta target=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d fileSize=%d->%d",
-				internal.LogPrefix(ctx, internal.TagDecrypt), targetForMeta, clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
+				internal.LogPrefix(ctx, internal.TagDecrypt), safeURLForLog(targetForMeta), clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize, originalSize, fileSize)
 		}
 
 		var encryptor FlowEncryptor

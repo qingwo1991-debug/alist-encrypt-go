@@ -12,19 +12,19 @@ import (
 )
 
 type ProviderStrategyState struct {
-	Provider       string                       `json:"provider"`
-	Preferred      proxy.StreamStrategy         `json:"preferred"`
-	Failures       map[proxy.StreamStrategy]int `json:"failures"`
-	CapabilityFailCount int                     `json:"capability_fail_count"`
-	LastValidatedAt    time.Time                `json:"last_validated_at"`
-	SuccessStreak  int                          `json:"success_streak"`
-	CooldownUntil  time.Time                    `json:"cooldown_until"`
-	LastDowngrade  time.Time                    `json:"last_downgrade"`
-	LastUpdate     time.Time                    `json:"last_update"`
-	LastFailure    string                       `json:"last_failure"`
-	LastStrategy   proxy.StreamStrategy         `json:"last_strategy"`
-	TotalFailures  int                          `json:"total_failures"`
-	TotalSuccesses int                          `json:"total_successes"`
+	Provider            string                       `json:"provider"`
+	Preferred           proxy.StreamStrategy         `json:"preferred"`
+	Failures            map[proxy.StreamStrategy]int `json:"failures"`
+	CapabilityFailCount int                          `json:"capability_fail_count"`
+	LastValidatedAt     time.Time                    `json:"last_validated_at"`
+	SuccessStreak       int                          `json:"success_streak"`
+	CooldownUntil       time.Time                    `json:"cooldown_until"`
+	LastDowngrade       time.Time                    `json:"last_downgrade"`
+	LastUpdate          time.Time                    `json:"last_update"`
+	LastFailure         string                       `json:"last_failure"`
+	LastStrategy        proxy.StreamStrategy         `json:"last_strategy"`
+	TotalFailures       int                          `json:"total_failures"`
+	TotalSuccesses      int                          `json:"total_successes"`
 }
 
 type StrategySelectorConfig struct {
@@ -56,12 +56,16 @@ func NewStrategySelector(cfg *config.Config, store StrategyStore) (*StrategySele
 	if store == nil {
 		store = NewMemoryStrategyStore()
 	}
+	alist := config.AlistServer{}
+	if cfg != nil {
+		alist = cfg.AlistServerSnapshot()
+	}
 
 	selector := &StrategySelector{
 		cfg: StrategySelectorConfig{
-			FailToDowngrade:  cfg.AlistServer.StrategyFailToDowngrade,
-			SuccessToRecover: cfg.AlistServer.StrategySuccessToRecover,
-			Cooldown:         time.Duration(cfg.AlistServer.StrategyCooldownMinutes) * time.Minute,
+			FailToDowngrade:  alist.StrategyFailToDowngrade,
+			SuccessToRecover: alist.StrategySuccessToRecover,
+			Cooldown:         time.Duration(alist.StrategyCooldownMinutes) * time.Minute,
 			ProviderFallbacks: []proxy.StreamStrategy{
 				proxy.StreamStrategyRange,
 				proxy.StreamStrategyChunked,

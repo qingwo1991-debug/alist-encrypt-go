@@ -49,9 +49,9 @@ const childMethod = () => {
   return 'childMethod'
 }
 
-const vm = getCurrentInstance()?.proxy
+const fatherMethod = inject<() => void>('fatherMethod')
 const getFatherMethod = () => {
-  vm?.$parent?.fartherMethod()
+  fatherMethod?.()
 }
 //emit
 // 定义emit事件

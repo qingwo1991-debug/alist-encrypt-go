@@ -1,0 +1,1 @@
+import{C as e,D as t,K as n,N as r,X as i}from"./vue.runtime.esm-bundler-DnU87Vq5.js";import{t as a}from"./_plugin-vue_export-helper-BDNMzG2s.js";r();var o={};function s(r,a){let o=i(`el-alert`);return n(),e(`div`,null,[t(o,{closable:!1,title:`menu 1-3`,type:`success`})])}var c=a(o,[[`render`,s]]);export{c as default};

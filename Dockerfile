@@ -1,5 +1,5 @@
 # Frontend build stage
-FROM node:20-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/enc-webui
 
@@ -10,7 +10,7 @@ COPY enc-webui/ ./
 RUN npm run build
 
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26.5-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 

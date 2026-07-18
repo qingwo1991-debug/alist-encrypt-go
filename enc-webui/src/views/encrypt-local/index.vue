@@ -35,7 +35,7 @@
           </el-form-item>
           <div class="form-grid">
             <el-form-item label="密码">
-              <el-input v-model="folderForm.password" placeholder="12341234" />
+              <el-input v-model="folderForm.password" type="password" show-password autocomplete="new-password" placeholder="请输入加解密密码" />
             </el-form-item>
             <el-form-item label="后缀">
               <el-input v-model="folderForm.encSuffix" placeholder=".bin / 默认原文件名后缀" />
@@ -61,51 +61,35 @@
   </div>
 </template>
 <script setup>
-import { ref } from 'vue'
-import { useRoute } from 'vue-router'
-import { useConfigStore } from '@/store/config'
-import { useBasicStore } from '@/store/basic'
+import { reactive, ref } from 'vue'
 import { usePageStore } from '@/store/pageStore'
 import { encryptFileReq } from '@/api/user'
-
-import { CirclePlus, Folder } from '@element-plus/icons-vue'
-import { random } from 'lodash'
+import { ElMessage } from 'element-plus'
 
 const labelPosition = ref('right')
-const dialogFolderFormVisible = ref(false)
-const activeName = ref('encode')
-
-const basicStore = useBasicStore()
-const { settings, userInfo } = basicStore
 
 const { folderInfo, setFolderInfo } = usePageStore()
-
-const { setLanguage } = useConfigStore()
-const route = useRoute()
-const changeLanguage = (langParam) => {
-  setLanguage(langParam)
-}
 
 const folderForm = reactive({
   folderPath: folderInfo.folderPath,
   outPath: folderInfo.outPath,
   encType: 'aesctr',
-  password: '123456', // 文件夹密码
+  password: '',
   operation: 'enc',
   encName: false,
   encSuffix: ''
 })
 
-const alistConfigForm = reactive({})
 const refSearchForm = ref()
 
-const delPasswd = (index) => {
-  alistConfigForm.passwdList.splice(index, 1)
-}
-
 const encryptFile = () => {
-  setFolderInfo(Object.assign({}, folderForm))
-  encryptFileReq(folderForm).then((res) => {
+  if (!String(folderForm.password ?? '').trim()) {
+    ElMessage.error('请输入加解密密码')
+    return
+  }
+
+  setFolderInfo({ folderPath: folderForm.folderPath, outPath: folderForm.outPath })
+  return encryptFileReq(folderForm).then((res) => {
     ElMessage.success(res.msg)
   })
 }

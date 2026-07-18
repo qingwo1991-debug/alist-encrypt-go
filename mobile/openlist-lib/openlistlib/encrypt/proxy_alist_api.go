@@ -558,7 +558,12 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClientSnapshot()
+	if client == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -658,7 +663,12 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	resp, err := p.httpClient.Do(req)
+	client := p.httpClientSnapshot()
+	if client == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -718,7 +728,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 							}
 						}
 					}
-					resp2, err3 := p.httpClient.Do(req2)
+					resp2, err3 := client.Do(req2)
 					if err3 != nil {
 						return false
 					}
@@ -801,7 +811,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 				p.noteProviderCandidate(provider)
 				p.noteDriverCandidate(driver)
 
-				log.Infof("%s handleFsGet: path=%s, size=%v, rawURL=%s", internal.LogPrefix(ctx, internal.TagProxy), originalPath, size, rawURL)
+				log.Infof("%s handleFsGet: path=%s, size=%v, rawURL=%s", internal.LogPrefix(ctx, internal.TagProxy), originalPath, size, safeURLForLog(rawURL))
 
 				p.storeFileCache(originalPath, &FileInfo{
 					Name:           path.Base(originalPath),
@@ -1286,9 +1296,14 @@ func (p *ProxyServer) handleFsPutCommon(w http.ResponseWriter, r *http.Request, 
 		rewriteUploadHeadersForV2(req, uploadMeta, startOffset, r.Header.Get("Content-Range"))
 	}
 
-	uploadClient := p.streamClient
+	runtime := p.clientSnapshot()
+	uploadClient := runtime.streamClient
 	if uploadClient == nil {
-		uploadClient = p.httpClient
+		uploadClient = runtime.httpClient
+	}
+	if uploadClient == nil {
+		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
+		return
 	}
 	p.debugf("upload", "%s Using stream upload client for %s", internal.LogPrefix(ctx, internal.TagUpload), filePath)
 	resp, err := uploadClient.Do(req)

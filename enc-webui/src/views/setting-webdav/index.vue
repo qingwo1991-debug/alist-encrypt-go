@@ -47,7 +47,7 @@
                 <div class="service-card__title">{{ config.name }}</div>
                 <div class="service-card__meta">{{ config.describe || 'WebDAV 服务' }}</div>
               </div>
-              <el-switch v-model="config.enable" @change="updateWebdavConfig(config)" />
+              <el-switch v-model="config.enable" @change="(enabled) => updateWebdavConfig(config, enabled)" />
             </div>
 
             <div class="service-card__body">
@@ -134,7 +134,7 @@
                 </el-form-item>
                 <div class="form-grid">
                   <el-form-item label="密码">
-                    <el-input v-model="item.password" placeholder="123456" />
+                    <el-input v-model="item.password" type="password" show-password autocomplete="new-password" placeholder="请输入加密密码" />
                   </el-form-item>
                   <el-form-item label="备注">
                     <el-input v-model="item.describe" placeholder="my video" />
@@ -165,10 +165,11 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { delWebdavConfigReq, getWebdavConfigReq, saveWebdavConfigReq, updateWebdavConfigReq } from '@/api/user'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
+import { createPasswordRule, hasEnabledRuleWithoutPassword } from '@/utils/password-rules'
 
 const dialogFormVisible = ref(false)
 const configList = reactive([])
@@ -182,22 +183,18 @@ const configTemp = {
   serverPort: '5244',
   https: false,
   enable: true,
-  passwdList: [
-    {
-      id: Math.random(),
-      password: '123456',
-      encType: 'aesctr',
-      enable: false,
-      encName: false,
-      encSuffix: '',
-      describe: 'my video',
-      encPath: '/aliyun/encrypt/*'
-    }
-  ]
+  passwdList: [createPasswordRule({ describe: 'my video', encPath: '/aliyun/encrypt/*' })]
+}
+
+const replaceConfigTemp = (config) => {
+  Object.keys(configFormTemp).forEach((key) => {
+    delete configFormTemp[key]
+  })
+  Object.assign(configFormTemp, JSON.parse(JSON.stringify(config)))
 }
 
 const resetConfigTemp = () => {
-  Object.assign(configFormTemp, JSON.parse(JSON.stringify(configTemp)))
+  replaceConfigTemp(configTemp)
 }
 
 resetConfigTemp()
@@ -206,16 +203,7 @@ const enabledCount = computed(() => configList.filter((item) => item.enable).len
 const passwordRuleCount = computed(() => configList.reduce((sum, item) => sum + (item.passwdList?.length || 0), 0))
 
 const addPasswd = () => {
-  configFormTemp.passwdList.push({
-    id: Math.random(),
-    password: '123456',
-    encType: 'aesctr',
-    enable: true,
-    encName: false,
-    encSuffix: '',
-    describe: 'my video',
-    encPath: '/dav/encrypt/*'
-  })
+  configFormTemp.passwdList.push(createPasswordRule({ describe: 'my video', encPath: '/dav/encrypt/*' }))
 }
 
 const delPasswd = (index) => {
@@ -224,7 +212,7 @@ const delPasswd = (index) => {
 
 const editConfig = (config) => {
   dialogFormVisible.value = true
-  Object.assign(configFormTemp, JSON.parse(JSON.stringify(config)))
+  replaceConfigTemp(config)
 }
 
 const addConfig = () => {
@@ -232,12 +220,30 @@ const addConfig = () => {
   resetConfigTemp()
 }
 
-const updateWebdavConfig = async (config) => {
-  const result = await updateWebdavConfigReq(config)
+const updateWebdavConfig = async (config, enabled = config.enable) => {
+  const previousEnable = !enabled
+  if (enabled && hasEnabledRuleWithoutPassword(config.passwdList)) {
+    config.enable = previousEnable
+    ElMessage.error('已启用的密码规则必须填写密码')
+    return
+  }
+
+  let result
+  try {
+    result = await updateWebdavConfigReq(config)
+  } catch {
+    config.enable = previousEnable
+    return
+  }
   refreshConfigList(result)
 }
 
 const saveWebdavConfig = async () => {
+  if (hasEnabledRuleWithoutPassword(configFormTemp.passwdList)) {
+    ElMessage.error('已启用的密码规则必须填写密码')
+    return
+  }
+
   let result = null
   if (configFormTemp.id) {
     result = await updateWebdavConfigReq(configFormTemp)
@@ -249,12 +255,15 @@ const saveWebdavConfig = async () => {
 }
 
 const delWebdavConfig = async (id) => {
-  ElMessageBox.confirm('Are you sure to delete?').then(async () => {
-    const result = await delWebdavConfigReq({ id })
-    refreshConfigList(result)
-    dialogFormVisible.value = false
-    ElMessage(result.msg)
-  })
+  try {
+    await ElMessageBox.confirm('Are you sure to delete?')
+  } catch {
+    return
+  }
+  const result = await delWebdavConfigReq({ id })
+  refreshConfigList(result)
+  dialogFormVisible.value = false
+  ElMessage(result.msg)
 }
 
 const refreshConfigList = async (result) => {

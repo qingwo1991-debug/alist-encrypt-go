@@ -8,7 +8,6 @@ module.exports = defineConfig({
   },
   globals: {
     defineOptions: true,
-    $ref: true
   },
   plugins: ['@typescript-eslint', 'prettier', 'unicorn'],
   extends: [

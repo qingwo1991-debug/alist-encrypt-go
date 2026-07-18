@@ -5,16 +5,26 @@ Android client for OpenList with bundled encryption proxy support.
 ## Build
 
 ```bash
-cd mobile/openlist-lib/scripts
-./init_openlist.sh
-./init_gomobile.sh
-./gobind.sh
+cd mobile/enc-webui
+npm ci
+npm run build
 
-cd ../../..
-cd mobile
+cd ../openlist-lib
+bash scripts/install_enc_web.sh
+
+cd scripts
+./init_gomobile.sh
+./gobind.sh release all
+
+cd ../../
 flutter pub get
 flutter build apk --release --split-per-abi
 ```
+
+The normal build uses the reviewed `mobile/openlist-lib` source checked into
+this repository. `init_openlist.sh` and `init_web.sh` are upstream refresh
+tools; do not run them as part of a release build because they replace reviewed
+source/assets with network-fetched content.
 
 Before the first release build, generate the local reusable signing keystore:
 

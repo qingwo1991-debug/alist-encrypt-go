@@ -88,7 +88,7 @@ func CreateStorage(ctx context.Context, storage model.Storage) (uint, error) {
 		storage.MountPath,
 		storage.Driver,
 	)
-	log.Debugf("storage %+v is created", storageDriver)
+	log.Debugf("storage id=%d mount_path=%s driver=%s is created", storage.ID, storage.MountPath, storage.Driver)
 	return storage.ID, nil
 }
 
@@ -105,7 +105,7 @@ func LoadStorage(ctx context.Context, storage model.Storage) error {
 
 	err = initStorage(ctx, storage, storageDriver)
 	go callStorageHooks("add", storageDriver)
-	log.Debugf("storage %+v is created", storageDriver)
+	log.Debugf("storage id=%d mount_path=%s driver=%s is loaded", storage.ID, storage.MountPath, storage.Driver)
 	return err
 }
 
@@ -132,12 +132,11 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 	err = utils.Json.UnmarshalFromString(driverStorage.Addition, storageDriver.GetAddition())
 	if err != nil {
 		log.Warnf(
-			"[mobile_storage_create] addition unmarshal failed mount_path=%s driver=%s err=%v raw_addition=%s",
+			"[storage_init] addition unmarshal failed mount_path=%s driver=%s",
 			driverStorage.MountPath,
 			driverStorage.Driver,
-			err,
-			driverStorage.Addition,
 		)
+		err = errors.New("invalid storage addition JSON")
 	}
 	if err == nil {
 		if ref, ok := storageDriver.(driver.Reference); ok {
@@ -283,7 +282,7 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 
 	err = initStorage(ctx, storage, storageDriver)
 	go callStorageHooks("update", storageDriver)
-	log.Debugf("storage %+v is update", storageDriver)
+	log.Debugf("storage id=%d mount_path=%s driver=%s is updated", storage.ID, storage.MountPath, storage.Driver)
 	return err
 }
 

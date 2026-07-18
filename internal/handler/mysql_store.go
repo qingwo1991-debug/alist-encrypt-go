@@ -228,6 +228,7 @@ func preserveV2FileMetaRecord(existing *mysqlstore.FileMetaRecord, incoming *mys
 	}
 	if incoming.RawURL == "" {
 		incoming.RawURL = existing.RawURL
+		incoming.RawURLAuthScope = existing.RawURLAuthScope
 	}
 	if incoming.Sign == "" {
 		incoming.Sign = existing.Sign

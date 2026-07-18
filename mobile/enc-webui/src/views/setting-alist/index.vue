@@ -71,7 +71,7 @@
                     <el-switch v-model="item.enable" class="ml-2" />
                   </el-form-item>
                   <el-form-item label="密码">
-                    <el-input v-model="item.password" style="max-width: 280px" placeholder="12341234" />
+                    <el-input v-model="item.password" style="max-width: 280px" type="password" show-password autocomplete="new-password" placeholder="请输入加密密码" />
                   </el-form-item>
                   <el-form-item label="文件名">
                     <span class="helper-inline">加密</span>
@@ -114,7 +114,7 @@
                   </el-radio-group>
                 </el-form-item>
                 <el-form-item label="文件夹密码">
-                  <el-input v-model="folderForm.folderPasswd" style="max-width: 260px" placeholder="123456" />
+                  <el-input v-model="folderForm.folderPasswd" style="max-width: 260px" type="password" show-password autocomplete="new-password" placeholder="请输入文件夹密码" />
                 </el-form-item>
                 <el-form-item label="加密结果">
                   {{ folderForm.folderNameEnc }}
@@ -143,10 +143,11 @@
   </div>
 </template>
 <script setup>
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { decodeFoldNameReq, encodeFoldNameReq, getAlistConfigReq, saveAlistConfigReq } from '@/api/user'
 import { Delete } from '@element-plus/icons-vue'
+import { createPasswordRule, hasEnabledRuleWithoutPassword } from '@/utils/password-rules'
 
 const labelPosition = ref('right')
 const dialogFolderFormVisible = ref(false)
@@ -156,7 +157,7 @@ const expandedSections = ref(['connection', 'password'])
 const folderForm = reactive({
   folderName: 'my video',
   encType: 'aesctr',
-  folderPasswd: '123456',
+  folderPasswd: '',
   folderNameEnc: '',
   folderEncType: 'rc4',
   password: ''
@@ -169,31 +170,11 @@ const alistConfigForm = reactive({
   serverHost: '192.168.1.100',
   serverPort: '5244',
   https: false,
-  passwdList: [
-    {
-      id: Math.random(),
-      password: '123456',
-      encType: 'aesctr',
-      enable: false,
-      encName: false,
-      encSuffix: '',
-      describe: 'my video',
-      encPath: '333'
-    }
-  ]
+  passwdList: [createPasswordRule({ describe: 'my video', encPath: '333' })]
 })
 
 const addPasswd = () => {
-  alistConfigForm.passwdList.push({
-    id: Math.random(),
-    password: '123456',
-    encType: 'aesctr',
-    enable: true,
-    encName: false,
-    encSuffix: '',
-    describe: 'my video',
-    encPath: '/aliyun/encrypt/*'
-  })
+  alistConfigForm.passwdList.push(createPasswordRule({ describe: 'my video', encPath: '/aliyun/encrypt/*' }))
 }
 
 const delPasswd = (index) => {
@@ -217,7 +198,12 @@ const decodeFoldName = async () => {
   folderForm.folderEncType = res.data.folderEncType
 }
 
-const saveAlistConfig = () => {
+const saveAlistConfig = async () => {
+  if (hasEnabledRuleWithoutPassword(alistConfigForm.passwdList)) {
+    ElMessage.error('已启用的密码规则必须填写密码')
+    return
+  }
+
   for (const passwdInfo of alistConfigForm.passwdList) {
     if (typeof passwdInfo.encPath === 'string') {
       passwdInfo.encPath = passwdInfo.encPath
@@ -227,9 +213,13 @@ const saveAlistConfig = () => {
         .join(',')
     }
   }
-  saveAlistConfigReq(alistConfigForm).then(res => {
-    ElMessage.success(res.msg)
-  })
+  let res
+  try {
+    res = await saveAlistConfigReq(alistConfigForm)
+  } catch {
+    return
+  }
+  ElMessage.success(res.msg)
 }
 
 onMounted(async () => {

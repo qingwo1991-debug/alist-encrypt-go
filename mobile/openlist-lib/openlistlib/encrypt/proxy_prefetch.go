@@ -76,9 +76,13 @@ func (p *ProxyServer) prefetchEncryptedSubDirs(parentCtx context.Context, reqDat
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(parentCtx, p.probeTimeout())
+			runtime := p.runtimeSnapshot()
+			if runtime.config == nil || runtime.httpClient == nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(parentCtx, time.Duration(clampSeconds(runtime.config.ProbeTimeoutSeconds, 5, 1, 30))*time.Second)
 			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.getAlistURL()+"/api/fs/list", bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, getAlistURLFromConfig(runtime.config)+"/api/fs/list", bytes.NewReader(body))
 			if err != nil {
 				return
 			}
@@ -92,7 +96,7 @@ func (p *ProxyServer) prefetchEncryptedSubDirs(parentCtx context.Context, reqDat
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			resp, err := p.httpClient.Do(req)
+			resp, err := runtime.httpClient.Do(req)
 			if err != nil {
 				return
 			}

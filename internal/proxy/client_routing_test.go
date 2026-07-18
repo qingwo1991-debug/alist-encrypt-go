@@ -91,3 +91,35 @@ func TestProxyFuncFixedMode(t *testing.T) {
 		t.Fatalf("expected direct route for private cidr, got %#v", route)
 	}
 }
+
+func TestProxyFuncUsesUpdatedRoutingConfig(t *testing.T) {
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	fn := proxyFunc(cfg)
+	req, err := http.NewRequest(http.MethodGet, "https://drive.google.com/file", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	route, err := fn(req)
+	if err != nil {
+		t.Fatalf("initial proxy route: %v", err)
+	}
+	if route != nil {
+		t.Fatalf("default direct mode returned route %#v", route)
+	}
+
+	updated := cfg.ProxySnapshot()
+	updated.Mode = "fixed"
+	updated.URL = "http://127.0.0.1:7890"
+	if err := cfg.UpdateProxy(updated); err != nil {
+		t.Fatalf("update proxy config: %v", err)
+	}
+
+	route, err = fn(req)
+	if err != nil {
+		t.Fatalf("updated proxy route: %v", err)
+	}
+	if route == nil || route.Host != "127.0.0.1:7890" {
+		t.Fatalf("proxy function kept stale routing config: %#v", route)
+	}
+}

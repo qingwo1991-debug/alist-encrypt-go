@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # Build version information
 builtAt="${OPENLIST_BUILT_AT:-$(date +'%F %T %z')}"
 gitAuthor="${OPENLIST_GIT_AUTHOR:-The OpenList Projects Contributors <noreply@openlist.team>}"
@@ -53,11 +55,19 @@ if [ -f ../go.mod ]; then
     chmod +x scripts/fix_ios_dependencies.sh
     ./scripts/fix_ios_dependencies.sh
     
-    # Update mobile packages
-    echo "Updating mobile packages..."
-    go get -u golang.org/x/mobile/...
-    go install golang.org/x/mobile/cmd/gobind@latest
-    go install golang.org/x/mobile/cmd/gomobile@latest
+    # Install the exact x/mobile toolchain reviewed and pinned by this module.
+    echo "Installing pinned mobile packages..."
+    if ! MOBILE_VERSION="$(go list -mod=readonly -m -f '{{.Version}}' golang.org/x/mobile)"; then
+        echo "Error: Cannot resolve golang.org/x/mobile from go.mod"
+        exit 1
+    fi
+    if [ -z "$MOBILE_VERSION" ] || [ "$MOBILE_VERSION" = "<no value>" ]; then
+        echo "Error: golang.org/x/mobile has no pinned version in go.mod"
+        exit 1
+    fi
+    echo "Using golang.org/x/mobile $MOBILE_VERSION"
+    go install "golang.org/x/mobile/cmd/gobind@${MOBILE_VERSION}"
+    go install "golang.org/x/mobile/cmd/gomobile@${MOBILE_VERSION}"
     
     # Reinitialize gomobile
     echo "Reinitializing gomobile..."
@@ -73,10 +83,7 @@ if [ -f ../go.mod ]; then
     
     # Use build tags to exclude problematic packages on iOS
     echo "Attempting gomobile bind with iOS tags..."
-    gomobile bind -ldflags "$ldflags" -v -target="ios" -tags="ios,mobile" ./openlistlib 2>&1 | tee ios_build.log
-    
-    # Check the exit status
-    if [ $? -ne 0 ]; then
+    if ! gomobile bind -ldflags "$ldflags" -v -target="ios" -tags="ios,mobile" ./openlistlib 2>&1 | tee ios_build.log; then
         echo "Error: gomobile bind failed"
         echo "=== Build log ==="
         cat ios_build.log 2>/dev/null || echo "No build log available"
@@ -91,9 +98,7 @@ if [ -f ../go.mod ]; then
             
             # Try with minimal tags
             echo "Retrying with minimal build tags..."
-            gomobile bind -ldflags "$ldflags" -v -target="ios" ./openlistlib 2>&1 | tee ios_build_minimal.log
-            
-            if [ $? -ne 0 ]; then
+            if ! gomobile bind -ldflags "$ldflags" -v -target="ios" ./openlistlib 2>&1 | tee ios_build_minimal.log; then
                 echo "Minimal build also failed:"
                 cat ios_build_minimal.log 2>/dev/null || echo "No minimal build log available"
                 exit 1

@@ -57,6 +57,7 @@ type FileMetaRecord struct {
 	ETag              string
 	ContentType       string
 	RawURL            string
+	RawURLAuthScope   string
 	Sign              string
 	UpdatedAt         time.Time
 	LastAccessed      time.Time

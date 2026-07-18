@@ -96,9 +96,9 @@ const selectPageReq = () => {
   })
 }
 //重置
-const refSearchForm = $ref()
+const refSearchForm = ref()
 const resetForm = () => {
-  refSearchForm.resetFields()
+  refSearchForm.value?.resetFields()
   dateRangePacking(['', ''])
   resetPageReq()
 }

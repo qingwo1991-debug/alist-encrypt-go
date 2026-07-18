@@ -235,8 +235,8 @@ func (d *Cloud189) oldUpload(dstDir model.Obj, file model.FileStreamer) error {
 	if utils.Json.Get(res.Body(), "MD5").ToString() != "" {
 		return nil
 	}
-	log.Debugf("%s", res.String())
-	return errors.New(res.String())
+	log.Debugf("legacy upload failed status=%d body_bytes=%d", res.StatusCode(), len(res.Body()))
+	return fmt.Errorf("legacy upload failed: status %d", res.StatusCode())
 }
 
 func (d *Cloud189) getSessionKey() (string, error) {
@@ -413,7 +413,7 @@ func (d *Cloud189) newUpload(ctx context.Context, dstDir model.Obj, file model.F
 			return err
 		}
 		uploadData := resp.UploadUrls["partNumber_"+strconv.FormatInt(i, 10)]
-		log.Debugf("uploadData: %+v", uploadData)
+		log.Debugf("uploading signed part %d", i)
 		requestURL := uploadData.RequestURL
 		uploadHeaders := strings.Split(decodeURIComponent(uploadData.RequestHeader), "&")
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, requestURL, driver.NewLimitedUploadStream(ctx, bytes.NewReader(byteData)))
@@ -421,15 +421,23 @@ func (d *Cloud189) newUpload(ctx context.Context, dstDir model.Obj, file model.F
 			return err
 		}
 		for _, v := range uploadHeaders {
-			i := strings.Index(v, "=")
-			req.Header.Set(v[0:i], v[i+1:])
+			key, value, ok := strings.Cut(v, "=")
+			key = strings.TrimSpace(key)
+			if !ok || key == "" {
+				return errors.New("invalid signed upload header")
+			}
+			req.Header.Set(key, value)
 		}
 		r, err := base.HttpClient.Do(req)
 		if err != nil {
 			return err
 		}
-		log.Debugf("%+v %+v", r, r.Request.Header)
+		log.Debugf("signed part upload response status=%d", r.StatusCode)
+		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
 		_ = r.Body.Close()
+		if r.StatusCode < http.StatusOK || r.StatusCode >= http.StatusMultipleChoices {
+			return fmt.Errorf("signed part upload failed: status %d", r.StatusCode)
+		}
 		up(50 + float64(i)*50/float64(count))
 	}
 	res, err = d.uploadRequest("/person/commitMultiUploadFile", map[string]string{

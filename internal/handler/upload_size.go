@@ -19,12 +19,6 @@ func resolveUploadFileSize(r *http.Request) (int64, error) {
 		return 0, fmt.Errorf("request is nil")
 	}
 
-	if v := strings.TrimSpace(r.Header.Get("Content-Length")); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			return n, nil
-		}
-	}
-
 	if total := parseContentRangeTotal(r.Header.Get("Content-Range")); total > 0 {
 		return total, nil
 	}
@@ -34,6 +28,12 @@ func resolveUploadFileSize(r *http.Request) (int64, error) {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 				return n, nil
 			}
+		}
+	}
+
+	if v := strings.TrimSpace(r.Header.Get("Content-Length")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n, nil
 		}
 	}
 
@@ -64,26 +64,76 @@ func parseContentRangeTotal(contentRange string) int64 {
 // parseContentRangeStart extracts start offset from "bytes start-end/total".
 // Returns (0, false, nil) when header is absent.
 func parseContentRangeStart(contentRange string) (int64, bool, error) {
+	parsed, present, err := parseUploadContentRange(contentRange)
+	if err != nil || !present {
+		return 0, present, err
+	}
+	return parsed.start, true, nil
+}
+
+type uploadContentRange struct {
+	start      int64
+	end        int64
+	total      int64
+	totalKnown bool
+}
+
+func parseUploadContentRange(contentRange string) (uploadContentRange, bool, error) {
+	var parsed uploadContentRange
 	contentRange = strings.TrimSpace(contentRange)
 	if contentRange == "" {
-		return 0, false, nil
+		return parsed, false, nil
 	}
 	if !strings.HasPrefix(strings.ToLower(contentRange), "bytes ") {
-		return 0, true, fmt.Errorf("invalid content-range unit")
+		return parsed, true, fmt.Errorf("invalid content-range unit")
 	}
 	spec := strings.TrimSpace(contentRange[len("bytes "):])
 	slash := strings.Index(spec, "/")
-	if slash <= 0 {
-		return 0, true, fmt.Errorf("invalid content-range format")
+	if slash <= 0 || strings.Contains(spec[slash+1:], "/") {
+		return parsed, true, fmt.Errorf("invalid content-range format")
 	}
 	rangePart := strings.TrimSpace(spec[:slash])
 	parts := strings.SplitN(rangePart, "-", 2)
 	if len(parts) != 2 {
-		return 0, true, fmt.Errorf("invalid content-range range")
+		return parsed, true, fmt.Errorf("invalid content-range range")
 	}
 	start, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
 	if err != nil || start < 0 {
-		return 0, true, fmt.Errorf("invalid content-range start")
+		return parsed, true, fmt.Errorf("invalid content-range start")
 	}
-	return start, true, nil
+	end, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	if err != nil || end < start {
+		return parsed, true, fmt.Errorf("invalid content-range end")
+	}
+	totalText := strings.TrimSpace(spec[slash+1:])
+	if totalText == "" {
+		return parsed, true, fmt.Errorf("invalid content-range total")
+	}
+	parsed = uploadContentRange{start: start, end: end}
+	if totalText != "*" {
+		total, parseErr := strconv.ParseInt(totalText, 10, 64)
+		if parseErr != nil || total <= 0 || end >= total {
+			return uploadContentRange{}, true, fmt.Errorf("invalid content-range total")
+		}
+		parsed.total = total
+		parsed.totalKnown = true
+	}
+	return parsed, true, nil
+}
+
+func validateUploadContentRange(contentRange string, fileSize, contentLength int64) (int64, bool, error) {
+	parsed, present, err := parseUploadContentRange(contentRange)
+	if err != nil || !present {
+		return 0, present, err
+	}
+	if fileSize <= 0 || parsed.end >= fileSize {
+		return 0, true, fmt.Errorf("content-range exceeds upload size")
+	}
+	if parsed.totalKnown && parsed.total != fileSize {
+		return 0, true, fmt.Errorf("content-range total does not match upload size")
+	}
+	if contentLength >= 0 && contentLength != parsed.end-parsed.start+1 {
+		return 0, true, fmt.Errorf("content-range length does not match request body")
+	}
+	return parsed.start, true, nil
 }

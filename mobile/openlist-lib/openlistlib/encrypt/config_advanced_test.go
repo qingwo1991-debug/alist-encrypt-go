@@ -124,6 +124,9 @@ func TestDefaultConfigGeneratesRandomAdminPassword(t *testing.T) {
 	if first.AdminPassword == second.AdminPassword {
 		t.Fatal("expected different generated admin passwords")
 	}
+	if len(first.EncryptPaths) != 0 {
+		t.Fatalf("default encryption must be opt-in, got %d enabled/example rules", len(first.EncryptPaths))
+	}
 }
 
 func TestConfigManagerSaveUses0600Permissions(t *testing.T) {

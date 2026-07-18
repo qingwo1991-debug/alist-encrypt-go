@@ -2,7 +2,9 @@ package _189
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -56,27 +58,44 @@ func (d *Cloud189) Link(ctx context.Context, file model.Obj, args model.LinkArgs
 		resty.RedirectPolicyFunc(func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		}))
-	res, err := client.R().SetHeader("User-Agent", base.UserAgent).Get("https:" + resp.FileDownloadUrl)
-	if err != nil {
-		return nil, err
+	currentURL := strings.TrimSpace(resp.FileDownloadUrl)
+	if strings.HasPrefix(currentURL, "//") {
+		currentURL = "https:" + currentURL
+	} else if strings.HasPrefix(currentURL, "/") {
+		currentURL = "https://cloud.189.cn" + currentURL
 	}
-	log.Debugln(res.Status())
-	log.Debugln(res.String())
-	link := model.Link{}
-	log.Debugln("first url:", resp.FileDownloadUrl)
-	if res.StatusCode() == 302 {
-		link.URL = res.Header().Get("location")
-		log.Debugln("second url:", link.URL)
-		_, _ = client.R().Get(link.URL)
-		if res.StatusCode() == 302 {
-			link.URL = res.Header().Get("location")
+	if parsed, parseErr := url.Parse(currentURL); parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid download URL")
+	}
+	for hop := 0; hop < 3; hop++ {
+		res, requestErr := client.R().SetHeader("User-Agent", base.UserAgent).Get(currentURL)
+		if requestErr != nil {
+			return nil, requestErr
 		}
-		log.Debugln("third url:", link.URL)
-	} else {
-		link.URL = resp.FileDownloadUrl
+		log.Debugf("download redirect response hop=%d status=%d body_bytes=%d", hop, res.StatusCode(), len(res.Body()))
+		if res.StatusCode() < http.StatusMultipleChoices || res.StatusCode() >= http.StatusBadRequest {
+			if res.StatusCode() >= http.StatusBadRequest {
+				return nil, fmt.Errorf("download URL request failed: status %d", res.StatusCode())
+			}
+			break
+		}
+		location := strings.TrimSpace(res.Header().Get("Location"))
+		if location == "" {
+			return nil, fmt.Errorf("download redirect missing Location")
+		}
+		baseURL, _ := url.Parse(currentURL)
+		nextURL, resolveErr := url.Parse(location)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("invalid download redirect")
+		}
+		nextURL = baseURL.ResolveReference(nextURL)
+		if (nextURL.Scheme != "http" && nextURL.Scheme != "https") || nextURL.Host == "" {
+			return nil, fmt.Errorf("unsafe download redirect scheme")
+		}
+		currentURL = nextURL.String()
 	}
-	link.URL = strings.Replace(link.URL, "http://", "https://", 1)
-	return &link, nil
+	currentURL = strings.Replace(currentURL, "http://", "https://", 1)
+	return &model.Link{URL: currentURL}, nil
 }
 
 func (d *Cloud189) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {

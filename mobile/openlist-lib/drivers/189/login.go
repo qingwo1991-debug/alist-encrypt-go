@@ -2,6 +2,7 @@ package _189
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
@@ -71,7 +72,7 @@ func (d *Cloud189) newLogin() error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("189 AppConf resp body: %s", res.String())
+	log.Debugf("189 AppConf response status: %d", res.StatusCode())
 	if appConf.Result != "0" {
 		return errors.New(appConf.Msg)
 	}
@@ -87,9 +88,9 @@ func (d *Cloud189) newLogin() error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("189 EncryptConf resp body: %s\n%+v", res.String(), encryptConf)
+	log.Debugf("189 EncryptConf response status: %d", res.StatusCode())
 	if encryptConf.Result != 0 {
-		return errors.New("get EncryptConf error:" + res.String())
+		return fmt.Errorf("get EncryptConf error: status %d", res.StatusCode())
 	}
 	// TODO: getUUID? needcaptcha
 	// login
@@ -117,7 +118,7 @@ func (d *Cloud189) newLogin() error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("189 login resp body: %s", res.String())
+	log.Debugf("189 login response status: %d", res.StatusCode())
 	loginResult := utils.Json.Get(res.Body(), "result").ToInt()
 	if loginResult != 0 {
 		return errors.New(utils.Json.Get(res.Body(), "msg").ToString())

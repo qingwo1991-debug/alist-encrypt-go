@@ -38,6 +38,12 @@ type AlistHandler struct {
 	dirSyncStart   sync.Once
 	dirSyncRunning atomic.Bool
 	dirSyncGroup   singleflight.Group
+	dirSyncCtx     context.Context
+	dirSyncCancel  context.CancelFunc
+	dirSyncMu      sync.Mutex
+	dirSyncStopped bool
+	dirSyncWG      sync.WaitGroup
+	dirSyncStop    sync.Once
 	fsMetaGroup    singleflight.Group
 	fsMetaMu       sync.Mutex
 	fsMetaCache    map[string]fsMetaCacheEntry
@@ -74,16 +80,57 @@ type fsMetaFetchResult struct {
 // NewAlistHandler creates a new Alist handler
 // proxyHandler must be the same instance used for /redirect routes
 func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
+	dirSyncCtx, dirSyncCancel := context.WithCancel(context.Background())
 	return &AlistHandler{
-		cfg:          cfg,
-		streamProxy:  streamProxy,
-		httpClient:   proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
-		fileDAO:      fileDAO,
-		passwdDAO:    passwdDAO,
-		proxyHandler: proxyHandler,
-		metaStore:    metaStore,
-		probe:        probe,
+		cfg:           cfg,
+		streamProxy:   streamProxy,
+		httpClient:    proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
+		fileDAO:       fileDAO,
+		passwdDAO:     passwdDAO,
+		proxyHandler:  proxyHandler,
+		metaStore:     metaStore,
+		probe:         probe,
+		dirSyncCtx:    dirSyncCtx,
+		dirSyncCancel: dirSyncCancel,
 	}
+}
+
+// Stop cancels and joins directory synchronization work before its stores close.
+func (h *AlistHandler) Stop() {
+	if h == nil {
+		return
+	}
+	h.dirSyncStop.Do(func() {
+		h.dirSyncMu.Lock()
+		h.dirSyncStopped = true
+		if h.dirSyncCancel != nil {
+			h.dirSyncCancel()
+		}
+		h.dirSyncMu.Unlock()
+		h.dirSyncWG.Wait()
+	})
+}
+
+func (h *AlistHandler) startDirSyncWork(work func(context.Context)) bool {
+	if h == nil || work == nil {
+		return false
+	}
+	h.dirSyncMu.Lock()
+	if h.dirSyncStopped {
+		h.dirSyncMu.Unlock()
+		return false
+	}
+	if h.dirSyncCtx == nil {
+		h.dirSyncCtx, h.dirSyncCancel = context.WithCancel(context.Background())
+	}
+	ctx := h.dirSyncCtx
+	h.dirSyncWG.Add(1)
+	h.dirSyncMu.Unlock()
+	go func() {
+		defer h.dirSyncWG.Done()
+		work(ctx)
+	}()
+	return true
 }
 
 func (h *AlistHandler) SetDirSyncStore(store DirSyncStore) {
@@ -139,13 +186,15 @@ var mediaTypeByExt = map[string]float64{
 }
 
 func (h *AlistHandler) parallelDecryptEnabled() bool {
-	return h.cfg != nil && h.cfg.AlistServer.EnableParallelDecrypt
+	return h.cfg != nil && h.cfg.AlistServerSnapshot().EnableParallelDecrypt
 }
 
 func (h *AlistHandler) parallelDecryptLimit() int {
 	limit := 4
-	if h.cfg != nil && h.cfg.AlistServer.ParallelDecryptConcurrency > 0 {
-		limit = h.cfg.AlistServer.ParallelDecryptConcurrency
+	if h.cfg != nil {
+		if configured := h.cfg.AlistServerSnapshot().ParallelDecryptConcurrency; configured > 0 {
+			limit = configured
+		}
 	}
 	if limit < 1 {
 		limit = 1
@@ -157,7 +206,7 @@ func (h *AlistHandler) parallelDecryptLimit() int {
 }
 
 func (h *AlistHandler) convertShowName(passwdInfo *config.PasswdInfo, name string) string {
-	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 	return encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, name, passwdInfo.EncSuffix, allowLoose)
 }
 
@@ -264,8 +313,9 @@ func (h *AlistHandler) collectEncryptedSearchRoots() []string {
 		return roots
 	}
 
-	for i := range h.cfg.AlistServer.PasswdList {
-		passwdInfo := &h.cfg.AlistServer.PasswdList[i]
+	passwdList := h.cfg.PasswdListSnapshot()
+	for i := range passwdList {
+		passwdInfo := &passwdList[i]
 		if !passwdInfo.Enable {
 			continue
 		}
@@ -694,27 +744,10 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if h.scanConfigured() {
-			scanScopeKey := buildDirScopeKey(dirPath, dirSyncScopeScan)
-			if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scanScopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
-				if isSuccessfulListPayload(snap.PayloadJSON) {
-					if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
-						h.serveSnapshot(w, snap, "background_scan")
-						if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
-							h.refreshDirSnapshotAsync(dirPath, body, h.scanAuthHeaders(), scanScopeKey, dirSyncModeScan)
-						}
-						return
-					} else {
-						log.Warn().
-							Str("path", dirPath).
-							Str("scope_key", scanScopeKey).
-							Str("cache_mode", "background_scan").
-							Str("reason", reason).
-							Msg("Rejecting invalid background dir snapshot")
-					}
-				}
-			}
-		}
+		// Background scan snapshots are populated with the configured scan account,
+		// which may have broader permissions than the current caller. They are used
+		// for preheating and the authenticated dir-sync views only; serving one from
+		// this public Alist-compatible endpoint would bypass upstream authorization.
 	}
 
 	statusCode, _, payload, itemCount, err := h.liveFsListResponse(r, body, dirPath, true)
@@ -853,17 +886,18 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				}
 				h.enqueueProbeFromList(r, originalPath, fileSize)
 				_ = h.fileDAO.Set(&dao.FileInfo{
-					Path:           originalPath,
-					EncryptedPath:  filePath,
-					Name:           path.Base(originalPath),
-					Size:           fileSize,
-					CiphertextSize: ciphertextSize,
-					ContentVersion: meta.Version,
-					HeaderLen:      meta.HeaderLen,
-					NonceField:     append([]byte(nil), meta.NonceField...),
-					IsDir:          false,
-					RawURL:         rawURL,
-					Sign:           func() string { v, _ := data["sign"].(string); return v }(),
+					Path:            originalPath,
+					EncryptedPath:   filePath,
+					Name:            path.Base(originalPath),
+					Size:            fileSize,
+					CiphertextSize:  ciphertextSize,
+					ContentVersion:  meta.Version,
+					HeaderLen:       meta.HeaderLen,
+					NonceField:      append([]byte(nil), meta.NonceField...),
+					IsDir:           false,
+					RawURL:          rawURL,
+					RawURLAuthScope: rawURLAuthScope(r.Header),
+					Sign:            func() string { v, _ := data["sign"].(string); return v }(),
 				})
 
 				// Register redirect and update URL
@@ -871,7 +905,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				redirectPath := buildRedirectPath(key, originalPath, true)
 				data["raw_url"] = buildRedirectURL(r, redirectPath)
 			} else {
-				h.fileDAO.SetFromAlistResponse(originalPath, data)
+				h.fileDAO.SetFromAlistResponse(originalPath, data, rawURLAuthScope(r.Header))
 			}
 
 			if provider, ok := data["provider"].(string); ok && provider == "AliyundriveOpen" {
@@ -881,7 +915,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	} else {
 		// Still cache file info even without encryption
 		if data, ok := respData["data"].(map[string]interface{}); ok {
-			h.fileDAO.SetFromAlistResponse(filePath, data)
+			h.fileDAO.SetFromAlistResponse(filePath, data, rawURLAuthScope(r.Header))
 		}
 	}
 
@@ -1172,7 +1206,7 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 		RespondHTTPErrorWithStatus(w, "Cannot determine upload file size for encryption", http.StatusBadRequest)
 		return
 	}
-	startOffset, hasRange, err := parseContentRangeStart(r.Header.Get("Content-Range"))
+	startOffset, hasRange, err := validateUploadContentRange(r.Header.Get("Content-Range"), fileSize, r.ContentLength)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Invalid Content-Range header", http.StatusBadRequest)
 		return

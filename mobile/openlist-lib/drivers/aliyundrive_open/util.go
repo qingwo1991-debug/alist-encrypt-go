@@ -81,13 +81,13 @@ func (d *AliyundriveOpen) _refreshToken(ctx context.Context) (string, string, er
 	if err != nil {
 		return "", "", err
 	}
-	log.Debugf("[ali_open] refresh token response: %s", res.String())
+	log.Debugf("[ali_open] refresh token response status: %d", res.StatusCode())
 	if e.Code != "" {
 		return "", "", fmt.Errorf("failed to refresh token: %s", e.Message)
 	}
 	refresh, access := utils.Json.Get(res.Body(), "refresh_token").ToString(), utils.Json.Get(res.Body(), "access_token").ToString()
 	if refresh == "" {
-		return "", "", fmt.Errorf("failed to refresh token: refresh token is empty, resp: %s", res.String())
+		return "", "", errors.New("failed to refresh token: refresh token is empty")
 	}
 	curSub, err := getSub(d.RefreshToken)
 	if err != nil {
@@ -131,7 +131,7 @@ func (d *AliyundriveOpen) refreshToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Infof("[ali_open] token exchange: %s -> %s", d.RefreshToken, refresh)
+	log.Info("[ali_open] token exchange succeeded")
 	d.RefreshToken, d.AccessToken = refresh, access
 	op.MustSaveDriverStorage(d)
 	return nil
@@ -161,7 +161,7 @@ func (d *AliyundriveOpen) requestReturnErrResp(ctx context.Context, limitTy limi
 	res, err := req.Execute(method, API_URL+uri)
 	if err != nil {
 		if res != nil {
-			log.Errorf("[aliyundrive_open] request error: %s", res.String())
+			log.Errorf("[aliyundrive_open] request error status=%d body_bytes=%d", res.StatusCode(), len(res.Body()))
 		}
 		return nil, err, nil
 	}

@@ -27,7 +27,7 @@ func main() {
 		setupLogging(cfg)
 
 		trace.ServerLog("server", fmt.Sprintf("Encrypt proxy server starting on port %s", cfg.GetHTTPAddr()))
-		trace.ServerLog("config", fmt.Sprintf("Alist URL: %s, H2C: %t, HTTPS: %t", cfg.GetAlistURL(), cfg.Scheme.EnableH2C, cfg.IsHTTPSEnabled()))
+		trace.ServerLog("config", fmt.Sprintf("Alist URL: %s, H2C: %t, HTTPS: %t", cfg.GetAlistURL(), cfg.SchemeSnapshot().EnableH2C, cfg.IsHTTPSEnabled()))
 
 		// Create and start server
 		srv, err := server.New(cfg)
@@ -39,6 +39,7 @@ func main() {
 		restartChan := make(chan struct{})
 		shutdownChan := make(chan struct{})
 		doneChan := make(chan struct{})
+		serverErrorChan := make(chan struct{})
 
 		// Graceful shutdown handler
 		go func() {
@@ -52,6 +53,8 @@ func main() {
 				close(shutdownChan)
 			case <-restartChan:
 				log.Info().Msg("Restart requested")
+			case <-serverErrorChan:
+				log.Error().Msg("Listener failed; shutting down remaining server resources")
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -67,12 +70,17 @@ func main() {
 		restart.SetChan(restartChan)
 
 		// Start server (blocks until shutdown)
-		if err := srv.Start(); err != nil {
-			log.Error().Err(err).Msg("Server stopped")
+		startErr := srv.Start()
+		if startErr != nil {
+			log.Error().Err(startErr).Msg("Server stopped")
+			close(serverErrorChan)
 		}
 
 		// Wait for shutdown to complete
 		<-doneChan
+		if startErr != nil {
+			return
+		}
 
 		// Check if we should exit or restart
 		select {

@@ -35,14 +35,14 @@ func (h *AlistHandler) ensureDirSyncLoop() {
 		return
 	}
 	h.dirSyncStart.Do(func() {
-		go func() {
+		h.startDirSyncWork(func(ctx context.Context) {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Error().Interface("panic", r).Msg("Directory sync scheduler panicked")
 				}
 			}()
-			h.runDirSyncScheduler()
-		}()
+			h.runDirSyncScheduler(ctx)
+		})
 	})
 }
 
@@ -54,9 +54,10 @@ func (h *AlistHandler) scanConfigured() bool {
 	if h == nil || h.cfg == nil {
 		return false
 	}
-	return strings.TrimSpace(h.cfg.AlistServer.ScanAuthHeader) != "" ||
-		strings.TrimSpace(h.cfg.AlistServer.ScanUsername) != "" ||
-		strings.TrimSpace(h.cfg.AlistServer.ScanPassword) != ""
+	alist := h.cfg.AlistServerSnapshot()
+	return strings.TrimSpace(alist.ScanAuthHeader) != "" ||
+		strings.TrimSpace(alist.ScanUsername) != "" ||
+		strings.TrimSpace(alist.ScanPassword) != ""
 }
 
 func (h *AlistHandler) requestAuthHeaders(r *http.Request) http.Header {
@@ -78,12 +79,13 @@ func (h *AlistHandler) scanAuthHeaders() http.Header {
 	if h == nil || h.cfg == nil {
 		return headers
 	}
-	if raw := strings.TrimSpace(h.cfg.AlistServer.ScanAuthHeader); raw != "" {
+	alist := h.cfg.AlistServerSnapshot()
+	if raw := strings.TrimSpace(alist.ScanAuthHeader); raw != "" {
 		headers.Set("Authorization", raw)
 		return headers
 	}
-	username := strings.TrimSpace(h.cfg.AlistServer.ScanUsername)
-	password := strings.TrimSpace(h.cfg.AlistServer.ScanPassword)
+	username := strings.TrimSpace(alist.ScanUsername)
+	password := strings.TrimSpace(alist.ScanPassword)
 	if username != "" && password != "" {
 		// Try JWT token first — alist /api/fs/list needs token, not Basic auth.
 		if token := h.fetchAlistJWT(username, password); token != "" {
@@ -386,7 +388,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 							continue
 						}
 						filePath := path.Join(dirPath, name)
-						h.fileDAO.SetFromAlistResponse(filePath, fileData)
+						h.fileDAO.SetFromAlistResponse(filePath, fileData, rawURLAuthScope(r.Header))
 						if cached, ok := h.fileDAO.Get(filePath); ok && cached != nil && cached.ContentVersion == encryption.ContentVersionV2 && cached.Size > 0 {
 							fileData["size"] = float64(cached.Size)
 						}
@@ -518,43 +520,52 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 		return
 	}
 	h.ensureDirSyncLoop()
-	h.updateSnapshotSyncing(context.Background(), scopeKey, true, "")
-	go func() {
+	ctx := h.dirSyncCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.updateSnapshotSyncing(ctx, scopeKey, true, "")
+	h.startDirSyncWork(func(ctx context.Context) {
 		_, err, _ := h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
-			req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(body))
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(body))
 			req.Header = headers.Clone()
 			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, body, dirPath, true)
 			if liveErr != nil {
-				h.updateSnapshotSyncing(context.Background(), scopeKey, false, liveErr.Error())
+				h.updateSnapshotSyncing(ctx, scopeKey, false, liveErr.Error())
 				return nil, liveErr
 			}
 			if status >= 200 && status < 300 && isSuccessfulListPayload(payload) {
-				h.persistSnapshot(context.Background(), dirPath, scopeKey, authScopeHash(headers), payload, itemCount, sourceMode, "")
+				h.persistSnapshot(ctx, dirPath, scopeKey, authScopeHash(headers), payload, itemCount, sourceMode, "")
 				return nil, nil
 			}
 			errText := "upstream list refresh failed"
 			if code := payloadResponseCode(payload); code != 0 {
 				errText = "upstream list returned code " + strconv.Itoa(code)
 			}
-			h.updateSnapshotSyncing(context.Background(), scopeKey, false, errText)
+			h.updateSnapshotSyncing(ctx, scopeKey, false, errText)
 			return nil, nil
 		})
 		if err != nil {
 			log.Warn().Err(err).Str("path", dirPath).Msg("dir snapshot refresh failed")
 		}
-	}()
+	})
 }
 
-func (h *AlistHandler) runDirSyncScheduler() {
-	h.runDirSyncScan("bootstrap_scan")
+func (h *AlistHandler) runDirSyncScheduler(ctx context.Context) {
+	h.runDirSyncScan(ctx, "bootstrap_scan")
 	ticker := time.NewTicker(dirSyncScanEvery)
 	defer ticker.Stop()
-	for range ticker.C {
-		h.runDirSyncScan("scheduled_scan")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.runDirSyncScan(ctx, "scheduled_scan")
+		}
 	}
 }
 
-func (h *AlistHandler) runDirSyncScan(jobType string) {
+func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 	if h == nil || h.dirSyncStore == nil || !h.scanConfigured() {
 		return
 	}
@@ -576,12 +587,12 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 		UpdatedAt:         time.Now(),
 		NextRunAt:         time.Now().Add(dirSyncScanEvery),
 	}
-	_ = h.dirSyncStore.UpsertStatus(context.Background(), status)
+	_ = h.dirSyncStore.UpsertStatus(ctx, status)
 	if len(roots) == 0 {
 		status.Status = "done"
 		status.FinishedAt = time.Now()
 		status.LastSuccessAt = status.FinishedAt
-		_ = h.dirSyncStore.UpsertStatus(context.Background(), status)
+		_ = h.dirSyncStore.UpsertStatus(ctx, status)
 		return
 	}
 
@@ -589,7 +600,7 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 		path  string
 		depth int
 	}
-	maxDepth := h.cfg.AlistServer.ScanMaxDepth
+	maxDepth := h.cfg.AlistServerSnapshot().ScanMaxDepth
 	if maxDepth <= 0 {
 		maxDepth = math.MaxInt // unlimited (consistent with WebDAV deepScan)
 	}
@@ -604,12 +615,17 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 	}
 
 	for len(queue) > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		node := queue[0]
 		queue = queue[1:]
 		status.TotalDirsDiscovered = len(seen)
 		scopeKey := buildDirScopeKey(node.path, dirSyncScopeScan)
 		headers := h.scanAuthHeaders()
-		if snap, ok, _ := h.dirSyncStore.GetSnapshot(context.Background(), scopeKey); ok && snap != nil && !snap.NextRefreshAt.IsZero() && time.Now().Before(snap.NextRefreshAt) {
+		if snap, ok, _ := h.dirSyncStore.GetSnapshot(ctx, scopeKey); ok && snap != nil && !snap.NextRefreshAt.IsZero() && time.Now().Before(snap.NextRefreshAt) {
 			status.DirsSkipped++
 			status.DirsScanned++
 			if node.depth < maxDepth {
@@ -622,7 +638,7 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 				}
 			}
 			status.UpdatedAt = time.Now()
-			_ = h.dirSyncStore.UpsertStatus(context.Background(), status)
+			_ = h.dirSyncStore.UpsertStatus(ctx, status)
 			continue
 		}
 
@@ -632,7 +648,7 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 			"per_page": 1000,
 			"refresh":  false,
 		})
-		scanCtx := withProbeSource(context.Background(), probeSourceDirSync)
+		scanCtx := withProbeSource(ctx, probeSourceDirSync)
 		req, _ := http.NewRequestWithContext(scanCtx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(reqBody))
 		req.Header = headers
 		req.Header.Set("Content-Type", "application/json")
@@ -646,13 +662,13 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 				status.LastError = "upstream list returned code " + strconv.Itoa(code)
 			}
 			status.UpdatedAt = time.Now()
-			_ = h.dirSyncStore.UpsertStatus(context.Background(), status)
+			_ = h.dirSyncStore.UpsertStatus(ctx, status)
 			continue
 		}
 		status.DirsSucceeded++
 		status.ItemsSynced += itemCount
 		status.LastError = ""
-		h.persistSnapshot(context.Background(), node.path, scopeKey, dirSyncScopeScan, payload, itemCount, dirSyncModeScan, "")
+		h.persistSnapshot(ctx, node.path, scopeKey, dirSyncScopeScan, payload, itemCount, dirSyncModeScan, "")
 		if node.depth < maxDepth {
 			for _, child := range h.extractDirChildrenFromResponse(node.path, respData) {
 				if _, exists := seen[child]; exists {
@@ -663,13 +679,13 @@ func (h *AlistHandler) runDirSyncScan(jobType string) {
 			}
 		}
 		status.UpdatedAt = time.Now()
-		_ = h.dirSyncStore.UpsertStatus(context.Background(), status)
+		_ = h.dirSyncStore.UpsertStatus(ctx, status)
 	}
 	status.Status = "done"
 	status.FinishedAt = time.Now()
 	status.LastSuccessAt = status.FinishedAt
 	status.UpdatedAt = status.FinishedAt
-	_ = h.dirSyncStore.UpsertStatus(context.Background(), status)
+	_ = h.dirSyncStore.UpsertStatus(ctx, status)
 }
 
 func (h *AlistHandler) extractDirChildrenFromPayload(parentPath string, payload []byte) []string {
@@ -777,7 +793,7 @@ func (h *AlistHandler) HandleDirSyncRun(w http.ResponseWriter, r *http.Request) 
 		RespondHTTPErrorWithStatus(w, "scan config not set", http.StatusBadRequest)
 		return
 	}
-	go h.runDirSyncScan("manual_scan")
+	h.startDirSyncWork(func(ctx context.Context) { h.runDirSyncScan(ctx, "manual_scan") })
 	RespondSuccess(w, map[string]interface{}{"accepted": true})
 }
 

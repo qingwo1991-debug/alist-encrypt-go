@@ -3,6 +3,7 @@ package dao
 import (
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -25,6 +26,7 @@ type FileInfo struct {
 	IsDir             bool      `json:"is_dir"`
 	Modified          time.Time `json:"modified"`
 	RawURL            string    `json:"raw_url"`
+	RawURLAuthScope   string    `json:"raw_url_auth_scope,omitempty"`
 	Sign              string    `json:"sign"`
 	UpstreamFetchedAt time.Time `json:"upstream_fetched_at"`
 }
@@ -55,6 +57,9 @@ type FileDAO struct {
 	cfg            *config.Config
 	pathCache      *PathCache // Unified high-performance cache
 	fileMetaWriter FileMetaStoreWriter
+	cleanupStop    chan struct{}
+	cleanupOnce    sync.Once
+	cleanupWG      sync.WaitGroup
 }
 
 const mediaSizePreserveThreshold = 100 * 1024
@@ -131,13 +136,18 @@ func mergeCachedPathSize(existing *PathEntry, incomingSize int64, isDir bool, pa
 // optional form preserves compatibility for tests and embedded callers.
 func NewFileDAO(store *storage.Store, configs ...*config.Config) *FileDAO {
 	dao := &FileDAO{
-		store:     store,
-		cfg:       selectConfig(configs...),
-		pathCache: NewPathCache(32, 1000), // 32 shards, 1000 entries per shard = 32k max
+		store:       store,
+		cfg:         selectConfig(configs...),
+		pathCache:   NewPathCache(32, 1000), // 32 shards, 1000 entries per shard = 32k max
+		cleanupStop: make(chan struct{}),
 	}
 
 	// Start background cleanup for expired entries
-	go dao.cleanupPathCache()
+	dao.cleanupWG.Add(1)
+	go func() {
+		defer dao.cleanupWG.Done()
+		dao.cleanupPathCache()
+	}()
 
 	return dao
 }
@@ -150,6 +160,17 @@ func (d *FileDAO) Config() *config.Config {
 	return d.cfg
 }
 
+// Stop terminates background cache maintenance before its backing store closes.
+func (d *FileDAO) Stop() {
+	if d == nil {
+		return
+	}
+	d.cleanupOnce.Do(func() {
+		close(d.cleanupStop)
+		d.cleanupWG.Wait()
+	})
+}
+
 // SetFileMetaWriter injects an external store for persisting file metadata (e.g. MySQL).
 func (d *FileDAO) SetFileMetaWriter(w FileMetaStoreWriter) {
 	d.fileMetaWriter = w
@@ -160,17 +181,18 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	// Check unified path cache first
 	if entry, ok := d.pathCache.Get(path); ok {
 		fi := &FileInfo{
-			Path:           entry.DisplayPath,
-			EncryptedPath:  entry.EncryptedPath,
-			Name:           entry.Name,
-			Size:           entry.Size,
-			CiphertextSize: entry.CiphertextSize,
-			ContentVersion: entry.ContentVersion,
-			HeaderLen:      entry.HeaderLen,
-			NonceField:     append([]byte(nil), entry.NonceField...),
-			IsDir:          entry.IsDir,
-			RawURL:         entry.RawURL,
-			Sign:           entry.Sign,
+			Path:            entry.DisplayPath,
+			EncryptedPath:   entry.EncryptedPath,
+			Name:            entry.Name,
+			Size:            entry.Size,
+			CiphertextSize:  entry.CiphertextSize,
+			ContentVersion:  entry.ContentVersion,
+			HeaderLen:       entry.HeaderLen,
+			NonceField:      append([]byte(nil), entry.NonceField...),
+			IsDir:           entry.IsDir,
+			RawURL:          entry.RawURL,
+			RawURLAuthScope: entry.RawURLAuthScope,
+			Sign:            entry.Sign,
 		}
 		if entry.UpstreamFetchedAt > 0 {
 			fi.UpstreamFetchedAt = time.Unix(0, entry.UpstreamFetchedAt)
@@ -218,15 +240,16 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		}
 		if info.RawURL == "" {
 			info.RawURL = existing.RawURL
-		}
-		if info.Sign == "" {
-			info.Sign = existing.Sign
+			info.RawURLAuthScope = existing.RawURLAuthScope
+			if info.Sign == "" {
+				info.Sign = existing.Sign
+			}
+			if info.UpstreamFetchedAt.IsZero() {
+				info.UpstreamFetchedAt = existing.UpstreamFetchedAt
+			}
 		}
 		if info.Modified.IsZero() {
 			info.Modified = existing.Modified
-		}
-		if info.UpstreamFetchedAt.IsZero() {
-			info.UpstreamFetchedAt = existing.UpstreamFetchedAt
 		}
 	}
 
@@ -248,6 +271,7 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		NonceField:        append([]byte(nil), info.NonceField...),
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
+		RawURLAuthScope:   info.RawURLAuthScope,
 		Sign:              info.Sign,
 		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
 	}
@@ -291,6 +315,7 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 		NonceField:        append([]byte(nil), info.NonceField...),
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
+		RawURLAuthScope:   info.RawURLAuthScope,
 		Sign:              info.Sign,
 		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
 	}
@@ -361,6 +386,7 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 		entry.HeaderLen = existing.HeaderLen
 		entry.NonceField = append([]byte(nil), existing.NonceField...)
 		entry.RawURL = existing.RawURL
+		entry.RawURLAuthScope = existing.RawURLAuthScope
 		entry.Sign = existing.Sign
 		entry.UpstreamFetchedAt = existing.UpstreamFetchedAt
 	}
@@ -403,10 +429,11 @@ func (d *FileDAO) GetFileSize(path string) (int64, bool) {
 	if cfg == nil {
 		cfg = config.Get()
 	}
-	if cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
+	alist := cfg.AlistServerSnapshot()
+	if alist.EnableSizeMap && alist.SizeMapTtlMinutes > 0 {
 		var entry FileSizeEntry
 		if err := d.store.GetJSON(storage.BucketFileSize, path, &entry); err == nil && entry.Size > 0 {
-			ttl := time.Duration(cfg.AlistServer.SizeMapTtlMinutes) * time.Minute
+			ttl := time.Duration(alist.SizeMapTtlMinutes) * time.Minute
 			if entry.UpdatedAt.IsZero() || time.Since(entry.UpdatedAt) <= ttl {
 				cacheEntry := &PathEntry{EncryptedPath: path, DisplayPath: path, Size: entry.Size}
 				d.pathCache.Set(cacheEntry, ttl)
@@ -443,7 +470,8 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 	if cfg == nil {
 		cfg = config.Get()
 	}
-	if d.fileMetaWriter == nil && cfg.AlistServer.EnableSizeMap && cfg.AlistServer.SizeMapTtlMinutes > 0 {
+	alist := cfg.AlistServerSnapshot()
+	if d.fileMetaWriter == nil && alist.EnableSizeMap && alist.SizeMapTtlMinutes > 0 {
 		persistEntry := FileSizeEntry{Path: path, Size: size, UpdatedAt: time.Now()}
 		_ = d.store.SetJSON(storage.BucketFileSize, path, persistEntry)
 	}
@@ -475,6 +503,7 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	if entry, ok := d.pathCache.Get(displayPath); ok && entry != nil {
 		entry.Size = 0
 		entry.RawURL = ""
+		entry.RawURLAuthScope = ""
 		entry.Sign = ""
 		entry.UpstreamFetchedAt = 0
 		d.pathCache.Set(entry, 24*time.Hour)
@@ -482,6 +511,47 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 			d.DeleteFileSize(entry.EncryptedPath)
 		}
 	}
+}
+
+// InvalidateRawURLForScope clears only a signed URL owned by authScope. It
+// deliberately preserves path mappings and size/content metadata, and cannot
+// evict a URL fetched under another caller's credentials.
+func (d *FileDAO) InvalidateRawURLForScope(displayPath, authScope string) bool {
+	if d == nil || d.pathCache == nil {
+		return false
+	}
+	displayPath = strings.TrimSpace(displayPath)
+	if displayPath == "" {
+		return false
+	}
+	authScope = strings.TrimSpace(authScope)
+	if authScope == "" {
+		authScope = "anon"
+	}
+	invalidated := false
+	if entry, ok := d.pathCache.Get(displayPath); ok && entry != nil && entry.RawURLAuthScope == authScope {
+		updated := *entry
+		updated.RawURL = ""
+		updated.RawURLAuthScope = ""
+		updated.Sign = ""
+		updated.UpstreamFetchedAt = 0
+		d.pathCache.Set(&updated, 24*time.Hour)
+		invalidated = true
+	}
+	if d.store != nil {
+		var persisted FileInfo
+		if err := d.store.GetJSON(storage.BucketFileInfo, displayPath, &persisted); err == nil &&
+			persisted.Path != "" && persisted.RawURLAuthScope == authScope {
+			persisted.RawURL = ""
+			persisted.RawURLAuthScope = ""
+			persisted.Sign = ""
+			persisted.UpstreamFetchedAt = time.Time{}
+			if err := d.store.SetJSON(storage.BucketFileInfo, displayPath, &persisted); err == nil {
+				invalidated = true
+			}
+		}
+	}
+	return invalidated
 }
 
 // FileSizeCacheStats returns file size cache statistics
@@ -499,13 +569,18 @@ func (d *FileDAO) cleanupPathCache() {
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		d.pathCache.CleanExpired()
+	for {
+		select {
+		case <-d.cleanupStop:
+			return
+		case <-ticker.C:
+			d.pathCache.CleanExpired()
+		}
 	}
 }
 
 // SetFromAlistResponse parses and stores file info from Alist API response
-func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{}) error {
+func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{}, rawURLAuthScope string) error {
 	info := &FileInfo{
 		Path:              path,
 		UpstreamFetchedAt: time.Now(),
@@ -522,6 +597,9 @@ func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{})
 	}
 	if rawURL, ok := data["raw_url"].(string); ok {
 		info.RawURL = rawURL
+		if strings.TrimSpace(rawURL) != "" {
+			info.RawURLAuthScope = strings.TrimSpace(rawURLAuthScope)
+		}
 	}
 	if sign, ok := data["sign"].(string); ok {
 		info.Sign = sign
@@ -566,22 +644,31 @@ func (d *PasswdDAO) Stop() {
 	}
 }
 
+// Reload invalidates positive and negative path matches after a config update.
+func (d *PasswdDAO) Reload() {
+	if d != nil && d.cache != nil {
+		d.cache.Clear()
+	}
+}
+
 // GetAll retrieves all password configs from the main config
 func (d *PasswdDAO) GetAll() []*config.PasswdInfo {
+	list := d.cfg.PasswdListSnapshot()
 	var result []*config.PasswdInfo
-	for i := range d.cfg.AlistServer.PasswdList {
-		result = append(result, &d.cfg.AlistServer.PasswdList[i])
+	for i := range list {
+		result = append(result, &list[i])
 	}
 	return result
 }
 
 // GetEncPathPrefixes returns directory prefixes extracted from encPath patterns.
 func (d *PasswdDAO) GetEncPathPrefixes() []string {
+	list := d.cfg.PasswdListSnapshot()
 	seen := make(map[string]struct{})
 	var prefixes []string
 
-	for i := range d.cfg.AlistServer.PasswdList {
-		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
+	for i := range list {
+		passwdInfo := &list[i]
 		if !passwdInfo.Enable {
 			continue
 		}
@@ -639,8 +726,9 @@ func (d *PasswdDAO) MatchDir(dirPath string) bool {
 	}
 
 	probePath := buildProbePath(dirPath)
-	for i := range d.cfg.AlistServer.PasswdList {
-		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
+	list := d.cfg.PasswdListSnapshot()
+	for i := range list {
+		passwdInfo := &list[i]
 		if !passwdInfo.Enable {
 			continue
 		}
@@ -655,10 +743,11 @@ func (d *PasswdDAO) MatchDir(dirPath string) bool {
 }
 
 func (d *PasswdDAO) findByPathInternal(urlPath string) (*config.PasswdInfo, bool) {
+	list := d.cfg.PasswdListSnapshot()
 	var bestMatch *config.PasswdInfo
 	var bestLen int
-	for i := range d.cfg.AlistServer.PasswdList {
-		passwdInfo := &d.cfg.AlistServer.PasswdList[i]
+	for i := range list {
+		passwdInfo := &list[i]
 		if !passwdInfo.Enable {
 			continue
 		}

@@ -45,7 +45,7 @@ func (m *Manager) LoadConfigJSON() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cfg := m.ensureConfigLocked()
-	data, err := json.Marshal(cfg)
+	data, err := cfg.MarshalJSONSnapshot()
 	if err != nil {
 		return `{"error":"failed to marshal config"}`
 	}
@@ -55,11 +55,11 @@ func (m *Manager) LoadConfigJSON() string {
 func (m *Manager) SaveConfigJSON(configJSON string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cfg := m.ensureConfigLocked()
-	if err := json.Unmarshal([]byte(configJSON), cfg); err != nil {
-		return err
+	if m.running {
+		return errors.New("cannot replace configuration while service is running")
 	}
-	return cfg.Save()
+	cfg := m.ensureConfigLocked()
+	return cfg.ReplaceFromJSON([]byte(configJSON))
 }
 
 func (m *Manager) GetBuildInfoJSON() string {
@@ -111,14 +111,8 @@ func (m *Manager) getHTTPPortLocked(cfg *config.Config) int {
 	if cfg == nil {
 		return 0
 	}
-	if cfg.Scheme != nil && cfg.Scheme.HTTPPort > 0 {
-		return cfg.Scheme.HTTPPort
-	}
-	if cfg.Port > 0 {
-		return cfg.Port
-	}
-	host, port, err := net.SplitHostPort(cfg.GetHTTPAddr())
-	if err == nil && host != "" {
+	_, port, err := net.SplitHostPort(cfg.GetHTTPAddr())
+	if err == nil {
 		if p, err := parseInt(port); err == nil {
 			return p
 		}
@@ -147,9 +141,18 @@ func (m *Manager) StartService() error {
 
 	go func() {
 		if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownErr := srv.Shutdown(ctx)
+			cancel()
 			m.mu.Lock()
 			m.lastErr = err.Error()
+			if shutdownErr != nil {
+				m.lastErr += "; cleanup: " + shutdownErr.Error()
+			}
 			m.running = false
+			if m.srv == srv {
+				m.srv = nil
+			}
 			m.mu.Unlock()
 		}
 	}()
@@ -175,6 +178,9 @@ func (m *Manager) StopService(timeoutMs int64) error {
 
 	m.mu.Lock()
 	m.running = false
+	if m.srv == srv {
+		m.srv = nil
+	}
 	if err != nil {
 		m.lastErr = err.Error()
 	}
@@ -191,6 +197,10 @@ func (m *Manager) IsRunning() bool {
 func (m *Manager) SetBaseDir(baseDir string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.running {
+		m.lastErr = "cannot change base directory while service is running"
+		return
+	}
 	m.baseDir = strings.TrimSpace(baseDir)
 	m.cfg = nil
 }

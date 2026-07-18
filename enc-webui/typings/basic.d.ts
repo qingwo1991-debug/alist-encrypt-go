@@ -10,16 +10,25 @@
  * */
 
 /*router*/
-import type { RouteRecordRaw } from 'vue-router'
+import type {
+  LocationQueryRaw,
+  RouteLocationMatched,
+  RouteMeta,
+  RouteRecordName,
+  RouteRecordRaw,
+  RouteRecordRedirectOption
+} from 'vue-router'
 export interface rawConfig {
   hidden?: boolean
   alwaysShow?: boolean
   code?: number
-  name?: string
+  name?: RouteRecordName
   fullPath?: string
-  path?: string
-  meta?: {
-    title: string
+  path: string
+  query?: LocationQueryRaw
+  matched?: RouteLocationMatched[]
+  meta?: RouteMeta & {
+    title?: string
     icon?: string
     affix?: boolean
     activeMenu?: string
@@ -31,11 +40,11 @@ export interface rawConfig {
     leaveRmCachePage?: boolean
     closeTabRmCache?: boolean
   }
-  children?: RouterOptions
-  redirect?: string
+  children?: RouteRecordRaw[]
+  redirect?: RouteRecordRedirectOption
 }
 export type RouteRawConfig = RouteRecordRaw & rawConfig
-export type RouterTypes = Array<rawProp>
+export type RouterTypes = Array<rawConfig>
 
 /*settings*/
 export interface SettingsConfig {
