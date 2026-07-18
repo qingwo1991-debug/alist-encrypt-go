@@ -1041,7 +1041,7 @@ func providerHostFromKey(providerKey string) string {
 	if providerKey == "" {
 		return ""
 	}
-	if idx := strings.Index(providerKey, "::"); idx >= 0 {
+	if idx := strings.Index(providerKey, "::/"); idx >= 0 {
 		return providerKey[:idx]
 	}
 	return providerKey

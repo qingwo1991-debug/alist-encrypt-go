@@ -37,6 +37,9 @@ type StrategySelectorConfig struct {
 type StrategySelector struct {
 	cfg   StrategySelectorConfig
 	store StrategyStore
+	// stateLocks serialize read-modify-write transitions per provider without
+	// making a slow persistence write block unrelated upstreams.
+	stateLocks [64]sync.Mutex
 
 	obsMu           sync.Mutex
 	reasonCounts    map[string]uint64
@@ -130,6 +133,9 @@ func (s *StrategySelector) Stats() map[string]interface{} {
 
 func (s *StrategySelector) Select(provider string) []proxy.StreamStrategy {
 	provider = normalizeStrategyProviderKey(provider)
+	unlock := s.lockProvider(provider)
+	defer unlock()
+
 	state := s.ensureState(provider)
 	order := s.cfg.ProviderFallbacks
 
@@ -142,30 +148,71 @@ func (s *StrategySelector) Select(provider string) []proxy.StreamStrategy {
 	if preferredIndex == -1 {
 		preferredIndex = 0
 		preferred = order[0]
+		state.Preferred = preferred
+		_ = s.store.Set(provider, state)
 	}
 
+	// A downgraded provider stays on its known-good strategy during cooldown.
+	// Once cooldown expires, probe exactly one faster tier. Select deliberately
+	// returns one strategy; the orchestrator remains responsible for fallback.
+	if preferredIndex > 0 && !state.CooldownUntil.After(time.Now()) {
+		return []proxy.StreamStrategy{order[preferredIndex-1]}
+	}
 	return []proxy.StreamStrategy{preferred}
 }
 
 func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamStrategy) {
 	provider = normalizeStrategyProviderKey(provider)
+	unlock := s.lockProvider(provider)
+	defer unlock()
+
 	state := s.ensureState(provider)
+	order := s.cfg.ProviderFallbacks
+	preferredIndex := indexOfStrategy(order, state.Preferred)
+	if preferredIndex < 0 {
+		preferredIndex = 0
+		state.Preferred = order[0]
+	}
+	strategyIndex := indexOfStrategy(order, strategy)
+	now := time.Now()
+
 	state.TotalSuccesses++
-	state.SuccessStreak++
-	state.CapabilityFailCount = 0
-	state.LastValidatedAt = time.Now()
+	state.LastValidatedAt = now
 	state.LastStrategy = strategy
 	state.LastFailure = ""
 
-	if state.Preferred == "" {
-		state.Preferred = strategy
-	}
-	if state.Preferred != strategy {
+	switch {
+	case strategyIndex == preferredIndex:
+		// Only success of the preferred strategy clears its consecutive
+		// capability failures. A slower fallback succeeding must not bypass
+		// FailToDowngrade or erase failures of the faster preferred strategy.
+		state.CapabilityFailCount = 0
+		state.SuccessStreak = 0
+		if state.Failures != nil {
+			state.Failures[strategy] = 0
+		}
+	case preferredIndex > 0 && strategyIndex == preferredIndex-1 && !state.CooldownUntil.After(now):
+		// Recovery is intentionally gradual: require consecutive successful
+		// probes of the immediately faster tier before promoting it.
+		state.SuccessStreak++
+		if state.Failures != nil {
+			state.Failures[strategy] = 0
+		}
+		if state.SuccessStreak < s.cfg.SuccessToRecover {
+			break
+		}
 		prev := state.Preferred
 		state.Preferred = strategy
-		state.SuccessStreak = 1
-		state.CooldownUntil = time.Time{}
-		s.appendEvent(provider, prev, strategy, "validated_success")
+		state.SuccessStreak = 0
+		state.CapabilityFailCount = 0
+		if strategyIndex > 0 {
+			state.CooldownUntil = now.Add(s.cfg.Cooldown)
+		} else {
+			state.CooldownUntil = time.Time{}
+		}
+		s.appendEvent(provider, prev, strategy, "recovered")
+	default:
+		state.SuccessStreak = 0
 	}
 
 	_ = s.store.Set(provider, state)
@@ -173,16 +220,32 @@ func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamS
 
 func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamStrategy, reason string) {
 	provider = normalizeStrategyProviderKey(provider)
+	unlock := s.lockProvider(provider)
+	defer unlock()
+
 	reason = normalizeFailureReason(reason)
 	s.recordReason(reason)
 	state := s.ensureState(provider)
+	now := time.Now()
 	state.TotalFailures++
-	state.SuccessStreak = 0
 	state.LastFailure = reason
 	state.LastStrategy = strategy
+	order := s.cfg.ProviderFallbacks
+	preferredIndex := indexOfStrategy(order, state.Preferred)
+	if preferredIndex < 0 {
+		state.Preferred = order[0]
+		preferredIndex = 0
+	}
+	strategyIndex := indexOfStrategy(order, strategy)
 
 	if isNonStrategyFailure(reason) {
-		state.LastValidatedAt = time.Now()
+		// A recovery streak represents consecutive successful probes. Transient
+		// failures do not downgrade or extend capability cooldown, but they do
+		// break that streak when they occur on the recovery tier.
+		if preferredIndex > 0 && strategyIndex == preferredIndex-1 {
+			state.SuccessStreak = 0
+		}
+		state.LastValidatedAt = now
 		_ = s.store.Set(provider, state)
 		return
 	}
@@ -191,27 +254,29 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 		state.Failures = make(map[proxy.StreamStrategy]int)
 	}
 	state.Failures[strategy]++
-	state.CapabilityFailCount++
-	state.LastValidatedAt = time.Now()
+	state.LastValidatedAt = now
 
-	order := s.cfg.ProviderFallbacks
-	preferredIndex := indexOfStrategy(order, state.Preferred)
-
-	if state.Preferred == "" {
-		state.Preferred = order[0]
-		preferredIndex = 0
+	if strategyIndex == preferredIndex {
+		state.SuccessStreak = 0
+		state.CapabilityFailCount = state.Failures[strategy]
 	}
 
-	if strategy == state.Preferred && state.CapabilityFailCount >= s.cfg.FailToDowngrade {
+	if strategyIndex == preferredIndex && state.CapabilityFailCount >= s.cfg.FailToDowngrade {
 		if preferredIndex >= 0 && preferredIndex+1 < len(order) {
 			prev := state.Preferred
 			state.Preferred = order[preferredIndex+1]
 			state.Failures[strategy] = 0
 			state.CapabilityFailCount = 0
-			state.LastDowngrade = time.Now()
-			state.CooldownUntil = time.Now().Add(s.cfg.Cooldown)
+			state.SuccessStreak = 0
+			state.LastDowngrade = now
+			state.CooldownUntil = now.Add(s.cfg.Cooldown)
 			s.appendEvent(provider, prev, state.Preferred, reason)
 		}
+	} else if preferredIndex > 0 && strategyIndex == preferredIndex-1 && !state.CooldownUntil.After(now) {
+		// The faster recovery probe failed. Keep the known-good preferred
+		// strategy, discard partial recovery progress, and back off again.
+		state.SuccessStreak = 0
+		state.CooldownUntil = now.Add(s.cfg.Cooldown)
 	}
 
 	_ = s.store.Set(provider, state)
@@ -263,11 +328,23 @@ func (s *StrategySelector) ensureState(provider string) *ProviderStrategyState {
 	}
 	state := &ProviderStrategyState{
 		Provider:  provider,
-		Preferred: "",
+		Preferred: s.cfg.ProviderFallbacks[0],
 		Failures:  make(map[proxy.StreamStrategy]int),
 	}
 	_ = s.store.Set(provider, state)
 	return state
+}
+
+func (s *StrategySelector) lockProvider(provider string) func() {
+	// FNV-1a gives a stable, cheap spread without an unbounded lock map.
+	var hash uint32 = 2166136261
+	for i := 0; i < len(provider); i++ {
+		hash ^= uint32(provider[i])
+		hash *= 16777619
+	}
+	lock := &s.stateLocks[hash%uint32(len(s.stateLocks))]
+	lock.Lock()
+	return lock.Unlock
 }
 
 func ProviderKey(targetURL string, _ string) string {
@@ -283,7 +360,10 @@ func normalizeStrategyProviderKey(provider string) string {
 	if provider == "" {
 		return "default"
 	}
-	if idx := strings.Index(provider, "::"); idx >= 0 {
+	// Legacy provider keys append an absolute path as "host::/path". Match
+	// that delimiter specifically so bracketed and unbracketed IPv6 hosts keep
+	// their intrinsic "::" intact.
+	if idx := strings.Index(provider, "::/"); idx >= 0 {
 		provider = provider[:idx]
 	}
 	if provider == "" {

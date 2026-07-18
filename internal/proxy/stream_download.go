@@ -31,7 +31,8 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
-	if !s.cbGate.Allow() {
+	cbGate := s.circuitBreakerFor(targetURL)
+	if !cbGate.Allow() {
 		return &StreamOutcome{
 			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
 			Retryable:     true,
@@ -102,10 +103,12 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 		return nil
 	})
 	if doErr != nil {
+		cbGate.RecordFailure()
 		reason, retryable := classifyStreamError(doErr)
 		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", doErr), FailureReason: reason, Retryable: retryable}
 	}
 	if isRedirectStatus(resp.StatusCode) {
+		cbGate.RecordSuccess()
 		defer resp.Body.Close()
 		return s.handleRedirect(w, r, resp, passwdInfo, fileSize, meta, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
@@ -127,6 +130,15 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 
 // ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	cbGate := s.circuitBreakerFor(targetURL)
+	if !cbGate.Allow() {
+		return &StreamOutcome{
+			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
+			Retryable:     true,
+			FailureReason: "circuit_open",
+		}
+	}
+
 	rangeHeader := req.Header.Get("Range")
 	meta := contentMetaFromContext(req.Context(), passwdInfo, fileSize)
 	if meta.PlainSize > 0 {
@@ -164,10 +176,12 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	s.StripForeignHeaders(req)
 	resp, err := s.client.Do(req)
 	if err != nil {
+		cbGate.RecordFailure()
 		reason, retryable := classifyStreamError(err)
 		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", err), FailureReason: reason, Retryable: retryable}
 	}
 	if isRedirectStatus(resp.StatusCode) {
+		cbGate.RecordSuccess()
 		defer resp.Body.Close()
 		return s.handleRedirect(w, req, resp, passwdInfo, fileSize, meta, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
@@ -277,6 +291,7 @@ func (s *StreamProxy) DecryptedBlockCacheStats() map[string]interface{} {
 
 func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	result := &StreamOutcome{}
+	cbGate := s.circuitBreakerFor(targetURL)
 	allowLoose := false
 	enableSniff := true
 	if s != nil && s.cfg != nil {
@@ -285,7 +300,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		enableSniff = alist.EnableSniff
 	}
 	if resp.StatusCode >= http.StatusInternalServerError {
-		s.cbGate.RecordFailure()
+		cbGate.RecordFailure()
 		return &StreamOutcome{
 			Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
 			Retryable:     true,
@@ -308,7 +323,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	}
 
 	// Upstream responded successfully (< 500), reset circuit breaker
-	s.cbGate.RecordSuccess()
+	cbGate.RecordSuccess()
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
@@ -328,19 +343,6 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	}
 	if fileSize == 0 {
 		result.Err = errors.NewDecryptionError("file size required for decrypt stream")
-		return result
-	}
-
-	// Create decryption stream
-	var flowEnc encryption.Cipher
-	var err error
-	if meta.IsV2() {
-		flowEnc, err = encryption.NewCipherV2(encryption.EncType(passwdInfo.EncType), passwdInfo.Password, fileSize, meta.NonceField)
-	} else {
-		flowEnc, err = encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
-	}
-	if err != nil {
-		result.Err = errors.NewDecryptionErrorWithCause("failed to create cipher", err)
 		return result
 	}
 
@@ -400,6 +402,38 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsatisfiable")
 			return &StreamOutcome{Err: errors.NewProxyError("range unsatisfiable"), Retryable: true, FailureReason: "range_unsatisfiable"}
 		}
+		contentRangeHeader := resp.Header.Get("Content-Range")
+		actualRange, validContentRange := parseContentRange(contentRangeHeader)
+		expectedStart := activeRange.Start
+		expectedEnd := activeRange.End
+		if meta.IsV2() {
+			expectedStart += meta.HeaderLen
+			expectedEnd += meta.HeaderLen
+		}
+		if !validContentRange || actualRange.Start != expectedStart || actualRange.End < expectedEnd {
+			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsupported")
+			return &StreamOutcome{
+				Err:           errors.NewProxyError(fmt.Sprintf("upstream Content-Range %q does not cover requested interval %d-%d", contentRangeHeader, expectedStart, expectedEnd)),
+				Retryable:     true,
+				FailureReason: "range_unsupported",
+				StatusCode:    resp.StatusCode,
+			}
+		}
+	}
+
+	// Validate the upstream range before paying the key-derivation cost or
+	// committing response headers. A 206 for a different interval is not safe
+	// to decrypt at the requested plaintext position.
+	var flowEnc encryption.Cipher
+	var err error
+	if meta.IsV2() {
+		flowEnc, err = encryption.NewCipherV2(encryption.EncType(passwdInfo.EncType), passwdInfo.Password, fileSize, meta.NonceField)
+	} else {
+		flowEnc, err = encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
+	}
+	if err != nil {
+		result.Err = errors.NewDecryptionErrorWithCause("failed to create cipher", err)
+		return result
 	}
 
 	if activeRange != nil {

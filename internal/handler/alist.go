@@ -1092,26 +1092,19 @@ func cloneFSMetaResponse(src *fsMetaUpstreamResponse) *fsMetaUpstreamResponse {
 
 func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, encryptedPath string, ciphertextSize int64, passwdInfo *config.PasswdInfo) encryption.ContentMeta {
 	authVariants := buildProbeAuthVariants(h.cfg, r.Header)
-	for _, headers := range authVariants {
-		meta := h.streamProxy.InspectEncryptedContent(r.Context(), rawURL, headers, passwdInfo, ciphertextSize)
-		if meta.IsV2() && meta.PlainSize > 0 {
-			return meta
+	meta := encryption.LegacyContentMeta(encryption.EncType(passwdInfo.EncType), ciphertextSize)
+	candidates := []string{rawURL}
+	if h != nil && h.cfg != nil && strings.TrimSpace(encryptedPath) != "" {
+		alistURL := strings.TrimSpace(h.cfg.GetAlistURL())
+		if alistURL != "" {
+			candidates = append(candidates,
+				httputil.BuildTargetURLWithQuery(alistURL, "/dav"+encryptedPath, ""),
+				httputil.BuildTargetURLWithQuery(alistURL, "/d"+encryptedPath, ""),
+			)
 		}
 	}
-	meta := encryption.LegacyContentMeta(encryption.EncType(passwdInfo.EncType), ciphertextSize)
-	if h == nil || h.cfg == nil || strings.TrimSpace(encryptedPath) == "" {
-		return meta
-	}
-	alistURL := strings.TrimSpace(h.cfg.GetAlistURL())
-	if alistURL == "" {
-		return meta
-	}
-	candidates := []string{
-		httputil.BuildTargetURLWithQuery(alistURL, "/dav"+encryptedPath, ""),
-		httputil.BuildTargetURLWithQuery(alistURL, "/d"+encryptedPath, ""),
-	}
-	seen := map[string]struct{}{rawURL: {}}
-	for _, candidate := range candidates {
+	seen := make(map[string]struct{}, len(candidates))
+	for index, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
 			continue
@@ -1120,12 +1113,14 @@ func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, e
 			continue
 		}
 		seen[candidate] = struct{}{}
-		for _, headers := range authVariants {
-			fallback := h.streamProxy.InspectEncryptedContent(r.Context(), candidate, headers, passwdInfo, ciphertextSize)
-			if fallback.IsV2() && fallback.PlainSize > 0 {
-				trace.Logf(r.Context(), "get", "Detected V2 content via fallback probe target=%s plain=%d cipher=%d", candidate, fallback.PlainSize, fallback.CiphertextSize)
-				return fallback
+		result := probeCandidateWithAuth(h.cfg, candidate, authVariants, func(headers http.Header) proxy.ContentInspectionResult {
+			return h.streamProxy.InspectEncryptedContentResult(r.Context(), candidate, headers, passwdInfo, ciphertextSize)
+		})
+		if result.Confirmed {
+			if index > 0 && result.Meta.IsV2() && result.Meta.PlainSize > 0 {
+				trace.Logf(r.Context(), "get", "Detected V2 content via fallback probe target=%s plain=%d cipher=%d", candidate, result.Meta.PlainSize, result.Meta.CiphertextSize)
 			}
+			return result.Meta
 		}
 	}
 	return meta

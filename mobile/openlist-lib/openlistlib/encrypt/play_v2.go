@@ -235,6 +235,47 @@ func parseSingleRange(header string, size int64) (start, end int64, hasRange boo
 	return start, end, true, nil
 }
 
+type parsedContentRange struct {
+	Start      int64
+	End        int64
+	Total      int64
+	TotalKnown bool
+}
+
+func parseContentRange(contentRange string) (parsedContentRange, bool) {
+	fields := strings.Fields(strings.TrimSpace(contentRange))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return parsedContentRange{}, false
+	}
+	rangeAndTotal := strings.SplitN(fields[1], "/", 2)
+	if len(rangeAndTotal) != 2 || strings.TrimSpace(rangeAndTotal[1]) == "" {
+		return parsedContentRange{}, false
+	}
+	bounds := strings.SplitN(rangeAndTotal[0], "-", 2)
+	if len(bounds) != 2 {
+		return parsedContentRange{}, false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(bounds[0]), 10, 64)
+	if err != nil || start < 0 {
+		return parsedContentRange{}, false
+	}
+	end, err := strconv.ParseInt(strings.TrimSpace(bounds[1]), 10, 64)
+	if err != nil || end < start {
+		return parsedContentRange{}, false
+	}
+	parsed := parsedContentRange{Start: start, End: end}
+	totalText := strings.TrimSpace(rangeAndTotal[1])
+	if totalText != "*" {
+		total, err := strconv.ParseInt(totalText, 10, 64)
+		if err != nil || total <= 0 || end >= total {
+			return parsedContentRange{}, false
+		}
+		parsed.Total = total
+		parsed.TotalKnown = true
+	}
+	return parsed, true
+}
+
 // parseRange is retained for legacy call sites. Playback V2 uses
 // parseSingleRange directly so malformed or unsupported ranges can produce a
 // proper 416 instead of being mistaken for a request for the full file.
@@ -262,39 +303,17 @@ func shouldDecryptRedirect(r *http.Request, info *RedirectInfo) bool {
 	return r == nil || r.URL == nil || r.URL.Query().Get("decode") != "0"
 }
 
-func isFirstFrameRangeHint(method, rangeHeader string) bool {
-	if method != http.MethodGet && method != http.MethodHead {
-		return false
+func redirectRawFileSize(info *RedirectInfo, fallback int64) int64 {
+	if info == nil || info.ContentVersion != ContentVersionV2 {
+		return fallback
 	}
-	if rangeHeader == "" {
-		return true
+	if info.CiphertextSize > 0 {
+		return info.CiphertextSize
 	}
-	if !strings.HasPrefix(rangeHeader, "bytes=") {
-		return false
+	if info.FileSize > 0 && info.HeaderLen > 0 && info.FileSize <= (1<<63-1)-info.HeaderLen {
+		return info.FileSize + info.HeaderLen
 	}
-	parts := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
-	if len(parts) == 0 {
-		return false
-	}
-	startStr := strings.TrimSpace(parts[0])
-	if startStr == "" {
-		return false
-	}
-	start, err := strconv.ParseInt(startStr, 10, 64)
-	if err != nil || start != 0 {
-		return false
-	}
-	if len(parts) > 1 {
-		endStr := strings.TrimSpace(parts[1])
-		if endStr == "" {
-			return true
-		}
-		end, err := strconv.ParseInt(endStr, 10, 64)
-		if err == nil && end < 2*1024*1024 {
-			return true
-		}
-	}
-	return false
+	return fallback
 }
 
 func appendUniquePathVariant(out []string, value string) []string {
@@ -489,10 +508,11 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 	refreshed.RedirectURL = rawURL
 	if size > 0 {
 		if refreshed.ContentVersion == ContentVersionV2 && refreshed.HeaderLen > 0 {
-			refreshed.CiphertextSize = size
-			if size > refreshed.HeaderLen {
-				refreshed.FileSize = size - refreshed.HeaderLen
-			}
+			// handleFsGet exposes and caches the decrypted (plain-text) size for
+			// V2 content. Do not subtract the V2 header a second time when a
+			// signed raw_url is refreshed.
+			refreshed.FileSize = size
+			refreshed.CiphertextSize = size + refreshed.HeaderLen
 		} else {
 			refreshed.FileSize = size
 			refreshed.CiphertextSize = size
@@ -580,6 +600,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	// Do not let failures from one signed cloud URL trip the process-wide
 	// control-plane breaker. A newly selected video may use a healthy provider,
 	// and request cancellation already bounds abandoned seek attempts.
+	decodeDisabled := r.URL.Query().Get("decode") == "0"
+	if decodeDisabled {
+		fileSize = redirectRawFileSize(info, fileSize)
+	}
 	clientRangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	upstreamRangeHeader := clientRangeHeader
 	startPos, endPos, hasRange, rangeErr := parseSingleRange(clientRangeHeader, fileSize)
@@ -603,7 +627,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		meta = cachedMeta
 		trustedRedirectMeta = true
 	}
-	if decode := r.URL.Query().Get("decode"); decode != "0" && info.PasswdInfo != nil && !trustedRedirectMeta {
+	if !decodeDisabled && info.PasswdInfo != nil && !trustedRedirectMeta {
 		encProbePath := info.EncryptedPath
 		if strings.HasPrefix(encProbePath, "/dav") {
 			encProbePath = strings.TrimPrefix(encProbePath, "/dav")
@@ -691,7 +715,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 
 	// Always apply V2 corrections — whether meta came from inspection, cache, or pre-population.
 	// This ensures fileSize is plainSize and upstream range is shifted by headerLen.
-	if meta.IsV2() {
+	if meta.IsV2() && !decodeDisabled {
 		if meta.PlainSize > 0 {
 			fileSize = meta.PlainSize
 		}
@@ -707,7 +731,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			StatusCode:      http.StatusRequestedRangeNotSatisfiable,
 		}
 	}
-	if meta.IsV2() {
+	if meta.IsV2() && !decodeDisabled {
 		if hasRange && strategy == StreamStrategyRange {
 			// Canonicalize bounded and suffix client ranges to an explicit
 			// ciphertext interval. Passing a suffix range through as-is would
@@ -731,7 +755,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 
-	if r.Method == http.MethodHead {
+	if r.Method == http.MethodHead && !decodeDisabled {
 		statusCode := http.StatusOK
 		w.Header().Set("Accept-Ranges", "bytes")
 		if hasRange {
@@ -749,8 +773,12 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	if client == nil {
 		return &StreamOutcome{Err: fmt.Errorf("stream client unavailable"), FailureReason: "stream_error", Retryable: true}
 	}
+	upstreamMethod := http.MethodGet
+	if decodeDisabled {
+		upstreamMethod = r.Method
+	}
 	buildRequest := func(targetURL string, current *RedirectInfo) (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		req, err := http.NewRequestWithContext(ctx, upstreamMethod, targetURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -815,8 +843,8 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		resp.Body.Close()
 		if refreshed, ok := p.refreshRedirectInfo(ctx, redirectKey, r.Header, info); ok {
+			resp.Body.Close()
 			info = refreshed
 			resp, err = doStreamRequest(info)
 			if err != nil {
@@ -825,6 +853,27 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 	defer resp.Body.Close()
+	if decodeDisabled {
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		if r.Method == http.MethodHead {
+			return &StreamOutcome{StatusCode: resp.StatusCode, ResponseStarted: true}
+		}
+		if _, copyErr := copyWithBuffer(w, resp.Body); copyErr != nil {
+			return &StreamOutcome{
+				Err:             copyErr,
+				FailureReason:   "stream_error",
+				Retryable:       true,
+				ResponseStarted: true,
+				StatusCode:      resp.StatusCode,
+			}
+		}
+		return &StreamOutcome{StatusCode: resp.StatusCode, ResponseStarted: true}
+	}
 
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
@@ -877,7 +926,24 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 
-	if clientRangeHeader != "" && upstreamIsRange {
+	if clientRangeHeader != "" && strategy == StreamStrategyRange && upstreamIsRange {
+		contentRangeHeader := resp.Header.Get("Content-Range")
+		actualRange, validContentRange := parseContentRange(contentRangeHeader)
+		expectedStart := startPos
+		expectedEnd := endPos
+		if meta.IsV2() {
+			expectedStart = meta.UpstreamOffset(startPos)
+			expectedEnd = meta.UpstreamOffset(endPos)
+		}
+		if !validContentRange || actualRange.Start != expectedStart || actualRange.End < expectedEnd {
+			p.markRangeIncompatible(info.RedirectURL, info.OriginalURL)
+			return &StreamOutcome{
+				Err:           fmt.Errorf("upstream Content-Range %q does not cover requested interval %d-%d", contentRangeHeader, expectedStart, expectedEnd),
+				FailureReason: "range_unsupported",
+				Retryable:     true,
+				StatusCode:    statusCode,
+			}
+		}
 		p.markRangeCompatible(info.RedirectURL, info.OriginalURL)
 	}
 
@@ -919,8 +985,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 
-	decode := r.URL.Query().Get("decode")
-	if decode == "0" || info.PasswdInfo == nil {
+	if info.PasswdInfo == nil {
 		w.WriteHeader(statusCode)
 		_, err = copyWithBuffer(w, resp.Body)
 		if err != nil {
@@ -1086,6 +1151,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	info = cloneRedirectInfo(info)
 
 	fileSize := o.resolveFileSize(r.Context(), r, info)
+	decodeDisabled := r.URL.Query().Get("decode") == "0"
+	if decodeDisabled {
+		fileSize = redirectRawFileSize(info, fileSize)
+	}
 	log.Debugf("V2 redirect resolve: original=%s redirect=%s size=%d range=%q", safeURLForLog(info.OriginalURL), safeURLForLog(info.RedirectURL), fileSize, r.Header.Get("Range"))
 	if fileSize == 0 {
 		if shouldDecryptRedirect(r, info) {
@@ -1141,13 +1210,13 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 
 	strategies := []StreamStrategy{StreamStrategyRange}
-	if o.proxy.strategySelector != nil {
+	if !decodeDisabled && o.proxy.strategySelector != nil {
 		strategies = o.proxy.strategySelector.Select(provider)
 	}
 
-	firstFrameHint := isFirstFrameRangeHint(r.Method, r.Header.Get("Range"))
-
+	attempted := make(map[StreamStrategy]struct{}, len(strategies)+2)
 	tryStrategy := func(strategy StreamStrategy) *StreamOutcome {
+		attempted[strategy] = struct{}{}
 		if latest, ok := o.proxy.loadRedirectCache(key); ok {
 			info = cloneRedirectInfo(latest)
 		}
@@ -1179,6 +1248,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 
 	var outcome *StreamOutcome
 	for _, strategy := range strategies {
+		if _, alreadyAttempted := attempted[strategy]; alreadyAttempted {
+			continue
+		}
 		outcome = tryStrategy(strategy)
 		if outcome.Err == nil {
 			return
@@ -1186,17 +1258,27 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		if outcome.ResponseStarted {
 			break
 		}
-		if outcome.FailureReason == "range_unsupported" && firstFrameHint && strategy == StreamStrategyRange {
-			log.Warnf("V2 play: range unsupported on first frame, falling back to chunked")
-			outcome = tryStrategy(StreamStrategyChunked)
-			if outcome.Err == nil {
-				return
+		if outcome.FailureReason == "range_unsupported" && strategy == StreamStrategyRange {
+			if _, alreadyAttempted := attempted[StreamStrategyChunked]; !alreadyAttempted {
+				log.Warnf("V2 play: range unsupported, falling back to chunked")
+				outcome = tryStrategy(StreamStrategyChunked)
+				if outcome.Err == nil {
+					return
+				}
+				if outcome.ResponseStarted {
+					break
+				}
+				if outcome.FailureReason == "chunked_seek_too_large" {
+					log.Warnf("V2 play: chunked seek exceeds local discard limit; refusing an unbounded full-file fallback")
+				}
 			}
 		} else if outcome.FailureReason == "range_unsatisfiable" && strategy == StreamStrategyRange {
-			log.Warnf("V2 play: range unsatisfiable, falling back to full")
-			outcome = tryStrategy(StreamStrategyFull)
-			if outcome.Err == nil {
-				return
+			if _, alreadyAttempted := attempted[StreamStrategyFull]; !alreadyAttempted {
+				log.Warnf("V2 play: range unsatisfiable, falling back to full")
+				outcome = tryStrategy(StreamStrategyFull)
+				if outcome.Err == nil {
+					return
+				}
 			}
 		}
 	}

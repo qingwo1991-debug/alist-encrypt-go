@@ -148,6 +148,7 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 	// Idempotency is handled via error handling below (Duplicate key name / 1061).
 	indexes := []string{
 		fmt.Sprintf("CREATE INDEX idx_strategy_last_accessed ON %s(last_accessed)", TableName("strategy")),
+		fmt.Sprintf("CREATE INDEX idx_strategy_provider_updated ON %s(provider_host, updated_at)", TableName("strategy")),
 		fmt.Sprintf("CREATE INDEX idx_file_meta_last_accessed ON %s(last_accessed)", TableName("file_meta")),
 		fmt.Sprintf("CREATE INDEX idx_file_meta_provider_path ON %s(provider_host, original_path(255))", TableName("file_meta")),
 		fmt.Sprintf("CREATE INDEX idx_range_compat_last_accessed ON %s(last_accessed)", TableName("range_compat")),

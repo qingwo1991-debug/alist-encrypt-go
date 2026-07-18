@@ -3,6 +3,7 @@ package encrypt
 import (
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 )
 
 // 流式传输优化常量
+
+// redirectCacheMaxEntries bounds short-lived signed redirect URLs. A few
+// thousand entries are enough to absorb bursts without allowing an attacker or
+// a long-running client to grow the process indefinitely.
+const redirectCacheMaxEntries = 4096
 
 // CachedFileInfo 带过期时间的文件信息缓存
 type CachedFileInfo struct {
@@ -74,20 +80,93 @@ func (p *ProxyServer) cleanupExpiredCache() {
 		return true
 	})
 
-	// 清理重定向缓存
-	p.redirectCache.Range(func(key string, value interface{}) bool {
-		if cached, ok := value.(*CachedRedirectInfo); ok {
-			if now.After(cached.ExpireAt) {
-				p.redirectCache.Delete(key)
-			}
-		}
-		return true
-	})
+	// 清理重定向缓存，并修复任何由旧版本遗留的超限状态。
+	p.redirectCacheMu.Lock()
+	p.trimRedirectCacheLocked(now, redirectCacheMaxEntries)
+	p.redirectCacheMu.Unlock()
+
+	// 预热记录的有效期就是冷却窗口；过期后没有保留价值。
+	p.prefetchRecentMu.Lock()
+	p.trimPrefetchRecentLocked(now, prefetchRecentMaxEntries)
+	p.prefetchRecentMu.Unlock()
 
 	if deletedCount > 0 {
 		log.Debugf("[%s] Cache cleanup: removed %d expired file entries", internal.TagCache, deletedCount)
 	}
 	p.maybeRefreshProviderCatalog(nil)
+}
+
+type redirectCacheEvictionCandidate struct {
+	key      string
+	expireAt time.Time
+}
+
+// trimRedirectCacheLocked drops expired/malformed entries first, then removes
+// entries with the earliest expiration until maxEntries is satisfied.
+// redirectCacheMu must be held by the caller.
+func (p *ProxyServer) trimRedirectCacheLocked(now time.Time, maxEntries int) {
+	if p == nil || p.redirectCache == nil {
+		return
+	}
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+
+	// The steady-state insertion path can only exceed its target by one. Keep
+	// that path allocation-free and O(n); collect all candidates only when
+	// repairing a cache left over-capacity by an older build.
+	collectAll := p.redirectCache.Len()-maxEntries > 1
+	var candidates []redirectCacheEvictionCandidate
+	if collectAll {
+		candidates = make([]redirectCacheEvictionCandidate, 0, p.redirectCache.Len())
+	}
+	expiredKeys := make([]string, 0)
+	oldest := redirectCacheEvictionCandidate{}
+	haveOldest := false
+	for i := range p.redirectCache.shards {
+		shard := &p.redirectCache.shards[i]
+		shard.mu.RLock()
+		for key, value := range shard.m {
+			cached, ok := value.(*CachedRedirectInfo)
+			if !ok || cached == nil || !now.Before(cached.ExpireAt) {
+				expiredKeys = append(expiredKeys, key)
+				continue
+			}
+			candidate := redirectCacheEvictionCandidate{key: key, expireAt: cached.ExpireAt}
+			if !haveOldest || candidate.expireAt.Before(oldest.expireAt) ||
+				(candidate.expireAt.Equal(oldest.expireAt) && candidate.key < oldest.key) {
+				oldest = candidate
+				haveOldest = true
+			}
+			if collectAll {
+				candidates = append(candidates, candidate)
+			}
+		}
+		shard.mu.RUnlock()
+	}
+	for _, key := range expiredKeys {
+		p.redirectCache.Delete(key)
+	}
+
+	if p.redirectCache.Len() <= maxEntries {
+		return
+	}
+	if p.redirectCache.Len()-maxEntries == 1 && haveOldest {
+		p.redirectCache.Delete(oldest.key)
+		return
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].expireAt.Equal(candidates[j].expireAt) {
+			return candidates[i].key < candidates[j].key
+		}
+		return candidates[i].expireAt.Before(candidates[j].expireAt)
+	})
+	for _, candidate := range candidates {
+		if p.redirectCache.Len() <= maxEntries {
+			break
+		}
+		p.redirectCache.Delete(candidate.key)
+	}
 }
 
 // normalizeCacheKey 统一缓存键（对齐 alist-encrypt：decodeURIComponent）
@@ -242,10 +321,27 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 // storeRedirectCache 存储重定向信息到缓存（带 TTL）
 func (p *ProxyServer) storeRedirectCache(key string, info *RedirectInfo) {
 	p.ensureRuntimeCaches()
-	p.redirectCache.Set(key, &CachedRedirectInfo{
+	now := time.Now()
+	entry := &CachedRedirectInfo{
 		Info:     info,
-		ExpireAt: time.Now().Add(p.redirectCacheTTL()),
-	})
+		ExpireAt: now.Add(p.redirectCacheTTL()),
+	}
+
+	p.redirectCacheMu.Lock()
+	if p.redirectCache.Len() >= redirectCacheMaxEntries {
+		_, replacing := p.redirectCache.Get(key)
+		target := redirectCacheMaxEntries
+		if !replacing {
+			target--
+		}
+		p.trimRedirectCacheLocked(now, target)
+		// The key may itself have been expired and removed while trimming.
+		if _, stillPresent := p.redirectCache.Get(key); !stillPresent && p.redirectCache.Len() >= redirectCacheMaxEntries {
+			p.trimRedirectCacheLocked(now, redirectCacheMaxEntries-1)
+		}
+	}
+	p.redirectCache.Set(key, entry)
+	p.redirectCacheMu.Unlock()
 	if info != nil {
 		p.debugf("retry", "store redirect key=%s ttl=%s url=%s", key, p.redirectCacheTTL().String(), p.sanitizeURLForDebug(info.RedirectURL))
 	}

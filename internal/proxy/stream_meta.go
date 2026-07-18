@@ -17,6 +17,16 @@ import (
 
 type contentMetaContextKey struct{}
 
+// ContentInspectionResult preserves whether a prefix probe conclusively
+// identified the content format. A legacy-looking ContentMeta alone is
+// ambiguous: it can mean either a complete V1 prefix or a failed/short probe.
+// StatusCode is the final upstream HTTP status (zero for transport failures).
+type ContentInspectionResult struct {
+	Meta       encryption.ContentMeta
+	Confirmed  bool
+	StatusCode int
+}
+
 type uploadMetaEntry struct {
 	Meta      encryption.ContentMeta
 	ExpiresAt time.Time
@@ -40,18 +50,23 @@ func copyProbeAuthHeaders(req *http.Request, src http.Header) {
 }
 
 func (s *StreamProxy) inspectEncryptedContent(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) encryption.ContentMeta {
-	meta, _ := s.inspectEncryptedContentConfirmed(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
-	return meta
+	return s.inspectEncryptedContentResult(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize).Meta
 }
 
 func (s *StreamProxy) inspectEncryptedContentConfirmed(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) (encryption.ContentMeta, bool) {
+	result := s.inspectEncryptedContentResult(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
+	return result.Meta, result.Confirmed
+}
+
+func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) ContentInspectionResult {
 	encType := encryption.EncType("")
 	if passwdInfo != nil {
 		encType = encryption.EncType(passwdInfo.EncType)
 	}
 	meta := encryption.LegacyContentMeta(encType, ciphertextSize)
+	result := ContentInspectionResult{Meta: meta}
 	if s == nil || passwdInfo == nil || !passwdInfo.Enable || strings.TrimSpace(targetURL) == "" {
-		return meta, false
+		return result
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -69,7 +84,7 @@ func (s *StreamProxy) inspectEncryptedContentConfirmed(ctx context.Context, targ
 			WithContext(ctx).
 			Build()
 		if err != nil {
-			return meta, false
+			return result
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", encryption.ContentHeaderSize()-1))
 		req.Header.Set("Accept-Encoding", "identity")
@@ -77,18 +92,19 @@ func (s *StreamProxy) inspectEncryptedContentConfirmed(ctx context.Context, targ
 
 		resp, err := s.client.Do(req)
 		if err != nil {
-			return meta, false
+			return result
 		}
+		result.StatusCode = resp.StatusCode
 		if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently ||
 			resp.StatusCode == http.StatusSeeOther || resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect {
 			location := strings.TrimSpace(resp.Header.Get("Location"))
 			resp.Body.Close()
 			if location == "" {
-				return meta, false
+				return result
 			}
 			nextURL, err := resolveRedirectTarget(currentURL, location)
 			if err != nil {
-				return meta, false
+				return result
 			}
 			previous, previousErr := url.Parse(currentURL)
 			next, nextErr := url.Parse(nextURL)
@@ -100,16 +116,17 @@ func (s *StreamProxy) inspectEncryptedContentConfirmed(ctx context.Context, targ
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= http.StatusBadRequest {
-			return meta, false
+			return result
 		}
 		prefix, err := io.ReadAll(io.LimitReader(resp.Body, encryption.ContentHeaderSize()))
 		if err != nil {
-			return meta, false
+			return result
 		}
 		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
 			meta.CiphertextSize = total
 			meta.PlainSize = total
-		} else if cl := resp.Header.Get("Content-Length"); cl != "" {
+		} else if meta.CiphertextSize <= 0 {
+			cl := resp.Header.Get("Content-Length")
 			if total, err := strconv.ParseInt(cl, 10, 64); err == nil && total > 0 && resp.StatusCode == http.StatusOK {
 				meta.CiphertextSize = total
 				meta.PlainSize = total
@@ -123,22 +140,35 @@ func (s *StreamProxy) inspectEncryptedContentConfirmed(ctx context.Context, targ
 			// io.ReadAll on a LimitReader reports no error for a short body. Do not
 			// classify a truncated probe as a confirmed legacy file, because resumed
 			// encryption would then use incompatible metadata.
-			return meta, false
+			result.Meta = meta
+			return result
 		}
 		parsed, ok, err := encryption.ParseContentHeader(encType, prefix, meta.CiphertextSize)
 		if err != nil {
-			return meta, false
+			result.Meta = meta
+			return result
 		}
 		if ok {
-			return parsed, true
+			result.Meta = parsed
+			result.Confirmed = true
+			return result
 		}
-		return meta, true
+		result.Meta = meta
+		result.Confirmed = true
+		return result
 	}
-	return meta, false
+	return result
 }
 
 func (s *StreamProxy) InspectEncryptedContent(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) encryption.ContentMeta {
 	return s.inspectEncryptedContent(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
+}
+
+// InspectEncryptedContentResult returns both parsed metadata and the probe's
+// certainty/status so callers can stop after a confirmed V1 result and only
+// retry authentication when the upstream actually rejected it.
+func (s *StreamProxy) InspectEncryptedContentResult(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) ContentInspectionResult {
+	return s.inspectEncryptedContentResult(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
 }
 
 func resolveRedirectTarget(baseURL, location string) (string, error) {
@@ -364,6 +394,47 @@ func parseContentRangeTotal(contentRange string) int64 {
 		}
 	}
 	return 0
+}
+
+type parsedContentRange struct {
+	Start      int64
+	End        int64
+	Total      int64
+	TotalKnown bool
+}
+
+func parseContentRange(contentRange string) (parsedContentRange, bool) {
+	fields := strings.Fields(strings.TrimSpace(contentRange))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bytes") {
+		return parsedContentRange{}, false
+	}
+	rangeAndTotal := strings.SplitN(fields[1], "/", 2)
+	if len(rangeAndTotal) != 2 || strings.TrimSpace(rangeAndTotal[1]) == "" {
+		return parsedContentRange{}, false
+	}
+	bounds := strings.SplitN(rangeAndTotal[0], "-", 2)
+	if len(bounds) != 2 {
+		return parsedContentRange{}, false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(bounds[0]), 10, 64)
+	if err != nil || start < 0 {
+		return parsedContentRange{}, false
+	}
+	end, err := strconv.ParseInt(strings.TrimSpace(bounds[1]), 10, 64)
+	if err != nil || end < start {
+		return parsedContentRange{}, false
+	}
+	parsed := parsedContentRange{Start: start, End: end}
+	totalText := strings.TrimSpace(rangeAndTotal[1])
+	if totalText != "*" {
+		total, err := strconv.ParseInt(totalText, 10, 64)
+		if err != nil || total <= 0 || end >= total {
+			return parsedContentRange{}, false
+		}
+		parsed.Total = total
+		parsed.TotalKnown = true
+	}
+	return parsed, true
 }
 
 func discardBytes(r io.Reader, n int64) error {

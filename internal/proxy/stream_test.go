@@ -379,6 +379,34 @@ func TestInspectEncryptedContentFollowsRedirectForV2Probe(t *testing.T) {
 	}
 }
 
+func TestInspectEncryptedContentKeepsKnownSizeOnShortHTTP200(t *testing.T) {
+	cfg := config.DefaultConfig()
+	sp := NewStreamProxy(cfg)
+	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Length": []string{"1"}},
+			Body:       io.NopCloser(strings.NewReader("x")),
+			Request:    r,
+		}, nil
+	})
+
+	const knownCiphertextSize = int64(1568)
+	result := sp.InspectEncryptedContentResult(
+		context.Background(),
+		"https://cdn.example/short.bin",
+		nil,
+		&config.PasswdInfo{Password: "123456", EncType: "aesctr", Enable: true},
+		knownCiphertextSize,
+	)
+	if result.Confirmed {
+		t.Fatal("one-byte HTTP 200 response was incorrectly confirmed as V1")
+	}
+	if result.Meta.CiphertextSize != knownCiphertextSize || result.Meta.PlainSize != knownCiphertextSize {
+		t.Fatalf("known size was overwritten by short response: %+v", result.Meta)
+	}
+}
+
 func TestDecryptRequestFollowsTemporaryRedirect(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AlistServer.FollowRedirectForDecrypt = true

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/sync/singleflight"
 )
 
 // EncType represents encryption type
@@ -56,11 +57,14 @@ var (
 // Key format: "sha256(password):encType:keyLen". The per-file nonce is applied by each cipher after
 // PBKDF2; it is not part of the PBKDF2 salt.
 var (
-	v2KeyCache      = make(map[string]*cacheEntry[[]byte])
-	v2KeyCacheMu    sync.RWMutex
-	v2KeyCacheTTL   = 24 * time.Hour
-	v2KeyCacheTTLMu sync.RWMutex
+	v2KeyCache           = make(map[string]*cacheEntry[[]byte])
+	v2KeyCacheMu         sync.RWMutex
+	v2KeyDerivationGroup singleflight.Group
+	v2KeyCacheTTL        = 24 * time.Hour
+	v2KeyCacheTTLMu      sync.RWMutex
 )
+
+const v2KeyCacheMaxEntries = 128
 
 // SetV2KeyCacheTTL configures how long V2 PBKDF2 base keys stay hot in memory.
 // Non-positive values keep the current TTL.
@@ -83,37 +87,86 @@ func currentV2KeyCacheTTL() time.Duration {
 	return ttl
 }
 
-// cachedV2Key returns a cached PBKDF2 key for V2 ciphers, computing it only on cache miss.
-func cachedV2Key(password, encType string, keyLen int) []byte {
+type v2KeyDeriver func(password, encType string, keyLen int) []byte
+
+func deriveV2KeyPBKDF2(password, encType string, keyLen int) []byte {
+	return pbkdf2.Key([]byte(password), []byte(encType), pbkdf2IterationsModern, keyLen, sha256.New)
+}
+
+func v2KeyCacheKey(password, encType string, keyLen int) string {
 	passHash := sha256.Sum256([]byte(password))
-	cacheKey := fmt.Sprintf("%x:%s:%d", passHash, encType, keyLen)
-	now := time.Now()
-	ttl := currentV2KeyCacheTTL()
+	return fmt.Sprintf("%x:%s:%d", passHash, encType, keyLen)
+}
 
-	v2KeyCacheMu.RLock()
-	if entry, ok := v2KeyCache[cacheKey]; ok && now.Before(entry.expireAt) {
-		result := append([]byte(nil), entry.value...)
-		v2KeyCacheMu.RUnlock()
-		v2KeyCacheMu.Lock()
-		if current, ok := v2KeyCache[cacheKey]; ok && current == entry {
-			current.expireAt = now.Add(ttl)
-		}
-		v2KeyCacheMu.Unlock()
-		return result
-	}
-	v2KeyCacheMu.RUnlock()
-
-	key := pbkdf2.Key([]byte(password), []byte(encType), pbkdf2IterationsModern, keyLen, sha256.New)
-	result := append([]byte(nil), key...)
-
+func loadCachedV2Key(cacheKey string, now time.Time, ttl time.Duration) ([]byte, bool) {
 	v2KeyCacheMu.Lock()
+	defer v2KeyCacheMu.Unlock()
+
+	entry, ok := v2KeyCache[cacheKey]
+	if !ok {
+		return nil, false
+	}
+	if !now.Before(entry.expireAt) {
+		delete(v2KeyCache, cacheKey)
+		return nil, false
+	}
+	entry.expireAt = now.Add(ttl)
+	return append([]byte(nil), entry.value...), true
+}
+
+func storeCachedV2Key(cacheKey string, key []byte, now time.Time, ttl time.Duration) {
+	v2KeyCacheMu.Lock()
+	defer v2KeyCacheMu.Unlock()
+
+	if _, exists := v2KeyCache[cacheKey]; !exists && len(v2KeyCache) >= v2KeyCacheMaxEntries {
+		for candidate, entry := range v2KeyCache {
+			if !now.Before(entry.expireAt) {
+				delete(v2KeyCache, candidate)
+			}
+		}
+	}
+	if _, exists := v2KeyCache[cacheKey]; !exists && len(v2KeyCache) >= v2KeyCacheMaxEntries {
+		var oldestKey string
+		var oldestExpiry time.Time
+		for candidate, entry := range v2KeyCache {
+			if oldestKey == "" || entry.expireAt.Before(oldestExpiry) {
+				oldestKey = candidate
+				oldestExpiry = entry.expireAt
+			}
+		}
+		if oldestKey != "" {
+			delete(v2KeyCache, oldestKey)
+		}
+	}
 	v2KeyCache[cacheKey] = &cacheEntry[[]byte]{
-		value:    append([]byte(nil), result...),
+		value:    append([]byte(nil), key...),
 		expireAt: now.Add(ttl),
 	}
-	v2KeyCacheMu.Unlock()
+}
 
-	return result
+// cachedV2Key returns a cached PBKDF2 key for V2 ciphers, computing it only on cache miss.
+func cachedV2Key(password, encType string, keyLen int) []byte {
+	return cachedV2KeyWithDeriver(password, encType, keyLen, deriveV2KeyPBKDF2)
+}
+
+func cachedV2KeyWithDeriver(password, encType string, keyLen int, derive v2KeyDeriver) []byte {
+	cacheKey := v2KeyCacheKey(password, encType, keyLen)
+	now := time.Now()
+	ttl := currentV2KeyCacheTTL()
+	if key, ok := loadCachedV2Key(cacheKey, now, ttl); ok {
+		return key
+	}
+
+	value, _, _ := v2KeyDerivationGroup.Do(cacheKey, func() (interface{}, error) {
+		ttl := currentV2KeyCacheTTL()
+		if key, ok := loadCachedV2Key(cacheKey, time.Now(), ttl); ok {
+			return key, nil
+		}
+		key := derive(password, encType, keyLen)
+		storeCachedV2Key(cacheKey, key, time.Now(), ttl)
+		return key, nil
+	})
+	return append([]byte(nil), value.([]byte)...)
 }
 
 // mixBase64Cache caches MixBase64 instances to avoid repeated KSA computation

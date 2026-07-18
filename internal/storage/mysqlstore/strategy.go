@@ -52,6 +52,51 @@ func (s *Store) GetStrategy(ctx context.Context, providerKey string) (*StrategyR
 	return &record, true, nil
 }
 
+// GetLatestStrategyByProvider reads the newest path-scoped strategy written by
+// older releases. It intentionally targets one provider instead of listing the
+// complete strategy table on every cache miss.
+func (s *Store) GetLatestStrategyByProvider(ctx context.Context, providerHost string) (*StrategyRecord, bool, error) {
+	if s == nil {
+		return nil, false, nil
+	}
+	query := "SELECT key_hash, provider_host, original_path, preferred_strategy, failures_json, success_streak, total_failures, total_successes, cooldown_until, last_downgrade, last_failure, last_strategy, updated_at, last_accessed, is_active FROM " + TableName("strategy") + " WHERE provider_host = ? AND is_active=1 ORDER BY updated_at DESC LIMIT 1"
+	row := s.db.QueryRowContext(ctx, query, providerHost)
+
+	var record StrategyRecord
+	var cooldownUntil sql.NullTime
+	var lastDowngrade sql.NullTime
+	var isActive int
+	if err := row.Scan(
+		&record.KeyHash,
+		&record.ProviderHost,
+		&record.OriginalPath,
+		&record.Preferred,
+		&record.FailuresJSON,
+		&record.SuccessStreak,
+		&record.TotalFailures,
+		&record.TotalSuccesses,
+		&cooldownUntil,
+		&lastDowngrade,
+		&record.LastFailure,
+		&record.LastStrategy,
+		&record.UpdatedAt,
+		&record.LastAccessed,
+		&isActive,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if cooldownUntil.Valid {
+		record.CooldownUntil = cooldownUntil.Time
+	}
+	if lastDowngrade.Valid {
+		record.LastDowngrade = lastDowngrade.Time
+	}
+	return &record, true, nil
+}
+
 func (s *Store) UpsertStrategy(ctx context.Context, record StrategyRecord) error {
 	if s == nil {
 		return nil

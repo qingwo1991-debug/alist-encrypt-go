@@ -59,6 +59,73 @@ func TestRegisterRedirectStoresDisplayPathAndCompatKey(t *testing.T) {
 	}
 }
 
+func TestRefreshRedirectMetadataUsesImmutableSnapshotAndShortCache(t *testing.T) {
+	var fsGetHits int
+	var backendURL string
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/fs/get" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		fsGetHits++
+		writeJSONResponse(w, map[string]interface{}{
+			"code": 200,
+			"data": map[string]interface{}{
+				"raw_url": backendURL + "/fresh",
+				"size":    float64(4096),
+				"is_dir":  false,
+			},
+		})
+	}))
+	defer upstream.Close()
+	backendURL = upstream.URL
+
+	parsed, err := url.Parse(backendURL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.ServerHost = parsed.Hostname()
+	cfg.AlistServer.ServerPort = port
+	cfg.AlistServer.HTTPS = false
+
+	handler := newTestProxyHandler(t, cfg)
+	key := handler.RegisterRedirect(backendURL+"/stale", 0, nil, "/enc/demo.mp4")
+	value, ok := handler.redirectMap.Load(key)
+	if !ok {
+		t.Fatal("redirect info not stored")
+	}
+	original := value.(*redirectInfo)
+
+	req := httptest.NewRequest(http.MethodGet, "/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=1024-2047")
+	refreshed := handler.refreshRedirectMetadata(req, key, "/enc/demo.mp4", original)
+	if refreshed == nil || refreshed == original {
+		t.Fatal("metadata refresh must return a new immutable snapshot")
+	}
+	if original.URL != backendURL+"/stale" || original.FileSize != 0 {
+		t.Fatalf("shared snapshot was mutated in place: url=%q size=%d", original.URL, original.FileSize)
+	}
+	if refreshed.URL != backendURL+"/fresh" || refreshed.FileSize != 4096 {
+		t.Fatalf("unexpected refreshed snapshot: url=%q size=%d", refreshed.URL, refreshed.FileSize)
+	}
+	stored, ok := handler.redirectMap.Load(key)
+	if !ok || stored != refreshed {
+		t.Fatal("redirect map was not atomically replaced with the refreshed snapshot")
+	}
+
+	second := handler.refreshRedirectMetadata(req, key, "/enc/demo.mp4", refreshed)
+	if second != refreshed {
+		t.Fatal("unchanged cached metadata should reuse the immutable snapshot")
+	}
+	if fsGetHits != 1 {
+		t.Fatalf("fs/get calls=%d, want 1 for repeated Range requests within refresh TTL", fsGetHits)
+	}
+}
+
 func TestHandleRedirectDecryptsUsingUnifiedPlaybackFlow(t *testing.T) {
 	cfg := config.DefaultConfig()
 

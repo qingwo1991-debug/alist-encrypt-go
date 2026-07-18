@@ -556,11 +556,14 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 			continue
 		}
 		seen[candidateURL] = struct{}{}
-		for _, headers := range authVariants {
-			meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
-			if meta.EncType == "" {
-				meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
-			}
+		result := probeCandidateWithAuth(req.Config, candidateURL, authVariants, func(headers http.Header) proxy.ContentInspectionResult {
+			return req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
+		})
+		meta := result.Meta
+		if meta.EncType == "" {
+			meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
+		}
+		if result.Confirmed {
 			if meta.IsV2() && meta.PlainSize > 0 {
 				log.Info().
 					Str("category", "playback").
@@ -571,8 +574,16 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 					Int64("plaintext_size", meta.PlainSize).
 					Int64("header_len", meta.HeaderLen).
 					Msg("Inspected V2 playback content meta")
-				return meta, true
+			} else {
+				log.Debug().
+					Str("category", "playback").
+					Str("consumer_scenario", req.ConsumerScenario).
+					Str("path", req.Path).
+					Str("target_url", candidateURL).
+					Int64("ciphertext_size", meta.CiphertextSize).
+					Msg("Confirmed V1 playback content meta")
 			}
+			return meta, true
 		}
 		log.Info().
 			Str("category", "playback").

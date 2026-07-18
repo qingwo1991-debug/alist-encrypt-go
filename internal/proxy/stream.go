@@ -77,8 +77,9 @@ type StreamProxy struct {
 	chunkedHintHits  uint64
 	rangeHintHits    uint64
 	fullHintHits     uint64
-	cbGate           *backoff.Gate    // circuit breaker for upstream failures
-	retrier          *backoff.Retrier // retry with jitter for transient network errors
+	cbGate           *backoff.Gate           // circuit breaker for the configured upstream and invalid targets
+	cbGates          *circuitBreakerRegistry // host-isolated circuit breakers for CDN/data-plane targets
+	retrier          *backoff.Retrier        // retry with jitter for transient network errors
 	uploadMetaMu     sync.Mutex
 	uploadMeta       map[string]uploadMetaEntry
 	blockCache       *decryptedBlockCache
@@ -123,13 +124,19 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 			maxActiveStreams = alist.MaxActiveStreams
 		}
 	}
+	cbGate := backoff.NewGate(cbThreshold, cbCooldown)
+	fallbackURL := ""
+	if cfg != nil {
+		fallbackURL = cfg.GetAlistURL()
+	}
 	return &StreamProxy{
 		client:        NewClient(cfg),
 		cfg:           cfg,
 		compatStore:   NewMemoryRangeCompatStore(),
 		rangeStats:    newRangeLearningStats(),
 		playbackHints: make(map[string]recentPlaybackHint),
-		cbGate:        backoff.NewGate(cbThreshold, cbCooldown),
+		cbGate:        cbGate,
+		cbGates:       newCircuitBreakerRegistry(cbGate, fallbackURL, cbThreshold, cbCooldown),
 		retrier:       retrier,
 		uploadMeta:    make(map[string]uploadMetaEntry),
 		blockCache:    newDecryptedBlockCacheFromConfig(cfg),

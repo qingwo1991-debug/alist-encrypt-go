@@ -12,7 +12,8 @@ import (
 
 // ProxyRequest forwards a request to the target and copies response
 func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targetURL string) error {
-	if !s.cbGate.Allow() {
+	cbGate := s.circuitBreakerFor(targetURL)
+	if !cbGate.Allow() {
 		return errors.NewProxyError("upstream temporarily unavailable (circuit open)")
 	}
 
@@ -59,15 +60,15 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 		resp, doErr = s.client.Do(req)
 	}
 	if doErr != nil {
-		s.cbGate.RecordFailure()
+		cbGate.RecordFailure()
 		return errors.NewProxyErrorWithCause("failed to proxy request", doErr)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 500 {
-		s.cbGate.RecordFailure()
+		cbGate.RecordFailure()
 	} else {
-		s.cbGate.RecordSuccess()
+		cbGate.RecordSuccess()
 	}
 
 	// Copy response headers and write response

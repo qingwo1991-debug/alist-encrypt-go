@@ -54,7 +54,10 @@ type ProxyHandler struct {
 	stopCleanupOnce       sync.Once
 }
 
-const maxRedirectEntries = 10000
+const (
+	maxRedirectEntries         = 10000
+	redirectMetadataRefreshTTL = 30 * time.Second
+)
 
 type redirectInfo struct {
 	URL         string
@@ -238,7 +241,7 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		displayPath = resolveRedirectDisplayPath(r)
 	}
 	if displayPath != "" {
-		if refreshed := h.refreshRedirectMetadata(r, displayPath, info); refreshed != nil {
+		if refreshed := h.refreshRedirectMetadata(r, key, displayPath, info); refreshed != nil {
 			info = refreshed
 		}
 	}
@@ -380,7 +383,7 @@ func redirectCompatKey(info *redirectInfo, passwdInfo *config.PasswdInfo, displa
 	return buildRangeCompatStorageKey(passwdInfo, displayPath)
 }
 
-func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, displayPath string, info *redirectInfo) *redirectInfo {
+func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, key, displayPath string, info *redirectInfo) *redirectInfo {
 	if h == nil || h.fileDAO == nil || h.cfg == nil || displayPath == "" {
 		return nil
 	}
@@ -401,17 +404,31 @@ func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, displayPath stri
 			realPath = displayPath
 		}
 	}
-	result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, 0)
-	if info != nil {
-		if strings.TrimSpace(result.RawURL) != "" {
-			info.URL = result.RawURL
-		}
-		if result.Size > 0 {
-			info.FileSize = result.Size
-		}
+	result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, redirectMetadataRefreshTTL)
+	if info == nil {
+		return nil
+	}
+
+	// Values stored in redirectMap are immutable snapshots. Mutating info in
+	// place races with concurrent Range requests that loaded the same pointer.
+	refreshed := *info
+	changed := false
+	if rawURL := strings.TrimSpace(result.RawURL); rawURL != "" && rawURL != refreshed.URL {
+		refreshed.URL = rawURL
+		changed = true
+	}
+	if result.Size > 0 && result.Size != refreshed.FileSize {
+		refreshed.FileSize = result.Size
+		changed = true
+	}
+	if !changed {
 		return info
 	}
-	return nil
+
+	// Do not resurrect an expired/evicted key or overwrite a newer concurrent
+	// refresh. The returned snapshot remains valid for this in-flight request.
+	h.redirectMap.CompareAndSwap(key, info, &refreshed)
+	return &refreshed
 }
 
 func (h *ProxyHandler) convertRedirectDisplayPath(displayPath string, passwdInfo *config.PasswdInfo) string {

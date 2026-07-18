@@ -23,14 +23,16 @@ import (
 //
 // Lock ordering convention (acquire in this order to prevent deadlocks):
 //   1. mutex (general state)
-//   2. sizeMapMu
-//   3. rangeCompatMu
-//   4. rangeProbeMu
-//   5. upstreamMu
-//   6. routingMu
-//   7. webdavNegativeMu
-//   8. uploadMetaMu
-//   9. dbExportTokenMu
+//   2. redirectCacheMu
+//   3. prefetchRecentMu
+//   4. sizeMapMu
+//   5. rangeCompatMu
+//   6. rangeProbeMu
+//   7. upstreamMu
+//   8. routingMu
+//   9. webdavNegativeMu
+//  10. uploadMetaMu
+//  11. dbExportTokenMu
 // Never hold two locks simultaneously unless following this order.
 
 // ProxyServer 加密代理服务器
@@ -53,6 +55,7 @@ type ProxyServer struct {
 	runtimeConfig       *ProxyConfig
 	fileCache           *shardedAnyMap
 	fileCacheCount      int64 // 缓存条目计数
+	redirectCacheMu     sync.Mutex
 	redirectCache       *shardedAnyMap
 	sizeMapMu           sync.RWMutex
 	sizeMap             map[string]SizeMapEntry
@@ -76,6 +79,7 @@ type ProxyServer struct {
 	upstreamDownAt      time.Time
 	upstreamError       string
 	upstreamFailures    int
+	prefetchRecentMu    sync.Mutex
 	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
 	webdavNegativeMu    sync.Mutex
 	webdavNegativeCache map[string]time.Time // path -> expireAt

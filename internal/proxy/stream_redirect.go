@@ -65,6 +65,14 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 	currentHeaders := req.Header.Clone()
 
 	for hop := 0; hop < maxHops; hop++ {
+		cbGate := s.circuitBreakerFor(currentURL)
+		if !cbGate.Allow() {
+			return &StreamOutcome{
+				Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
+				Retryable:     true,
+				FailureReason: "circuit_open",
+			}
+		}
 		newReq, err := httputil.NewRequest(req.Method, currentURL).
 			WithContext(req.Context()).
 			Build()
@@ -100,11 +108,13 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 
 		nextResp, err := s.client.Do(newReq)
 		if err != nil {
+			cbGate.RecordFailure()
 			reason, retryable := classifyStreamError(err)
 			return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to follow redirect", err), FailureReason: reason, Retryable: retryable}
 		}
 
 		if isRedirectStatus(nextResp.StatusCode) {
+			cbGate.RecordSuccess()
 			location := nextResp.Header.Get("Location")
 			nextResp.Body.Close()
 			if location == "" {

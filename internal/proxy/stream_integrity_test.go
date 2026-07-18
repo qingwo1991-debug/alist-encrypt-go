@@ -20,6 +20,19 @@ type closeTrackingBody struct {
 	closeCount int
 }
 
+func TestParseContentRangeReturnsCompleteInterval(t *testing.T) {
+	parsed, ok := parseContentRange("bytes 1056-1567/4128")
+	if !ok {
+		t.Fatal("valid Content-Range was rejected")
+	}
+	if parsed.Start != 1056 || parsed.End != 1567 || parsed.Total != 4128 || !parsed.TotalKnown {
+		t.Fatalf("parsed Content-Range=%+v", parsed)
+	}
+	if _, ok := parseContentRange("bytes 1056-4128/4128"); ok {
+		t.Fatal("Content-Range ending at total size was accepted")
+	}
+}
+
 func (b *closeTrackingBody) Close() error {
 	b.closeCount++
 	return nil
@@ -117,6 +130,82 @@ func TestDecryptStreamTreatsShortUpstreamBodyAsTruncatedWithoutRangeSuccess(t *t
 	}
 	if state.ConsecutiveSuccesses != 0 || state.ConsecutiveFailures != 1 {
 		t.Fatalf("truncated response changed range success state: %#v", state)
+	}
+}
+
+func TestV2DecryptRejectsInvalidUpstreamContentRangeCoverage(t *testing.T) {
+	const plainSize = int64(4096)
+	meta := encryption.ContentMeta{
+		EncType:        encryption.EncTypeAESCTR,
+		Version:        encryption.ContentVersionV2,
+		HeaderLen:      encryption.ContentHeaderSize(),
+		PlainSize:      plainSize,
+		CiphertextSize: plainSize + encryption.ContentHeaderSize(),
+		NonceField:     bytes.Repeat([]byte{0x4d}, 16),
+	}
+	tests := []struct {
+		name          string
+		contentRange  string
+		contentLength int
+	}{
+		{name: "wrong start", contentRange: "bytes 0-511/4128", contentLength: 512},
+		{name: "same start but short end", contentRange: "bytes 1056-1500/4128", contentLength: 445},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.AlistServer.EnableSniff = false
+			cfg.AlistServer.EnableRangeCompatCache = true
+			sp := NewStreamProxy(cfg)
+			targetURL := "http://upstream.local/v2-file"
+			storageKey := "/encrypt"
+			sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+				if got := r.Header.Get("Range"); got != "bytes=1056-1567" {
+					t.Fatalf("upstream Range=%q, want shifted V2 range", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Type":   []string{"video/mp4"},
+						"Content-Length": []string{strconv.Itoa(tt.contentLength)},
+						"Content-Range":  []string{tt.contentRange},
+					},
+					Body:    io.NopCloser(bytes.NewReader(make([]byte, tt.contentLength))),
+					Request: r,
+				}, nil
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/d/v2-file", nil)
+			req.Header.Set("Range", "bytes=1024-1535")
+			req = req.WithContext(WithContentMeta(req.Context(), meta))
+			rec := httptest.NewRecorder()
+			result := sp.ProxyDownloadDecryptWithStrategyForStorage(
+				rec,
+				req,
+				targetURL,
+				&config.PasswdInfo{Password: "123456", EncType: "aesctr", Enable: true},
+				plainSize,
+				StreamStrategyRange,
+				storageKey,
+			)
+
+			if result.Err == nil || result.FailureReason != "range_unsupported" || !result.Retryable {
+				t.Fatalf("outcome=%+v, want retryable range rejection", result)
+			}
+			if result.ResponseStarted {
+				t.Fatal("invalid upstream range must be rejected before response starts")
+			}
+			if rec.Body.Len() != 0 {
+				t.Fatalf("invalid range leaked %d response bytes", rec.Body.Len())
+			}
+			state, ok, err := sp.compatStore.Get(sp.rangeCompatKey(targetURL, storageKey))
+			if err != nil || !ok {
+				t.Fatalf("read range compatibility state: ok=%v err=%v", ok, err)
+			}
+			if state.ConsecutiveSuccesses != 0 || state.ConsecutiveFailures != 1 || state.LastReason != "range_unsupported" {
+				t.Fatalf("unexpected range compatibility state: %#v", state)
+			}
+		})
 	}
 }
 

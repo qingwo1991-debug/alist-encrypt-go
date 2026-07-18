@@ -19,6 +19,11 @@ func BenchmarkMobilePlaybackV2KeySetup(b *testing.B) {
 	const plainSize = int64(4 * 1024 * 1024 * 1024)
 
 	b.Run("cold_unique_password", func(b *testing.B) {
+		b.StopTimer()
+		v2KeyCacheMu.Lock()
+		clear(v2KeyCache)
+		v2KeyCacheMu.Unlock()
+		b.StartTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			cipherImpl, err := NewCipherV2(
@@ -48,6 +53,26 @@ func BenchmarkMobilePlaybackV2KeySetup(b *testing.B) {
 			}
 			mobilePlaybackBenchmarkCipher = cipherImpl
 		}
+	})
+
+	b.Run("hot_cached_password_parallel", func(b *testing.B) {
+		const password = "mobile-playback-benchmark-hot-parallel"
+		if _, err := NewCipherV2(EncTypeAESCTR, password, plainSize, nonce); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				cipherImpl, err := NewCipherV2(EncTypeAESCTR, password, plainSize, nonce)
+				if err != nil {
+					panic(err)
+				}
+				if cipherImpl == nil {
+					panic("nil V2 cipher")
+				}
+			}
+		})
 	})
 }
 
