@@ -141,11 +141,25 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
+      # Temporary lockfile refresh: keep this resolution step separate so the
+      # generated lockfile remains available even when analysis/tests fail.
+      - name: Resolve Flutter dependencies
+        working-directory: mobile
+        run: |
+          set -euo pipefail
+          flutter pub get
+
+      - name: Upload resolved Flutter lockfile
+        uses: actions/upload-artifact@v6
+        with:
+          name: resolved-flutter-lock
+          path: mobile/pubspec.lock
+          if-no-files-found: error
+
       - name: Analyze and test Flutter app
         working-directory: mobile
         run: |
           set -euo pipefail
-          flutter pub get --enforce-lockfile
           flutter analyze --no-pub
           flutter test --no-pub
 

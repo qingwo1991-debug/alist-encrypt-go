@@ -35,22 +35,22 @@ import (
 
 // ProxyServer 加密代理服务器
 type ProxyServer struct {
-	config              *ProxyConfig
-	httpClient          *http.Client
-	probeClient         *http.Client
-	streamClient        *http.Client
-	transport           *http.Transport
-	streamTransport     *http.Transport
-	h2cTransport        *http2.Transport // H2C Transport (如果启用)
-	server              *http.Server
-	running             bool
-	stopping            bool
-	stopDone            chan struct{}
-	stopErr             error
-	mutex               sync.RWMutex
+	config          *ProxyConfig
+	httpClient      *http.Client
+	probeClient     *http.Client
+	streamClient    *http.Client
+	transport       *http.Transport
+	streamTransport *http.Transport
+	h2cTransport    *http2.Transport // H2C Transport (如果启用)
+	server          *http.Server
+	running         bool
+	stopping        bool
+	stopDone        chan struct{}
+	stopErr         error
+	mutex           sync.RWMutex
 	// runtimeConfig is immutable after publication. p.config remains the
 	// mutable working copy used by the legacy configuration handlers.
-	runtimeConfig *ProxyConfig
+	runtimeConfig       *ProxyConfig
 	fileCache           *shardedAnyMap
 	fileCacheCount      int64 // 缓存条目计数
 	redirectCache       *shardedAnyMap
@@ -172,8 +172,15 @@ func (p *ProxyServer) runtimeSnapshot() proxyRuntimeSnapshot {
 		return proxyRuntimeSnapshot{}
 	}
 	p.mutex.RLock()
+	runtimeConfig := p.runtimeConfig
+	if runtimeConfig == nil {
+		// Keep manually constructed/zero-value servers usable in tests and
+		// embedders. Normal servers publish an immutable runtimeConfig, so this
+		// detached fallback has no cost on the request hot path.
+		runtimeConfig = cloneProxyConfig(p.config)
+	}
 	snapshot := proxyRuntimeSnapshot{
-		config:       p.runtimeConfig,
+		config:       runtimeConfig,
 		httpClient:   p.httpClient,
 		probeClient:  p.probeClient,
 		streamClient: p.streamClient,
