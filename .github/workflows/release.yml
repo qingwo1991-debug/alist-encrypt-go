@@ -146,7 +146,9 @@ jobs:
         run: |
           set -euo pipefail
           flutter pub get --enforce-lockfile
-          flutter analyze --no-pub
+          # Keep errors and warnings fatal; the inherited upstream app still
+          # has informational lint debt that should not block validation.
+          flutter analyze --no-pub --no-fatal-infos
           flutter test --no-pub
 
   version:

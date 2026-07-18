@@ -31,6 +31,10 @@ enc-webui/node_modules/
 
 # Data and config
 data/
+!mobile/openlist-lib/internal/bootstrap/data/
+!mobile/openlist-lib/internal/bootstrap/data/**
+!mobile/openlist-lib/src/internal/bootstrap/data/
+!mobile/openlist-lib/src/internal/bootstrap/data/**
 config.json
 *.db
 .env
