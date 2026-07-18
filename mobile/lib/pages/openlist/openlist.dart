@@ -160,7 +160,7 @@ content: Text(S.of(context).currentIsLatestVersion),
               }),
         ),
         body: Obx(() => LogListView(
-              logs: ui.logs,
+              logs: ui.logs.toList(growable: false),
               controller: ui.scrollController,
             )));
   }
