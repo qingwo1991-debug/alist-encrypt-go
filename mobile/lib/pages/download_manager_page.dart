@@ -706,7 +706,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           break;
         case ResultType.error:
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(S.of(context).openFileFailed(result.message ?? '')),
+            content: Text(S.of(context).openFileFailed(result.message)),
             duration: const Duration(seconds: 3),
             action: SnackBarAction(
               label: S.of(context).viewLocation,

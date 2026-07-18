@@ -569,7 +569,7 @@ func TestPlayV2ResolveAndStream(t *testing.T) {
 	}
 }
 
-func TestPlayV2RedirectFallsBackToRawUpstream4xxWhenEnabled(t *testing.T) {
+func TestPlayV2RedirectDecodeDisabledFallsBackToRawUpstream4xx(t *testing.T) {
 	password := "123456"
 	encType := EncTypeAESCTR
 	redirectURL := "http://upstream.local/missing"
@@ -621,7 +621,7 @@ func TestPlayV2RedirectFallsBackToRawUpstream4xxWhenEnabled(t *testing.T) {
 		OriginalURL: "/enc/demo.mp4",
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=0", nil)
 	rr := httptest.NewRecorder()
 	newPlayOrchestrator(p).ServeRedirect(rr, req)
 

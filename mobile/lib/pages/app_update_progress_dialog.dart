@@ -26,7 +26,6 @@ class _AppUpdateProgressDialogState extends State<AppUpdateProgressDialog> {
   int _totalBytes = 0;
   String? _filePath;
   String? _errorMessage;
-  bool _isDownloading = true;
   bool _isCompleted = false;
   bool _isCancelled = false;
   CancelToken? _cancelToken;
@@ -58,7 +57,6 @@ class _AppUpdateProgressDialogState extends State<AppUpdateProgressDialog> {
       onComplete: (filePath) {
         if (mounted && !_isCancelled) {
           setState(() {
-            _isDownloading = false;
             _isCompleted = true;
             _filePath = filePath;
           });
@@ -67,7 +65,6 @@ class _AppUpdateProgressDialogState extends State<AppUpdateProgressDialog> {
       onError: (error) {
         if (mounted && !_isCancelled) {
           setState(() {
-            _isDownloading = false;
             _errorMessage = error;
           });
         }
@@ -76,7 +73,6 @@ class _AppUpdateProgressDialogState extends State<AppUpdateProgressDialog> {
 
     if (result == null && mounted && !_isCancelled && _errorMessage == null) {
       setState(() {
-        _isDownloading = false;
         _errorMessage = S.of(context).downloadFailed;
       });
     }
@@ -293,7 +289,6 @@ class _AppUpdateProgressDialogState extends State<AppUpdateProgressDialog> {
             onPressed: () {
               setState(() {
                 _errorMessage = null;
-                _isDownloading = true;
                 _progress = 0.0;
                 _receivedBytes = 0;
                 _totalBytes = 0;

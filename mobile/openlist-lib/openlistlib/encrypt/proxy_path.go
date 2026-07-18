@@ -14,6 +14,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // 流式传输优化常量
@@ -152,7 +153,16 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 	// The resolver is invoked asynchronously by net/http. Capture a detached,
 	// immutable snapshot instead of the live configuration object.
 	config = cloneProxyConfig(config)
-	envProxyFunc := http.ProxyFromEnvironment
+	// http.ProxyFromEnvironment caches the process environment on first use.
+	// Build a resolver snapshot explicitly so configuration reloads and tests
+	// observe the environment that exists when this transport is constructed.
+	proxyForURL := httpproxy.FromEnvironment().ProxyFunc()
+	envProxyFunc := func(req *http.Request) (*url.URL, error) {
+		if req == nil || req.URL == nil {
+			return nil, nil
+		}
+		return proxyForURL(req.URL)
+	}
 	return func(req *http.Request) (*url.URL, error) {
 		if req == nil || req.URL == nil {
 			return nil, nil
