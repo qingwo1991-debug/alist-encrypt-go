@@ -7,6 +7,7 @@ COPY enc-webui/package.json enc-webui/package-lock.json enc-webui/.npmrc ./
 RUN apk add --no-cache python3 build-base && npm ci
 
 COPY enc-webui/ ./
+COPY tools/vite-svg-sprite-plugin.mjs /app/tools/vite-svg-sprite-plugin.mjs
 RUN npm run build
 
 # Build stage
