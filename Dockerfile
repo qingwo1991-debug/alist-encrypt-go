@@ -3,7 +3,7 @@ FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/enc-webui
 
-COPY enc-webui/package.json enc-webui/package-lock.json ./
+COPY enc-webui/package.json enc-webui/package-lock.json enc-webui/.npmrc ./
 RUN apk add --no-cache python3 build-base && npm ci
 
 COPY enc-webui/ ./
