@@ -42,14 +42,20 @@ def now_ts() -> int:
 def infohash(uri: str) -> str:
     m = BTIH_RE.search(uri)
     if not m:
-        return hashlib.sha256(uri.encode()).hexdigest()
-    value = urllib.parse.unquote(m.group(1)).upper()
-    if len(value) == 32:
+        return hashlib.sha256(uri.encode()).hexdigest().upper()
+    value = urllib.parse.unquote(m.group(1)).strip().upper()
+    if re.fullmatch(r"[0-9A-F]{40}", value):
+        return value
+    if re.fullmatch(r"[A-Z2-7]{32}", value):
         try:
-            value = base64.b32decode(value).hex().upper()
+            decoded = base64.b32decode(value)
+            if len(decoded) == 20:
+                return decoded.hex().upper()
         except Exception:
             pass
-    return value
+    # A malformed or unsupported xt value must never become part of a local
+    # path. Hashing the complete URI also keeps such tasks deterministic.
+    return hashlib.sha256(uri.encode()).hexdigest().upper()
 
 
 def encrypted_size(plain_size: int) -> int:
@@ -135,9 +141,11 @@ class Database:
     def add_manual(self, uri: str) -> int:
         if not MAGNET_RE.match(uri): raise ValueError("manual task must be a magnet URI")
         h = infohash(uri)
-        row = self.db.execute("SELECT id FROM tasks WHERE infohash=? ORDER BY id LIMIT 1", (h,)).fetchone()
-        if row: return int(row[0])
         n = now_ts()
+        row = self.db.execute("SELECT id FROM tasks WHERE infohash=? ORDER BY id LIMIT 1", (h,)).fetchone()
+        if row:
+            self.db.execute("UPDATE tasks SET enabled=1,updated_at=? WHERE id=?", (n, row["id"]))
+            return int(row["id"])
         cur = self.db.execute("INSERT INTO tasks(source_id,line_no,uri,infohash,state,created_at,updated_at) VALUES(NULL,0,?,?,'queued',?,?)", (uri,h,n,n))
         return int(cur.lastrowid)
 
@@ -150,21 +158,16 @@ class Database:
         return rows
 
     def import_lines(self, source_id: int, lines: list[str], parity: str) -> int:
-        seen: set[str] = set()
+        valid_lines = [raw.strip() for raw in lines if raw.strip() and not raw.strip().startswith("#") and MAGNET_RE.match(raw.strip())]
+        if not valid_lines:
+            raise ValueError("source contains no valid magnet URIs")
         assigned_seen: set[str] = set()
         count = 0
         n = now_ts()
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            task_no = 0
-            for _, raw in enumerate(lines, 1):
-                uri = raw.strip()
-                if not uri or uri.startswith("#") or not MAGNET_RE.match(uri):
-                    continue
-                task_no += 1
-                line_no = task_no
+            for line_no, uri in enumerate(valid_lines, 1):
                 h = infohash(uri)
-                seen.add(h)
                 assigned = (line_no % 2 == 1) if parity == "odd" else (line_no % 2 == 0)
                 if not assigned:
                     continue
@@ -201,6 +204,22 @@ class Database:
         fields["updated_at"] = now_ts()
         cols = ",".join(f"{k}=?" for k in fields)
         self.db.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), tid))
+
+    def retry_task(self, tid: int) -> None:
+        n = now_ts()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self.db.execute("""UPDATE tasks SET
+              state='queued',enabled=1,aria_gid='',name='',total_size=0,selected_json='[]',task_dir='',
+              attempt=0,next_retry=0,last_progress=0,last_progress_at=0,error='',updated_at=?
+              WHERE id=?""", (n, tid))
+            if cur.rowcount == 0:
+                raise ValueError(f"task not found: {tid}")
+            self.db.execute("DELETE FROM uploads WHERE task_id=?", (tid,))
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def task(self, tid: int) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
@@ -285,6 +304,17 @@ class OpenList:
             raw = resp.read()
         return json.loads(raw) if raw else {}
 
+    @staticmethod
+    def _is_not_found(res: dict[str, Any]) -> bool:
+        if int(res.get("code") or 0) == 404:
+            return True
+        message = str(res.get("message") or "").strip().lower()
+        return any(marker in message for marker in ("object not found", "file not found", "path not found", "no such file"))
+
+    @staticmethod
+    def _raise_api_error(action: str, res: dict[str, Any]) -> None:
+        raise RuntimeError(f"OpenList {action} failed (code={res.get('code')}): {res.get('message') or res}")
+
     def login(self) -> None:
         password = Path(self.password_file).read_text(encoding="utf-8").rstrip("\r\n")
         res = self._request("POST", "/api/auth/login", {"username":self.user,"password":password})
@@ -295,28 +325,44 @@ class OpenList:
     def fs_get(self, path: str) -> dict[str, Any] | None:
         try:
             res = self._request("POST", "/api/fs/get", {"path":path,"password":""})
-            return res.get("data") if res.get("code") == 200 else None
+            if res.get("code") == 200:
+                return res.get("data")
+            if self._is_not_found(res):
+                return None
+            self._raise_api_error("fs/get", res)
         except urllib.error.HTTPError as e:
             if e.code == 404: return None
             raise
 
     def fs_list(self, path: str, refresh: bool = False) -> list[dict[str, Any]]:
         res = self._request("POST", "/api/fs/list", {"path":path,"password":"","page":1,"per_page":0,"refresh":refresh})
-        return (res.get("data") or {}).get("content") or [] if res.get("code") == 200 else []
+        if res.get("code") == 200:
+            return (res.get("data") or {}).get("content") or []
+        if self._is_not_found(res):
+            return []
+        self._raise_api_error("fs/list", res)
 
     def mkdir(self, path: str) -> None:
         res = self._request("POST", "/api/fs/mkdir", {"path":path})
-        if res.get("code") != 200 and "exist" not in str(res.get("message","")).lower():
-            raise RuntimeError("mkdir failed: " + str(res))
+        if res.get("code") == 200:
+            return
+        message = str(res.get("message") or "").lower()
+        if "already exist" in message or "file exists" in message or "object exists" in message:
+            return
+        self._raise_api_error("fs/mkdir", res)
 
     def tasks(self, done: bool) -> list[dict[str, Any]]:
         endpoint = "/api/task/upload/done" if done else "/api/task/upload/undone"
         res = self._request("GET", endpoint)
-        return res.get("data") or [] if res.get("code") == 200 else []
+        if res.get("code") != 200:
+            self._raise_api_error("task list", res)
+        return res.get("data") or []
 
     def create_storage(self, storage: dict[str, Any]) -> int:
         res = self._request("GET", "/api/admin/storage/list?page=1&per_page=100")
-        content = ((res.get("data") or {}).get("content") or []) if res.get("code") == 200 else []
+        if res.get("code") != 200:
+            self._raise_api_error("storage list", res)
+        content = (res.get("data") or {}).get("content") or []
         for item in content:
             if item.get("mount_path") == storage.get("mount_path"):
                 self.logger.info("storage already exists: %s", storage.get("mount_path"))
@@ -426,6 +472,24 @@ class Mover:
         self.aria.remove_and_purge(gid)
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
+
+    def retry_task(self, tid: int) -> None:
+        task = self.db.task(tid)
+        if task is None:
+            raise ValueError(f"task not found: {tid}")
+        # Compare normalized lexical paths without resolving the final entry:
+        # resolving a task-dir symlink first could turn it into an arbitrary
+        # external directory and make recursive cleanup destructive.
+        expected_dir = Path(os.path.abspath(self.task_dir(task)))
+        directory = Path(os.path.abspath(task["task_dir"])) if task["task_dir"] else expected_dir
+        if directory != expected_dir:
+            raise RuntimeError(f"refusing to remove unexpected task directory: {directory}")
+        if directory.is_symlink():
+            raise RuntimeError(f"refusing to remove symlink task directory: {directory}")
+        self.aria.remove_and_purge(str(task["aria_gid"] or ""))
+        if directory.exists():
+            shutil.rmtree(directory)
+        self.db.retry_task(tid)
 
     def acquire_metadata(self, task: sqlite3.Row, directory: Path) -> tuple[str, dict[str,Any]]:
         directory.mkdir(parents=True, exist_ok=True)
@@ -711,7 +775,7 @@ def main() -> int:
             for row in mover.db.source_rows(False):
                 print(f"{row['name']} enabled={row['enabled']} refresh={row['refresh_seconds']} url={row['url']} error={row['last_error']}")
         elif args.command == "source-disable": mover.db.db.execute("UPDATE sources SET enabled=0 WHERE name=?", (args.name,))
-        elif args.command == "retry": mover.db.update_task(args.id,"queued",next_retry=0,error="")
+        elif args.command == "retry": mover.retry_task(args.id)
         elif args.command == "cancel": mover.db.update_task(args.id,"canceled",enabled=0)
         elif args.command == "storage-create":
             mover.openlist.login()

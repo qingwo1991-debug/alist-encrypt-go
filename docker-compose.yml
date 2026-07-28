@@ -58,15 +58,17 @@ services:
     profiles:
       - mysql
     environment:
-      - MYSQL_DATABASE=alist_encrypt
-      - MYSQL_USER=alist_encrypt
-      - MYSQL_PASSWORD=change-me
-      - MYSQL_ROOT_PASSWORD=change-me-root
-      - TZ=Asia/Shanghai
+      MYSQL_DATABASE: alist_encrypt
+      MYSQL_USER: alist_encrypt
+      # Leave these empty only when the profile is disabled. The MySQL image
+      # rejects an enabled profile until real values are supplied via .env.
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-}
+      TZ: Asia/Shanghai
     volumes:
       - ./mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "alist_encrypt", "-pchange-me"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u alist_encrypt -p\"$${MYSQL_PASSWORD}\" --silent"]
       interval: 30s
       timeout: 5s
       retries: 5

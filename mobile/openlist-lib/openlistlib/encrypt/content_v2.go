@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -38,7 +39,10 @@ var contentHeaderMagic = map[EncryptionType]string{
 	EncTypeRC4:      "RC4MD2",
 }
 
-const v2KeyCacheTTL = 30 * time.Minute
+const (
+	v2KeyCacheTTL        = 24 * time.Hour
+	v2KeyCacheMaxEntries = 128
+)
 
 type v2KeyCacheEntry struct {
 	key      []byte
@@ -46,30 +50,88 @@ type v2KeyCacheEntry struct {
 }
 
 var (
-	v2KeyCache   = make(map[string]v2KeyCacheEntry)
-	v2KeyCacheMu sync.RWMutex
+	v2KeyCache           = make(map[string]v2KeyCacheEntry)
+	v2KeyCacheMu         sync.RWMutex
+	v2KeyDerivationGroup singleflight.Group
 )
 
-func cachedV2Key(password, encType string, keyLen int) []byte {
-	cacheKey := fmt.Sprintf("%s:%s:%d", password, encType, keyLen)
+type v2KeyDeriver func(password, encType string, keyLen int) []byte
 
-	v2KeyCacheMu.RLock()
-	if entry, ok := v2KeyCache[cacheKey]; ok && time.Now().Before(entry.expireAt) {
-		v2KeyCacheMu.RUnlock()
-		return append([]byte(nil), entry.key...)
-	}
-	v2KeyCacheMu.RUnlock()
+func deriveV2KeyPBKDF2(password, encType string, keyLen int) []byte {
+	return pbkdf2.Key([]byte(password), []byte(encType), pbkdf2IterationsModern, keyLen, sha256.New)
+}
 
-	key := pbkdf2.Key([]byte(password), []byte(encType), pbkdf2IterationsModern, keyLen, sha256.New)
-	result := append([]byte(nil), key...)
+func v2KeyCacheKey(password, encType string, keyLen int) string {
+	passHash := sha256.Sum256([]byte(password))
+	return fmt.Sprintf("%x:%s:%d", passHash, encType, keyLen)
+}
 
+func loadCachedV2Key(cacheKey string, now time.Time) ([]byte, bool) {
 	v2KeyCacheMu.Lock()
-	v2KeyCache[cacheKey] = v2KeyCacheEntry{
-		key:      result,
-		expireAt: time.Now().Add(v2KeyCacheTTL),
+	defer v2KeyCacheMu.Unlock()
+
+	entry, ok := v2KeyCache[cacheKey]
+	if !ok {
+		return nil, false
 	}
-	v2KeyCacheMu.Unlock()
-	return result
+	if !now.Before(entry.expireAt) {
+		delete(v2KeyCache, cacheKey)
+		return nil, false
+	}
+	entry.expireAt = now.Add(v2KeyCacheTTL)
+	v2KeyCache[cacheKey] = entry
+	return append([]byte(nil), entry.key...), true
+}
+
+func storeCachedV2Key(cacheKey string, key []byte, now time.Time) {
+	v2KeyCacheMu.Lock()
+	defer v2KeyCacheMu.Unlock()
+
+	if _, exists := v2KeyCache[cacheKey]; !exists && len(v2KeyCache) >= v2KeyCacheMaxEntries {
+		for candidate, entry := range v2KeyCache {
+			if !now.Before(entry.expireAt) {
+				delete(v2KeyCache, candidate)
+			}
+		}
+	}
+	if _, exists := v2KeyCache[cacheKey]; !exists && len(v2KeyCache) >= v2KeyCacheMaxEntries {
+		var oldestKey string
+		var oldestExpiry time.Time
+		for candidate, entry := range v2KeyCache {
+			if oldestKey == "" || entry.expireAt.Before(oldestExpiry) {
+				oldestKey = candidate
+				oldestExpiry = entry.expireAt
+			}
+		}
+		if oldestKey != "" {
+			delete(v2KeyCache, oldestKey)
+		}
+	}
+	v2KeyCache[cacheKey] = v2KeyCacheEntry{
+		key:      append([]byte(nil), key...),
+		expireAt: now.Add(v2KeyCacheTTL),
+	}
+}
+
+func cachedV2Key(password, encType string, keyLen int) []byte {
+	return cachedV2KeyWithDeriver(password, encType, keyLen, deriveV2KeyPBKDF2)
+}
+
+func cachedV2KeyWithDeriver(password, encType string, keyLen int, derive v2KeyDeriver) []byte {
+	cacheKey := v2KeyCacheKey(password, encType, keyLen)
+	if key, ok := loadCachedV2Key(cacheKey, time.Now()); ok {
+		return key
+	}
+
+	value, _, _ := v2KeyDerivationGroup.Do(cacheKey, func() (interface{}, error) {
+		if key, ok := loadCachedV2Key(cacheKey, time.Now()); ok {
+			return key, nil
+		}
+		key := derive(password, encType, keyLen)
+		storeCachedV2Key(cacheKey, key, time.Now())
+		return key, nil
+	})
+	return append([]byte(nil), value.([]byte)...)
 }
 
 type ContentMeta struct {

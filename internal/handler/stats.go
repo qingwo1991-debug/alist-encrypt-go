@@ -48,6 +48,7 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 	if h.streamProxy != nil {
 		streamLimitStats = h.streamProxy.StreamLimitStats()
 	}
+	playFirstFallback := h.cfg != nil && h.cfg.AlistServerSnapshot().PlayFirstFallback
 
 	data := map[string]interface{}{
 		"version": config.Version,
@@ -56,7 +57,7 @@ func (h *StatsHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 			"cleanup_disabled": h.cfg != nil && h.cfg.Database != nil && h.cfg.Database.DisableCleanup,
 		},
 		"stream": map[string]interface{}{
-			"play_first_fallback":     h.cfg != nil && h.cfg.AlistServer.PlayFirstFallback,
+			"play_first_fallback":     playFirstFallback,
 			"final_passthrough_count": proxyStream["final_passthrough_count"] + webdavStream["final_passthrough_count"],
 			"size_conflict_count":     proxyStream["size_conflict_count"] + webdavStream["size_conflict_count"],
 			"strategy_fallback_count": proxyStream["strategy_fallback_count"] + webdavStream["strategy_fallback_count"],

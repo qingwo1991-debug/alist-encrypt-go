@@ -1,0 +1,1 @@
+import{C as e,K as t,N as n}from"./vue.runtime.esm-bundler-DnU87Vq5.js";import{t as r}from"./_plugin-vue_export-helper-BDNMzG2s.js";n();var i={};function a(n,r){return t(),e(`div`,null,`excel`)}var o=r(i,[[`render`,a]]);export{o as default};

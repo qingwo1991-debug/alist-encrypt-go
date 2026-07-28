@@ -163,13 +163,13 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 
 	var e BaseResp
 	req.SetResult(&e)
-	log.Debugf("[139] request: %s %s, body: %s", method, url, string(body))
+	log.Debugf("[139] request: %s %s body_bytes=%d", method, url, len(body))
 	res, err := req.Execute(method, url)
 	if err != nil {
 		log.Debugf("[139] request error: %v", err)
 		return nil, err
 	}
-	log.Debugf("[139] response body: %s", res.String())
+	log.Debugf("[139] response status=%d body_bytes=%d", res.StatusCode(), len(res.Body()))
 	if !e.Success {
 		// Always try to unmarshal to the specific response type first if 'resp' is provided.
 		if resp != nil {
@@ -241,7 +241,10 @@ func (d *Yun139) requestRoute(data interface{}, resp interface{}) ([]byte, error
 	var e BaseResp
 	req.SetResult(&e)
 	res, err := req.Execute(http.MethodPost, url)
-	log.Debugln(res.String())
+	if err != nil {
+		return nil, err
+	}
+	log.Debugf("[139] response status=%d body_bytes=%d", res.StatusCode(), len(res.Body()))
 	if !e.Success {
 		return nil, errors.New(e.Message)
 	}
@@ -537,13 +540,13 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 
 	var e BaseResp
 	req.SetResult(&e)
-	log.Debugf("[139] personal request: %s %s, body: %s", method, url, string(body))
+	log.Debugf("[139] personal request: %s %s body_bytes=%d", method, url, len(body))
 	res, err := req.Execute(method, url)
 	if err != nil {
 		log.Debugf("[139] personal request error: %v", err)
 		return nil, err
 	}
-	log.Debugf("[139] personal response body: %s", res.String())
+	log.Debugf("[139] personal response status=%d body_bytes=%d", res.StatusCode(), len(res.Body()))
 	if !e.Success {
 		return nil, errors.New(e.Message)
 	}
@@ -769,9 +772,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 
 	// 密码 SHA1 哈希
 	hashedPassword := sha1Hash(fmt.Sprintf("fetion.com.cn:%s", d.Password))
-	log.Debugf("DEBUG: 原始密码: %s", d.Password)
-	log.Debugf("DEBUG: SHA1 输入: fetion.com.cn:%s", d.Password)
-	log.Debugf("DEBUG: 生成的 Password 哈希: %s", hashedPassword)
+	log.Debug("DEBUG: login password hash prepared")
 
 	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
 
@@ -807,11 +808,11 @@ func (d *Yun139) step1_password_login() (string, error) {
 	loginData.Set("authType", "2")
 
 	log.Debugf("DEBUG: 登录请求 URL: %s", loginURL)
-	log.Debugf("DEBUG: 登录请求 Headers: %+v", loginHeaders)
-	log.Debugf("DEBUG: 登录请求 Body: %s", loginData.Encode())
+	log.Debug("DEBUG: login request headers and body prepared")
 
-	// 设置客户端不跟随重定向
-	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	// Use a request-local client. Mutating the shared Resty redirect policy races
+	// every other storage request and can unexpectedly disable their redirects.
+	client := base.RestyClient.Clone().SetRedirectPolicy(resty.NoRedirectPolicy())
 	res, err := client.R().
 		SetHeaders(loginHeaders).
 		SetFormDataFromValues(loginData).
@@ -827,9 +828,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 	} else {
 		log.Debugf("DEBUG: 登录响应 Status Code: %d", res.StatusCode())
 	}
-	// 恢复客户端的默认重定向策略，以免影响后续请求
-	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
-	log.Debugf("DEBUG: 登录响应 Headers: %+v", res.Header())
+	log.Debug("DEBUG: login response headers received")
 
 	var sid, extractedCguid string
 
@@ -840,11 +839,11 @@ func (d *Yun139) step1_password_login() (string, error) {
 		cguidMatch := regexp.MustCompile(`cguid=([^&]+)`).FindStringSubmatch(locationHeader)
 		if len(sidMatch) > 1 {
 			sid = sidMatch[1]
-			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
+			log.Debug("DEBUG: extracted sid from Location")
 		}
 		if len(cguidMatch) > 1 {
 			extractedCguid = cguidMatch[1]
-			log.Debugf("DEBUG: 从 Location 提取到 cguid: %s", extractedCguid)
+			log.Debug("DEBUG: extracted cguid from Location")
 		}
 	}
 
@@ -856,11 +855,11 @@ func (d *Yun139) step1_password_login() (string, error) {
 			cookieCguidMatch := regexp.MustCompile(`cguid=([^;]+)`).FindStringSubmatch(cookieStr)
 			if len(ssoSidMatch) > 1 && sid == "" {
 				sid = ssoSidMatch[1]
-				log.Debugf("DEBUG: 从 Set-Cookie 提取到 sid: %s", sid)
+				log.Debug("DEBUG: extracted sid from Set-Cookie")
 			}
 			if len(cookieCguidMatch) > 1 && extractedCguid == "" {
 				extractedCguid = cookieCguidMatch[1]
-				log.Debugf("DEBUG: 从 Set-Cookie 提取到 cguid: %s", extractedCguid)
+				log.Debug("DEBUG: extracted cguid from Set-Cookie")
 			}
 		}
 	}
@@ -877,7 +876,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 		cookieStrings = append(cookieStrings, cookie.Name+"="+cookie.Value)
 	}
 	cookieStr := strings.Join(cookieStrings, "; ")
-	log.Debugf("DEBUG: 提取到的 Cookies: %s", cookieStr)
+	log.Debugf("DEBUG: extracted %d login cookies", len(cookieStrings))
 	d.MailCookies = cookieStr
 
 	return sid, nil
@@ -911,8 +910,7 @@ func (d *Yun139) step2_get_single_token(sid string) (string, error) {
 		"User-Agent":      "okhttp/4.12.0",
 	}
 
-	log.Debugf("DEBUG: 换passid 请求 URL: %s", exchangeArtifactURL)
-	log.Debugf("DEBUG: 换passid 请求 Headers: %+v", exchangePassidHeaders)
+	log.Debug("DEBUG: exchanging passid")
 
 	res, err := base.RestyClient.R().
 		SetHeaders(exchangePassidHeaders).
@@ -923,14 +921,13 @@ func (d *Yun139) step2_get_single_token(sid string) (string, error) {
 	}
 
 	log.Debugf("DEBUG: 换passid 响应 Status Code: %d", res.StatusCode())
-	log.Debugf("DEBUG: 换passid 响应 Headers: %+v", res.Header())
-	log.Debugf("DEBUG: 换passid 响应 Body: %s...", res.String()[:min(len(res.String()), 500)])
+	log.Debugf("DEBUG: passid response body_bytes=%d", len(res.Body()))
 
 	dycpwd := jsoniter.Get(res.Body(), "var", "artifact").ToString()
 	if dycpwd == "" {
 		return "", errors.New("failed to extract dycpwd from artifact exchange response")
 	}
-	log.Debugf("DEBUG: 提取到 dycpwd: %s", dycpwd)
+	log.Debug("DEBUG: extracted dycpwd")
 
 	return dycpwd, nil
 }
@@ -1087,7 +1084,7 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 	if err != nil {
 		return nil, fmt.Errorf("yun139EncryptedRequest: failed to marshal and sort body: %w", err)
 	}
-	log.Debugf("yun139EncryptedRequest: Request Body (plaintext): %s", sortedJson)
+	log.Debugf("yun139EncryptedRequest: plaintext request bytes=%d", len(sortedJson))
 
 	// 3. Encrypt the body using AES/CBC
 	iv := make([]byte, 16) // 16 bytes for AES-128
@@ -1111,7 +1108,7 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 	}
 
 	if res.StatusCode() != 200 {
-		return nil, fmt.Errorf("yun139EncryptedRequest: unexpected status code %d: %s", res.StatusCode(), res.String())
+		return nil, fmt.Errorf("yun139EncryptedRequest: unexpected status code %d", res.StatusCode())
 	}
 
 	// 5. Decrypt the response
@@ -1119,12 +1116,12 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 	var decryptedBytes []byte
 
 	if len(respBody) > 0 && respBody[0] == '{' {
-		log.Warnf("yun139EncryptedRequest: received a plain JSON response, not an encrypted string. Body: %s", string(respBody))
+		log.Warnf("yun139EncryptedRequest: received a plain JSON response, not an encrypted string (bytes=%d)", len(respBody))
 		decryptedBytes = respBody
 	} else {
 		decodedResp, err := base64.StdEncoding.DecodeString(string(respBody))
 		if err != nil {
-			return nil, fmt.Errorf("yun139EncryptedRequest: response base64 decode failed: %w. Body: '%s'", err, string(respBody))
+			return nil, fmt.Errorf("yun139EncryptedRequest: response base64 decode failed: %w (bytes=%d)", err, len(respBody))
 		}
 
 		if len(decodedResp) < 16 {
@@ -1140,7 +1137,7 @@ func (d *Yun139) yun139EncryptedRequest(url string, body interface{}, headers ma
 		}
 	}
 
-	log.Debugf("yun139EncryptedRequest: Response Body (decrypted): %s", string(decryptedBytes))
+	log.Debugf("yun139EncryptedRequest: decrypted response bytes=%d", len(decryptedBytes))
 
 	// 6. Unmarshal to the final response struct
 	if resp != nil {
@@ -1194,7 +1191,7 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	if hexInner == "" {
 		return "", errors.New("missing data field in first layer decryption result")
 	}
-	log.Debugf("DEBUG: 第一层解密提取到 hex_inner: %s...", hexInner[:min(len(hexInner), 50)])
+	log.Debugf("DEBUG: extracted encrypted inner payload bytes=%d", len(hexInner)/2)
 
 	// 第二层解密
 	key2, err := hex.DecodeString(KEY_HEX_2)
@@ -1209,14 +1206,14 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("step3 response layer2 aes ecb decrypt failed: %w", err)
 	}
-	log.Debugf("DEBUG: 最终解密结果: %s", string(finalJsonStrBytes))
+	log.Debugf("DEBUG: final decrypted response bytes=%d", len(finalJsonStrBytes))
 
 	// 提取 authToken
 	authToken := jsoniter.Get(finalJsonStrBytes, "authToken").ToString()
 	if authToken == "" {
 		return "", errors.New("failed to extract authToken from final decryption result")
 	}
-	log.Debugf("DEBUG: 提取到 authToken: %s", authToken)
+	log.Debug("DEBUG: extracted authToken")
 
 	// 提取 account 和 userDomainId
 	account := jsoniter.Get(finalJsonStrBytes, "account").ToString()
@@ -1240,13 +1237,13 @@ func (d *Yun139) loginWithPassword() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Infof("Step 1 success, passId: %s", passId)
+	log.Info("Step 1 login succeeded")
 
 	token, err := d.step2_get_single_token(passId)
 	if err != nil {
 		return "", err
 	}
-	log.Infof("Step 2 success, token: %s", token)
+	log.Info("Step 2 token exchange succeeded")
 
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {

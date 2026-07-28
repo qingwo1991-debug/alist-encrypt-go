@@ -215,6 +215,7 @@ func TestHandleDownloadUsesWarmCacheWithoutMetadataPrefetch(t *testing.T) {
 		Name:              "movie.mp4",
 		Size:              fileSize,
 		RawURL:            backendURL + "/raw/movie.mp4",
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now(),
 	})
 
@@ -326,6 +327,7 @@ func TestHandleDownloadRefreshesStaleWarmCache(t *testing.T) {
 		Name:              "movie.mp4",
 		Size:              fileSize,
 		RawURL:            "https://stale.example/raw.mp4",
+		RawURLAuthScope:   "anon",
 		UpstreamFetchedAt: time.Now().Add(-2 * time.Minute),
 	})
 

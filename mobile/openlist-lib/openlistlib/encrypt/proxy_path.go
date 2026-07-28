@@ -14,6 +14,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // 流式传输优化常量
@@ -149,7 +150,19 @@ func matchBuiltinRouting(provider, driver string) (string, bool) {
 }
 
 func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
-	envProxyFunc := http.ProxyFromEnvironment
+	// The resolver is invoked asynchronously by net/http. Capture a detached,
+	// immutable snapshot instead of the live configuration object.
+	config = cloneProxyConfig(config)
+	// http.ProxyFromEnvironment caches the process environment on first use.
+	// Build a resolver snapshot explicitly so configuration reloads and tests
+	// observe the environment that exists when this transport is constructed.
+	proxyForURL := httpproxy.FromEnvironment().ProxyFunc()
+	envProxyFunc := func(req *http.Request) (*url.URL, error) {
+		if req == nil || req.URL == nil {
+			return nil, nil
+		}
+		return proxyForURL(req.URL)
+	}
 	return func(req *http.Request) (*url.URL, error) {
 		if req == nil || req.URL == nil {
 			return nil, nil
@@ -293,7 +306,14 @@ func (p *ProxyServer) rebuildEncryptPathIndex() {
 }
 
 func (p *ProxyServer) forceProbeRemoteFileSizeWithPath(targetURL string, headers http.Header, encPathPattern string) int64 {
-	ctx, cancel := context.WithTimeout(context.Background(), p.probeBudget())
+	return p.forceProbeRemoteFileSizeWithPathCtx(context.Background(), targetURL, headers, encPathPattern)
+}
+
+func (p *ProxyServer) forceProbeRemoteFileSizeWithPathCtx(parent context.Context, targetURL string, headers http.Header, encPathPattern string) int64 {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, p.probeBudget())
 	defer cancel()
 	scopeKey := p.probeScopeKey(encPathPattern, targetURL)
 	methods := p.prioritizeProbeMethods(scopeKey, []ProbeMethod{ProbeMethodRange, ProbeMethodHead, ProbeMethodWebDAV})
@@ -375,7 +395,14 @@ func (p *ProxyServer) probeRemoteFileSizeWithPath(targetURL string, headers http
 }
 
 func (p *ProxyServer) fetchWebDAVFileSizeWithPath(targetURL string, headers http.Header, encPathPattern string) int64 {
-	ctx, cancel := context.WithTimeout(context.Background(), p.probeTimeout())
+	return p.fetchWebDAVFileSizeWithPathCtx(context.Background(), targetURL, headers, encPathPattern)
+}
+
+func (p *ProxyServer) fetchWebDAVFileSizeWithPathCtx(parent context.Context, targetURL string, headers http.Header, encPathPattern string) int64 {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, p.probeTimeout())
 	defer cancel()
 	size := p.fetchWebDAVFileSizeCtx(ctx, targetURL, headers)
 	scopeKey := p.probeScopeKey(encPathPattern, targetURL)
@@ -546,9 +573,10 @@ func (p *ProxyServer) tryFetchRemoteProviderRoutingCandidates(ctx context.Contex
 		return nil, nil, true
 	}
 	u, err := url.Parse(rootBase)
-	if err == nil && p.config != nil {
+	runtimeCfg := p.configSnapshot()
+	if err == nil && runtimeCfg != nil {
 		port := u.Port()
-		if port == strconv.Itoa(p.config.ProxyPort) {
+		if port == strconv.Itoa(runtimeCfg.ProxyPort) {
 			host := strings.ToLower(strings.TrimSpace(u.Hostname()))
 			if host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1" {
 				return nil, nil, false

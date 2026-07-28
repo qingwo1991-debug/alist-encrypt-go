@@ -48,11 +48,42 @@ func cloneProxyRules(rules []config.ProxyRule) []config.ProxyRule {
 	return cp
 }
 
-func baseTransport(cfg *config.Config) *http.Transport {
-	if cfg == nil || cfg.Proxy == nil {
+func proxyConfigSnapshot(cfg *config.Config) config.ProxyConfig {
+	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
-	proxyCfg := cfg.Proxy
+	proxyCfg := cfg.ProxySnapshot()
+	if !cfg.HasProxyConfig() {
+		return config.DefaultConfig().ProxySnapshot()
+	}
+	// Hand-built configurations do not pass through Config normalization. Apply
+	// transport defaults field-by-field so their routing mode/rules are retained.
+	if proxyCfg.MaxIdleConns <= 0 {
+		proxyCfg.MaxIdleConns = 100
+	}
+	if proxyCfg.MaxIdleConnsPerHost <= 0 {
+		proxyCfg.MaxIdleConnsPerHost = 100
+	}
+	if proxyCfg.MaxConnsPerHost <= 0 {
+		proxyCfg.MaxConnsPerHost = 100
+	}
+	if proxyCfg.IdleConnTimeout <= 0 {
+		proxyCfg.IdleConnTimeout = 90
+	}
+	if proxyCfg.DialTimeoutSeconds <= 0 {
+		proxyCfg.DialTimeoutSeconds = 30
+	}
+	if proxyCfg.TLSHandshakeSeconds <= 0 {
+		proxyCfg.TLSHandshakeSeconds = 10
+	}
+	if proxyCfg.ResponseHeaderSecs <= 0 {
+		proxyCfg.ResponseHeaderSecs = 15
+	}
+	return proxyCfg
+}
+
+func baseTransport(cfg *config.Config) *http.Transport {
+	proxyCfg := proxyConfigSnapshot(cfg)
 	dialTimeout := time.Duration(proxyCfg.DialTimeoutSeconds) * time.Second
 	tlsTimeout := time.Duration(proxyCfg.TLSHandshakeSeconds) * time.Second
 	respHeaderTimeout := time.Duration(proxyCfg.ResponseHeaderSecs) * time.Second
@@ -160,22 +191,23 @@ func matchesNoProxy(pattern string, host string) bool {
 }
 
 func proxyFunc(cfg *config.Config) func(*http.Request) (*url.URL, error) {
-	if cfg == nil || cfg.Proxy == nil {
+	if cfg == nil {
 		cfg = config.DefaultConfig()
-	}
-	rules := cloneProxyRules(cfg.Proxy.Rules)
-	noProxy := append([]string(nil), cfg.Proxy.NoProxy...)
-	mode := strings.ToLower(strings.TrimSpace(cfg.Proxy.Mode))
-	fixedURL := strings.TrimSpace(cfg.Proxy.URL)
-	var fixedProxyURL *url.URL
-	if fixedURL != "" {
-		if parsed, err := url.Parse(fixedURL); err == nil {
-			fixedProxyURL = parsed
-		}
 	}
 	return func(req *http.Request) (*url.URL, error) {
 		if req == nil || req.URL == nil {
 			return nil, nil
+		}
+		proxyCfg := cfg.ProxySnapshot()
+		rules := cloneProxyRules(proxyCfg.Rules)
+		noProxy := proxyCfg.NoProxy
+		mode := strings.ToLower(strings.TrimSpace(proxyCfg.Mode))
+		fixedURL := strings.TrimSpace(proxyCfg.URL)
+		var fixedProxyURL *url.URL
+		if fixedURL != "" {
+			if parsed, err := url.Parse(fixedURL); err == nil {
+				fixedProxyURL = parsed
+			}
 		}
 		host := parseHostOnly(req.URL.Host)
 		if host == "" {
@@ -227,7 +259,7 @@ func proxyFunc(cfg *config.Config) func(*http.Request) (*url.URL, error) {
 func NewHTTPClient(cfg *config.Config, timeout time.Duration) *http.Client {
 	transport := baseTransport(cfg)
 	transport.Proxy = proxyFunc(cfg)
-	if cfg.Proxy.EnableHTTP2 {
+	if proxyConfigSnapshot(cfg).EnableHTTP2 {
 		http2.ConfigureTransport(transport)
 	}
 	return &http.Client{
@@ -245,7 +277,7 @@ func NewHTTPClient(cfg *config.Config, timeout time.Duration) *http.Client {
 func NewSharedTransport(cfg *config.Config) http.RoundTripper {
 	transport := baseTransport(cfg)
 	transport.Proxy = proxyFunc(cfg)
-	if cfg != nil && cfg.Proxy != nil && cfg.Proxy.EnableHTTP2 {
+	if proxyConfigSnapshot(cfg).EnableHTTP2 {
 		http2.ConfigureTransport(transport)
 	}
 	return transport
@@ -265,7 +297,10 @@ func NewHTTPClientWithTransport(transport http.RoundTripper, timeout time.Durati
 
 // NewClient creates a new HTTP client with connection pooling
 func NewClient(cfg *config.Config) *Client {
-	proxyCfg := cfg.Proxy
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	proxyCfg := proxyConfigSnapshot(cfg)
 	transport := baseTransport(cfg)
 	transport.Proxy = proxyFunc(cfg)
 
@@ -286,7 +321,7 @@ func NewClient(cfg *config.Config) *Client {
 	}
 
 	// Create h2c client if enabled for backend connections
-	if cfg.AlistServer.EnableH2C {
+	if cfg.AlistServerSnapshot().EnableH2C {
 		h2cTransport := &http2.Transport{
 			AllowHTTP: true, // Allow HTTP/2 over cleartext (h2c)
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
@@ -325,17 +360,17 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 // isBackendRequest checks if the request is to the Alist backend
 func (c *Client) isBackendRequest(req *http.Request) bool {
-	backendHost := c.cfg.AlistServer.ServerHost
+	if c == nil || c.cfg == nil || req == nil || req.URL == nil {
+		return false
+	}
+	backendHost := parseHostOnly(c.cfg.AlistServerSnapshot().ServerHost)
 	// Check both with and without port
 	reqHost := req.URL.Host
 	if reqHost == "" {
 		reqHost = req.Host
 	}
-	// Strip port for comparison
-	if host, _, err := net.SplitHostPort(reqHost); err == nil {
-		reqHost = host
-	}
-	return reqHost == backendHost
+	reqHost = parseHostOnly(reqHost)
+	return backendHost != "" && strings.EqualFold(reqHost, backendHost)
 }
 
 // Get performs a GET request

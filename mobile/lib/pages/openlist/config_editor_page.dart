@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/monokai-sublime.dart';
 import 'package:flutter_highlight/themes/github.dart';
-import 'package:get/get.dart';
 import '../../contant/native_bridge.dart';
 import '../../generated/l10n.dart';
 import '../../utils/service_manager.dart';

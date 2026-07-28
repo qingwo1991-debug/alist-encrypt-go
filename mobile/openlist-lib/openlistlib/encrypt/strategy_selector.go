@@ -10,23 +10,22 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 )
 
 type ProviderStrategyState struct {
-	Provider       string                 `json:"provider"`
-	Preferred      StreamStrategy         `json:"preferred"`
-	Failures       map[StreamStrategy]int `json:"failures"`
-	CapabilityFailCount int               `json:"capability_fail_count"`
-	LastValidatedAt    time.Time          `json:"last_validated_at"`
-	SuccessStreak  int                    `json:"success_streak"`
-	CooldownUntil  time.Time              `json:"cooldown_until"`
-	LastDowngrade  time.Time              `json:"last_downgrade"`
-	LastUpdate     time.Time              `json:"last_update"`
-	LastFailure    string                 `json:"last_failure"`
-	LastStrategy   StreamStrategy         `json:"last_strategy"`
-	TotalFailures  int                    `json:"total_failures"`
-	TotalSuccesses int                    `json:"total_successes"`
+	Provider            string                 `json:"provider"`
+	Preferred           StreamStrategy         `json:"preferred"`
+	Failures            map[StreamStrategy]int `json:"failures"`
+	CapabilityFailCount int                    `json:"capability_fail_count"`
+	LastValidatedAt     time.Time              `json:"last_validated_at"`
+	SuccessStreak       int                    `json:"success_streak"`
+	CooldownUntil       time.Time              `json:"cooldown_until"`
+	LastDowngrade       time.Time              `json:"last_downgrade"`
+	LastUpdate          time.Time              `json:"last_update"`
+	LastFailure         string                 `json:"last_failure"`
+	LastStrategy        StreamStrategy         `json:"last_strategy"`
+	TotalFailures       int                    `json:"total_failures"`
+	TotalSuccesses      int                    `json:"total_successes"`
 }
 
 type StrategySelectorConfig struct {
@@ -39,6 +38,9 @@ type StrategySelectorConfig struct {
 type StrategySelector struct {
 	cfg   StrategySelectorConfig
 	store StrategyStore
+	// stateLocks serialize transitions per provider without making persistence
+	// for one upstream block playback results from unrelated upstreams.
+	stateLocks [64]sync.Mutex
 
 	obsMu           sync.Mutex
 	reasonCounts    map[string]uint64
@@ -289,6 +291,9 @@ func (s *StrategySelector) Stats() map[string]interface{} {
 
 func (s *StrategySelector) Select(provider string) []StreamStrategy {
 	provider = normalizeStrategyProviderKey(provider)
+	unlock := s.lockProvider(provider)
+	defer unlock()
+
 	state := s.ensureState(provider)
 	order := s.cfg.ProviderFallbacks
 
@@ -301,30 +306,63 @@ func (s *StrategySelector) Select(provider string) []StreamStrategy {
 	if preferredIndex == -1 {
 		preferredIndex = 0
 		preferred = order[0]
+		state.Preferred = preferred
+		_ = s.store.Set(provider, state)
 	}
 
+	if preferredIndex > 0 && !state.CooldownUntil.After(time.Now()) {
+		return []StreamStrategy{order[preferredIndex-1]}
+	}
 	return []StreamStrategy{preferred}
 }
 
 func (s *StrategySelector) RecordSuccess(provider string, strategy StreamStrategy) {
 	provider = normalizeStrategyProviderKey(provider)
+	unlock := s.lockProvider(provider)
+	defer unlock()
+
 	state := s.ensureState(provider)
+	order := s.cfg.ProviderFallbacks
+	preferredIndex := indexOfStrategy(order, state.Preferred)
+	if preferredIndex < 0 {
+		preferredIndex = 0
+		state.Preferred = order[0]
+	}
+	strategyIndex := indexOfStrategy(order, strategy)
+	now := time.Now()
+
 	state.TotalSuccesses++
-	state.SuccessStreak++
-	state.CapabilityFailCount = 0
-	state.LastValidatedAt = time.Now()
+	state.LastValidatedAt = now
 	state.LastStrategy = strategy
 	state.LastFailure = ""
 
-	if state.Preferred == "" {
-		state.Preferred = strategy
-	}
-	if state.Preferred != strategy {
+	switch {
+	case strategyIndex == preferredIndex:
+		state.CapabilityFailCount = 0
+		state.SuccessStreak = 0
+		if state.Failures != nil {
+			state.Failures[strategy] = 0
+		}
+	case preferredIndex > 0 && strategyIndex == preferredIndex-1 && !state.CooldownUntil.After(now):
+		state.SuccessStreak++
+		if state.Failures != nil {
+			state.Failures[strategy] = 0
+		}
+		if state.SuccessStreak < s.cfg.SuccessToRecover {
+			break
+		}
 		prev := state.Preferred
 		state.Preferred = strategy
-		state.SuccessStreak = 1
-		state.CooldownUntil = time.Time{}
-		s.appendEvent(provider, prev, strategy, "validated_success")
+		state.SuccessStreak = 0
+		state.CapabilityFailCount = 0
+		if strategyIndex > 0 {
+			state.CooldownUntil = now.Add(s.cfg.Cooldown)
+		} else {
+			state.CooldownUntil = time.Time{}
+		}
+		s.appendEvent(provider, prev, strategy, "recovered")
+	default:
+		state.SuccessStreak = 0
 	}
 
 	_ = s.store.Set(provider, state)
@@ -332,16 +370,29 @@ func (s *StrategySelector) RecordSuccess(provider string, strategy StreamStrateg
 
 func (s *StrategySelector) RecordFailure(provider string, strategy StreamStrategy, reason string) {
 	provider = normalizeStrategyProviderKey(provider)
+	unlock := s.lockProvider(provider)
+	defer unlock()
+
 	reason = normalizeFailureReason(reason)
 	s.recordReason(reason)
 	state := s.ensureState(provider)
+	now := time.Now()
 	state.TotalFailures++
-	state.SuccessStreak = 0
 	state.LastFailure = reason
 	state.LastStrategy = strategy
+	order := s.cfg.ProviderFallbacks
+	preferredIndex := indexOfStrategy(order, state.Preferred)
+	if preferredIndex < 0 {
+		state.Preferred = order[0]
+		preferredIndex = 0
+	}
+	strategyIndex := indexOfStrategy(order, strategy)
 
 	if isNonStrategyFailure(reason) {
-		state.LastValidatedAt = time.Now()
+		if preferredIndex > 0 && strategyIndex == preferredIndex-1 {
+			state.SuccessStreak = 0
+		}
+		state.LastValidatedAt = now
 		_ = s.store.Set(provider, state)
 		return
 	}
@@ -350,27 +401,27 @@ func (s *StrategySelector) RecordFailure(provider string, strategy StreamStrateg
 		state.Failures = make(map[StreamStrategy]int)
 	}
 	state.Failures[strategy]++
-	state.CapabilityFailCount++
-	state.LastValidatedAt = time.Now()
+	state.LastValidatedAt = now
 
-	order := s.cfg.ProviderFallbacks
-	preferredIndex := indexOfStrategy(order, state.Preferred)
-
-	if state.Preferred == "" {
-		state.Preferred = order[0]
-		preferredIndex = 0
+	if strategyIndex == preferredIndex {
+		state.SuccessStreak = 0
+		state.CapabilityFailCount = state.Failures[strategy]
 	}
 
-	if strategy == state.Preferred && state.CapabilityFailCount >= s.cfg.FailToDowngrade {
+	if strategyIndex == preferredIndex && state.CapabilityFailCount >= s.cfg.FailToDowngrade {
 		if preferredIndex >= 0 && preferredIndex+1 < len(order) {
 			prev := state.Preferred
 			state.Preferred = order[preferredIndex+1]
 			state.Failures[strategy] = 0
 			state.CapabilityFailCount = 0
-			state.LastDowngrade = time.Now()
-			state.CooldownUntil = time.Now().Add(s.cfg.Cooldown)
+			state.SuccessStreak = 0
+			state.LastDowngrade = now
+			state.CooldownUntil = now.Add(s.cfg.Cooldown)
 			s.appendEvent(provider, prev, state.Preferred, reason)
 		}
+	} else if preferredIndex > 0 && strategyIndex == preferredIndex-1 && !state.CooldownUntil.After(now) {
+		state.SuccessStreak = 0
+		state.CooldownUntil = now.Add(s.cfg.Cooldown)
 	}
 
 	_ = s.store.Set(provider, state)
@@ -422,11 +473,22 @@ func (s *StrategySelector) ensureState(provider string) *ProviderStrategyState {
 	}
 	state := &ProviderStrategyState{
 		Provider:  provider,
-		Preferred: "",
+		Preferred: s.cfg.ProviderFallbacks[0],
 		Failures:  make(map[StreamStrategy]int),
 	}
 	_ = s.store.Set(provider, state)
 	return state
+}
+
+func (s *StrategySelector) lockProvider(provider string) func() {
+	var hash uint32 = 2166136261
+	for i := 0; i < len(provider); i++ {
+		hash ^= uint32(provider[i])
+		hash *= 16777619
+	}
+	lock := &s.stateLocks[hash%uint32(len(s.stateLocks))]
+	lock.Lock()
+	return lock.Unlock
 }
 
 func ProviderKey(targetURL string, _ string) string {

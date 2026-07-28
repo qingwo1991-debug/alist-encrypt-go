@@ -56,6 +56,7 @@ func (s *Store) ensureSchema(ctx context.Context) error {
   is_active TINYINT NOT NULL DEFAULT 1,
   upstream_fetched_at DATETIME NULL,
   raw_url VARCHAR(2048) NULL,
+  raw_url_auth_scope VARCHAR(128) NOT NULL DEFAULT '',
   sign VARCHAR(512) NULL,
   PRIMARY KEY (key_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`, fileMetaTable)
@@ -147,6 +148,7 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 	// Idempotency is handled via error handling below (Duplicate key name / 1061).
 	indexes := []string{
 		fmt.Sprintf("CREATE INDEX idx_strategy_last_accessed ON %s(last_accessed)", TableName("strategy")),
+		fmt.Sprintf("CREATE INDEX idx_strategy_provider_updated ON %s(provider_host, updated_at)", TableName("strategy")),
 		fmt.Sprintf("CREATE INDEX idx_file_meta_last_accessed ON %s(last_accessed)", TableName("file_meta")),
 		fmt.Sprintf("CREATE INDEX idx_file_meta_provider_path ON %s(provider_host, original_path(255))", TableName("file_meta")),
 		fmt.Sprintf("CREATE INDEX idx_range_compat_last_accessed ON %s(last_accessed)", TableName("range_compat")),
@@ -174,6 +176,7 @@ func (s *Store) migrateSchema(ctx context.Context) error {
 	migrations := []string{
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN upstream_fetched_at DATETIME NULL", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN raw_url VARCHAR(2048) NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN raw_url_auth_scope VARCHAR(128) NOT NULL DEFAULT ''", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN sign VARCHAR(512) NULL", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN encrypted_path TEXT NULL", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN name VARCHAR(512) NULL", TableName("file_meta")),
@@ -277,7 +280,7 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 		return nil
 	}
 	query := fmt.Sprintf(`INSERT INTO %s
-  (key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, status_code, raw_url, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
+	  (key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, status_code, raw_url, raw_url_auth_scope, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
   VALUES %s
   ON DUPLICATE KEY UPDATE
     encrypted_path=IF(VALUES(encrypted_path) <> '', VALUES(encrypted_path), encrypted_path),
@@ -289,15 +292,16 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
     nonce_field=IF(VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0, VALUES(nonce_field), nonce_field),
     etag=VALUES(etag),
     content_type=VALUES(content_type),
-    status_code=VALUES(status_code),
-    raw_url=IF(VALUES(raw_url) <> '', VALUES(raw_url), raw_url),
-    sign=IF(VALUES(sign) <> '', VALUES(sign), sign),
+	    status_code=VALUES(status_code),
+	    raw_url=IF(VALUES(raw_url) <> '', VALUES(raw_url), raw_url),
+	    raw_url_auth_scope=IF(VALUES(raw_url) <> '', VALUES(raw_url_auth_scope), raw_url_auth_scope),
+	    sign=IF(VALUES(sign) <> '', VALUES(sign), sign),
     last_accessed=VALUES(last_accessed),
     updated_at=VALUES(updated_at),
     upstream_fetched_at=IF(VALUES(upstream_fetched_at) IS NOT NULL, VALUES(upstream_fetched_at), upstream_fetched_at),
-    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(19, len(records)))
+	    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(20, len(records)))
 
-	args := make([]interface{}, 0, len(records)*19)
+	args := make([]interface{}, 0, len(records)*20)
 	now := time.Now()
 	for _, record := range records {
 		lastAccessed := record.LastAccessed
@@ -327,6 +331,7 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 			record.ContentType,
 			record.StatusCode,
 			record.RawURL,
+			record.RawURLAuthScope,
 			record.Sign,
 			lastAccessed,
 			updatedAt,

@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -28,6 +29,10 @@ type ProbeScheduler struct {
 	metaStore FileMetaStore
 	stream    *proxy.StreamProxy
 	enabled   bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workerWG  sync.WaitGroup
+	stopOnce  sync.Once
 
 	queue    chan probeItem
 	workers  int
@@ -84,7 +89,9 @@ type ProbeScheduler struct {
 	// JWT caching to avoid repeated login requests
 	cachedJWT       string
 	cachedJWTExpiry time.Time
+	cachedJWTScope  [sha256.Size]byte
 	jwtMu           sync.Mutex
+	jwtFetcher      func(alistURL, username, password string) string
 }
 
 // RawURLFetcher fetches the signed raw_url for a display path from alist fs/get.
@@ -207,13 +214,20 @@ func (ps *ProbeScheduler) SetRawURLFetcher(f RawURLFetcher) {
 }
 
 func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy) *ProbeScheduler {
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	alist := config.AlistServer{}
+	if cfg != nil {
+		alist = cfg.AlistServerSnapshot()
+	}
 	ps := &ProbeScheduler{
 		cfg:                    cfg,
 		resolver:               NewFileSizeResolver(cfg, fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
 		fileDAO:                fileDAO,
 		metaStore:              metaStore,
 		stream:                 stream,
-		enabled:                cfg != nil && cfg.AlistServer.EnableBackgroundProbe,
+		enabled:                cfg != nil && alist.EnableBackgroundProbe,
+		ctx:                    workerCtx,
+		cancel:                 cancelWorkers,
 		seen:                   make(map[string]time.Time),
 		pending:                make(map[string]struct{}),
 		providerSem:            make(map[string]chan struct{}),
@@ -232,18 +246,22 @@ func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileM
 		return ps
 	}
 
-	ps.workers = clampInt(cfg.AlistServer.ProbeConcurrency, 1, 20)
-	ps.providerLimit = clampInt(cfg.AlistServer.ProbeProviderConcurrency, 1, 5)
-	ps.minDelay = time.Duration(clampInt(cfg.AlistServer.ProbeMinDelayMs, 0, 60000)) * time.Millisecond
-	ps.maxDelay = time.Duration(clampInt(cfg.AlistServer.ProbeMaxDelayMs, 0, 120000)) * time.Millisecond
-	ps.cooldown = time.Duration(clampInt(cfg.AlistServer.ProbeCooldownMinutes, 1, 10080)) * time.Minute
-	queueSize := clampInt(cfg.AlistServer.ProbeQueueSize, 100, 10000)
+	ps.workers = clampInt(alist.ProbeConcurrency, 1, 20)
+	ps.providerLimit = clampInt(alist.ProbeProviderConcurrency, 1, 5)
+	ps.minDelay = time.Duration(clampInt(alist.ProbeMinDelayMs, 0, 60000)) * time.Millisecond
+	ps.maxDelay = time.Duration(clampInt(alist.ProbeMaxDelayMs, 0, 120000)) * time.Millisecond
+	ps.cooldown = time.Duration(clampInt(alist.ProbeCooldownMinutes, 1, 10080)) * time.Minute
+	queueSize := clampInt(alist.ProbeQueueSize, 100, 10000)
 	ps.queue = make(chan probeItem, queueSize)
-	ps.minSizeBytes = cfg.AlistServer.ProbeMinSizeBytes
+	ps.minSizeBytes = alist.ProbeMinSizeBytes
 
 	if ps.enabled {
 		for i := 0; i < ps.workers; i++ {
-			go ps.worker()
+			ps.workerWG.Add(1)
+			go func() {
+				defer ps.workerWG.Done()
+				ps.worker()
+			}()
 		}
 	}
 	return ps
@@ -261,6 +279,11 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 	if ps == nil || !ps.enabled || ps.queue == nil {
 		return
 	}
+	select {
+	case <-ps.done():
+		return
+	default:
+	}
 	ps.ensureRecordState()
 	source = normalizeProbeSource(source)
 	if file.DisplayPath == "" || file.TargetURL == "" {
@@ -268,7 +291,7 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 	}
 	atomic.AddUint64(&ps.filesDiscoveredTotal, 1)
 	forcePlaybackWarmup := source == probeSourceFirstFrame
-	if !forcePlaybackWarmup && ps.cfg != nil && ps.cfg.AlistServer.ScanVideoOnly && !isVideoFile(file.FileName) {
+	if !forcePlaybackWarmup && ps.cfg != nil && ps.cfg.AlistServerSnapshot().ScanVideoOnly && !isVideoFile(file.FileName) {
 		ps.recordTerminal(file, source, probeStatusSkippedSize, reportedSize, probeExecutionResult{})
 		atomic.AddUint64(&ps.filesSkippedTotal, 1)
 		return
@@ -321,7 +344,10 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 	}
 
 	select {
-	case ps.queue <- probeItem{file: file, authHeaders: authHeaders, source: source, queuedAt: time.Now()}:
+	case <-ps.done():
+		ps.releaseProbeReservation(key, reservedAt, true)
+		return
+	case ps.queue <- probeItem{file: file, authHeaders: authHeaders.Clone(), source: source, queuedAt: time.Now()}:
 		atomic.AddUint64(&ps.enqueuedTotal, 1)
 		atomic.AddUint64(&ps.filesQueuedTotal, 1)
 		ps.recordTerminal(file, source, probeStatusQueued, reportedSize, probeExecutionResult{})
@@ -403,9 +429,42 @@ func (ps *ProbeScheduler) shouldProbeRange(file FileItem, size int64) bool {
 }
 
 func (ps *ProbeScheduler) worker() {
-	for item := range ps.queue {
-		ps.runItem(item)
+	for {
+		select {
+		case <-ps.done():
+			return
+		case item := <-ps.queue:
+			ps.runItem(item)
+		}
 	}
+}
+
+// Stop cancels queued and active background probes and waits for workers to
+// release references to stores and HTTP clients before server shutdown.
+func (ps *ProbeScheduler) Stop() {
+	if ps == nil {
+		return
+	}
+	ps.stopOnce.Do(func() {
+		if ps.cancel != nil {
+			ps.cancel()
+		}
+		ps.workerWG.Wait()
+	})
+}
+
+func (ps *ProbeScheduler) probeContext() context.Context {
+	if ps != nil && ps.ctx != nil {
+		return ps.ctx
+	}
+	return context.Background()
+}
+
+func (ps *ProbeScheduler) done() <-chan struct{} {
+	if ps != nil && ps.ctx != nil {
+		return ps.ctx.Done()
+	}
+	return nil
 }
 
 func (ps *ProbeScheduler) runItem(item probeItem) {
@@ -427,7 +486,12 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 
 	// Workers wait for their provider slot. Dropping here permanently loses an
 	// item that was already marked as seen for the full cooldown window.
-	sem <- struct{}{}
+	select {
+	case <-ps.done():
+		ps.finishRecord(item, startedAt, probeStatusFailed, probeExecutionResult{failureReason: "scheduler_stopped"})
+		return
+	case sem <- struct{}{}:
+	}
 	defer func() { <-sem }()
 
 	// Only delay files that were already successfully warmed. A directory
@@ -440,14 +504,24 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 			delta := ps.maxDelay - ps.minDelay
 			delay += time.Duration(rand.Int63n(int64(delta)))
 		}
-		time.Sleep(delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ps.done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			ps.finishRecord(item, startedAt, probeStatusFailed, probeExecutionResult{failureReason: "scheduler_stopped"})
+			return
+		case <-timer.C:
+		}
 	}
 
 	// Fallback to configured scan credentials if no user auth available
 	authHeaders, authMode := ps.ensureAuth(item.authHeaders)
 
 	resultState := probeExecutionResult{}
-	result := ps.resolver.ResolveSingle(context.Background(), item.file, authHeaders)
+	probeCtx := ps.probeContext()
+	result := ps.resolver.ResolveSingle(probeCtx, item.file, authHeaders)
 	if result.Error == nil && result.Size > 0 {
 		ps.fileDAO.SetFileSize(item.file.DisplayPath, result.Size, 24*time.Hour)
 		resultState.resolvedSize = result.Size
@@ -461,8 +535,10 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 	// Pre-fetch raw_url so WebDAV first-play is zero-latency.
 	// Check staleness: don't re-fetch if raw_url is still fresh.
 	stalenessThreshold := 30 * time.Minute
-	if ps.cfg != nil && ps.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
-		stalenessThreshold = time.Duration(ps.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	if ps.cfg != nil {
+		if minutes := ps.cfg.AlistServerSnapshot().UpstreamStalenessMinutes; minutes > 0 {
+			stalenessThreshold = time.Duration(minutes) * time.Minute
+		}
 	}
 	if ps.rawURLFetcher != nil {
 		if rawURL := ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath, authHeaders); rawURL != "" {
@@ -473,12 +549,12 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 	if ps.rawURLFetcher == nil && ps.cfg != nil {
 		// Fallback: use built-in raw_url fetcher via alist fs/get
 		alistURL := ps.cfg.GetAlistURL()
-		rawURLResult := fetchRawURL(context.Background(), alistURL, item.file.DisplayPath, item.file.EncryptedPath, authHeaders, ps.fileDAO, stalenessThreshold)
+		rawURLResult := fetchRawURL(probeCtx, alistURL, item.file.DisplayPath, item.file.EncryptedPath, authHeaders, ps.fileDAO, stalenessThreshold)
 		if rawURLResult.RawURL != "" {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 			if item.file.PasswdInfo != nil && ps.stream != nil {
-				meta := ps.stream.InspectEncryptedContent(context.Background(), rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
+				meta := ps.stream.InspectEncryptedContent(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
 				if meta.IsV2() && meta.PlainSize > 0 {
 					cached := &dao.FileInfo{
 						Path:              item.file.DisplayPath,
@@ -490,6 +566,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 						HeaderLen:         meta.HeaderLen,
 						NonceField:        append([]byte(nil), meta.NonceField...),
 						RawURL:            rawURLResult.RawURL,
+						RawURLAuthScope:   rawURLAuthScope(authHeaders),
 						UpstreamFetchedAt: time.Now(),
 					}
 					if existing, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && existing != nil {
@@ -513,7 +590,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 			ps.invalidateJWTCache()
 		}
 	}
-	if ps.stream != nil && ps.stream.ProbeRangeCompatibility(context.Background(), item.file.TargetURL, authHeaders, item.file.CompatStorageKey) {
+	if ps.stream != nil && ps.stream.ProbeRangeCompatibility(probeCtx, item.file.TargetURL, authHeaders, item.file.CompatStorageKey) {
 		resultState.rangeProbed = true
 		atomic.AddUint64(&ps.filesRangeProbed, 1)
 	}
@@ -1070,8 +1147,10 @@ func (ps *ProbeScheduler) consumerHitRate() float64 {
 }
 
 func (ps *ProbeScheduler) stalenessThreshold() time.Duration {
-	if ps != nil && ps.cfg != nil && ps.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
-		return time.Duration(ps.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	if ps != nil && ps.cfg != nil {
+		if minutes := ps.cfg.AlistServerSnapshot().UpstreamStalenessMinutes; minutes > 0 {
+			return time.Duration(minutes) * time.Minute
+		}
 	}
 	return 30 * time.Minute
 }
@@ -1135,9 +1214,8 @@ func (ps *ProbeScheduler) applyWarmStateToRecordsLocked(displayPath string, warm
 }
 
 func splitProvider(providerKey string) (string, string) {
-	parts := strings.SplitN(providerKey, "::", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	if idx := strings.Index(providerKey, "::/"); idx >= 0 {
+		return providerKey[:idx], providerKey[idx+2:]
 	}
 	return providerKey, ""
 }
@@ -1156,29 +1234,40 @@ func (ps *ProbeScheduler) ensureAuth(headers http.Header) (http.Header, string) 
 		return headers, "none"
 	}
 	// Try scan auth header first
-	if raw := strings.TrimSpace(ps.cfg.AlistServer.ScanAuthHeader); raw != "" {
+	alist := ps.cfg.AlistServerSnapshot()
+	if raw := strings.TrimSpace(alist.ScanAuthHeader); raw != "" {
 		headers.Set("Authorization", raw)
 		return headers, "scan_header"
 	}
 	// Try JWT login with scan credentials (alist /api/fs/list needs token, not Basic auth)
-	username := ps.cfg.AlistServer.ScanUsername
-	password := ps.cfg.AlistServer.ScanPassword
+	username := alist.ScanUsername
+	password := alist.ScanPassword
 	if username != "" && password != "" {
+		alistURL := ps.cfg.GetAlistURL()
+		scope := sha256.Sum256([]byte(alistURL + "\x00" + username + "\x00" + password))
 		// Check cached JWT first (2-hour TTL)
 		ps.jwtMu.Lock()
-		if ps.cachedJWT != "" && time.Now().Before(ps.cachedJWTExpiry) {
+		if ps.cachedJWT != "" && ps.cachedJWTScope == scope && time.Now().Before(ps.cachedJWTExpiry) {
 			token := ps.cachedJWT
 			ps.jwtMu.Unlock()
 			headers.Set("Authorization", token)
 			return headers, "scan_jwt_cached"
 		}
+		ps.cachedJWT = ""
+		ps.cachedJWTExpiry = time.Time{}
+		ps.cachedJWTScope = [sha256.Size]byte{}
 		ps.jwtMu.Unlock()
 
-		if token := fetchAlistJWT(ps.cfg.GetAlistURL(), username, password); token != "" {
+		fetcher := ps.jwtFetcher
+		if fetcher == nil {
+			fetcher = fetchAlistJWT
+		}
+		if token := fetcher(alistURL, username, password); token != "" {
 			// Cache the token with 2-hour expiry
 			ps.jwtMu.Lock()
 			ps.cachedJWT = token
 			ps.cachedJWTExpiry = time.Now().Add(2 * time.Hour)
+			ps.cachedJWTScope = scope
 			ps.jwtMu.Unlock()
 			headers.Set("Authorization", token)
 			return headers, "scan_jwt"
@@ -1197,6 +1286,7 @@ func (ps *ProbeScheduler) invalidateJWTCache() {
 	ps.jwtMu.Lock()
 	ps.cachedJWT = ""
 	ps.cachedJWTExpiry = time.Time{}
+	ps.cachedJWTScope = [sha256.Size]byte{}
 	ps.jwtMu.Unlock()
 }
 
@@ -1236,9 +1326,10 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 		return rawURLFetchResult{}
 	}
 	// Check if cached raw_url is still fresh.
+	authScope := rawURLAuthScope(authHeaders)
 	if staleThreshold > 0 {
 		if cached, ok := fileDAO.Get(displayPath); ok && cached != nil &&
-			cachedRawURLFresh(cached, staleThreshold) {
+			cachedRawURLFresh(cached, staleThreshold, authScope) {
 			return rawURLFetchResult{RawURL: cached.RawURL, Size: cached.Size, Source: "cache"}
 		}
 	}
@@ -1284,8 +1375,7 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		fileDAO.InvalidateDisplayPath(displayPath)
-		fileDAO.DeleteEncPathMapping(displayPath)
+		fileDAO.InvalidateRawURLForScope(displayPath, rawURLAuthScope(authHeaders))
 		return rawURLFetchResult{
 			StatusCode:    resp.StatusCode,
 			Source:        rawURLSourceFromAPIPath(apiPath),
@@ -1310,6 +1400,7 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		Path:              displayPath,
 		Size:              result.Data.Size,
 		RawURL:            result.Data.RawURL,
+		RawURLAuthScope:   rawURLAuthScope(authHeaders),
 		UpstreamFetchedAt: time.Now(),
 	})
 	return rawURLFetchResult{

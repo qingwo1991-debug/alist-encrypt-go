@@ -19,6 +19,7 @@ type PathEntry struct {
 	NonceField        []byte // V2 nonce field for direct decrypt reuse
 	IsDir             bool   // Is directory
 	RawURL            string // Cached upstream direct URL
+	RawURLAuthScope   string // Irreversible Authorization+Cookie scope for RawURL
 	Sign              string // Cached upstream sign
 	ExpiresAt         int64  // Unix nano timestamp for TTL expiration
 	UpstreamFetchedAt int64  // Unix nano timestamp when upstream metadata was last fetched
@@ -39,9 +40,9 @@ type pathCacheShard struct {
 // PathCache provides high-performance dual-indexed path caching
 // Uses sharding to reduce lock contention under high concurrency
 type PathCache struct {
-	shards     []*pathCacheShard
-	shardCount uint32
-	shardMask  uint32
+	shards      []*pathCacheShard
+	shardCount  uint32
+	shardMask   uint32
 	maxPerShard int
 
 	// Stats

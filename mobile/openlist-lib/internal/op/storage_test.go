@@ -1,8 +1,12 @@
 package op_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
@@ -11,6 +15,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/glebarez/sqlite"
+	log "github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
@@ -40,6 +45,48 @@ func TestCreateStorage(t *testing.T) {
 			} else {
 				t.Logf("expect failed to create storage: %+v", err)
 			}
+		}
+	}
+}
+
+func TestCreateStorageInvalidAdditionLogDoesNotLeakCredentials(t *testing.T) {
+	logger := log.StandardLogger()
+	previousOutput := logger.Out
+	previousFormatter := logger.Formatter
+	previousLevel := logger.Level
+	t.Cleanup(func() {
+		logger.SetOutput(previousOutput)
+		logger.SetFormatter(previousFormatter)
+		logger.SetLevel(previousLevel)
+	})
+
+	var output bytes.Buffer
+	logger.SetOutput(&output)
+	logger.SetFormatter(&log.TextFormatter{DisableColors: true, DisableTimestamp: true})
+	logger.SetLevel(log.DebugLevel)
+
+	const secret = "credential-sentinel-do-not-log"
+	addition := `{"root_folder_path":".","password":"` + secret + `"`
+	mountPath := fmt.Sprintf("/invalid-addition-log-redaction-%d", time.Now().UnixNano())
+	_, err := op.CreateStorage(context.Background(), model.Storage{
+		Driver:    "Local",
+		MountPath: mountPath,
+		Addition:  addition,
+	})
+	if err == nil {
+		t.Fatal("expected invalid addition JSON to fail")
+	}
+
+	logged := output.String()
+	if !strings.Contains(logged, "[storage_init] addition unmarshal failed") {
+		t.Fatalf("expected a safe addition parse warning, got %q", logged)
+	}
+	for _, sensitive := range []string{secret, addition, `"password"`} {
+		if strings.Contains(logged, sensitive) {
+			t.Fatalf("log leaked sensitive addition data %q: %s", sensitive, logged)
+		}
+		if strings.Contains(err.Error(), sensitive) {
+			t.Fatalf("returned error leaked sensitive addition data %q: %v", sensitive, err)
 		}
 	}
 }

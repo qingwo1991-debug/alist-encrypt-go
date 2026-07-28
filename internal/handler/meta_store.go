@@ -57,6 +57,7 @@ func (w *MySQLFileMetaWriter) UpsertFileMeta(info *dao.FileInfo) error {
 		HeaderLen:         info.HeaderLen,
 		NonceField:        append([]byte(nil), info.NonceField...),
 		RawURL:            info.RawURL,
+		RawURLAuthScope:   info.RawURLAuthScope,
 		Sign:              info.Sign,
 		LastAccessed:      time.Now(),
 		UpstreamFetchedAt: info.UpstreamFetchedAt,

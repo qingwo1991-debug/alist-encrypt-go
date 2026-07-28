@@ -53,7 +53,9 @@ class OpenListScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ui = Get.put(OpenListController());
+    final ui = Get.isRegistered<OpenListController>()
+        ? Get.find<OpenListController>()
+        : Get.put(OpenListController());
 
     return Scaffold(
         appBar: AppBar(
@@ -157,7 +159,10 @@ content: Text(S.of(context).currentIsLatestVersion),
                 }
               }),
         ),
-        body: Obx(() => LogListView(logs: ui.logs.value)));
+        body: Obx(() => LogListView(
+              logs: ui.logs.toList(growable: false),
+              controller: ui.scrollController,
+            )));
   }
 }
 
@@ -180,18 +185,25 @@ class MyEventReceiver extends Event {
 
 class OpenListController extends GetxController {
   final ScrollController _scrollController = ScrollController();
+  StreamSubscription<bool>? _serviceStatusSubscription;
   var isSwitch = false.obs;
   var openlistVersion = "".obs;
 
   var logs = <Log>[].obs;
+
+  ScrollController get scrollController => _scrollController;
 
   void clearLog() {
     logs.clear();
   }
 
   void addLog(Log log) {
+    if (isClosed) return;
     logs.add(log);
-    _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (isClosed || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    });
   }
 
   Future<void> exportLogs(BuildContext context) async {
@@ -262,6 +274,7 @@ content: Text('${S.of(context).logsExportFailed}: $e'),
 
   @override
   void onInit() {
+    super.onInit();
     // 设置日志接收器，但状态变化只通过ServiceManager处理
     Event.setup(MyEventReceiver(
         (isRunning) {
@@ -270,19 +283,34 @@ content: Text('${S.of(context).logsExportFailed}: $e'),
         }, 
         (log) => addLog(log)));
     
-    NativeBridge.android.getOpenListVersion().then((value) => openlistVersion.value = value);
+    NativeBridge.android.getOpenListVersion().then((value) {
+      if (!isClosed) {
+        openlistVersion.value = value;
+      }
+    });
     
     // 获取初始状态
     ServiceManager.instance.checkServiceStatus().then((isRunning) {
-      isSwitch.value = isRunning;
+      if (!isClosed) {
+        isSwitch.value = isRunning;
+      }
     });
 
     // 只监听ServiceManager的状态变化
-    ServiceManager.instance.serviceStatusStream.listen((isRunning) {
+    _serviceStatusSubscription =
+        ServiceManager.instance.serviceStatusStream.listen((isRunning) {
+      if (isClosed) return;
       print('ServiceManager status changed: $isRunning');
       isSwitch.value = isRunning;
     });
+  }
 
-    super.onInit();
+  @override
+  void onClose() {
+    Event.setup(null);
+    unawaited(_serviceStatusSubscription?.cancel());
+    _serviceStatusSubscription = null;
+    _scrollController.dispose();
+    super.onClose();
   }
 }

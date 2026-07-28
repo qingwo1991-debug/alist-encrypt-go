@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,63 @@ import (
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 )
+
+func TestCollectEncryptedSearchRootsConcurrentConfigUpdate(t *testing.T) {
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	base := cfg.AlistServer
+	serverA := base
+	serverA.PasswdList = []config.PasswdInfo{{
+		Password: "test-password",
+		EncType:  "aesctr",
+		Enable:   true,
+		EncPath:  []string{"/alpha/*"},
+	}}
+	serverB := base
+	serverB.PasswdList = []config.PasswdInfo{{
+		Password: "test-password",
+		EncType:  "aesctr",
+		Enable:   true,
+		EncPath:  []string{"/beta/*"},
+	}}
+	if err := cfg.UpdateAlistServer(serverA); err != nil {
+		t.Fatalf("seed alist config: %v", err)
+	}
+
+	h := &AlistHandler{cfg: cfg}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			server := serverA
+			if i%2 == 1 {
+				server = serverB
+			}
+			if err := cfg.UpdateAlistServer(server); err != nil {
+				t.Errorf("update alist config: %v", err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 1000; i++ {
+			roots := h.collectEncryptedSearchRoots()
+			if len(roots) != 1 || (roots[0] != "/alpha" && roots[0] != "/beta") {
+				t.Errorf("unexpected roots during update: %v", roots)
+				return
+			}
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+}
 
 func TestHandleFsListSnapshotPreservesItemPaths(t *testing.T) {
 	passwd := &config.PasswdInfo{
@@ -189,6 +247,65 @@ func TestHandleFsListRejectsInvalidBackgroundSnapshot(t *testing.T) {
 	}
 	if got, _ := resp.Data.Content[0]["path"].(string); got != "/backup_storage/正确目录" {
 		t.Fatalf("path=%q, want live upstream path", got)
+	}
+}
+
+func TestHandleFsListDoesNotExposeBackgroundScanSnapshotToAnonymousRequest(t *testing.T) {
+	upstreamHits := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		writeJSONResponse(w, map[string]interface{}{
+			"code": 200,
+			"data": map[string]interface{}{
+				"content": []interface{}{map[string]interface{}{
+					"name": "public", "path": "/backup_storage/public", "is_dir": true,
+				}},
+			},
+		})
+	})
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, &config.PasswdInfo{
+		Password: "testpass", EncType: "aesctr", Enable: true, EncPath: []string{"/encrypted/*"},
+	})
+	handler.dirSyncStart.Do(func() {})
+	cfg := config.Get()
+	originalScanAuth := cfg.AlistServer.ScanAuthHeader
+	cfg.AlistServer.ScanAuthHeader = "Bearer privileged-scan-token"
+	t.Cleanup(func() { cfg.AlistServer.ScanAuthHeader = originalScanAuth })
+
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create snapshot store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	dirStore := NewBoltDirSyncStore(store)
+	handler.SetDirSyncStore(dirStore)
+	scanScopeKey := buildDirScopeKey("/backup_storage", dirSyncScopeScan)
+	if err := dirStore.UpsertSnapshot(context.Background(), DirListSnapshot{
+		ScopeKey:      scanScopeKey,
+		DisplayPath:   "/backup_storage",
+		AuthScopeHash: dirSyncScopeScan,
+		SourceMode:    dirSyncModeScan,
+		SyncState:     "fresh",
+		NextRefreshAt: time.Now().Add(time.Minute),
+		PayloadJSON:   []byte(`{"code":200,"data":{"content":[{"name":"secret","path":"/backup_storage/secret","is_dir":true}],"total":1}}`),
+	}); err != nil {
+		t.Fatalf("seed scan snapshot: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/list", strings.NewReader(`{"path":"/backup_storage"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.HandleFsList(rec, req)
+
+	if upstreamHits != 1 {
+		t.Fatalf("upstreamHits=%d, want anonymous request validated by upstream", upstreamHits)
+	}
+	if strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("anonymous response exposed privileged scan snapshot: %s", rec.Body.String())
 	}
 }
 

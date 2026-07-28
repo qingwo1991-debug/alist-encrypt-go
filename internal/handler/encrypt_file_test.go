@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alist-encrypt-go/internal/encryption"
 )
 
 func TestRunEncryptTaskCreatesNestedOutputAndPublishesFile(t *testing.T) {
@@ -102,6 +104,49 @@ func TestRunEncryptTaskMissingEnumeratedFileSetsError(t *testing.T) {
 	}
 	if snapshot.DoneFiles != 0 || snapshot.DoneBytes != 0 {
 		t.Fatalf("missing file advanced progress to %d files/%d bytes", snapshot.DoneFiles, snapshot.DoneBytes)
+	}
+}
+
+func TestRunDecryptTaskRejectsEscapingDecodedName(t *testing.T) {
+	rootDir := t.TempDir()
+	srcDir := filepath.Join(rootDir, "src")
+	dstDir := filepath.Join(rootDir, "dst")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	password := "test-password"
+	plain := filepath.Join(rootDir, "plain.dat")
+	content := []byte("decoded filenames must stay inside the output directory")
+	if err := os.WriteFile(plain, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	converter := encryption.NewFileNameConverter(password, "aesctr", "")
+	craftedName := converter.EncryptFileName("../escape") + ".dat"
+	encrypted := filepath.Join(srcDir, craftedName)
+	if err := processFile(plain, encrypted, password, "aesctr", int64(len(content)), "enc"); err != nil {
+		t.Fatalf("create encrypted fixture: %v", err)
+	}
+	encryptedInfo, err := os.Stat(encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := newEncryptTaskForTest(srcDir, dstDir, encryptedInfo.Size())
+	task.Operation = "dec"
+	task.EncName = true
+	runEncryptTask(task, []string{encrypted}, password)
+
+	snapshot := task.snapshot()
+	if snapshot.Status != "error" || !strings.Contains(snapshot.Error, "unsafe decoded filename") {
+		t.Fatalf("status/error = %q/%q; want unsafe filename error", snapshot.Status, snapshot.Error)
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, "escape.dat")); !os.IsNotExist(err) {
+		t.Fatalf("decoded output escaped destination directory: err=%v", err)
 	}
 }
 

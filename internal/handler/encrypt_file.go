@@ -319,6 +319,10 @@ func runEncryptTask(task *EncryptTask, files []string, password string) {
 			} else {
 				decoded := converter.DecryptFileName(base)
 				if decoded != "" {
+					if !isSafeLocalFileBase(decoded) {
+						setEncryptTaskError(task, fmt.Sprintf("unsafe decoded filename %q", decoded))
+						return
+					}
 					relPath = filepath.Join(dir, decoded+ext)
 				}
 			}
@@ -369,6 +373,13 @@ func runEncryptTask(task *EncryptTask, files []string, password string) {
 
 	log.Info().Str("task_id", task.ID).Int("files", doneFiles).
 		Int64("bytes", doneBytes).Msg("Encrypt task completed")
+}
+
+func isSafeLocalFileBase(name string) bool {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return false
+	}
+	return !filepath.IsAbs(name) && filepath.VolumeName(name) == "" && filepath.Base(name) == name
 }
 
 func setEncryptTaskError(task *EncryptTask, message string) {

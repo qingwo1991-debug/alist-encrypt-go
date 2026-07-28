@@ -140,3 +140,52 @@ func TestSetEncPathMappingWithInfoPreservesV2PlainSize(t *testing.T) {
 		t.Fatalf("v2 metadata not preserved: %+v", got)
 	}
 }
+
+func TestInvalidateRawURLForScopePreservesOtherScopeAndMetadata(t *testing.T) {
+	fileDAO := newTestFileDAO(t)
+	t.Cleanup(fileDAO.Stop)
+	const (
+		displayPath   = "/dav/movie.mp4"
+		encryptedPath = "/dav/encrypted.bin"
+		scopeA        = "sha256:user-a"
+		scopeB        = "sha256:user-b"
+	)
+	if err := fileDAO.Set(&FileInfo{
+		Path:            displayPath,
+		EncryptedPath:   encryptedPath,
+		Name:            "movie.mp4",
+		Size:            4096,
+		RawURL:          "https://cdn.example/user-a",
+		RawURLAuthScope: scopeA,
+		Sign:            "user-a-sign",
+	}); err != nil {
+		t.Fatalf("seed scoped raw URL: %v", err)
+	}
+
+	if fileDAO.InvalidateRawURLForScope(displayPath, scopeB) {
+		t.Fatal("different auth scope invalidated cached raw URL")
+	}
+	fileDAO.pathCache.Delete(displayPath)
+	info, ok := fileDAO.Get(displayPath)
+	if !ok {
+		t.Fatal("expected persisted file info")
+	}
+	if info.RawURL != "https://cdn.example/user-a" || info.RawURLAuthScope != scopeA {
+		t.Fatalf("other scope changed persisted raw URL: %+v", info)
+	}
+
+	if !fileDAO.InvalidateRawURLForScope(displayPath, scopeA) {
+		t.Fatal("owning auth scope did not invalidate cached raw URL")
+	}
+	fileDAO.pathCache.Delete(displayPath)
+	info, ok = fileDAO.Get(displayPath)
+	if !ok {
+		t.Fatal("expected metadata after scoped invalidation")
+	}
+	if info.RawURL != "" || info.RawURLAuthScope != "" || info.Sign != "" {
+		t.Fatalf("scoped raw URL fields were not cleared: %+v", info)
+	}
+	if info.Size != 4096 || info.EncryptedPath != encryptedPath || info.Name != "movie.mp4" {
+		t.Fatalf("scoped invalidation removed unrelated metadata: %+v", info)
+	}
+}

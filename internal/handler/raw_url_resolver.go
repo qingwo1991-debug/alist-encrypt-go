@@ -36,7 +36,7 @@ func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displ
 			continue
 		}
 		result.Source = candidate.source
-		cacheResolvedRawURL(fileDAO, displayPath, realPath, result.RawURL, result.Size)
+		cacheResolvedRawURL(fileDAO, displayPath, realPath, result.RawURL, result.Size, rawURLAuthScope(authHeaders))
 		return result
 	}
 	return rawURLFetchResult{FailureReason: "raw_url_empty"}
@@ -49,8 +49,10 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 	client := proxy.NewHTTPClient(cfg, finalRawURLResolveTimeout)
 	origHost := hostOfURL(initialURL)
 	maxHops := 2
-	if cfg != nil && cfg.AlistServer.RedirectMaxHops > 0 {
-		maxHops = cfg.AlistServer.RedirectMaxHops
+	if cfg != nil {
+		if configured := cfg.AlistServerSnapshot().RedirectMaxHops; configured > 0 {
+			maxHops = configured
+		}
 	}
 
 	methods := []string{http.MethodHead, http.MethodGet}
@@ -107,7 +109,7 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 	return rawURLFetchResult{FailureReason: "raw_url_empty"}
 }
 
-func cacheResolvedRawURL(fileDAO *dao.FileDAO, displayPath, realPath, rawURL string, size int64) {
+func cacheResolvedRawURL(fileDAO *dao.FileDAO, displayPath, realPath, rawURL string, size int64, authScope string) {
 	if fileDAO == nil || strings.TrimSpace(displayPath) == "" || strings.TrimSpace(rawURL) == "" {
 		return
 	}
@@ -115,6 +117,7 @@ func cacheResolvedRawURL(fileDAO *dao.FileDAO, displayPath, realPath, rawURL str
 		Path:              displayPath,
 		EncryptedPath:     realPath,
 		RawURL:            rawURL,
+		RawURLAuthScope:   authScope,
 		UpstreamFetchedAt: time.Now(),
 	}
 	if size > 0 {

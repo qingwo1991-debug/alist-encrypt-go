@@ -4,7 +4,7 @@
   <p>
     <a href="https://github.com/qingwo1991-debug/alist-encrypt-go/releases"><img src="https://img.shields.io/github/v/release/qingwo1991-debug/alist-encrypt-go?style=flat-square" alt="Release"></a>
     <a href=".github/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/qingwo1991-debug/alist-encrypt-go/release.yml?style=flat-square" alt="Build"></a>
-    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go" alt="Go"></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go" alt="Go"></a>
   </p>
 </div>
 
@@ -91,7 +91,7 @@ docker run -d \
 - WebDAV：`http://<主机>:5344/dav`
 - 健康检查：`http://<主机>:5344/health`
 
-初始用户名为 `admin`，随机密码只在首次创建用户时写入启动日志。首次登录后应立即修改管理员密码，并修改或删除默认 `/encrypt/*` 示例规则中的 `123456`。
+初始用户名为 `admin`，随机密码只在首次创建用户时写入启动日志。首次登录后应立即修改管理员密码，并按需创建使用强随机密码的加密规则；新安装默认不启用任何加密规则。
 
 ### 启用 MySQL
 

@@ -48,11 +48,15 @@ type decryptPlaybackRequest struct {
 func executeDecryptPlayback(req decryptPlaybackRequest) {
 	w := req.ResponseWriter
 	r := req.Request
+	alist := config.AlistServer{}
+	if req.Config != nil {
+		alist = req.Config.AlistServerSnapshot()
+	}
 	if req.StreamProxy != nil {
 		release, ok := req.StreamProxy.AcquireStream()
 		if !ok {
 			status := http.StatusTooManyRequests
-			if req.Config != nil && req.Config.AlistServer.StreamOverloadStatus == http.StatusServiceUnavailable {
+			if req.Config != nil && alist.StreamOverloadStatus == http.StatusServiceUnavailable {
 				status = http.StatusServiceUnavailable
 			}
 			w.Header().Set("Retry-After", "2")
@@ -69,6 +73,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		authHeaders.Set("Cookie", cookie)
 	}
+	rawURLScope := rawURLAuthScope(authHeaders)
 
 	metaLoaded := false
 	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
@@ -123,7 +128,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	}
 
 	if fileSize == 0 {
-		if req.Config == nil || req.Config.AlistServer.SizeUnknownStrict {
+		if req.Config == nil || alist.SizeUnknownStrict {
 			RespondHTTPErrorWithStatus(w, "Unable to determine encrypted file size", http.StatusBadGateway)
 			return
 		}
@@ -407,7 +412,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				}
 				fileSize = fresh.Size
 				if req.ConsumerScenario == consumerScenarioRedirect && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
-					if refreshed, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && refreshed != nil && strings.TrimSpace(refreshed.RawURL) != "" {
+					if refreshed, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && refreshed != nil &&
+						refreshed.RawURLAuthScope == rawURLScope && strings.TrimSpace(refreshed.RawURL) != "" {
 						req.TargetURL = refreshed.RawURL
 						req.FileItem.TargetURL = refreshed.RawURL
 						req.ProviderKey = ProviderKey(refreshed.RawURL, req.FileItem.DisplayPath)
@@ -550,11 +556,14 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 			continue
 		}
 		seen[candidateURL] = struct{}{}
-		for _, headers := range authVariants {
-			meta := req.StreamProxy.InspectEncryptedContent(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
-			if meta.EncType == "" {
-				meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
-			}
+		result := probeCandidateWithAuth(req.Config, candidateURL, authVariants, func(headers http.Header) proxy.ContentInspectionResult {
+			return req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
+		})
+		meta := result.Meta
+		if meta.EncType == "" {
+			meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
+		}
+		if result.Confirmed {
 			if meta.IsV2() && meta.PlainSize > 0 {
 				log.Info().
 					Str("category", "playback").
@@ -565,8 +574,16 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 					Int64("plaintext_size", meta.PlainSize).
 					Int64("header_len", meta.HeaderLen).
 					Msg("Inspected V2 playback content meta")
-				return meta, true
+			} else {
+				log.Debug().
+					Str("category", "playback").
+					Str("consumer_scenario", req.ConsumerScenario).
+					Str("path", req.Path).
+					Str("target_url", candidateURL).
+					Int64("ciphertext_size", meta.CiphertextSize).
+					Msg("Confirmed V1 playback content meta")
 			}
+			return meta, true
 		}
 		log.Info().
 			Str("category", "playback").
@@ -630,7 +647,8 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 		return false
 	}
 	info, ok := req.FileDAO.Get(req.FileItem.DisplayPath)
-	if !ok || info == nil || info.ContentVersion != 0 || info.RawURL == "" || info.Size <= 0 {
+	if !ok || info == nil || info.ContentVersion != 0 || info.RawURL == "" || info.Size <= 0 ||
+		info.RawURLAuthScope != rawURLAuthScope(req.Request.Header) {
 		return false
 	}
 	if fallbackSize > 0 && info.Size != fallbackSize {
@@ -643,6 +661,10 @@ func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.Conten
 	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || !meta.IsV2() || meta.PlainSize <= 0 {
 		return
 	}
+	authScope := "anon"
+	if req.Request != nil {
+		authScope = rawURLAuthScope(req.Request.Header)
+	}
 	info := &dao.FileInfo{
 		Path:              req.FileItem.DisplayPath,
 		EncryptedPath:     req.FileItem.EncryptedPath,
@@ -653,19 +675,21 @@ func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.Conten
 		HeaderLen:         meta.HeaderLen,
 		NonceField:        append([]byte(nil), meta.NonceField...),
 		RawURL:            req.TargetURL,
+		RawURLAuthScope:   authScope,
 		UpstreamFetchedAt: time.Now(),
 	}
 	if existing, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && existing != nil {
 		if info.Name == "" {
 			info.Name = existing.Name
 		}
-		if strings.TrimSpace(existing.RawURL) != "" {
+		if strings.TrimSpace(existing.RawURL) != "" && existing.RawURLAuthScope == authScope {
 			info.RawURL = existing.RawURL
+			info.RawURLAuthScope = existing.RawURLAuthScope
+			if !existing.UpstreamFetchedAt.IsZero() {
+				info.UpstreamFetchedAt = existing.UpstreamFetchedAt
+			}
+			info.Sign = existing.Sign
 		}
-		if !existing.UpstreamFetchedAt.IsZero() {
-			info.UpstreamFetchedAt = existing.UpstreamFetchedAt
-		}
-		info.Sign = existing.Sign
 		info.IsDir = existing.IsDir
 	}
 	_ = req.FileDAO.Set(info)
@@ -736,7 +760,13 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 		return
 	}
 	switch reason {
-	case "range_unsatisfiable", "upstream_4xx", "decrypt_validation_failed", "timeout":
+	case "upstream_4xx":
+		authScope := "anon"
+		if req.Request != nil {
+			authScope = rawURLAuthScope(req.Request.Header)
+		}
+		req.FileDAO.InvalidateRawURLForScope(req.FileItem.DisplayPath, authScope)
+	case "range_unsatisfiable", "decrypt_validation_failed", "timeout":
 		req.FileDAO.InvalidateDisplayPath(req.FileItem.DisplayPath)
 	}
 }

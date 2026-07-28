@@ -178,8 +178,10 @@ func (h *WebDAVHandler) getShortClient() *http.Client {
 }
 
 func (h *WebDAVHandler) upstreamStalenessThreshold() time.Duration {
-	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
-		return time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	if h.cfg != nil {
+		if minutes := h.cfg.AlistServerSnapshot().UpstreamStalenessMinutes; minutes > 0 {
+			return time.Duration(minutes) * time.Minute
+		}
 	}
 	return 30 * time.Minute
 }
@@ -190,7 +192,7 @@ func (h *WebDAVHandler) StartupProbe(ctx context.Context, paths []string) {
 	}
 	ctx = h.withProbeAuthContext(ctx)
 	ctx = withProbeSource(ctx, probeSourceStartupScan)
-	if h.cfg != nil && h.cfg.AlistServer.StartupProbeDeepScan {
+	if h.cfg != nil && h.cfg.AlistServerSnapshot().StartupProbeDeepScan {
 		h.deepScan(ctx, paths)
 		return
 	}
@@ -206,8 +208,10 @@ func (h *WebDAVHandler) deepScan(ctx context.Context, paths []string) {
 	}
 
 	maxDepth := 0
-	if h.cfg != nil && h.cfg.AlistServer.ScanMaxDepth > 0 {
-		maxDepth = h.cfg.AlistServer.ScanMaxDepth
+	if h.cfg != nil {
+		if configured := h.cfg.AlistServerSnapshot().ScanMaxDepth; configured > 0 {
+			maxDepth = configured
+		}
 	}
 
 	visited := make(map[string]struct{}, len(paths))
@@ -261,7 +265,7 @@ func (h *WebDAVHandler) convertToRealPath(davPath string, passwdInfo *config.Pas
 }
 
 func (h *WebDAVHandler) resolveRealPathWithMode(davPath string, passwdInfo *config.PasswdInfo) (string, string) {
-	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 	return resolveEncryptedRealPath(h.fileDAO, passwdInfo, davPath, allowLoose)
 }
 
@@ -303,9 +307,10 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	firstFrameRange := proxy.IsFirstFrameRangeHint(r.Method, rangeHeader)
 	staleThreshold := h.upstreamStalenessThreshold()
+	rawURLScope := rawURLAuthScope(r.Header)
 	needsRawURLWarmup := true
 	if firstFrameRange {
-		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold) && strings.TrimSpace(cachedInfo.RawURL) != "" {
+		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold, rawURLScope) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			targetURL = cachedInfo.RawURL
 			needsRawURLWarmup = false
 			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for first-frame playback, display=%s source=cache", davPath)
@@ -417,8 +422,10 @@ func (h *WebDAVHandler) fetchRawURLFromAlist(r *http.Request, displayPath, realP
 
 func (h *WebDAVHandler) resolveRawURLFromAlist(r *http.Request, displayPath, realPath string) webdavRawURLResolution {
 	stalenessThreshold := 30 * time.Minute
-	if h.cfg != nil && h.cfg.AlistServer.UpstreamStalenessMinutes > 0 {
-		stalenessThreshold = time.Duration(h.cfg.AlistServer.UpstreamStalenessMinutes) * time.Minute
+	if h.cfg != nil {
+		if minutes := h.cfg.AlistServerSnapshot().UpstreamStalenessMinutes; minutes > 0 {
+			stalenessThreshold = time.Duration(minutes) * time.Minute
+		}
 	}
 	authHeaders := make(http.Header)
 	if auth := r.Header.Get("Authorization"); auth != "" {
@@ -462,7 +469,7 @@ func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, r
 	}
 	stalenessThreshold := h.upstreamStalenessThreshold()
 	if h.fileDAO != nil {
-		if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, stalenessThreshold) && strings.TrimSpace(cachedInfo.RawURL) != "" {
+		if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, stalenessThreshold, rawURLAuthScope(r.Header)) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			trace.Logf(r.Context(), "webdav-get", "Skipped raw_url async warmup, fresh cache exists display=%s", displayPath)
 			return
 		}
@@ -522,7 +529,7 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 		RespondHTTPErrorWithStatus(w, "Cannot determine upload file size for encryption", http.StatusBadRequest)
 		return
 	}
-	startOffset, hasRange, err := parseContentRangeStart(r.Header.Get("Content-Range"))
+	startOffset, hasRange, err := validateUploadContentRange(r.Header.Get("Content-Range"), fileSize, r.ContentLength)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Invalid Content-Range header", http.StatusBadRequest)
 		return
@@ -1002,6 +1009,7 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 	// For large directories, avoid per-entry BoltDB writes in request path.
 	// Keep hot data in pathCache and let background mechanisms persist metadata.
 	persistToStore := len(entries) <= propfindPersistentWriteThreshold
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 
 	for _, entry := range entries {
 		displayPath := entry.Path
@@ -1010,7 +1018,6 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 
 		if h.passwdDAO != nil {
 			if passwdInfo, found := h.passwdDAO.FindByPath(entry.Path); found && passwdInfo != nil && passwdInfo.EncName {
-				allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
 				if decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, entry.Name, passwdInfo.EncSuffix, allowLoose); decryptedName != "" && decryptedName != entry.Name {
 					displayName = decryptedName
 					displayPath = path.Join(path.Dir(entry.Path), decryptedName)
@@ -1110,11 +1117,12 @@ func (h *WebDAVHandler) probeAuthHeader(ctx context.Context) string {
 	if h == nil || h.cfg == nil {
 		return ""
 	}
-	if raw := strings.TrimSpace(h.cfg.AlistServer.ScanAuthHeader); raw != "" {
+	alist := h.cfg.AlistServerSnapshot()
+	if raw := strings.TrimSpace(alist.ScanAuthHeader); raw != "" {
 		return extractAuthorizationValue(raw)
 	}
-	username := h.cfg.AlistServer.ScanUsername
-	password := h.cfg.AlistServer.ScanPassword
+	username := alist.ScanUsername
+	password := alist.ScanPassword
 	if username == "" && password == "" {
 		return ""
 	}
@@ -1184,7 +1192,7 @@ func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.
 	}
 
 	headerSize := encryption.ContentHeaderSize()
-	allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 
 	var b bytes.Buffer
 	b.Grow(len(body))
@@ -1416,6 +1424,7 @@ func (h *WebDAVHandler) adjustPropfindContentLengthForV2(xmlStr string) string {
 func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
 	result := xmlStr
 	searchPos := 0
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 
 	for {
 		startIdx := strings.Index(result[searchPos:], startTag)
@@ -1434,7 +1443,6 @@ func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, pass
 		encryptedName := result[contentStart:endIdx]
 
 		if encryptedName != "" && encryptedName != "/" {
-			allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
 			decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, encryptedName, passwdInfo.EncSuffix, allowLoose)
 			if decryptedName != "" && decryptedName != encryptedName {
 				result = result[:contentStart] + decryptedName + result[endIdx:]
@@ -1452,6 +1460,7 @@ func (h *WebDAVHandler) decryptXMLElements(xmlStr, startTag, endTag string, pass
 func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, passwdInfo *config.PasswdInfo) string {
 	result := xmlStr
 	searchPos := 0
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 
 	for {
 		startIdx := strings.Index(result[searchPos:], startTag)
@@ -1481,7 +1490,6 @@ func (h *WebDAVHandler) decryptHrefElements(xmlStr, startTag, endTag string, pas
 				// Get the filename from the decoded path
 				fileName := path.Base(decodedPath)
 				if fileName != "" && fileName != "/" && fileName != "." {
-					allowLoose := h.cfg != nil && h.cfg.AlistServer.AllowLooseDecode
 					decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, fileName, passwdInfo.EncSuffix, allowLoose)
 					if decryptedName != "" && !encryption.IsOriginalFile(decryptedName) && decryptedName != fileName {
 						// Save mapping: display path -> encrypted path (use decoded path)

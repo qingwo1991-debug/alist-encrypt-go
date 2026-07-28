@@ -1,16 +1,22 @@
-# Frontend build stage
-FROM node:20-alpine AS frontend-builder
+# Frontend build stage. The generated assets are architecture-independent, so
+# run Node on the native builder platform instead of under QEMU for arm64.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-builder
 
 WORKDIR /app/enc-webui
 
-COPY enc-webui/package.json enc-webui/package-lock.json ./
+COPY enc-webui/package.json enc-webui/package-lock.json enc-webui/.npmrc ./
 RUN apk add --no-cache python3 build-base && npm ci
 
 COPY enc-webui/ ./
+COPY tools/vite-svg-sprite-plugin.mjs /app/tools/vite-svg-sprite-plugin.mjs
 RUN npm run build
 
-# Build stage
-FROM golang:1.24-alpine AS builder
+# Build stage. Compile target binaries natively via Go cross-compilation instead
+# of running the full toolchain under emulation for non-amd64 images.
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN apk add --no-cache git ca-certificates
 
@@ -27,7 +33,8 @@ COPY . .
 COPY --from=frontend-builder /app/enc-webui/dist/ /app/web/public/
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /alist-encrypt-go ./cmd/server
+RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -ldflags="-w -s" -o /alist-encrypt-go ./cmd/server
 
 # Runtime stage
 FROM alpine:latest

@@ -4,9 +4,20 @@ import { useBasicStore } from '@/store/basic'
 
 //使用axios.create()创建一个axios请求实例
 const service = axios.create()
-let loadingInstance = null //loading实例
-let tempReqUrlSave = ''
 let authResetting = false
+
+const cleanupRequest = (config) => {
+  const requestState = config?.__encRequestState
+  if (!requestState || requestState.cleaned) return
+
+  requestState.cleaned = true
+  if (requestState.cancelEntry) {
+    const axiosPromiseArr = useBasicStore().axiosPromiseArr
+    const index = axiosPromiseArr.indexOf(requestState.cancelEntry)
+    if (index !== -1) axiosPromiseArr.splice(index, 1)
+  }
+  requestState.loadingInstance?.close()
+}
 
 const codeMatches = (code, candidates) => candidates.has(String(code))
 
@@ -26,13 +37,23 @@ const resetExpiredSession = () => {
 service.interceptors.request.use(
   (req) => {
     const { token, axiosPromiseArr } = useBasicStore()
+    const requestState = {
+      cancelEntry: null,
+      loadingInstance: null,
+      cleaned: false
+    }
+    req.__encRequestState = requestState
     //axiosPromiseArr收集请求地址,用于取消请求
     req.cancelToken = new axios.CancelToken((cancel) => {
-      tempReqUrlSave = req.url
-      axiosPromiseArr.push({
+      const cancelEntry = {
         url: req.url,
-        cancel
-      })
+        cancel: (message) => {
+          cleanupRequest(req)
+          cancel(message)
+        }
+      }
+      requestState.cancelEntry = cancelEntry
+      axiosPromiseArr.push(cancelEntry)
     })
     //设置token到header，nginx不支持下划线的headers
     req.headers['AUTHORIZETOKEN'] = token
@@ -42,7 +63,7 @@ service.interceptors.request.use(
     //req loading
     // @ts-ignore
     if (req.reqLoading ?? true) {
-      loadingInstance = ElLoading.service({
+      requestState.loadingInstance = ElLoading.service({
         lock: true,
         fullscreen: true,
         // spinner: 'CircleCheck',
@@ -61,12 +82,7 @@ service.interceptors.request.use(
 //请求后拦截
 service.interceptors.response.use(
   (res) => {
-    //取消请求
-    useBasicStore().remotePromiseArrByReqUrl(tempReqUrlSave)
-
-    if (loadingInstance) {
-      loadingInstance && loadingInstance.close()
-    }
+    cleanupRequest(res.config)
     //download file
     if (['application/zip', 'zip', 'blob', 'arraybuffer'].includes(res.headers['content-type'])) {
       return res
@@ -92,11 +108,7 @@ service.interceptors.response.use(
   },
   //响应报错
   (err) => {
-    //取消请求
-    useBasicStore().remotePromiseArrByReqUrl(tempReqUrlSave)
-    if (loadingInstance) {
-      loadingInstance && loadingInstance.close()
-    }
+    cleanupRequest(err?.config)
     const unauthorized = [401, 403].includes(err?.response?.status)
     if (unauthorized) {
       resetExpiredSession()

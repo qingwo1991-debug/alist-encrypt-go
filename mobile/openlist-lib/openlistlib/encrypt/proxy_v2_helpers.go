@@ -64,14 +64,19 @@ func (p *ProxyServer) putUploadMeta(target string, meta ContentMeta) {
 }
 
 func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string, authHeaders http.Header, encPath *EncryptPath, ciphertextSize int64) ContentMeta {
+	meta, _ := p.inspectEncryptedContentConfirmed(ctx, target, authHeaders, encPath, ciphertextSize)
+	return meta
+}
+
+func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, target string, authHeaders http.Header, encPath *EncryptPath, ciphertextSize int64) (ContentMeta, bool) {
 	encType := EncryptionType("")
 	if encPath != nil {
 		encType = EncryptionType(encPath.EncType)
 	}
 	meta := LegacyContentMeta(encType, ciphertextSize)
 	if p == nil || encPath == nil || !encPath.Enable || strings.TrimSpace(target) == "" {
-		log.Infof("[v2-inspect] skipped: p=%v encPath=%v enable=%v target=%q", p != nil, encPath != nil, encPath != nil && encPath.Enable, target)
-		return meta
+		log.Infof("[v2-inspect] skipped: p=%v encPath=%v enable=%v target=%q", p != nil, encPath != nil, encPath != nil && encPath.Enable, safeURLForLog(target))
+		return meta, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -83,13 +88,17 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 	// When probing alist /dav/ or /d/ paths, alist returns 302 → CDN URL.
 	// Without following the redirect, we get HTML (302 body) instead of the actual file bytes.
 	const maxHops = 2
+	client := p.streamClientSnapshot()
+	if client == nil {
+		return meta, false
+	}
 	currentURL := target
 	currentAuth := authHeaders
 	for hop := 0; hop <= maxHops; hop++ {
 		req, err := http.NewRequestWithContext(inspectCtx, http.MethodGet, currentURL, nil)
 		if err != nil {
 			log.Infof("[v2-inspect] request creation failed: err=%v", err)
-			return meta
+			return meta, false
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", ContentHeaderSize()-1))
 		req.Header.Set("Accept-Encoding", "identity")
@@ -104,10 +113,10 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 		if ua := authHeaders.Get("User-Agent"); ua != "" {
 			req.Header.Set("User-Agent", ua)
 		}
-		resp, err := p.streamClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
-			log.Infof("[v2-inspect] upstream request failed: target=%.120s err=%v", currentURL, err)
-			return meta
+			log.Infof("[v2-inspect] upstream request failed: target=%s err=%v", safeURLForLog(currentURL), err)
+			return meta, false
 		}
 		// Follow redirects (301/302/307/308) — drop auth after first hop (CDN doesn't need alist auth)
 		if hop < maxHops && (resp.StatusCode == http.StatusMovedPermanently ||
@@ -117,8 +126,8 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 			location := strings.TrimSpace(resp.Header.Get("Location"))
 			resp.Body.Close()
 			if location == "" {
-				log.Infof("[v2-inspect] redirect with empty location: target=%.120s status=%d", currentURL, resp.StatusCode)
-				return meta
+				log.Infof("[v2-inspect] redirect with empty location: target=%s status=%d", safeURLForLog(currentURL), resp.StatusCode)
+				return meta, false
 			}
 			if !strings.HasPrefix(location, "http://") && !strings.HasPrefix(location, "https://") {
 				// Relative redirect — resolve against current URL
@@ -138,41 +147,53 @@ func (p *ProxyServer) inspectEncryptedContent(ctx context.Context, target string
 			}
 			// Drop auth headers after redirect — CDN URLs don't need alist auth
 			currentAuth = nil
-			log.Debugf("[v2-inspect] following redirect hop=%d → %.120s", hop+1, currentURL)
+			log.Debugf("[v2-inspect] following redirect hop=%d target=%s", hop+1, safeURLForLog(currentURL))
 			continue
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= http.StatusBadRequest {
 			// Use Debugf for error statuses — 401/403 on internal probe paths (like /d/) is expected
 			// when the proxy lacks alist auth credentials. These are not actionable errors.
-			log.Debugf("[v2-inspect] upstream returned error status: target=%.120s status=%d", currentURL, resp.StatusCode)
-			return meta
+			log.Debugf("[v2-inspect] upstream returned error status: target=%s status=%d", safeURLForLog(currentURL), resp.StatusCode)
+			return meta, false
 		}
 		prefix, err := io.ReadAll(io.LimitReader(resp.Body, ContentHeaderSize()))
 		if err != nil {
-			log.Infof("[v2-inspect] failed to read prefix bytes: target=%.120s err=%v", currentURL, err)
-			return meta
+			log.Infof("[v2-inspect] failed to read prefix bytes: target=%s err=%v", safeURLForLog(currentURL), err)
+			return meta, false
 		}
 		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
 			meta.CiphertextSize = total
 			meta.PlainSize = total
 		}
+		expectedPrefix := ContentHeaderSize()
+		if meta.CiphertextSize > 0 && meta.CiphertextSize < expectedPrefix {
+			expectedPrefix = meta.CiphertextSize
+		}
+		if expectedPrefix <= 0 || int64(len(prefix)) < expectedPrefix {
+			log.Infof("[v2-inspect] incomplete prefix: target=%s prefixLen=%d expected=%d status=%d contentRange=%q",
+				safeURLForLog(currentURL), len(prefix), expectedPrefix, resp.StatusCode, resp.Header.Get("Content-Range"))
+			return meta, false
+		}
 		if parsed, ok, err := ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
 			log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
-				currentURL, parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
-			return parsed
+				safeURLForLog(currentURL), parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
+			return parsed, true
 		} else {
-			log.Infof("[v2-inspect] header not detected: target=%.120s encType=%q prefixLen=%d status=%d contentRange=%q ok=%v parseErr=%v first6=%x",
-				currentURL, encType, len(prefix), resp.StatusCode, resp.Header.Get("Content-Range"), ok, err, prefix[:min(len(prefix), 6)])
+			log.Infof("[v2-inspect] header not detected: target=%s encType=%q prefixLen=%d status=%d contentRange=%q ok=%v parseErr=%v first6=%x",
+				safeURLForLog(currentURL), encType, len(prefix), resp.StatusCode, resp.Header.Get("Content-Range"), ok, err, prefix[:min(len(prefix), 6)])
+			if err != nil {
+				return meta, false
+			}
 		}
-		return meta
+		return meta, true
 	}
-	return meta
+	return meta, false
 }
 
 func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, target string, authHeaders http.Header, encPath *EncryptPath, ciphertextSize int64, encryptedPath string) ContentMeta {
-	meta := p.inspectEncryptedContent(ctx, target, authHeaders, encPath, ciphertextSize)
-	if meta.IsV2() && meta.PlainSize > 0 {
+	meta, confirmed := p.inspectEncryptedContentConfirmed(ctx, target, authHeaders, encPath, ciphertextSize)
+	if confirmed {
 		return meta
 	}
 	if p == nil || encPath == nil || strings.TrimSpace(encryptedPath) == "" {
@@ -208,10 +229,12 @@ func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, t
 			continue
 		}
 		seen[candidate] = struct{}{}
-		fallback := p.inspectEncryptedContent(ctx, candidate, authHeaders, encPath, ciphertextSize)
-		if fallback.IsV2() && fallback.PlainSize > 0 {
-			log.Infof("[v2] detected content header via fallback target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
-				candidate, fallback.EncType, fallback.HeaderLen, fallback.CiphertextSize, fallback.PlainSize)
+		fallback, fallbackConfirmed := p.inspectEncryptedContentConfirmed(ctx, candidate, authHeaders, encPath, ciphertextSize)
+		if fallbackConfirmed {
+			if fallback.IsV2() && fallback.PlainSize > 0 {
+				log.Infof("[v2] detected content header via fallback target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
+					safeURLForLog(candidate), fallback.EncType, fallback.HeaderLen, fallback.CiphertextSize, fallback.PlainSize)
+			}
 			return fallback
 		}
 	}

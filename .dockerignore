@@ -3,6 +3,18 @@
 implementation_plan.md
 openlist_logs_*.txt
 
+# Runtime state and local persistence
+/data
+/conf
+/alist-data
+/mysql-data
+/logs
+/tmp
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
 enc-webui/node_modules
 enc-webui/dist
 enc-webui/dist-nominify
@@ -11,5 +23,11 @@ enc-webui/ts-out-dir
 mobile/**/node_modules
 mobile/**/build
 
-tmp
 *.log
+
+# Android and Apple signing credentials
+**/*.jks
+**/*.keystore
+**/key.properties
+**/*.p12
+**/*.pfx

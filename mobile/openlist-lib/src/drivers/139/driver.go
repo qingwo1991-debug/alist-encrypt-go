@@ -848,7 +848,7 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			pathname = "/orchestration/familyCloud-rebuild/content/v1.0/getFileUploadURL"
 		}
 		var resp UploadResp
-		log.Debugf("[139] upload request body: %+v", data)
+		log.Debug("[139] upload request prepared")
 		_, err = d.post(pathname, data, &resp)
 		if err != nil {
 			return err

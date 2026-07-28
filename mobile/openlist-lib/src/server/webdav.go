@@ -66,7 +66,7 @@ func WebDAVAuth(c *gin.Context) {
 	username, password, ok := c.Request.BasicAuth()
 	if !ok {
 		bt := c.GetHeader("Authorization")
-		log.Debugf("[webdav auth] token: %s", bt)
+		log.Debug("[webdav auth] bearer credentials supplied")
 		if strings.HasPrefix(bt, "Bearer") {
 			bt = strings.TrimPrefix(bt, "Bearer ")
 			token := setting.GetStr(conf.Token)

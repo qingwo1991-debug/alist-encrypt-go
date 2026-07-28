@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:open_filex/open_filex.dart';
@@ -20,12 +22,13 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   bool _isLoading = true;
   String? _downloadPath;
   late TabController _tabController;
+  StreamSubscription<int>? _periodicRefreshSubscription;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
-    _loadDownloadedFiles();
+    unawaited(_loadDownloadedFiles());
     
     // 定期刷新活跃任务状态
     _startPeriodicRefresh();
@@ -33,12 +36,17 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
 
   @override
   void dispose() {
+    unawaited(_periodicRefreshSubscription?.cancel());
+    _periodicRefreshSubscription = null;
     _tabController.dispose();
     super.dispose();
   }
 
   void _startPeriodicRefresh() {
-    Stream.periodic(const Duration(seconds: 1)).listen((_) {
+    _periodicRefreshSubscription = Stream<int>.periodic(
+      const Duration(seconds: 1),
+      (count) => count,
+    ).listen((_) {
       if (mounted && _tabController.index == 0 && DownloadManager.activeTasks.isNotEmpty) {
         setState(() {});
       }
@@ -46,20 +54,27 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   }
 
   Future<void> _loadDownloadedFiles() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
     });
 
     try {
-      _downloadedFiles = await DownloadManager.getDownloadedFiles();
-      _downloadPath = await DownloadManager.getDownloadDirectoryPath();
+      final downloadedFiles = await DownloadManager.getDownloadedFiles();
+      final downloadPath = await DownloadManager.getDownloadDirectoryPath();
+      if (!mounted) return;
+      setState(() {
+        _downloadedFiles = downloadedFiles;
+        _downloadPath = downloadPath;
+        _isLoading = false;
+      });
     } catch (e) {
       print('${S.current.loadDownloadFilesFailed}: $e');
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+      });
     }
-
-    setState(() {
-      _isLoading = false;
-    });
   }
 
   String _formatFileSize(int bytes) {
@@ -585,24 +600,25 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   void _confirmDeleteFile(String filename) {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(S.of(context).confirmDelete),
-        content: Text(S.of(context).confirmDeleteFile(filename)),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(S.of(dialogContext).confirmDelete),
+        content: Text(S.of(dialogContext).confirmDeleteFile(filename)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(S.of(context).cancel),
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text(S.of(dialogContext).cancel),
           ),
           TextButton(
             onPressed: () async {
-              Navigator.pop(context);
+              Navigator.pop(dialogContext);
               bool success = await DownloadManager.deleteFile(filename);
+              if (!mounted) return;
               if (success) {
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text(S.of(context).fileDeleted),
                   duration: const Duration(seconds: 2),
                 ));
-                _loadDownloadedFiles(); // 刷新列表
+                await _loadDownloadedFiles();
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text(S.of(context).deleteFailed),
@@ -610,7 +626,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
                 ));
               }
             },
-            child: Text(S.of(context).delete, style: const TextStyle(color: Colors.red)),
+            child: Text(S.of(dialogContext).delete, style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -620,26 +636,26 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   void _confirmClearAll() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(S.of(context).confirmClear),
-        content: Text(S.of(context).confirmClearAllFiles),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(S.of(dialogContext).confirmClear),
+        content: Text(S.of(dialogContext).confirmClearAllFiles),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(S.of(context).cancel),
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text(S.of(dialogContext).cancel),
           ),
           TextButton(
             onPressed: () async {
-              Navigator.pop(context);
+              Navigator.pop(dialogContext);
               bool success = await DownloadManager.clearDownloadDirectory();
+              if (!mounted) return;
               if (success) {
                 DownloadManager.clearCompletedTasks();
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text(S.of(context).cleared),
                   duration: const Duration(seconds: 2),
                 ));
-                _loadDownloadedFiles(); // 刷新列表
-                setState(() {});
+                await _loadDownloadedFiles();
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text(S.of(context).clearFailed),
@@ -647,7 +663,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
                 ));
               }
             },
-            child: Text(S.of(context).clear, style: const TextStyle(color: Colors.red)),
+            child: Text(S.of(dialogContext).clear, style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -658,6 +674,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   Future<void> _openFile(String filePath) async {
     try {
       final result = await OpenFilex.open(filePath);
+      if (!mounted) return;
       
       switch (result.type) {
         case ResultType.done:
@@ -689,7 +706,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           break;
         case ResultType.error:
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(S.of(context).openFileFailed(result.message ?? '')),
+            content: Text(S.of(context).openFileFailed(result.message)),
             duration: const Duration(seconds: 3),
             action: SnackBarAction(
               label: S.of(context).viewLocation,
@@ -701,6 +718,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           break;
       }
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(S.of(context).openFileFailed(e.toString())),
         duration: const Duration(seconds: 3),
@@ -729,6 +747,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           subFolderPath: directoryPath,
         ),
       );
+      if (!mounted) return;
       
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(S.of(context).fileManagerOpened),
@@ -736,6 +755,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
       ));
     } catch (e) {
       print('打开文件管理器失败: $e');
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(S.of(context).openFileManagerFailed(e.toString())),
         duration: const Duration(seconds: 3),
@@ -748,6 +768,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     if (_downloadPath != null) {
       try {
         final result = await OpenFilex.open(_downloadPath!);
+        if (!mounted) return;
         if (result.type == ResultType.done) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(S.of(context).downloadDirectoryOpened),
@@ -758,6 +779,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
         _showFileLocation(_downloadPath!);
       } catch (e) {
         print('打开下载目录失败: $e');
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(S.of(context).openDownloadDirectoryFailed(e.toString())),
           duration: const Duration(seconds: 3),
@@ -832,8 +854,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () {
-              _loadDownloadedFiles();
-              setState(() {});
+              unawaited(_loadDownloadedFiles());
             },
           ),
           PopupMenuButton<String>(

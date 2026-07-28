@@ -18,12 +18,6 @@ const BasicDemo = {
       meta: { title: 'Pinia' }
     },
     {
-      path: 'mock',
-      component: () => import('@/views/basic-demo/mock/index.vue'),
-      name: 'Mock',
-      meta: { title: 'Mock' }
-    },
-    {
       path: 'proxy',
       component: () => import('@/views/basic-demo/proxy/index.vue'),
       name: 'proxy',

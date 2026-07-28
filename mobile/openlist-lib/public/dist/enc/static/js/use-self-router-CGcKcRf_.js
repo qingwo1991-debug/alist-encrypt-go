@@ -1,0 +1,1 @@
+import{n as e}from"./basic-CZCg27Lg.js";var t=()=>{let t=e.currentRoute;if(t.value?.query.params)return JSON.parse(t.value.query.params)},n=(t,n)=>{let r={};r=n?{params:JSON.stringify(n)}:{},e.push({name:t,query:r})},r=()=>{e.go(-1)};export{r as n,n as r,t};

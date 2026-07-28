@@ -11,7 +11,7 @@ func selectStrategyOverride(cfg *config.Config, displayPath string) (proxy.Strea
 	if cfg == nil || displayPath == "" {
 		return "", false
 	}
-	overrides := cfg.AlistServer.StreamStrategyOverrides
+	overrides := cfg.AlistServerSnapshot().StreamStrategyOverrides
 	if len(overrides) == 0 {
 		return "", false
 	}

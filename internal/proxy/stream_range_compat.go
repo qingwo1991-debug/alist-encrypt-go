@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/httputil"
 )
 
@@ -15,19 +16,20 @@ const defaultRangeCompatReprobe = 30 * time.Minute
 
 // RangeCompatStats returns range compatibility cache stats
 func (s *StreamProxy) RangeCompatStats() map[string]interface{} {
+	alist := s.alistServerSnapshot()
 	configStats := map[string]interface{}{
-		"enabled": s.cfg != nil && s.cfg.AlistServer.EnableRangeCompatCache,
+		"enabled": s.cfg != nil && alist.EnableRangeCompatCache,
 		"reprobe_minutes": func() int {
-			if s.cfg != nil && s.cfg.AlistServer.RangeReprobeMinutes > 0 {
-				return s.cfg.AlistServer.RangeReprobeMinutes
+			if s.cfg != nil && alist.RangeReprobeMinutes > 0 {
+				return alist.RangeReprobeMinutes
 			}
 			return int(defaultRangeCompatReprobe / time.Minute)
 		}(),
 		"fail_to_downgrade":  s.rangeFailToDowngrade(),
 		"success_to_recover": s.rangeSuccessToRecover(),
 		"probe_timeout_seconds": func() int {
-			if s != nil && s.cfg != nil && s.cfg.AlistServer.RangeProbeTimeoutSeconds > 0 {
-				return s.cfg.AlistServer.RangeProbeTimeoutSeconds
+			if s != nil && s.cfg != nil && alist.RangeProbeTimeoutSeconds > 0 {
+				return alist.RangeProbeTimeoutSeconds
 			}
 			return 8
 		}(),
@@ -61,6 +63,13 @@ func (s *StreamProxy) RangeCompatStats() map[string]interface{} {
 	return flat
 }
 
+func (s *StreamProxy) alistServerSnapshot() config.AlistServer {
+	if s == nil || s.cfg == nil {
+		return config.AlistServer{}
+	}
+	return s.cfg.AlistServerSnapshot()
+}
+
 // SetRangeCompatStore sets a persistent range compatibility store.
 func (s *StreamProxy) SetRangeCompatStore(store RangeCompatStore) {
 	if s == nil {
@@ -74,41 +83,46 @@ func (s *StreamProxy) SetRangeCompatStore(store RangeCompatStore) {
 }
 
 func (s *StreamProxy) rangeCompatReprobeInterval() time.Duration {
-	if s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+	alist := s.alistServerSnapshot()
+	if s == nil || s.cfg == nil || !alist.EnableRangeCompatCache {
 		return 0
 	}
-	if s.cfg.AlistServer.RangeReprobeMinutes > 0 {
-		return time.Duration(s.cfg.AlistServer.RangeReprobeMinutes) * time.Minute
+	if alist.RangeReprobeMinutes > 0 {
+		return time.Duration(alist.RangeReprobeMinutes) * time.Minute
 	}
 	return defaultRangeCompatReprobe
 }
 
 func (s *StreamProxy) rangeFailToDowngrade() int {
-	if s == nil || s.cfg == nil || s.cfg.AlistServer.RangeFailToDowngrade <= 0 {
+	alist := s.alistServerSnapshot()
+	if s == nil || s.cfg == nil || alist.RangeFailToDowngrade <= 0 {
 		return 2
 	}
-	return s.cfg.AlistServer.RangeFailToDowngrade
+	return alist.RangeFailToDowngrade
 }
 
 func (s *StreamProxy) rangeSuccessToRecover() int {
-	if s == nil || s.cfg == nil || s.cfg.AlistServer.RangeSuccessToRecover <= 0 {
+	alist := s.alistServerSnapshot()
+	if s == nil || s.cfg == nil || alist.RangeSuccessToRecover <= 0 {
 		return 3
 	}
-	return s.cfg.AlistServer.RangeSuccessToRecover
+	return alist.RangeSuccessToRecover
 }
 
 func (s *StreamProxy) rangeProbeTimeout() time.Duration {
-	if s == nil || s.cfg == nil || s.cfg.AlistServer.RangeProbeTimeoutSeconds <= 0 {
+	alist := s.alistServerSnapshot()
+	if s == nil || s.cfg == nil || alist.RangeProbeTimeoutSeconds <= 0 {
 		return 8 * time.Second
 	}
-	return time.Duration(s.cfg.AlistServer.RangeProbeTimeoutSeconds) * time.Second
+	return time.Duration(alist.RangeProbeTimeoutSeconds) * time.Second
 }
 
 func (s *StreamProxy) chunkedSeekMaxDiscardBytes() int64 {
-	if s == nil || s.cfg == nil || s.cfg.AlistServer.ChunkedSeekMaxDiscardBytes <= 0 {
+	alist := s.alistServerSnapshot()
+	if s == nil || s.cfg == nil || alist.ChunkedSeekMaxDiscardBytes <= 0 {
 		return 8 * 1024 * 1024
 	}
-	return s.cfg.AlistServer.ChunkedSeekMaxDiscardBytes
+	return alist.ChunkedSeekMaxDiscardBytes
 }
 
 func (s *StreamProxy) rangeCompatHost(targetURL string) string {
@@ -143,7 +157,7 @@ func (s *StreamProxy) rangeCompatKey(targetURL, storageKey string) string {
 }
 
 func (s *StreamProxy) shouldSkipRange(targetURL, storageKey string) bool {
-	if s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+	if s == nil || s.compatStore == nil || s.cfg == nil || !s.alistServerSnapshot().EnableRangeCompatCache {
 		return false
 	}
 	key := s.rangeCompatKey(targetURL, storageKey)
@@ -171,7 +185,7 @@ func (s *StreamProxy) shouldSkipRange(targetURL, storageKey string) bool {
 }
 
 func (s *StreamProxy) recordRangeFailure(targetURL, storageKey, reason string) {
-	if s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+	if s == nil || s.compatStore == nil || s.cfg == nil || !s.alistServerSnapshot().EnableRangeCompatCache {
 		return
 	}
 	key := s.rangeCompatKey(targetURL, storageKey)
@@ -221,7 +235,7 @@ func (s *StreamProxy) recordRangeFailure(targetURL, storageKey, reason string) {
 }
 
 func (s *StreamProxy) recordRangeSuccess(targetURL, storageKey string) {
-	if s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+	if s == nil || s.compatStore == nil || s.cfg == nil || !s.alistServerSnapshot().EnableRangeCompatCache {
 		return
 	}
 	key := s.rangeCompatKey(targetURL, storageKey)
@@ -254,7 +268,7 @@ func (s *StreamProxy) recordRangeSuccess(targetURL, storageKey string) {
 
 // ShouldBackgroundProbeRange returns whether range capability should be probed in background.
 func (s *StreamProxy) ShouldBackgroundProbeRange(targetURL, storageKey string) bool {
-	if s == nil || s.compatStore == nil || s.cfg == nil || !s.cfg.AlistServer.EnableRangeCompatCache {
+	if s == nil || s.compatStore == nil || s.cfg == nil || !s.alistServerSnapshot().EnableRangeCompatCache {
 		return false
 	}
 	key := s.rangeCompatKey(targetURL, storageKey)

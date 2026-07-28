@@ -1,16 +1,12 @@
 //获取用户信息
 import axiosReq from '@/utils/axios-req'
 export const userInfoReq = () => {
-  return new Promise((resolve) => {
-    const reqConfig = {
-      url: '/enc-api/getUserInfo',
-      params: { plateFormId: 2 },
-      method: 'post'
-    }
-    axiosReq(reqConfig).then(({ data }) => {
-      resolve(data)
-    })
-  })
+  const reqConfig = {
+    url: '/enc-api/getUserInfo',
+    params: { plateFormId: 2 },
+    method: 'post'
+  }
+  return axiosReq(reqConfig).then(({ data }) => data)
 }
 // 更新密码
 export const upatePasswordReq = (subForm) => {
@@ -105,14 +101,6 @@ export const loginReq = (subForm) => {
   return axiosReq({
     url: '/enc-api/login',
     data: subForm,
-    method: 'post'
-  })
-}
-
-//退出登录
-export const loginOutReq = () => {
-  return axiosReq({
-    url: '/mock/basis-func/user/loginValid',
     method: 'post'
   })
 }

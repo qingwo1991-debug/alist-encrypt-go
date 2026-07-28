@@ -1,5 +1,4 @@
 import 'package:openlist_mobile/contant/native_bridge.dart';
-import 'package:openlist_mobile/contant/log_level.dart';
 import 'package:openlist_mobile/generated_api.dart';
 import 'package:openlist_mobile/pages/settings/preference_widgets.dart';
 import 'package:openlist_mobile/pages/settings/troubleshooting_page.dart';

@@ -8,7 +8,6 @@ import 'package:openlist_mobile/utils/intent_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:get/get.dart';
 
 import '../../generated/l10n.dart';
 

@@ -2,6 +2,7 @@ package backoff
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -110,6 +111,28 @@ func TestRetrierRetriesTransient(t *testing.T) {
 	}
 }
 
+func TestRetrierRetriesTransientHTTPStatus(t *testing.T) {
+	r := DefaultRetrier()
+	r.Max = time.Millisecond
+	r.Initial = time.Millisecond
+	r.Jitter = 0
+
+	calls := 0
+	err := r.Do(t.Context(), func() error {
+		calls++
+		if calls == 1 {
+			return &HTTPStatusError{StatusCode: http.StatusServiceUnavailable}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
 func TestRetrierFailsFastOnPermanent(t *testing.T) {
 	r := DefaultRetrier()
 
@@ -147,7 +170,7 @@ func TestRetrierExhaustsRetries(t *testing.T) {
 
 func TestIsTransient(t *testing.T) {
 	tests := []struct {
-		err      error
+		err       error
 		transient bool
 	}{
 		{errors.New("dial tcp: connection refused"), true},

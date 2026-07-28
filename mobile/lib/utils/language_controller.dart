@@ -22,10 +22,11 @@ class LanguageController extends GetxController {
   Future<void> _loadSavedLanguage() async {
     try {
       final savedOption = await LanguageManager.instance.getSavedLanguageOption();
-      _currentLanguageOption.value = savedOption;
-      
       final savedLocale = await LanguageManager.instance.getCurrentLocale();
+      if (isClosed) return;
+      _currentLanguageOption.value = savedOption;
       _locale.value = savedLocale;
+      update();
     } catch (e) {
       debugPrint('Failed to load saved language: $e');
     }
@@ -35,6 +36,7 @@ class LanguageController extends GetxController {
   Future<void> changeLanguage(LanguageOption option) async {
     try {
       _currentLanguageOption.value = option;
+      update();
       
       // 保存语言设置
       await LanguageManager.instance.saveLanguageCode(option.code);

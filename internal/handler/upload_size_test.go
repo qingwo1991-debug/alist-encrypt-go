@@ -31,6 +31,34 @@ func TestResolveUploadFileSizeByContentRange(t *testing.T) {
 	}
 }
 
+func TestResolveUploadFileSizePrefersContentRangeTotalOverChunkLength(t *testing.T) {
+	req := httptest.NewRequest("PUT", "/dav/encrypt/a.bin", nil)
+	req.Header.Set("Content-Length", "1024")
+	req.Header.Set("Content-Range", "bytes 1024-2047/4096")
+
+	size, err := resolveUploadFileSize(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if size != 4096 {
+		t.Fatalf("size=%d, want Content-Range total 4096", size)
+	}
+}
+
+func TestResolveUploadFileSizePrefersExplicitTotalOverChunkLength(t *testing.T) {
+	req := httptest.NewRequest("PUT", "/dav/encrypt/a.bin", nil)
+	req.Header.Set("Content-Length", "1024")
+	req.Header.Set("X-File-Size", "4096")
+
+	size, err := resolveUploadFileSize(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if size != 4096 {
+		t.Fatalf("size=%d, want explicit total 4096", size)
+	}
+}
+
 func TestResolveUploadFileSizeMissing(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/dav/encrypt/a.bin", nil)
 
@@ -72,5 +100,34 @@ func TestParseContentRangeStartInvalid(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("expected ok=true when header is present")
+	}
+}
+
+func TestParseContentRangeRejectsInvalidEndAndTotal(t *testing.T) {
+	for _, value := range []string{
+		"bytes 10-9/20",
+		"bytes 0-nope/20",
+		"bytes 0-20/20",
+		"bytes 0-9/nope",
+		"bytes 0-9/20/extra",
+	} {
+		t.Run(value, func(t *testing.T) {
+			if _, ok, err := parseContentRangeStart(value); err == nil || !ok {
+				t.Fatalf("parseContentRangeStart(%q)=(ok=%v, err=%v), want present error", value, ok, err)
+			}
+		})
+	}
+}
+
+func TestValidateUploadContentRangeChecksSizeAndBodyLength(t *testing.T) {
+	if _, _, err := validateUploadContentRange("bytes 0-9/20", 19, 10); err == nil {
+		t.Fatal("expected total/file size mismatch")
+	}
+	if _, _, err := validateUploadContentRange("bytes 0-9/20", 20, 9); err == nil {
+		t.Fatal("expected body length mismatch")
+	}
+	start, ok, err := validateUploadContentRange("bytes 10-19/*", 20, 10)
+	if err != nil || !ok || start != 10 {
+		t.Fatalf("wildcard total with explicit file size: start=%d ok=%v err=%v", start, ok, err)
 	}
 }

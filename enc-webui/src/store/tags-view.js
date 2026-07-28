@@ -3,7 +3,7 @@ import setting from '@/settings'
 export const useTagsViewStore = defineStore('tagsView', {
   state: () => {
     return {
-      visitedViews: [] //tag标签数组
+      visitedViews: /** @type {(import('vue-router').RouteLocationNormalizedLoaded & { title: string })[]} */ ([]) //tag标签数组
     }
   },
   actions: {

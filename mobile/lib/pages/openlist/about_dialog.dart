@@ -2,7 +2,6 @@ import 'package:openlist_mobile/contant/native_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/svg.dart';
-import 'package:get/get.dart';
 
 import '../../generated/l10n.dart';
 import '../../generated_api.dart';

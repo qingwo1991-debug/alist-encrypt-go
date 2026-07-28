@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -23,6 +24,9 @@ type Store struct {
 	fileMetaBuffer    *fileMetaBuffer
 	rangeCompatBuffer *rangeCompatBuffer
 	cancelLoops       context.CancelFunc // cancels background flush/cleanup goroutines
+	loopWG            sync.WaitGroup
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 var openDB = sql.Open
@@ -135,20 +139,25 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	// Stop background flush/cleanup goroutines
-	if s.cancelLoops != nil {
-		s.cancelLoops()
-	}
-	// Flush all pending write-behind buffers before closing the connection,
-	// otherwise data buffered within the flush interval window will be lost.
-	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	s.flushBuffers(flushCtx)
-	return s.db.Close()
+	s.closeOnce.Do(func() {
+		// Stop and join background flush/cleanup goroutines before the final drain
+		// so they cannot race the database close or re-enqueue records afterward.
+		if s.cancelLoops != nil {
+			s.cancelLoops()
+		}
+		s.loopWG.Wait()
+		flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s.flushBuffers(flushCtx)
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 func (s *Store) startLoops(ctx context.Context) {
+	s.loopWG.Add(1)
 	go func() {
+		defer s.loopWG.Done()
 		ticker := time.NewTicker(s.flushInterval)
 		defer ticker.Stop()
 		for {
@@ -162,7 +171,9 @@ func (s *Store) startLoops(ctx context.Context) {
 	}()
 
 	if !s.disableCleanup {
+		s.loopWG.Add(1)
 		go func() {
+			defer s.loopWG.Done()
 			ticker := time.NewTicker(s.cleanupInterval)
 			defer ticker.Stop()
 			for {

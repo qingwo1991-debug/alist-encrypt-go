@@ -1,0 +1,1 @@
+var e=(e={})=>({id:Math.random(),encType:`aesctr`,encName:!1,encSuffix:``,describe:``,encPath:``,...e,password:``,enable:!1}),t=(e=[])=>e.some(e=>e?.enable&&!String(e.password??``).trim());export{t as n,e as t};

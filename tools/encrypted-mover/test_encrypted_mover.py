@@ -1,4 +1,5 @@
 import datetime as dt
+import base64
 import importlib.util
 import json
 import os
@@ -10,8 +11,10 @@ import subprocess
 import sys
 import threading
 import logging
+import urllib.error
 import urllib.parse
 from pathlib import Path
+from unittest import mock
 
 MODULE = Path(__file__).with_name("encrypted_mover.py")
 spec = importlib.util.spec_from_file_location("encrypted_mover", MODULE)
@@ -33,6 +36,84 @@ class MoverTests(unittest.TestCase):
             db.import_lines(sid, moved, "odd")
             enabled = {r["infohash"]:r["enabled"] for r in db.db.execute("select infohash,enabled from tasks")}
             self.assertEqual(enabled[m.infohash(lines[0])], 0)
+            db.db.close()
+
+    def test_infohash_rejects_path_components(self):
+        valid_hex = "A" * 40
+        self.assertEqual(
+            m.infohash(f"magnet:?xt=urn:btih:{valid_hex.lower()}"),
+            valid_hex,
+        )
+
+        raw = bytes(range(20))
+        encoded = base64.b32encode(raw).decode("ascii")
+        self.assertEqual(
+            m.infohash(f"magnet:?xt=urn:btih:{encoded}"),
+            raw.hex().upper(),
+        )
+
+        malicious = "magnet:?xt=urn:btih:..%2F..%2Foutside"
+        normalized = m.infohash(malicious)
+        self.assertRegex(normalized, r"^[0-9A-F]{64}$")
+        self.assertNotIn("/", normalized)
+
+        with tempfile.TemporaryDirectory() as d:
+            mover = object.__new__(m.Mover)
+            mover.cfg = {"paths": {"work_dir": str(Path(d) / "work")}}
+            task = {"id": 1, "infohash": normalized}
+            task_dir = mover.task_dir(task)
+            self.assertEqual(task_dir.parent, Path(d) / "work")
+
+    def test_empty_or_invalid_source_does_not_disable_existing_tasks(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = m.Database(str(Path(d)/"m.db"))
+            db.add_source("x", "https://example.invalid")
+            sid = db.source_rows()[0]["id"]
+            lines = [f"magnet:?xt=urn:btih:{i:040x}" for i in range(1, 5)]
+            self.assertEqual(db.import_lines(sid, lines, "odd"), 2)
+
+            before = list(db.db.execute(
+                "select id,enabled from tasks where source_id=? order by id", (sid,)
+            ))
+            for invalid in ([], ["", "# comment", "not-a-magnet"]):
+                with self.assertRaisesRegex(ValueError, "no valid magnet"):
+                    db.import_lines(sid, invalid, "odd")
+                after = list(db.db.execute(
+                    "select id,enabled from tasks where source_id=? order by id", (sid,)
+                ))
+                self.assertEqual(
+                    [(row["id"], row["enabled"]) for row in after],
+                    [(row["id"], row["enabled"]) for row in before],
+                )
+            db.db.close()
+
+    def test_http_source_error_does_not_disable_existing_tasks(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = m.Database(str(Path(d)/"m.db"))
+            db.add_source("x", "https://example.invalid")
+            sid = db.source_rows()[0]["id"]
+            lines = [f"magnet:?xt=urn:btih:{i:040x}" for i in range(1, 5)]
+            db.import_lines(sid, lines, "odd")
+
+            mover = object.__new__(m.Mover)
+            mover.db = db
+            mover.cfg = {"node": {"parity": "odd"}}
+            mover.log = logging.getLogger("test-source-error")
+            with mock.patch.object(
+                m.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError("offline"),
+            ):
+                mover.sync_sources(force=True)
+
+            self.assertEqual(
+                [row[0] for row in db.db.execute(
+                    "select enabled from tasks where source_id=? order by id", (sid,)
+                )],
+                [1, 1],
+            )
+            source = db.source_rows()[0]
+            self.assertIn("offline", source["last_error"])
             db.db.close()
 
     def test_signature_ad_rule(self):
@@ -58,9 +139,103 @@ class MoverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             db=m.Database(str(Path(d)/"m.db"))
             uri="magnet:?xt=urn:btih:"+"A"*40
-            first=db.add_manual(uri); second=db.add_manual(uri+"&dn=renamed")
+            first=db.add_manual(uri)
+            db.update_task(first, "queued", enabled=0)
+            second=db.add_manual(uri+"&dn=renamed")
             self.assertEqual(first,second)
             self.assertEqual(db.db.execute("select count(*) from tasks").fetchone()[0],1)
+            self.assertEqual(db.task(first)["enabled"], 1)
+            db.db.close()
+
+    def test_retry_resets_task_for_clean_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = m.Database(str(Path(d)/"m.db"))
+            tid = db.add_manual("magnet:?xt=urn:btih:" + "B"*40)
+            db.update_task(
+                tid,
+                "dead",
+                enabled=0,
+                aria_gid="stale-gid",
+                name="stale-name",
+                total_size=123,
+                selected_json='[{"path":"old.mkv"}]',
+                task_dir="/tmp/stale-task",
+                attempt=3,
+                next_retry=9999999999,
+                last_progress=42,
+                last_progress_at=123456,
+                error="old failure",
+            )
+            upload = db.add_upload(tid, "/tmp/old.mkv", "old.mkv", "old.bin", 123, "/remote/old.bin")
+            db.update_upload(upload["id"], "uploading")
+
+            db.retry_task(tid)
+            row = db.task(tid)
+            self.assertEqual(row["state"], "queued")
+            self.assertEqual(row["enabled"], 1)
+            self.assertEqual(row["attempt"], 0)
+            self.assertEqual(row["next_retry"], 0)
+            self.assertEqual(row["aria_gid"], "")
+            self.assertEqual(row["name"], "")
+            self.assertEqual(row["total_size"], 0)
+            self.assertEqual(row["selected_json"], "[]")
+            self.assertEqual(row["task_dir"], "")
+            self.assertEqual(row["last_progress"], 0)
+            self.assertEqual(row["last_progress_at"], 0)
+            self.assertEqual(row["error"], "")
+            self.assertEqual(db.uploads_for_task(tid), [])
+            with self.assertRaisesRegex(ValueError, "task not found"):
+                db.retry_task(tid + 1)
+            db.db.close()
+
+    def test_mover_retry_removes_preserved_task_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d) / "work"
+            db = m.Database(str(Path(d) / "m.db"))
+            tid = db.add_manual("magnet:?xt=urn:btih:" + "C"*40)
+            task = db.task(tid)
+
+            mover = object.__new__(m.Mover)
+            mover.db = db
+            mover.cfg = {"paths": {"work_dir": str(work)}}
+            mover.aria = mock.Mock()
+            task_dir = mover.task_dir(task)
+            task_dir.mkdir(parents=True)
+            (task_dir / "plain.mkv").write_bytes(b"plaintext")
+            db.update_task(tid, "dead", task_dir=str(task_dir), aria_gid="old-gid", enabled=0)
+
+            mover.retry_task(tid)
+
+            self.assertFalse(task_dir.exists())
+            mover.aria.remove_and_purge.assert_called_once_with("old-gid")
+            self.assertEqual(db.task(tid)["state"], "queued")
+            db.db.close()
+
+    def test_mover_retry_refuses_symlink_task_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d) / "work"
+            outside = Path(d) / "outside"
+            outside.mkdir()
+            marker = outside / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            db = m.Database(str(Path(d) / "m.db"))
+            tid = db.add_manual("magnet:?xt=urn:btih:" + "D"*40)
+
+            mover = object.__new__(m.Mover)
+            mover.db = db
+            mover.cfg = {"paths": {"work_dir": str(work)}}
+            mover.aria = mock.Mock()
+            task_dir = mover.task_dir(db.task(tid))
+            task_dir.parent.mkdir(parents=True)
+            task_dir.symlink_to(outside, target_is_directory=True)
+            db.update_task(tid, "dead", task_dir=str(task_dir), aria_gid="old-gid", enabled=0)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink task directory"):
+                mover.retry_task(tid)
+
+            self.assertTrue(marker.exists())
+            self.assertEqual(db.task(tid)["state"], "dead")
+            mover.aria.remove_and_purge.assert_not_called()
             db.db.close()
 
     def test_file_filter(self):
@@ -105,6 +280,28 @@ class MoverTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close()
 
+    def test_openlist_distinguishes_missing_paths_from_service_errors(self):
+        cfg = {"base_url":"http://127.0.0.1:1","username":"a","password_file":"x"}
+        ol = m.OpenList(cfg, logging.getLogger("test-openlist-errors"))
+
+        ol._request = mock.Mock(return_value={"code":500,"message":"object not found"})
+        self.assertIsNone(ol.fs_get("/missing"))
+        self.assertEqual(ol.fs_list("/missing"), [])
+
+        ol._request = mock.Mock(return_value={"code":500,"message":"database unavailable"})
+        with self.assertRaisesRegex(RuntimeError, "fs/get failed"):
+            ol.fs_get("/unknown")
+        with self.assertRaisesRegex(RuntimeError, "fs/list failed"):
+            ol.fs_list("/unknown")
+        with self.assertRaisesRegex(RuntimeError, "task list failed"):
+            ol.tasks(False)
+
+        ol._request = mock.Mock(return_value={"code":500,"message":"storage does not exist"})
+        with self.assertRaisesRegex(RuntimeError, "fs/mkdir failed"):
+            ol.mkdir("/target")
+        with self.assertRaisesRegex(RuntimeError, "storage list failed"):
+            ol.create_storage({"mount_path":"/target"})
+
     def test_v2_remote_header_validation(self):
         cfg={"base_url":"http://127.0.0.1:1","username":"a","password_file":"x"}
         ol=m.OpenList(cfg,logging.getLogger("test"))
@@ -138,7 +335,7 @@ class MoverTests(unittest.TestCase):
                 if self.path=="/api/fs/get":
                     if state["done"] and payload.get("path")==state["path"]:
                         return self.reply({"code":200,"data":{"name":Path(state["path"]).name,"size":len(state["body"]),"raw_url":f"http://127.0.0.1:{self.server.server_port}/raw"}})
-                    return self.reply({"code":500,"message":"not found"})
+                    return self.reply({"code":500,"message":"object not found"})
                 if self.path=="/api/fs/list":
                     content=[]
                     if state["done"]: content=[{"name":Path(state["path"]).name,"size":len(state["body"]),"raw_url":f"http://127.0.0.1:{self.server.server_port}/raw"}]

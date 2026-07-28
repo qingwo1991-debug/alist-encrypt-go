@@ -31,7 +31,8 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
-	if !s.cbGate.Allow() {
+	cbGate := s.circuitBreakerFor(targetURL)
+	if !cbGate.Allow() {
 		return &StreamOutcome{
 			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
 			Retryable:     true,
@@ -96,16 +97,18 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 		}
 		if backoff.IsTransientStatus(resp.StatusCode) {
 			resp.Body.Close()
-			doErr = fmt.Errorf("upstream status %d", resp.StatusCode)
+			doErr = &backoff.HTTPStatusError{StatusCode: resp.StatusCode}
 			return doErr
 		}
 		return nil
 	})
 	if doErr != nil {
+		cbGate.RecordFailure()
 		reason, retryable := classifyStreamError(doErr)
 		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", doErr), FailureReason: reason, Retryable: retryable}
 	}
 	if isRedirectStatus(resp.StatusCode) {
+		cbGate.RecordSuccess()
 		defer resp.Body.Close()
 		return s.handleRedirect(w, r, resp, passwdInfo, fileSize, meta, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
@@ -127,6 +130,15 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 
 // ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	cbGate := s.circuitBreakerFor(targetURL)
+	if !cbGate.Allow() {
+		return &StreamOutcome{
+			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
+			Retryable:     true,
+			FailureReason: "circuit_open",
+		}
+	}
+
 	rangeHeader := req.Header.Get("Range")
 	meta := contentMetaFromContext(req.Context(), passwdInfo, fileSize)
 	if meta.PlainSize > 0 {
@@ -164,10 +176,12 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	s.StripForeignHeaders(req)
 	resp, err := s.client.Do(req)
 	if err != nil {
+		cbGate.RecordFailure()
 		reason, retryable := classifyStreamError(err)
 		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", err), FailureReason: reason, Retryable: retryable}
 	}
 	if isRedirectStatus(resp.StatusCode) {
+		cbGate.RecordSuccess()
 		defer resp.Body.Close()
 		return s.handleRedirect(w, req, resp, passwdInfo, fileSize, meta, rangeHeader, strategy, targetURL, compatStorageKey)
 	}
@@ -277,8 +291,16 @@ func (s *StreamProxy) DecryptedBlockCacheStats() map[string]interface{} {
 
 func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	result := &StreamOutcome{}
+	cbGate := s.circuitBreakerFor(targetURL)
+	allowLoose := false
+	enableSniff := true
+	if s != nil && s.cfg != nil {
+		alist := s.cfg.AlistServerSnapshot()
+		allowLoose = alist.AllowLooseDecode
+		enableSniff = alist.EnableSniff
+	}
 	if resp.StatusCode >= http.StatusInternalServerError {
-		s.cbGate.RecordFailure()
+		cbGate.RecordFailure()
 		return &StreamOutcome{
 			Err:           errors.NewProxyError(fmt.Sprintf("upstream status %d", resp.StatusCode)),
 			Retryable:     true,
@@ -301,7 +323,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	}
 
 	// Upstream responded successfully (< 500), reset circuit breaker
-	s.cbGate.RecordSuccess()
+	cbGate.RecordSuccess()
 
 	// Get file size from Content-Length if not provided
 	fileSize = resolveFileSize(fileSize, resp)
@@ -321,19 +343,6 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	}
 	if fileSize == 0 {
 		result.Err = errors.NewDecryptionError("file size required for decrypt stream")
-		return result
-	}
-
-	// Create decryption stream
-	var flowEnc encryption.Cipher
-	var err error
-	if meta.IsV2() {
-		flowEnc, err = encryption.NewCipherV2(encryption.EncType(passwdInfo.EncType), passwdInfo.Password, fileSize, meta.NonceField)
-	} else {
-		flowEnc, err = encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
-	}
-	if err != nil {
-		result.Err = errors.NewDecryptionErrorWithCause("failed to create cipher", err)
 		return result
 	}
 
@@ -361,11 +370,13 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	// Preserve range start for Full strategy fallback: when Range is unsupported,
-	// we download the full file but seek in the cipher + discard upstream bytes.
-	fullRangeStart := int64(0)
+	// Preserve the exact requested range for Full strategy fallback: when Range
+	// is unsupported upstream, download the full ciphertext, seek locally, and
+	// still return the client-requested interval (including its end offset).
+	var fullRequestedRange *httputil.Range
 	if strategy == StreamStrategyFull && activeRange != nil {
-		fullRangeStart = activeRange.Start
+		copied := *activeRange
+		fullRequestedRange = &copied
 		activeRange = nil
 	}
 
@@ -391,6 +402,38 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsatisfiable")
 			return &StreamOutcome{Err: errors.NewProxyError("range unsatisfiable"), Retryable: true, FailureReason: "range_unsatisfiable"}
 		}
+		contentRangeHeader := resp.Header.Get("Content-Range")
+		actualRange, validContentRange := parseContentRange(contentRangeHeader)
+		expectedStart := activeRange.Start
+		expectedEnd := activeRange.End
+		if meta.IsV2() {
+			expectedStart += meta.HeaderLen
+			expectedEnd += meta.HeaderLen
+		}
+		if !validContentRange || actualRange.Start != expectedStart || actualRange.End < expectedEnd {
+			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsupported")
+			return &StreamOutcome{
+				Err:           errors.NewProxyError(fmt.Sprintf("upstream Content-Range %q does not cover requested interval %d-%d", contentRangeHeader, expectedStart, expectedEnd)),
+				Retryable:     true,
+				FailureReason: "range_unsupported",
+				StatusCode:    resp.StatusCode,
+			}
+		}
+	}
+
+	// Validate the upstream range before paying the key-derivation cost or
+	// committing response headers. A 206 for a different interval is not safe
+	// to decrypt at the requested plaintext position.
+	var flowEnc encryption.Cipher
+	var err error
+	if meta.IsV2() {
+		flowEnc, err = encryption.NewCipherV2(encryption.EncType(passwdInfo.EncType), passwdInfo.Password, fileSize, meta.NonceField)
+	} else {
+		flowEnc, err = encryption.NewFlowEnc(passwdInfo.Password, passwdInfo.EncType, fileSize)
+	}
+	if err != nil {
+		result.Err = errors.NewDecryptionErrorWithCause("failed to create cipher", err)
+		return result
 	}
 
 	if activeRange != nil {
@@ -400,16 +443,15 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	// For Full strategy with seek: build a synthetic range for correct 206 headers.
-	fullSeekRange := activeRange
-	if strategy == StreamStrategyFull && fullRangeStart > 0 {
-		fullSeekRange = &httputil.Range{Start: fullRangeStart, End: fileSize - 1}
+	responseRange := activeRange
+	if fullRequestedRange != nil {
+		responseRange = fullRequestedRange
 	}
 
 	upstreamShiftedRange := meta.IsV2() && strategy == StreamStrategyRange && buildUpstreamRangeHeader(rangeHeader, meta) != rangeHeader
 
 	statusCode := http.StatusOK
-	if fullSeekRange != nil {
+	if responseRange != nil {
 		statusCode = http.StatusPartialContent
 	}
 
@@ -417,10 +459,10 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	httputil.CopyResponseHeaders(w, resp, "Content-Length", "Content-Range", "Accept-Ranges")
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	if fullSeekRange != nil {
-		w.Header().Set("Content-Range", fullSeekRange.ContentRangeHeader(fileSize))
-		w.Header().Set("Content-Length", strconv.FormatInt(fullSeekRange.ContentLength(), 10))
-		result.ExpectedBytes = fullSeekRange.ContentLength()
+	if responseRange != nil {
+		w.Header().Set("Content-Range", responseRange.ContentRangeHeader(fileSize))
+		w.Header().Set("Content-Length", strconv.FormatInt(responseRange.ContentLength(), 10))
+		result.ExpectedBytes = responseRange.ContentLength()
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 		result.ExpectedBytes = fileSize
@@ -452,7 +494,6 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	if req.Method == http.MethodGet && passwdInfo != nil && passwdInfo.Enable && passwdInfo.EncName {
 		showName := displayNameFromContext(req.Context())
 		if showName == "" {
-			allowLoose := s.cfg != nil && s.cfg.AlistServer.AllowLooseDecode
 			showName = decodeNameFromRequest(passwdInfo, req.URL.Path, allowLoose)
 		}
 		if showName != "" {
@@ -477,14 +518,14 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 
-	// For Full strategy with a seek: position cipher and discard upstream bytes
+	// For Full strategy with a range: position cipher and discard upstream bytes
 	// BEFORE creating the decrypt reader, to sync stream positions.
-	if strategy == StreamStrategyFull && fullRangeStart > 0 {
-		if err := flowEnc.SetPosition(fullRangeStart); err != nil {
+	if fullRequestedRange != nil {
+		if err := flowEnc.SetPosition(fullRequestedRange.Start); err != nil {
 			result.Err = errors.NewDecryptionErrorWithCause("failed to set position for full seek", err)
 			return result
 		}
-		if err := discardBytes(bodyReader, fullRangeStart); err != nil {
+		if err := discardBytes(bodyReader, fullRequestedRange.Start); err != nil {
 			result.Err = errors.NewProxyErrorWithCause("failed to discard bytes for full seek", err)
 			return result
 		}
@@ -510,19 +551,20 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 			}
 		}
 	}
-	if strategy == StreamStrategyFull && fullRangeStart > 0 {
-		sniffOffset = fullRangeStart
+	if fullRequestedRange != nil {
+		sniffOffset = fullRequestedRange.Start
 	}
 
 	readerToStream := flowEnc.DecryptReader(bodyReader)
 	if activeRange != nil {
 		readerToStream = io.LimitReader(readerToStream, activeRange.ContentLength())
+	} else if fullRequestedRange != nil {
+		readerToStream = io.LimitReader(readerToStream, fullRequestedRange.ContentLength())
 	}
 
 	// Sniff first bytes of decrypted output to detect wrong password/fileSize.
 	// Can be disabled via config (enableSniff: false) for performance.
-	if shouldSniffDecryptedContent(req.Method, resp.Header.Get("Content-Type"), sniffOffset) &&
-		(s.cfg == nil || s.cfg.AlistServer.EnableSniff) {
+	if shouldSniffDecryptedContent(req.Method, resp.Header.Get("Content-Type"), sniffOffset) && enableSniff {
 		if sniffBytes, ok := sniffDecrypted(readerToStream); !ok {
 			resp.Body.Close()
 			return &StreamOutcome{
@@ -546,6 +588,12 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	defer putBuffer(buf)
 	written, err := io.CopyBuffer(w, readerToStream, *buf)
 	result.BytesWritten = written
+	if err == nil && result.ExpectedBytes > 0 && written < result.ExpectedBytes {
+		err = io.ErrUnexpectedEOF
+		result.FailureReason = "upstream_truncated"
+		result.Retryable = true
+		result.NoLearning = true
+	}
 	if err != nil {
 		result.Err = err
 		reason, retryable := classifyStreamError(err)
@@ -556,8 +604,8 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 		if result.FailureReason == "" {
 			result.FailureReason = reason
+			result.Retryable = retryable
 		}
-		result.Retryable = retryable
 	}
 	if strategy == StreamStrategyRange && activeRange != nil && result.Err == nil {
 		s.recordRangeSuccess(targetURL, compatStorageKey)

@@ -27,14 +27,19 @@ func cloneRoutingHeaders(src http.Header) http.Header {
 }
 
 func (p *ProxyServer) providerCatalogEnabled() bool {
-	return p != nil && p.config != nil && p.config.ProviderCatalogEnabled
+	cfg := p.configSnapshot()
+	return cfg != nil && cfg.ProviderCatalogEnabled
 }
 
 func (p *ProxyServer) providerCatalogTTL() time.Duration {
-	if p == nil || p.config == nil || p.config.ProviderCatalogTTLMinutes <= 0 {
+	return providerCatalogTTLFromConfig(p.configSnapshot())
+}
+
+func providerCatalogTTLFromConfig(cfg *ProxyConfig) time.Duration {
+	if cfg == nil || cfg.ProviderCatalogTTLMinutes <= 0 {
 		return 12 * time.Hour
 	}
-	return time.Duration(p.config.ProviderCatalogTTLMinutes) * time.Minute
+	return time.Duration(cfg.ProviderCatalogTTLMinutes) * time.Minute
 }
 
 func (p *ProxyServer) initProviderCatalog() {
@@ -70,7 +75,8 @@ func (p *ProxyServer) initProviderCatalog() {
 		}
 	}
 
-	if p.providerCatalogEnabled() && p.config.ProviderCatalogBootstrapOnStart {
+	cfg := p.configSnapshot()
+	if cfg != nil && cfg.ProviderCatalogEnabled && cfg.ProviderCatalogBootstrapOnStart {
 		p.refreshProviderCatalogAsync(nil, true)
 	}
 }
@@ -122,7 +128,11 @@ func (p *ProxyServer) mergeProviderCatalog(provider string, label string, source
 }
 
 func (p *ProxyServer) refreshProviderCatalogAsync(srcHeaders http.Header, force bool) {
-	if p == nil || !p.providerCatalogEnabled() {
+	if p == nil {
+		return
+	}
+	runtime := p.runtimeSnapshot()
+	if runtime.config == nil || !runtime.config.ProviderCatalogEnabled {
 		return
 	}
 	p.routingMu.Lock()
@@ -144,7 +154,7 @@ func (p *ProxyServer) refreshProviderCatalogAsync(srcHeaders http.Header, force 
 			p.catalogRefreshing = false
 			p.routingMu.Unlock()
 		}()
-		p.refreshProviderCatalog(context.Background(), headers)
+		p.refreshProviderCatalogWithRuntime(context.Background(), headers, runtime)
 	}()
 }
 
@@ -153,6 +163,10 @@ func (p *ProxyServer) maybeRefreshProviderCatalog(srcHeaders http.Header) {
 }
 
 func (p *ProxyServer) refreshProviderCatalog(ctx context.Context, srcHeaders http.Header) {
+	p.refreshProviderCatalogWithRuntime(ctx, srcHeaders, p.runtimeSnapshot())
+}
+
+func (p *ProxyServer) refreshProviderCatalogWithRuntime(ctx context.Context, srcHeaders http.Header, runtime proxyRuntimeSnapshot) {
 	if p == nil {
 		return
 	}
@@ -200,12 +214,12 @@ func (p *ProxyServer) refreshProviderCatalog(ctx context.Context, srcHeaders htt
 	}
 	p.routingMu.RUnlock()
 
-	driverNames, degradedDriverNames := p.fetchAdminDriverNames(ctx, srcHeaders)
+	driverNames, degradedDriverNames := p.fetchAdminDriverNamesWithRuntime(ctx, srcHeaders, runtime)
 	for _, driver := range driverNames {
 		appendEntry(driver, "", providerSourceDriverNames)
 	}
 
-	p.refreshStorageDriverMapIfNeeded(ctx, srcHeaders)
+	p.refreshStorageDriverMapIfNeededWithRuntime(ctx, srcHeaders, runtime)
 	p.routingMu.RLock()
 	for _, driver := range p.storageDriverMap {
 		appendEntry(driver, "", providerSourceStorage)
@@ -248,7 +262,7 @@ func (p *ProxyServer) refreshProviderCatalog(ctx context.Context, srcHeaders htt
 		p.providerSourceMask[entry.ProviderKey] |= entry.SourceMask
 	}
 	p.catalogLastRefresh = startedAt
-	p.catalogNextRefresh = startedAt.Add(p.providerCatalogTTL())
+	p.catalogNextRefresh = startedAt.Add(providerCatalogTTLFromConfig(runtime.config))
 	if degradedDriverNames || remoteDegraded {
 		p.catalogLastError = "partial refresh: some sources degraded"
 	} else {

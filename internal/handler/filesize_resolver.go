@@ -281,9 +281,12 @@ func (r *FileSizeResolver) tryFastPath(ctx context.Context, file FileItem) (Size
 
 // resolveWithEarlyTermination runs parallel resolution with early return
 func (r *FileSizeResolver) resolveWithEarlyTermination(ctx context.Context, file FileItem, authHeaders http.Header) SizeResult {
-	// Create cancellable context for early termination
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// Keep caller cancellation separate from the internal cancellation used to
+	// stop the losing probes. If the collector observes the internal context,
+	// it can race with the winning result and incorrectly return
+	// context.Canceled before consuming that result.
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
 
 	resultChan := make(chan SizeResult, 4)
 	var wg sync.WaitGroup
@@ -297,10 +300,10 @@ func (r *FileSizeResolver) resolveWithEarlyTermination(ctx context.Context, file
 			if result.Error == nil && IsValidSize(result.Size) && result.Confidence >= HighConfidenceThreshold {
 				if atomic.CompareAndSwapInt32(&returned, 0, 1) {
 					atomic.AddUint64(&r.earlyReturns, 1)
-					cancel() // Cancel other pending requests
+					cancelWorkers() // Cancel other pending requests
 				}
 			}
-		case <-ctx.Done():
+		case <-workerCtx.Done():
 		}
 	}
 
@@ -322,14 +325,14 @@ func (r *FileSizeResolver) resolveWithEarlyTermination(ctx context.Context, file
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.tryHEADWithRetry(ctx, file, authHeaders, sendResult)
+		r.tryHEADWithRetry(workerCtx, file, authHeaders, sendResult)
 	}()
 
 	// Source 3: Range request (most reliable, but slower)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.tryRangeWithRetry(ctx, file, authHeaders, sendResult)
+		r.tryRangeWithRetry(workerCtx, file, authHeaders, sendResult)
 	}()
 
 	// Close channel when all sources complete
@@ -346,9 +349,9 @@ func (r *FileSizeResolver) resolveWithEarlyTermination(ctx context.Context, file
 func (r *FileSizeResolver) collectResults(ctx context.Context, file FileItem, results <-chan SizeResult) SizeResult {
 	var validResults []SizeResult
 	var maxSize int64
-	var highConfidenceResult *SizeResult
 
-	timeout := time.After(12 * time.Second) // Overall timeout
+	timeout := time.NewTimer(12 * time.Second) // Overall timeout
+	defer timeout.Stop()
 
 	for {
 		select {
@@ -367,19 +370,9 @@ func (r *FileSizeResolver) collectResults(ctx context.Context, file FileItem, re
 				if result.Size > maxSize {
 					maxSize = result.Size
 				}
-
-				// Early return on high confidence
-				if result.Confidence >= HighConfidenceThreshold && highConfidenceResult == nil {
-					highConfidenceResult = &result
-					// Don't return immediately, collect a bit more for cross-validation
-					// But set a short timeout
-					go func() {
-						time.Sleep(100 * time.Millisecond)
-					}()
-				}
 			}
 
-		case <-timeout:
+		case <-timeout.C:
 			if len(validResults) > 0 {
 				return r.selectBest(file, validResults, maxSize)
 			}
@@ -1048,7 +1041,7 @@ func providerHostFromKey(providerKey string) string {
 	if providerKey == "" {
 		return ""
 	}
-	if idx := strings.Index(providerKey, "::"); idx >= 0 {
+	if idx := strings.Index(providerKey, "::/"); idx >= 0 {
 		return providerKey[:idx]
 	}
 	return providerKey

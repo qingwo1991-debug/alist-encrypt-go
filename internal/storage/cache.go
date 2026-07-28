@@ -13,12 +13,12 @@ type CacheItem struct {
 
 // Cache provides in-memory caching with TTL
 type Cache struct {
-	items    map[string]CacheItem
-	mu       sync.RWMutex
-	ttl      time.Duration
-	maxSize  int
-	stopCh   chan struct{}
-	stopped  bool
+	items   map[string]CacheItem
+	mu      sync.RWMutex
+	ttl     time.Duration
+	maxSize int
+	stopCh  chan struct{}
+	stopped bool
 }
 
 // NewCache creates a new cache with default TTL

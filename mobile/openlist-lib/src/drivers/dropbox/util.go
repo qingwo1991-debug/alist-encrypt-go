@@ -60,9 +60,9 @@ func (d *Dropbox) refreshToken() error {
 	if err != nil {
 		return err
 	}
-	log.Debugf("[dropbox] refresh token response: %s", resp.String())
+	log.Debugf("[dropbox] refresh token response status: %d", resp.StatusCode())
 	if resp.StatusCode() != 200 {
-		return fmt.Errorf("failed to refresh token: %s", resp.String())
+		return fmt.Errorf("failed to refresh token: status %d", resp.StatusCode())
 	}
 	_ = utils.Json.UnmarshalFromString(resp.String(), &tokenResp)
 	d.AccessToken = tokenResp.AccessToken
@@ -95,7 +95,7 @@ func (d *Dropbox) request(uri, method string, callback base.ReqCallback, retry .
 	if err != nil {
 		return nil, err
 	}
-	log.Debugf("[dropbox] request (%s) response: %s", uri, res.String())
+	log.Debugf("[dropbox] request (%s) response status=%d bytes=%d", uri, res.StatusCode(), len(res.Body()))
 	isRetry := len(retry) > 0 && retry[0]
 	if res.StatusCode() != 200 {
 		body := res.String()

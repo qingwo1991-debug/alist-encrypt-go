@@ -2,8 +2,10 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,10 +94,7 @@ func normalizeOriginHost(hostport string) string {
 func ForceHTTPSMiddleware(httpsPort int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.TLS == nil && c.GetHeader("X-Forwarded-Proto") != "https" {
-			host := c.Request.Host
-			if httpsPort != 443 {
-				host = fmt.Sprintf("%s:%d", c.Request.Host, httpsPort)
-			}
+			host := httpsRedirectHost(c.Request.Host, httpsPort)
 			target := fmt.Sprintf("https://%s%s", host, c.Request.URL.RequestURI())
 			c.Redirect(http.StatusMovedPermanently, target)
 			c.Abort()
@@ -103,6 +102,20 @@ func ForceHTTPSMiddleware(httpsPort int) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func httpsRedirectHost(requestHost string, httpsPort int) string {
+	hostname := (&url.URL{Host: requestHost}).Hostname()
+	if hostname == "" {
+		hostname = strings.Trim(requestHost, "[]")
+	}
+	if httpsPort == 443 {
+		if strings.Contains(hostname, ":") {
+			return "[" + strings.Trim(hostname, "[]") + "]"
+		}
+		return hostname
+	}
+	return net.JoinHostPort(strings.Trim(hostname, "[]"), strconv.Itoa(httpsPort))
 }
 
 // AuthMiddleware validates JWT tokens

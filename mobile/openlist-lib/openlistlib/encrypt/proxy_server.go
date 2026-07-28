@@ -23,30 +23,39 @@ import (
 //
 // Lock ordering convention (acquire in this order to prevent deadlocks):
 //   1. mutex (general state)
-//   2. sizeMapMu
-//   3. rangeCompatMu
-//   4. rangeProbeMu
-//   5. upstreamMu
-//   6. routingMu
-//   7. webdavNegativeMu
-//   8. uploadMetaMu
-//   9. dbExportTokenMu
+//   2. redirectCacheMu
+//   3. prefetchRecentMu
+//   4. sizeMapMu
+//   5. rangeCompatMu
+//   6. rangeProbeMu
+//   7. upstreamMu
+//   8. routingMu
+//   9. webdavNegativeMu
+//  10. uploadMetaMu
+//  11. dbExportTokenMu
 // Never hold two locks simultaneously unless following this order.
 
 // ProxyServer 加密代理服务器
 type ProxyServer struct {
-	config              *ProxyConfig
-	httpClient          *http.Client
-	probeClient         *http.Client
-	streamClient        *http.Client
-	transport           *http.Transport
-	streamTransport     *http.Transport
-	h2cTransport        *http2.Transport // H2C Transport (如果启用)
-	server              *http.Server
-	running             bool
-	mutex               sync.RWMutex
+	config          *ProxyConfig
+	httpClient      *http.Client
+	probeClient     *http.Client
+	streamClient    *http.Client
+	transport       *http.Transport
+	streamTransport *http.Transport
+	h2cTransport    *http2.Transport // H2C Transport (如果启用)
+	server          *http.Server
+	running         bool
+	stopping        bool
+	stopDone        chan struct{}
+	stopErr         error
+	mutex           sync.RWMutex
+	// runtimeConfig is immutable after publication. p.config remains the
+	// mutable working copy used by the legacy configuration handlers.
+	runtimeConfig       *ProxyConfig
 	fileCache           *shardedAnyMap
 	fileCacheCount      int64 // 缓存条目计数
+	redirectCacheMu     sync.Mutex
 	redirectCache       *shardedAnyMap
 	sizeMapMu           sync.RWMutex
 	sizeMap             map[string]SizeMapEntry
@@ -70,6 +79,7 @@ type ProxyServer struct {
 	upstreamDownAt      time.Time
 	upstreamError       string
 	upstreamFailures    int
+	prefetchRecentMu    sync.Mutex
 	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
 	webdavNegativeMu    sync.Mutex
 	webdavNegativeCache map[string]time.Time // path -> expireAt
@@ -120,11 +130,129 @@ func (s *ProxyServer) ensureRuntimeCaches() {
 	})
 }
 
+// cloneProxyConfig returns a detached configuration snapshot. ProxyConfig
+// contains slices and pointers, so a shallow copy is not sufficient when the
+// snapshot is used by long-running requests or transport callbacks.
+func cloneProxyConfig(src *ProxyConfig) *ProxyConfig {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	if len(src.EncryptPaths) > 0 {
+		dst.EncryptPaths = make([]*EncryptPath, len(src.EncryptPaths))
+		for i, rule := range src.EncryptPaths {
+			if rule == nil {
+				continue
+			}
+			clonedRule := *rule
+			dst.EncryptPaths[i] = &clonedRule
+		}
+	}
+	if len(src.ProviderRoutingRules) > 0 {
+		dst.ProviderRoutingRules = make([]ProviderRoutingRule, len(src.ProviderRoutingRules))
+		for i := range src.ProviderRoutingRules {
+			dst.ProviderRoutingRules[i] = src.ProviderRoutingRules[i]
+			dst.ProviderRoutingRules[i].MatchValues = append([]string(nil), src.ProviderRoutingRules[i].MatchValues...)
+		}
+	}
+	dst.DebugModules = append([]string(nil), src.DebugModules...)
+	return &dst
+}
+
+type proxyRuntimeSnapshot struct {
+	config       *ProxyConfig
+	httpClient   *http.Client
+	probeClient  *http.Client
+	streamClient *http.Client
+}
+
+// runtimeSnapshot publishes configuration and clients through the same lock.
+// runtimeConfig and the clients are immutable after publication, so callers do
+// not have to hold the server lock during I/O and the hot path does not need to
+// deep-copy every routing rule for every request. Callers must treat config as
+// read-only.
+func (p *ProxyServer) runtimeSnapshot() proxyRuntimeSnapshot {
+	if p == nil {
+		return proxyRuntimeSnapshot{}
+	}
+	p.mutex.RLock()
+	runtimeConfig := p.runtimeConfig
+	if runtimeConfig == nil {
+		// Keep manually constructed/zero-value servers usable in tests and
+		// embedders. Normal servers publish an immutable runtimeConfig, so this
+		// detached fallback has no cost on the request hot path.
+		runtimeConfig = cloneProxyConfig(p.config)
+	}
+	snapshot := proxyRuntimeSnapshot{
+		config:       runtimeConfig,
+		httpClient:   p.httpClient,
+		probeClient:  p.probeClient,
+		streamClient: p.streamClient,
+	}
+	p.mutex.RUnlock()
+	return snapshot
+}
+
+func (p *ProxyServer) clientSnapshot() proxyRuntimeSnapshot {
+	if p == nil {
+		return proxyRuntimeSnapshot{}
+	}
+	p.mutex.RLock()
+	snapshot := proxyRuntimeSnapshot{
+		httpClient:   p.httpClient,
+		probeClient:  p.probeClient,
+		streamClient: p.streamClient,
+	}
+	p.mutex.RUnlock()
+	return snapshot
+}
+
+func (p *ProxyServer) configSnapshot() *ProxyConfig {
+	if p == nil {
+		return nil
+	}
+	p.mutex.RLock()
+	config := cloneProxyConfig(p.config)
+	p.mutex.RUnlock()
+	return config
+}
+
+func (p *ProxyServer) httpClientSnapshot() *http.Client {
+	if p == nil {
+		return nil
+	}
+	p.mutex.RLock()
+	client := p.httpClient
+	p.mutex.RUnlock()
+	return client
+}
+
+func (p *ProxyServer) probeClientSnapshot() *http.Client {
+	if p == nil {
+		return nil
+	}
+	p.mutex.RLock()
+	client := p.probeClient
+	p.mutex.RUnlock()
+	return client
+}
+
+func (p *ProxyServer) streamClientSnapshot() *http.Client {
+	if p == nil {
+		return nil
+	}
+	p.mutex.RLock()
+	client := p.streamClient
+	p.mutex.RUnlock()
+	return client
+}
+
 // NewProxyServer 创建代理服务器
 func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	if config == nil {
 		return nil, errors.New("config cannot be nil")
 	}
+	config = cloneProxyConfig(config)
 	applyLearningDefaults(config)
 
 	// 编译路径正则表达式
@@ -209,7 +337,8 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	// ProbeOnDownload is controlled by configuration / frontend; do not override here.
 	if config.StreamBufferKB > 0 {
 		effectiveKB := clampStreamBufferKB(config.StreamBufferKB)
-		streamBufferSize = effectiveKB * 1024
+		config.StreamBufferKB = effectiveKB
+		streamBufferSize.Store(int64(effectiveKB * 1024))
 	}
 
 	upstreamTimeout := time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600)) * time.Second
@@ -235,7 +364,9 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		}).DialContext,
 	}
 	streamTransport := transport.Clone()
-	streamTransport.ResponseHeaderTimeout = 0
+	// Limit only the wait for response headers. streamClient.Timeout remains
+	// zero, so long-running video bodies are not capped by this deadline.
+	streamTransport.ResponseHeaderTimeout = upstreamTimeout + 2*time.Second
 
 	// 配置 HTTP/2 over TLS 支持
 	if err := http2.ConfigureTransport(transport); err != nil {
@@ -311,7 +442,8 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	server := &ProxyServer{
-		config:             config,
+		config:             cloneProxyConfig(config),
+		runtimeConfig:      config,
 		transport:          transport,
 		streamTransport:    streamTransport,
 		h2cTransport:       h2cTransport,
@@ -350,10 +482,13 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 
 // Start 启动代理服务器
 func (p *ProxyServer) Start() error {
+	if p == nil {
+		return errors.New("proxy server is nil")
+	}
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
-	if p.running {
+	if p.running || p.stopping {
 		return errors.New("proxy server is already running")
 	}
 
@@ -407,7 +542,7 @@ func (p *ProxyServer) Start() error {
 	// 根路径：直接代理到 OpenList (Alist)
 	mux.HandleFunc("/", p.handleRoot)
 
-	p.server = &http.Server{
+	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", p.config.ProxyPort),
 		Handler:           internal.TraceMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second, // 防慢连接 header 攻击
@@ -416,28 +551,64 @@ func (p *ProxyServer) Start() error {
 		IdleTimeout:       300 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1MB
 	}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", server.Addr, err)
+	}
 
+	p.server = server
+	p.running = true
+	proxyPort := p.config.ProxyPort
 	go func() {
-		log.Infof("[%s] Encrypt proxy server starting on port %d", internal.TagServer, p.config.ProxyPort)
-		if err := p.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Infof("[%s] Encrypt proxy server starting on port %d", internal.TagServer, proxyPort)
+		err := server.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Errorf("[%s] Proxy server error: %v", internal.TagServer, err)
 		}
+		p.mutex.Lock()
+		if p.server == server {
+			p.running = false
+		}
+		p.mutex.Unlock()
 	}()
 
-	p.running = true
 	return nil
 }
 
 // Stop 停止代理服务器
 func (p *ProxyServer) Stop() error {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
-	if !p.running {
+	if p == nil {
 		return nil
 	}
+	p.mutex.Lock()
+	if p.stopping {
+		done := p.stopDone
+		p.mutex.Unlock()
+		if done != nil {
+			<-done
+		}
+		p.mutex.RLock()
+		err := p.stopErr
+		p.mutex.RUnlock()
+		return err
+	}
 
-	// 停止缓存清理协程
+	if !p.running {
+		p.mutex.Unlock()
+		return nil
+	}
+	p.stopping = true
+	p.stopErr = nil
+	p.stopDone = make(chan struct{})
+	done := p.stopDone
+	server := p.server
+	transport := p.transport
+	streamTransport := p.streamTransport
+	h2cTransport := p.h2cTransport
+	p.mutex.Unlock()
+
+	// Never hold p.mutex while waiting for background workers or active HTTP
+	// handlers. Both paths can legitimately take a runtime/config snapshot.
 	p.stopCacheCleanup()
 	p.stopRangeProbeLoop()
 	p.stopDBExportSyncLoop()
@@ -446,35 +617,50 @@ func (p *ProxyServer) Stop() error {
 		p.sizeMapDone = nil
 	}
 
-	if p.server != nil {
+	var stopErr error
+	if server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := p.server.Shutdown(ctx); err != nil {
+		if err := server.Shutdown(ctx); err != nil {
 			log.Errorf("[%s] Error shutting down proxy server: %v", internal.TagServer, err)
-			return err
+			stopErr = err
 		}
+		cancel()
 	}
 
 	// 关闭 HTTP Transport 的连接池，确保重启时没有残留连接
-	if p.transport != nil {
-		p.transport.CloseIdleConnections()
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
+	if streamTransport != nil && streamTransport != transport {
+		streamTransport.CloseIdleConnections()
 	}
 
 	// 关闭 H2C Transport 的连接池
-	if p.h2cTransport != nil {
-		p.h2cTransport.CloseIdleConnections()
+	if h2cTransport != nil {
+		h2cTransport.CloseIdleConnections()
 	}
 
 	p.closeLocalStore()
 
-	p.running = false
+	p.mutex.Lock()
+	if p.server == server {
+		p.server = nil
+		p.running = false
+	}
+	p.stopping = false
+	p.stopErr = stopErr
+	close(done)
+	p.mutex.Unlock()
 	log.Info("[" + internal.TagServer + "] Encrypt proxy server stopped")
-	return nil
+	return stopErr
 }
 
 // UpdateConfig 更新配置（热更新）
 func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
+	if p == nil || config == nil {
+		return
+	}
+	config = cloneProxyConfig(config)
 	// Compile regex BEFORE locking to avoid blocking reads too long?
 	// Or just do it all under lock but ensure assignment is last.
 	applyLearningDefaults(config)
@@ -559,28 +745,75 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		}
 	}
 
+	if config.StreamBufferKB > 0 {
+		effectiveKB := clampStreamBufferKB(config.StreamBufferKB)
+		config.StreamBufferKB = effectiveKB
+		streamBufferSize.Store(int64(effectiveKB * 1024))
+	}
+	workingConfig := cloneProxyConfig(config)
+
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	p.config = config
-	if p.config.StreamBufferKB > 0 {
-		effectiveKB := clampStreamBufferKB(p.config.StreamBufferKB)
-		p.config.StreamBufferKB = effectiveKB
-		streamBufferSize = effectiveKB * 1024
+	if p.stopping {
+		p.mutex.Unlock()
+		return
 	}
+	p.config = workingConfig
+	p.runtimeConfig = config
 	p.rebuildEncryptPathIndex()
-	if p.httpClient != nil {
-		p.httpClient.Timeout = p.upstreamTimeout()
+
+	// http.Client and http.Transport configuration must not be mutated after
+	// requests have started. Build fresh transports/clients and atomically
+	// publish them; in-flight requests continue safely on the previous runtime.
+	oldTransport := p.transport
+	oldStreamTransport := p.streamTransport
+	transport := oldTransport
+	if oldTransport != nil {
+		transport = oldTransport.Clone()
+		transport.ResponseHeaderTimeout = time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600))*time.Second + 2*time.Second
+		transport.Proxy = newProxyResolver(config)
 	}
-	if p.probeClient != nil {
-		p.probeClient.Timeout = p.probeTimeout()
+	streamTransport := oldStreamTransport
+	if oldStreamTransport != nil {
+		streamTransport = oldStreamTransport.Clone()
+		streamTransport.ResponseHeaderTimeout = time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600))*time.Second + 2*time.Second
+		streamTransport.Proxy = newProxyResolver(config)
 	}
-	if p.transport != nil {
-		p.transport.ResponseHeaderTimeout = p.upstreamTimeout() + 2*time.Second
-		p.transport.Proxy = newProxyResolver(config)
+
+	controlBase := http.RoundTripper(transport)
+	probeBase := http.RoundTripper(transport)
+	streamBase := http.RoundTripper(streamTransport)
+	if p.h2cTransport != nil {
+		controlBase = p.h2cTransport
+		probeBase = p.h2cTransport
+		streamBase = p.h2cTransport
 	}
-	if p.streamTransport != nil {
-		p.streamTransport.ResponseHeaderTimeout = 0
-		p.streamTransport.Proxy = newProxyResolver(config)
+	noRedirect := func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	p.httpClient = &http.Client{
+		Timeout:       time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600)) * time.Second,
+		CheckRedirect: noRedirect,
+		Transport:     &instrumentedRoundTripper{base: controlBase, stats: &p.controlHTTPStats},
+	}
+	p.probeClient = &http.Client{
+		Timeout:       time.Duration(clampSeconds(config.ProbeTimeoutSeconds, 5, 1, 30)) * time.Second,
+		CheckRedirect: noRedirect,
+		Transport:     &instrumentedRoundTripper{base: probeBase, stats: &p.probeHTTPStats},
+	}
+	p.streamClient = &http.Client{
+		Timeout:       0,
+		CheckRedirect: noRedirect,
+		Transport:     &instrumentedRoundTripper{base: streamBase, stats: &p.streamHTTPStats},
+	}
+	p.transport = transport
+	p.streamTransport = streamTransport
+	p.mutex.Unlock()
+
+	if oldTransport != nil && oldTransport != transport {
+		oldTransport.CloseIdleConnections()
+	}
+	if oldStreamTransport != nil && oldStreamTransport != streamTransport {
+		oldStreamTransport.CloseIdleConnections()
 	}
 	log.Infof("[%s] Proxy Config updated successfully", internal.TagConfig)
 }

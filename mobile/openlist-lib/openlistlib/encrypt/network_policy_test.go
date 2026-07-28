@@ -5,11 +5,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
-	"os"
 	"strconv"
 	"testing"
 	"time"
 )
+
+func setProxyEnvironment(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		t.Setenv(key, "http://127.0.0.1:9999")
+	}
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+}
 
 func TestIsLocalOrPrivateHost(t *testing.T) {
 	cases := []struct {
@@ -74,10 +82,7 @@ func TestClientSideStreamAbortDoesNotTriggerBackoff(t *testing.T) {
 }
 
 func TestProxyResolverDefaultUsesEnvProxyForPublicHosts(t *testing.T) {
-	t.Setenv("http_proxy", "http://127.0.0.1:9999")
-	t.Setenv("https_proxy", "http://127.0.0.1:9999")
-	_ = os.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
-	_ = os.Setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+	setProxyEnvironment(t)
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
 	resolver := newProxyResolver(&ProxyConfig{})
@@ -91,7 +96,7 @@ func TestProxyResolverDefaultUsesEnvProxyForPublicHosts(t *testing.T) {
 }
 
 func TestProxyResolverByProviderRule(t *testing.T) {
-	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	setProxyEnvironment(t)
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
 	req.Header.Set("X-Encrypt-Provider", "onedrive")
 	resolver := newProxyResolver(&ProxyConfig{
@@ -110,7 +115,7 @@ func TestProxyResolverByProviderRule(t *testing.T) {
 }
 
 func TestProxyResolverRespectsLocalBypass(t *testing.T) {
-	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	setProxyEnvironment(t)
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/ping", nil)
 	resolver := newProxyResolver(&ProxyConfig{
 		EnableLocalBypass: true,
@@ -126,7 +131,7 @@ func TestProxyResolverRespectsLocalBypass(t *testing.T) {
 }
 
 func TestProxyResolverLocalBypassWinsOverProxyDefault(t *testing.T) {
-	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	setProxyEnvironment(t)
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:5244/ping", nil)
 	req.Header.Set("X-Encrypt-Provider", "onedrive")
 	resolver := newProxyResolver(&ProxyConfig{
@@ -144,7 +149,7 @@ func TestProxyResolverLocalBypassWinsOverProxyDefault(t *testing.T) {
 }
 
 func TestProxyResolverUnmatchedDefaultDirect(t *testing.T) {
-	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	setProxyEnvironment(t)
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
 	resolver := newProxyResolver(&ProxyConfig{
 		RoutingMode:              routingModeByProvider,
@@ -163,7 +168,7 @@ func TestProxyResolverUnmatchedDefaultDirect(t *testing.T) {
 }
 
 func TestProxyResolverUnmatchedDefaultProxy(t *testing.T) {
-	t.Setenv("http_proxy", "http://127.0.0.1:9999")
+	setProxyEnvironment(t)
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
 	resolver := newProxyResolver(&ProxyConfig{
 		RoutingMode:             routingModeByProvider,

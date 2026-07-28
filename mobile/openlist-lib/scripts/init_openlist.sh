@@ -7,9 +7,21 @@ OPENLIST_LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 echo "Working in: $OPENLIST_LIB_DIR"
 
 GIT_REPO="https://github.com/OpenListTeam/OpenList.git"
-TAG_NAME=$(git -c 'versionsort.suffix=-' ls-remote --exit-code --refs --sort='version:refname' --tags $GIT_REPO | tail -n 1 | cut -d'/' -f3)
+TAG_NAME="${OPENLIST_TAG:-}"
+if [ -z "$TAG_NAME" ]; then
+    UPSTREAM_VERSION_FILE="$OPENLIST_LIB_DIR/UPSTREAM_VERSION"
+    if [ ! -f "$UPSTREAM_VERSION_FILE" ]; then
+        echo "Missing upstream version pin: $UPSTREAM_VERSION_FILE"
+        exit 1
+    fi
+    IFS= read -r TAG_NAME < "$UPSTREAM_VERSION_FILE"
+fi
+if [ -z "$TAG_NAME" ]; then
+    echo "OpenList upstream version must not be empty"
+    exit 1
+fi
 
-echo "OpenList - ${TAG_NAME}"
+echo "OpenList pinned upstream - ${TAG_NAME}"
 
 cd "$OPENLIST_LIB_DIR"
 

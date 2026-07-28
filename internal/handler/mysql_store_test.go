@@ -22,6 +22,7 @@ func TestPreserveV2FileMetaRecordKeepsPlainSizeForSizeOnlyUpdate(t *testing.T) {
 		HeaderLen:         encryption.ContentHeaderSize(),
 		NonceField:        nonce,
 		RawURL:            "https://cdn.example/movie.bin",
+		RawURLAuthScope:   "sha256:test-scope",
 		Sign:              "sign",
 		UpstreamFetchedAt: fetchedAt,
 	}
@@ -50,6 +51,9 @@ func TestPreserveV2FileMetaRecordKeepsPlainSizeForSizeOnlyUpdate(t *testing.T) {
 	}
 	if incoming.RawURL != existing.RawURL || incoming.Sign != existing.Sign || incoming.EncryptedPath != existing.EncryptedPath || incoming.Name != existing.Name {
 		t.Fatal("existing path metadata was not preserved")
+	}
+	if incoming.RawURLAuthScope != existing.RawURLAuthScope {
+		t.Fatalf("raw URL auth scope=%q, want %q", incoming.RawURLAuthScope, existing.RawURLAuthScope)
 	}
 	if !incoming.UpstreamFetchedAt.Equal(fetchedAt) {
 		t.Fatalf("upstream fetched at=%v, want %v", incoming.UpstreamFetchedAt, fetchedAt)
