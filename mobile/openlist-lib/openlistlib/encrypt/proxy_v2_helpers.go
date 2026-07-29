@@ -94,6 +94,12 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 	}
 	currentURL := target
 	currentAuth := authHeaders
+	if !isInternalAlistTarget(currentURL, p.getAlistURL()) {
+		currentAuth = authHeaders.Clone()
+		for _, key := range sensitivePlaybackHeaders {
+			currentAuth.Del(key)
+		}
+	}
 	for hop := 0; hop <= maxHops; hop++ {
 		req, err := http.NewRequestWithContext(inspectCtx, http.MethodGet, currentURL, nil)
 		if err != nil {
@@ -191,13 +197,20 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 	return meta, false
 }
 
-func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, target string, authHeaders http.Header, encPath *EncryptPath, ciphertextSize int64, encryptedPath string) ContentMeta {
+func (p *ProxyServer) inspectEncryptedContentWithFallbackConfirmed(
+	ctx context.Context,
+	target string,
+	authHeaders http.Header,
+	encPath *EncryptPath,
+	ciphertextSize int64,
+	encryptedPath string,
+) (ContentMeta, bool) {
 	meta, confirmed := p.inspectEncryptedContentConfirmed(ctx, target, authHeaders, encPath, ciphertextSize)
 	if confirmed {
-		return meta
+		return meta, true
 	}
 	if p == nil || encPath == nil || strings.TrimSpace(encryptedPath) == "" {
-		return meta
+		return meta, false
 	}
 	// Defensive: strip any leading /dav or /d prefix so candidates don't double up
 	if strings.HasPrefix(encryptedPath, "/dav") {
@@ -206,11 +219,11 @@ func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, t
 		encryptedPath = strings.TrimPrefix(encryptedPath, "/d")
 	}
 	if encryptedPath == "" {
-		return meta
+		return meta, false
 	}
 	alistURL := strings.TrimSpace(p.getAlistURL())
 	if alistURL == "" {
-		return meta
+		return meta, false
 	}
 	candidates := []string{
 		alistURL + "/dav" + encryptedPath,
@@ -235,9 +248,14 @@ func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, t
 				log.Infof("[v2] detected content header via fallback target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
 					safeURLForLog(candidate), fallback.EncType, fallback.HeaderLen, fallback.CiphertextSize, fallback.PlainSize)
 			}
-			return fallback
+			return fallback, true
 		}
 	}
+	return meta, false
+}
+
+func (p *ProxyServer) inspectEncryptedContentWithFallback(ctx context.Context, target string, authHeaders http.Header, encPath *EncryptPath, ciphertextSize int64, encryptedPath string) ContentMeta {
+	meta, _ := p.inspectEncryptedContentWithFallbackConfirmed(ctx, target, authHeaders, encPath, ciphertextSize, encryptedPath)
 	return meta
 }
 

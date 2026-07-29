@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -42,6 +43,101 @@ func TestFileCacheTTL(t *testing.T) {
 	// 测试缓存存在
 	if cached.Name != testInfo.Name {
 		t.Errorf("Expected name %s, got %s", testInfo.Name, cached.Name)
+	}
+}
+
+func TestFileCacheRawURLChangeInvalidatesUntrustedV2Metadata(t *testing.T) {
+	server, err := NewProxyServer(&ProxyConfig{
+		AlistHost:                       "localhost",
+		AlistPort:                       5244,
+		ProxyPort:                       5245,
+		ProviderCatalogEnabled:          false,
+		ProviderCatalogTTLMinutes:       1,
+		ProviderCatalogBootstrapOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("NewProxyServer: %v", err)
+	}
+	defer server.stopRangeProbeLoop()
+	defer server.stopCacheCleanup()
+	defer server.closeLocalStore()
+
+	const cachePath = "/enc/movie.mp4"
+	server.storeFileCache(cachePath, &FileInfo{
+		Name:           "movie.mp4",
+		Size:           4096,
+		CiphertextSize: 4128,
+		ContentVersion: ContentVersionV2,
+		HeaderLen:      32,
+		NonceField:     make([]byte, 16),
+		Path:           cachePath,
+		RawURL:         "http://cdn.example/old-signature",
+	})
+	server.storeFileCache(cachePath, &FileInfo{
+		Name:   "movie.mp4",
+		Path:   cachePath,
+		RawURL: "http://cdn.example/new-signature",
+	})
+
+	cached, ok := server.loadFileCache(cachePath)
+	if !ok {
+		t.Fatal("updated file cache entry is missing")
+	}
+	if cached.RawURL != "http://cdn.example/new-signature" {
+		t.Fatalf("RawURL=%q", cached.RawURL)
+	}
+	if cached.Size != 0 || cached.CiphertextSize != 0 || cached.ContentVersion != 0 || cached.HeaderLen != 0 || len(cached.NonceField) != 0 {
+		t.Fatalf("stale V2 metadata survived identity change: %+v", cached)
+	}
+	if _, ok := server.getSizeMap(cachePath); ok {
+		t.Fatal("stale size-map entry survived identity change")
+	}
+}
+
+func TestFileCacheFirstRawURLPreservesTrustedV2Metadata(t *testing.T) {
+	server, err := NewProxyServer(&ProxyConfig{
+		AlistHost:                       "localhost",
+		AlistPort:                       5244,
+		ProxyPort:                       5245,
+		ProviderCatalogEnabled:          false,
+		ProviderCatalogTTLMinutes:       1,
+		ProviderCatalogBootstrapOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("NewProxyServer: %v", err)
+	}
+	defer server.stopRangeProbeLoop()
+	defer server.stopCacheCleanup()
+	defer server.closeLocalStore()
+
+	const cachePath = "/enc/movie.mp4"
+	nonce := bytes.Repeat([]byte{7}, 16)
+	server.storeFileCache(cachePath, &FileInfo{
+		Name:           "movie.mp4",
+		Size:           4096,
+		CiphertextSize: 4128,
+		ContentVersion: ContentVersionV2,
+		HeaderLen:      32,
+		NonceField:     nonce,
+		Path:           cachePath,
+	})
+	server.storeFileCache(cachePath, &FileInfo{
+		Name:   "movie.mp4",
+		Path:   cachePath,
+		RawURL: "http://cdn.example/first-signature",
+	})
+
+	cached, ok := server.loadFileCache(cachePath)
+	if !ok {
+		t.Fatal("updated file cache entry is missing")
+	}
+	if cached.RawURL != "http://cdn.example/first-signature" {
+		t.Fatalf("RawURL=%q", cached.RawURL)
+	}
+	if cached.Size != 4096 || cached.CiphertextSize != 4128 ||
+		cached.ContentVersion != ContentVersionV2 || cached.HeaderLen != 32 ||
+		!bytes.Equal(cached.NonceField, nonce) {
+		t.Fatalf("trusted V2 metadata was discarded when first RawURL was attached: %+v", cached)
 	}
 }
 
