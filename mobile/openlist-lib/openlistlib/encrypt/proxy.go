@@ -747,6 +747,7 @@ func (p *ProxyServer) markWebdavNegative(requestPath string) {
 	if key == "" {
 		return
 	}
+	p.ensureRuntimeCaches()
 	p.webdavNegativeMu.Lock()
 	defer p.webdavNegativeMu.Unlock()
 	p.webdavNegativeCache[key] = time.Now().Add(p.webdavNegativeTTL())
@@ -796,6 +797,68 @@ func convertShowNameByRule(ep *EncryptPath, pathText string) string {
 		return path.Base(pathText)
 	}
 	return ConvertShowNameWithSuffix(ep.Password, ep.EncType, pathText, ep.EncSuffix)
+}
+
+type propfindCandidate struct {
+	path  string
+	stage string
+}
+
+func isKnownSubtitlePath(filePath string) bool {
+	switch strings.ToLower(path.Ext(path.Base(filePath))) {
+	case ".srt", ".ssa", ".ass", ".sub", ".smi", ".txt", ".idx",
+		".mpl", ".vtt", ".psb", ".sami", ".pjs", ".sup":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldPreferEncryptedPropfind(depthHeader, filePath string) bool {
+	return isKnownSubtitlePath(filePath) && shouldRetryPropfind404(depthHeader, filePath)
+}
+
+func buildPropfindRetryCandidates(encPath *EncryptPath, filePath, originalPath, currentPath string) []propfindCandidate {
+	if encPath == nil || !encPath.EncName {
+		return nil
+	}
+
+	candidates := make([]propfindCandidate, 0, 3)
+	seen := make(map[string]struct{}, 4)
+	addCandidate := func(candidatePath, stage string) {
+		if candidatePath == "" {
+			return
+		}
+		if !strings.HasPrefix(candidatePath, "/") {
+			candidatePath = "/" + candidatePath
+		}
+		if candidatePath == currentPath {
+			return
+		}
+		if _, ok := seen[candidatePath]; ok {
+			return
+		}
+		seen[candidatePath] = struct{}{}
+		candidates = append(candidates, propfindCandidate{path: candidatePath, stage: stage})
+	}
+
+	realName := convertRealNameByRule(encPath, filePath)
+	addCandidate(path.Join(path.Dir(filePath), realName), "fallback-encrypted-with-suffix")
+
+	// Subtitle players commonly probe a fixed list of extensions for every video.
+	// The canonical encrypted name (or a cached exact mapping) is deterministic, so
+	// probing plaintext and legacy variants only multiplies expected 404s. Directory
+	// listings still populate the exact-name cache for legacy files.
+	if isKnownSubtitlePath(filePath) {
+		return candidates
+	}
+
+	if encPath.EncSuffix != "" {
+		noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, filePath, "")
+		addCandidate(path.Join(path.Dir(filePath), noSuffixRealName), "fallback-encrypted-no-suffix")
+	}
+	addCandidate(originalPath, "fallback-original-path")
+	return candidates
 }
 
 func (p *ProxyServer) initSizeMap() {
@@ -3875,11 +3938,15 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 
 	// PROPFIND 特殊处理：检查文件缓存来判断是否是文件
 	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
-		// 先计算加密后的路径用于缓存查找
-		// alist-encrypt: const realName = convertRealName(passwdInfo.password, passwdInfo.encType, url)
-		//                const sourceUrl = path.dirname(url) + '/' + realName
-		//                const sourceFileInfo = await getFileInfo(sourceUrl)
-		if fileName != "/" && fileName != "." {
+		if shouldPreferEncryptedPropfind(r.Header.Get("Depth"), filePath) {
+			// Players probe many subtitle suffixes back-to-back. Start from the
+			// deterministic encrypted path so each missing suffix costs one request.
+			methodNeedConvert = true
+		} else if fileName != "/" && fileName != "." {
+			// 先计算加密后的路径用于缓存查找
+			// alist-encrypt: const realName = convertRealName(passwdInfo.password, passwdInfo.encType, url)
+			//                const sourceUrl = path.dirname(url) + '/' + realName
+			//                const sourceFileInfo = await getFileInfo(sourceUrl)
 			realName := convertRealNameByRule(encPath, filePath)
 			// 缓存中存储的是完整路径（包含 /dav 前缀），所以查找时也用完整路径
 			sourceUrl := path.Join(path.Dir(filePath), realName)
@@ -3929,36 +3996,65 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// and may return storage-specific redirects or proxied content. Rewriting
 	// to /d here breaks that flow and can trigger 401s on encrypted files.
 
-	targetURL := p.getAlistURL() + targetURLPath
+	internalTargetURL := p.getAlistURL() + targetURLPath
 	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
+		internalTargetURL += "?" + r.URL.RawQuery
 	}
-	if r.Method == "GET" && encPath != nil {
-		if cached, ok := p.loadFileCache(filePath); ok && strings.TrimSpace(cached.RawURL) != "" {
-			targetURL = strings.TrimSpace(cached.RawURL)
-		} else if strings.HasPrefix(filePath, "/dav/") {
+	targetURL := internalTargetURL
+	usingRawURL := false
+	usablePlaybackRawURL := func(candidate string) string {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" ||
+			isInternalAlistTarget(candidate, p.getAlistURL()) ||
+			p.rawURLFailureBlocked(candidate) {
+			return ""
+		}
+		return candidate
+	}
+	cachePlaybackTarget := func(rawURL string) {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			return
+		}
+		cachePaths := []string{filePath}
+		if strings.HasPrefix(filePath, "/dav/") {
+			cachePaths = append(cachePaths, strings.TrimPrefix(filePath, "/dav"))
+		}
+		for _, cachePath := range cachePaths {
+			p.storeFileCache(cachePath, &FileInfo{
+				Name:   path.Base(cachePath),
+				IsDir:  false,
+				Path:   cachePath,
+				RawURL: rawURL,
+			})
+		}
+	}
+	if r.Method == http.MethodGet && encPath != nil && isFirstFrameRangeHint(r.Method, clientRangeHeader) {
+		var rawURL string
+		if cached, ok := p.loadFileCache(filePath); ok {
+			// Older cache entries may contain the stable /dav fallback. Treat
+			// those and recently failed signed URLs as a cache miss.
+			rawURL = usablePlaybackRawURL(cached.RawURL)
+		}
+		if rawURL == "" && strings.HasPrefix(filePath, "/dav/") {
 			noDav := strings.TrimPrefix(filePath, "/dav")
-			if cached, ok := p.loadFileCache(noDav); ok && strings.TrimSpace(cached.RawURL) != "" {
-				targetURL = strings.TrimSpace(cached.RawURL)
-			} else if rawURL, size := p.resolveRawURLViaFsGet(r.Context(), r.Header, noDav); strings.TrimSpace(rawURL) != "" {
-				targetURL = rawURL
-				p.storeFileCache(noDav, &FileInfo{
-					Name:   path.Base(noDav),
-					Size:   size,
-					IsDir:  false,
-					Path:   noDav,
-					RawURL: rawURL,
-				})
-				p.storeFileCache(filePath, &FileInfo{
-					Name:   path.Base(filePath),
-					Size:   size,
-					IsDir:  false,
-					Path:   filePath,
-					RawURL: rawURL,
-				})
-				log.Infof("%s WebDAV GET resolved raw_url via fs/get: display=%s rawURL=%s size=%d",
-					internal.LogPrefix(ctx, internal.TagProxy), noDav, safeURLForLog(rawURL), size)
+			if cached, ok := p.loadFileCache(noDav); ok {
+				rawURL = usablePlaybackRawURL(cached.RawURL)
 			}
+		}
+		if rawURL == "" {
+			var ciphertextSize int64
+			rawURL, ciphertextSize = p.resolveEncryptedRawURLViaFsGet(r.Context(), r.Header, targetURLPath)
+			rawURL = usablePlaybackRawURL(rawURL)
+			if rawURL != "" {
+				cachePlaybackTarget(rawURL)
+				log.Infof("%s WebDAV first-frame resolved raw_url via strict fs/get: display=%s rawURL=%s ciphertextSize=%d",
+					internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(rawURL), ciphertextSize)
+			}
+		}
+		if rawURL != "" {
+			targetURL = rawURL
+			usingRawURL = targetURL != internalTargetURL
 		}
 	}
 	negativeCachePath := targetURLPath
@@ -4091,6 +4187,9 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
+	if r.Method == http.MethodGet {
+		applyPlaybackOriginCredentials(req.Header, r.Header, targetURL, p.getAlistURL())
+	}
 	if r.Method == "PUT" && uploadMeta.IsV2() {
 		startOffset := parseUploadStartOffset(r.Header.Get("Content-Range"))
 		rewriteUploadHeadersForV2(req, uploadMeta, startOffset, r.Header.Get("Content-Range"))
@@ -4160,7 +4259,13 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if !cachedFound {
-				meta = p.inspectEncryptedContent(r.Context(), targetURL, r.Header, encPath, 0)
+				inspectHeaders := r.Header
+				if !isInternalAlistTarget(targetURL, p.getAlistURL()) {
+					inspectHeaders = r.Header.Clone()
+					inspectHeaders.Del("Authorization")
+					inspectHeaders.Del("Cookie")
+				}
+				meta = p.inspectEncryptedContent(r.Context(), targetURL, inspectHeaders, encPath, 0)
 				// Cache the inspection result for future requests
 				if filePath != "" {
 					cacheInfo := &FileInfo{
@@ -4231,8 +4336,66 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p.markUpstreamSuccess()
-	if convertedTargetURL && (r.Method == "GET" || r.Method == "HEAD" || r.Method == "POST") && resp.StatusCode == http.StatusNotFound {
+	rawURLFallbackHandled := false
+	retryPlaybackGET := func(nextTarget string) (*http.Response, error) {
+		retryReq, retryErr := http.NewRequestWithContext(reqCtx, http.MethodGet, nextTarget, nil)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		retryReq.Header = req.Header.Clone()
+		applyPlaybackOriginCredentials(retryReq.Header, r.Header, nextTarget, p.getAlistURL())
+		return client.Do(retryReq)
+	}
+	if usingRawURL && isExpiredSignedURLStatus(resp.StatusCode) {
+		rawURLFallbackHandled = true
 		resp.Body.Close()
+		staleRawURL := targetURL
+		p.markRawURLFailure(staleRawURL)
+		freshRawURL, _ := p.resolveEncryptedRawURLViaFsGet(r.Context(), r.Header, targetURLPath)
+		freshRawURL = strings.TrimSpace(freshRawURL)
+		if freshRawURL != "" &&
+			freshRawURL != staleRawURL &&
+			freshRawURL != internalTargetURL &&
+			!p.rawURLFailureBlocked(freshRawURL) {
+			if refreshedResp, refreshErr := retryPlaybackGET(freshRawURL); refreshErr == nil {
+				resp = refreshedResp
+				targetURL = freshRawURL
+				if isExpiredSignedURLStatus(resp.StatusCode) {
+					p.markRawURLFailure(freshRawURL)
+				} else if resp.StatusCode < http.StatusBadRequest {
+					p.clearRawURLFailure(freshRawURL)
+					cachePlaybackTarget(freshRawURL)
+				}
+			} else {
+				log.Debugf("%s WebDAV raw_url refresh request failed: path=%s target=%s err=%v",
+					internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(freshRawURL), refreshErr)
+			}
+		}
+		if resp == nil || isExpiredSignedURLStatus(resp.StatusCode) {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			internalResp, internalErr := retryPlaybackGET(internalTargetURL)
+			if internalErr != nil {
+				p.markUpstreamFailure(internalErr)
+				http.Error(w, internalErr.Error(), http.StatusBadGateway)
+				return
+			}
+			resp = internalResp
+			targetURL = internalTargetURL
+			usingRawURL = false
+			// Do not cache /dav as RawURL: doing so suppresses future fs/get
+			// refreshes and can pin first-frame playback to the slower hop.
+			log.Infof("%s WebDAV stale raw_url fallback: path=%s stale=%s target=%s status=%d",
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(staleRawURL), safeURLForLog(internalTargetURL), resp.StatusCode)
+		}
+	}
+	if usingRawURL && resp != nil && resp.StatusCode < http.StatusBadRequest {
+		p.clearRawURLFailure(targetURL)
+	}
+	if convertedTargetURL && !rawURLFallbackHandled &&
+		(r.Method == "GET" || r.Method == "HEAD" || r.Method == "POST") &&
+		resp.StatusCode == http.StatusNotFound {
 		fallbackPaths := make([]string, 0, 2)
 		if encPath != nil && encPath.EncName && encPath.EncSuffix != "" {
 			noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, filePath, "")
@@ -4244,7 +4407,6 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				fallbackPaths = append(fallbackPaths, noSuffixPath)
 			}
 		}
-		fallbackPaths = append(fallbackPaths, originalTargetURLPath)
 		for _, fallbackPath := range fallbackPaths {
 			p.debugf("filename", "webdav fallback path method=%s from=%s to=%s", r.Method, targetURLPath, fallbackPath)
 			fallbackTargetURL := p.getAlistURL() + fallbackPath
@@ -4276,6 +4438,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			if err2 != nil {
 				continue
 			}
+			resp.Body.Close()
 			resp = resp2
 			targetURL = fallbackTargetURL
 			targetURLPath = fallbackPath
@@ -4298,42 +4461,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// 候选顺序：带后缀密文 -> 无后缀密文（仅配置了后缀）-> 原始路径
 	if r.Method == "PROPFIND" && resp.StatusCode == 404 && encPath != nil && encPath.EncName &&
 		shouldRetryPropfind404(r.Header.Get("Depth"), filePath) {
-		// 关闭首个 404 响应体
-		resp.Body.Close()
-		fileName := path.Base(filePath)
-		if fileName != "/" && fileName != "." {
-			type propfindCandidate struct {
-				path  string
-				stage string
-			}
-			candidates := make([]propfindCandidate, 0, 3)
-			seen := make(map[string]bool, 3)
-			addCandidate := func(candidatePath, stage string) {
-				if candidatePath == "" {
-					return
-				}
-				if !strings.HasPrefix(candidatePath, "/") {
-					candidatePath = "/" + candidatePath
-				}
-				if seen[candidatePath] {
-					return
-				}
-				seen[candidatePath] = true
-				candidates = append(candidates, propfindCandidate{path: candidatePath, stage: stage})
-			}
-
-			realName := convertRealNameByRule(encPath, filePath)
-			addCandidate(path.Join(path.Dir(filePath), realName), "fallback-encrypted-with-suffix")
-			if encPath.EncSuffix != "" {
-				noSuffixRealName := ConvertRealNameWithSuffix(encPath.Password, encPath.EncType, filePath, "")
-				addCandidate(path.Join(path.Dir(filePath), noSuffixRealName), "fallback-encrypted-no-suffix")
-			}
-			addCandidate(originalTargetURLPath, "fallback-original-path")
-
+		candidates := buildPropfindRetryCandidates(encPath, filePath, originalTargetURLPath, targetURLPath)
+		if len(candidates) > 0 {
+			// Keep the original response readable when there is no safe fallback.
+			resp.Body.Close()
 			for i, candidate := range candidates {
-				if candidate.path == targetURLPath {
-					continue
-				}
 				retryTargetURL := p.getAlistURL() + candidate.path
 				if r.URL.RawQuery != "" {
 					retryTargetURL += "?" + r.URL.RawQuery
@@ -4357,29 +4489,35 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 						}
 					}
 				}
-				resp, err = client.Do(retryReq)
-				retryCancel()
-				if err != nil {
-					p.debugf("webdav", "PROPFIND retry failed stage=%s path=%s err=%v", candidate.stage, candidate.path, err)
+				retryResp, retryErr := client.Do(retryReq)
+				if retryErr != nil {
+					retryCancel()
+					p.debugf("webdav", "PROPFIND retry failed stage=%s path=%s err=%v", candidate.stage, candidate.path, retryErr)
 					if i == len(candidates)-1 {
-						p.markUpstreamFailure(err)
-						http.Error(w, err.Error(), http.StatusBadGateway)
+						p.markUpstreamFailure(retryErr)
+						http.Error(w, retryErr.Error(), http.StatusBadGateway)
 						return
 					}
 					continue
 				}
+				resp = retryResp
 				p.markUpstreamSuccess()
 				p.debugf("webdav", "PROPFIND retry response stage=%s path=%s status=%d", candidate.stage, candidate.path, resp.StatusCode)
-				log.Infof("%s WebDAV PROPFIND retry: stage=%s candidate=%s status=%d",
-					internal.LogPrefix(ctx, internal.TagProxy), candidate.stage, candidate.path, resp.StatusCode)
 				targetURLPath = candidate.path
 				targetURL = retryTargetURL
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					log.Infof("%s WebDAV PROPFIND retry resolved: stage=%s candidate=%s status=%d",
+						internal.LogPrefix(ctx, internal.TagProxy), candidate.stage, candidate.path, resp.StatusCode)
 					p.clearWebdavNegative(negativeCachePath)
+					// The response body is consumed below; cancel only afterwards.
+					defer retryCancel()
 					break
 				}
 				if i < len(candidates)-1 {
 					resp.Body.Close()
+					retryCancel()
+				} else {
+					defer retryCancel()
 				}
 			}
 		}
@@ -4668,10 +4806,28 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				if strings.HasPrefix(encProbePath, "/dav") {
 					encProbePath = strings.TrimPrefix(encProbePath, "/dav")
 				}
-				meta = p.inspectEncryptedContentWithFallback(r.Context(), targetURL, req.Header, encPath, fileSize, encProbePath)
+				// The probe helper strips private credentials from external CDN
+				// requests and keeps this original header set for authenticated
+				// internal /dav fallback probes.
+				metaHeaders := r.Header
+				meta = p.inspectEncryptedContentWithFallback(r.Context(), targetURL, metaHeaders, encPath, fileSize, encProbePath)
 			}
 			originalSize := fileSize
 			fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
+			clientRangeStart := int64(0)
+			clientRangeEnd := fileSize - 1
+			hasClientRange := false
+			if clientRangeHeader != "" {
+				var rangeErr error
+				clientRangeStart, clientRangeEnd, hasClientRange, rangeErr = parseSingleRange(clientRangeHeader, fileSize)
+				if rangeErr != nil {
+					w.Header().Del("Content-Length")
+					w.Header().Del("Content-Range")
+					writeRangeNotSatisfiable(w, fileSize)
+					return
+				}
+				startPos = clientRangeStart
+			}
 			if meta.IsV2() {
 				p.storeFileCache(filePath, &FileInfo{
 					Name:           path.Base(filePath),
@@ -4722,9 +4878,66 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			}
 
 			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+			validatedRangeEnd := int64(-1)
 			if clientRangeHeader != "" && !upstreamIsRange {
 				p.markRangeIncompatible(targetURL, filePath)
 			} else if clientRangeHeader != "" && upstreamIsRange {
+				actualRange, validContentRange := parseContentRange(resp.Header.Get("Content-Range"))
+				expectedStart := clientRangeStart
+				if meta.IsV2() {
+					expectedStart = meta.UpstreamOffset(clientRangeStart)
+				}
+				var validationErr error
+				switch {
+				case !hasClientRange:
+					validationErr = fmt.Errorf("client range %q is invalid", clientRangeHeader)
+				case !validContentRange:
+					validationErr = fmt.Errorf("upstream Content-Range %q is invalid", resp.Header.Get("Content-Range"))
+				case actualRange.Start != expectedStart:
+					validationErr = fmt.Errorf(
+						"upstream Content-Range %q starts at %d, expected %d",
+						resp.Header.Get("Content-Range"),
+						actualRange.Start,
+						expectedStart,
+					)
+				default:
+					actualPlainEnd := actualRange.End
+					if meta.IsV2() {
+						actualPlainEnd -= meta.HeaderLen
+					}
+					if actualPlainEnd < clientRangeStart {
+						validationErr = fmt.Errorf(
+							"upstream Content-Range %q maps before requested plaintext offset %d",
+							resp.Header.Get("Content-Range"),
+							clientRangeStart,
+						)
+						break
+					}
+					if actualPlainEnd > clientRangeEnd {
+						actualPlainEnd = clientRangeEnd
+					}
+					validatedRangeEnd = actualPlainEnd
+
+					if contentLength := strings.TrimSpace(resp.Header.Get("Content-Length")); contentLength != "" {
+						if declaredLength, parseErr := strconv.ParseInt(contentLength, 10, 64); parseErr == nil {
+							actualLength := actualRange.End - actualRange.Start + 1
+							if declaredLength < actualLength {
+								validationErr = fmt.Errorf(
+									"upstream Content-Length %d is shorter than Content-Range span %d",
+									declaredLength,
+									actualLength,
+								)
+							}
+						}
+					}
+				}
+				if validationErr != nil {
+					p.markRangeIncompatible(targetURL, filePath)
+					w.Header().Del("Content-Length")
+					w.Header().Del("Content-Range")
+					http.Error(w, validationErr.Error(), http.StatusBadGateway)
+					return
+				}
 				p.markRangeCompatible(targetURL, filePath)
 			}
 			if clientRangeHeader != "" && !upstreamIsRange && startPos > 0 {
@@ -4770,15 +4983,26 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				}
 			}
 
-			if meta.IsV2() && upstreamIsRange && clientRangeHeader != "" {
-				if _, end, ok := parseRange(clientRangeHeader, fileSize); ok {
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, end, fileSize))
-					w.Header().Set("Content-Length", strconv.FormatInt(end-startPos+1, 10))
-				}
+			var readerToDecrypt io.Reader = resp.Body
+			expectedRangeLength := int64(-1)
+			if upstreamIsRange && hasClientRange && validatedRangeEnd >= clientRangeStart {
+				expectedRangeLength = validatedRangeEnd - clientRangeStart + 1
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", clientRangeStart, validatedRangeEnd, fileSize))
+				w.Header().Set("Content-Length", strconv.FormatInt(expectedRangeLength, 10))
+				readerToDecrypt = io.LimitReader(resp.Body, expectedRangeLength)
 			}
-			decryptReader := NewDecryptReader(resp.Body, encryptor)
+			decryptReader := NewDecryptReader(readerToDecrypt, encryptor)
 			w.WriteHeader(statusCode)
-			copyWithBuffer(w, decryptReader)
+			written, copyErr := copyWithBuffer(w, decryptReader)
+			if copyErr != nil {
+				log.Warnf("WebDAV decrypt stream failed: path=%s written=%d expected=%d err=%v",
+					filePath, written, expectedRangeLength, copyErr)
+				return
+			}
+			if expectedRangeLength >= 0 && written != expectedRangeLength {
+				log.Warnf("WebDAV decrypt stream truncated: path=%s written=%d expected=%d",
+					filePath, written, expectedRangeLength)
+			}
 			return
 		}
 	}

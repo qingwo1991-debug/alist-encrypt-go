@@ -18,6 +18,11 @@ import (
 // a long-running client to grow the process indefinitely.
 const redirectCacheMaxEntries = 4096
 
+const (
+	rawURLFailureCooldown   = 30 * time.Second
+	rawURLFailureMaxEntries = 512
+)
+
 // CachedFileInfo 带过期时间的文件信息缓存
 type CachedFileInfo struct {
 	Info     *FileInfo
@@ -185,6 +190,66 @@ func (p *ProxyServer) getFileCacheTTL() time.Duration {
 	return fileCacheTTL // 默认 10 分钟
 }
 
+func (p *ProxyServer) rawURLFailureBlocked(rawURL string) bool {
+	rawURL = strings.TrimSpace(rawURL)
+	if p == nil || rawURL == "" {
+		return false
+	}
+	p.ensureRuntimeCaches()
+	now := time.Now()
+	p.rawURLNegativeMu.Lock()
+	defer p.rawURLNegativeMu.Unlock()
+	expireAt, ok := p.rawURLNegativeCache[rawURL]
+	if !ok {
+		return false
+	}
+	if !now.Before(expireAt) {
+		delete(p.rawURLNegativeCache, rawURL)
+		return false
+	}
+	return true
+}
+
+func (p *ProxyServer) markRawURLFailure(rawURL string) {
+	rawURL = strings.TrimSpace(rawURL)
+	if p == nil || rawURL == "" {
+		return
+	}
+	p.ensureRuntimeCaches()
+	now := time.Now()
+	p.rawURLNegativeMu.Lock()
+	defer p.rawURLNegativeMu.Unlock()
+	if len(p.rawURLNegativeCache) >= rawURLFailureMaxEntries {
+		oldestURL := ""
+		var oldestExpiry time.Time
+		for candidate, expireAt := range p.rawURLNegativeCache {
+			if !now.Before(expireAt) {
+				delete(p.rawURLNegativeCache, candidate)
+				continue
+			}
+			if oldestURL == "" || expireAt.Before(oldestExpiry) {
+				oldestURL = candidate
+				oldestExpiry = expireAt
+			}
+		}
+		if len(p.rawURLNegativeCache) >= rawURLFailureMaxEntries && oldestURL != "" {
+			delete(p.rawURLNegativeCache, oldestURL)
+		}
+	}
+	p.rawURLNegativeCache[rawURL] = now.Add(rawURLFailureCooldown)
+}
+
+func (p *ProxyServer) clearRawURLFailure(rawURL string) {
+	rawURL = strings.TrimSpace(rawURL)
+	if p == nil || rawURL == "" {
+		return
+	}
+	p.ensureRuntimeCaches()
+	p.rawURLNegativeMu.Lock()
+	delete(p.rawURLNegativeCache, rawURL)
+	p.rawURLNegativeMu.Unlock()
+}
+
 // storeFileCache 存储文件信息到缓存（带 TTL）
 func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	p.ensureRuntimeCaches()
@@ -193,22 +258,47 @@ func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	}
 	key := normalizeCacheKey(path)
 	if existing, ok := p.loadFileCache(path); ok && existing != nil {
+		incomingRawURL := strings.TrimSpace(info.RawURL)
+		existingRawURL := strings.TrimSpace(existing.RawURL)
+		rawURLChanged := incomingRawURL != "" && existingRawURL != "" && incomingRawURL != existingRawURL
+		incomingMetaTrusted := (info.ContentVersion == ContentVersionV1 && info.Size > 0) ||
+			(info.ContentVersion == ContentVersionV2 &&
+				info.Size > 0 &&
+				info.CiphertextSize > 0 &&
+				info.HeaderLen > 0 &&
+				len(info.NonceField) == 16)
+		if rawURLChanged && !incomingMetaTrusted {
+			// A different signed URL can also represent a replaced object at the
+			// same display path. Do not bind the previous V2 nonce/size to the
+			// new identity; the next playback performs a cheap 32-byte probe.
+			info.Size = 0
+			info.CiphertextSize = 0
+			info.ContentVersion = 0
+			info.HeaderLen = 0
+			info.NonceField = nil
+			p.sizeMapMu.Lock()
+			if p.sizeMap != nil {
+				delete(p.sizeMap, key)
+				p.sizeMapDirty = true
+			}
+			p.sizeMapMu.Unlock()
+		}
 		if info.Name == "" {
 			info.Name = existing.Name
 		}
-		if info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2) {
+		if !rawURLChanged && (info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2)) {
 			info.Size = existing.Size
 		}
-		if info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+		if !rawURLChanged && info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
 			info.CiphertextSize = existing.CiphertextSize
 		}
-		if info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
+		if !rawURLChanged && info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
 			info.ContentVersion = existing.ContentVersion
 		}
-		if info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+		if !rawURLChanged && info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
 			info.HeaderLen = existing.HeaderLen
 		}
-		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+		if !rawURLChanged && len(info.NonceField) == 0 && len(existing.NonceField) > 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
 			info.NonceField = cloneNonceField(existing.NonceField)
 		}
 		if !info.IsDir && existing.IsDir {

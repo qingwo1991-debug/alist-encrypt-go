@@ -57,9 +57,6 @@ object SyncScheduler {
 
         val workName = WORK_NAME_PREFIX + taskId
 
-        // 取消已存在的调度
-        WorkManager.getInstance(context).cancelUniqueWork(workName)
-
         // 构建约束
         val constraints = buildConstraints(taskConfig.wifiOnly)
 
@@ -86,6 +83,7 @@ object SyncScheduler {
         WorkManager.getInstance(context)
             .enqueueUniquePeriodicWork(
                 workName,
+                // UPDATE preserves an in-flight periodic run and its schedule.
                 ExistingPeriodicWorkPolicy.UPDATE,
                 periodicWork
             )
@@ -114,9 +112,6 @@ object SyncScheduler {
         val taskJson = task.toJsonString()
         val workName = WORK_NAME_ONETIME_PREFIX + taskId
 
-        // 取消已存在的 one-time work
-        WorkManager.getInstance(context).cancelUniqueWork(workName)
-
         val constraints = buildConstraints(task.wifiOnly)
 
         val inputData = Data.Builder()
@@ -136,7 +131,9 @@ object SyncScheduler {
         WorkManager.getInstance(context)
             .enqueueUniqueWork(
                 workName,
-                ExistingWorkPolicy.REPLACE,
+                // Repeated taps while a manual run is active are coalesced into
+                // that run instead of canceling it or queueing duplicate backups.
+                ExistingWorkPolicy.KEEP,
                 oneTimeWork
             )
 

@@ -83,6 +83,8 @@ type ProxyServer struct {
 	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
 	webdavNegativeMu    sync.Mutex
 	webdavNegativeCache map[string]time.Time // path -> expireAt
+	rawURLNegativeMu    sync.Mutex
+	rawURLNegativeCache map[string]time.Time // signed URL -> expireAt
 	prefixRules         []encryptPrefixRule
 	routingMu           sync.RWMutex
 	seenProviders       map[string]time.Time
@@ -102,6 +104,10 @@ type ProxyServer struct {
 	strategySelector    *StrategySelector
 	uploadMetaMu        sync.Mutex
 	uploadMeta          map[string]uploadMetaEntry
+
+	playbackActivityOnce sync.Once
+	playbackActivity     *playbackActivityTracker
+
 	// DB export sync JWT token cache: reused across sync cycles to avoid
 	// redundant login calls. Invalidated on 401 errors.
 	dbExportTokenMu     sync.Mutex
@@ -126,6 +132,9 @@ func (s *ProxyServer) ensureRuntimeCaches() {
 		}
 		if s.webdavNegativeCache == nil {
 			s.webdavNegativeCache = make(map[string]time.Time)
+		}
+		if s.rawURLNegativeCache == nil {
+			s.rawURLNegativeCache = make(map[string]time.Time)
 		}
 	})
 }
@@ -519,10 +528,11 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	mux.HandleFunc("/public/sync-stats.html", p.handleSyncStatsPage)
 	mux.HandleFunc("/api/play/resolve", internal.WrapHandler(p.handlePlayResolve))
-	mux.HandleFunc("/api/play/stream/", internal.WrapHandler(p.handlePlayStream))
+	mux.HandleFunc("/api/play/stream/", internal.WrapHandler(p.withPlaybackActivity(p.handlePlayStream)))
 	mux.HandleFunc("/api/play/stats", internal.WrapHandler(p.handlePlayStats))
+	mux.HandleFunc("/api/play/activity", p.handlePlaybackActivity)
 	// 文件操作相关 - 包装以支持全链路追踪
-	mux.HandleFunc("/redirect/", internal.WrapHandler(p.handleRedirect))
+	mux.HandleFunc("/redirect/", internal.WrapHandler(p.withPlaybackActivity(p.handleRedirect)))
 	mux.HandleFunc("/api/fs/list", internal.WrapHandler(p.handleFsList))
 	mux.HandleFunc("/api/fs/get", internal.WrapHandler(p.handleFsGet))
 	mux.HandleFunc("/api/fs/link", internal.WrapHandler(p.handleFsLink))
@@ -533,12 +543,12 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/fs/copy", internal.WrapHandler(p.handleFsCopy))
 	mux.HandleFunc("/api/fs/rename", internal.WrapHandler(p.handleFsRename))
 	// 下载和 WebDAV - 包装以支持全链路追踪
-	mux.HandleFunc("/d/", internal.WrapHandler(p.handleDownload))
-	mux.HandleFunc("/p/", internal.WrapHandler(p.handleDownload))
-	mux.HandleFunc("/dav/", internal.WrapHandler(p.handleWebDAV))
-	mux.HandleFunc("/dav", internal.WrapHandler(p.handleWebDAV))
-	mux.HandleFunc("/dav2/", internal.WrapHandler(p.handleWebDAVV2))
-	mux.HandleFunc("/dav2", internal.WrapHandler(p.handleWebDAVV2))
+	mux.HandleFunc("/d/", internal.WrapHandler(p.withPlaybackActivity(p.handleDownload)))
+	mux.HandleFunc("/p/", internal.WrapHandler(p.withPlaybackActivity(p.handleDownload)))
+	mux.HandleFunc("/dav/", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAV)))
+	mux.HandleFunc("/dav", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAV)))
+	mux.HandleFunc("/dav2/", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAVV2)))
+	mux.HandleFunc("/dav2", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAVV2)))
 	// 根路径：直接代理到 OpenList (Alist)
 	mux.HandleFunc("/", p.handleRoot)
 
@@ -559,6 +569,7 @@ func (p *ProxyServer) Start() error {
 	p.server = server
 	p.running = true
 	proxyPort := p.config.ProxyPort
+	prewarmConfiguredV2KeysAsync(p.config)
 	go func() {
 		log.Infof("[%s] Encrypt proxy server starting on port %d", internal.TagServer, proxyPort)
 		err := server.Serve(listener)
@@ -809,6 +820,9 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.streamTransport = streamTransport
 	p.mutex.Unlock()
 
+	if p.IsRunning() {
+		prewarmConfiguredV2KeysAsync(workingConfig)
+	}
 	if oldTransport != nil && oldTransport != transport {
 		oldTransport.CloseIdleConnections()
 	}

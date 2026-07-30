@@ -63,6 +63,214 @@ func cloneHeader(dst http.Header, src http.Header) {
 	}
 }
 
+var (
+	privateOriginHeaders     = []string{"Authorization", "Cookie"}
+	sensitivePlaybackHeaders = []string{"Authorization", "Cookie", "Proxy-Authorization"}
+)
+
+func headersWithStoredOriginCredentials(base, stored http.Header) http.Header {
+	headers := make(http.Header)
+	cloneHeader(headers, base)
+	headers.Del("Proxy-Authorization")
+	for _, key := range privateOriginHeaders {
+		values := stored.Values(key)
+		if len(values) == 0 {
+			continue
+		}
+		headers.Del(key)
+		for _, value := range values {
+			headers.Add(key, value)
+		}
+	}
+	return headers
+}
+
+// copyPlaybackStreamHeaders copies ordinary client headers while keeping
+// OpenList credentials on the local origin. Signed CDN URLs are bearer
+// capabilities and must never receive local cookies or authorization headers.
+func copyPlaybackStreamHeaders(dst, clientHeaders, storedHeaders http.Header, target, alistURL string) {
+	for key, values := range clientHeaders {
+		switch strings.ToLower(key) {
+		case "host", "referer", "authorization", "cookie", "proxy-authorization":
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+	if !isInternalAlistTarget(target, alistURL) {
+		return
+	}
+	for _, key := range privateOriginHeaders {
+		values := storedHeaders.Values(key)
+		if len(values) == 0 {
+			values = clientHeaders.Values(key)
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+// applyPlaybackOriginCredentials removes every credential-like header first,
+// then restores only OpenList origin credentials for the configured internal
+// origin. Proxy-Authorization is hop-by-hop and is never forwarded.
+func applyPlaybackOriginCredentials(dst, originHeaders http.Header, target, alistURL string) {
+	if dst == nil {
+		return
+	}
+	internalTarget := isInternalAlistTarget(target, alistURL)
+	originValues := make(map[string][]string, len(privateOriginHeaders))
+	if internalTarget {
+		for _, key := range privateOriginHeaders {
+			originValues[key] = append([]string(nil), originHeaders.Values(key)...)
+		}
+	}
+	for _, key := range sensitivePlaybackHeaders {
+		dst.Del(key)
+	}
+	if !internalTarget {
+		return
+	}
+	for _, key := range privateOriginHeaders {
+		for _, value := range originValues[key] {
+			dst.Add(key, value)
+		}
+	}
+}
+
+const (
+	firstFrameWindowBytes     int64 = 2 * 1024 * 1024
+	firstFrameStartSlackBytes int64 = 1024
+)
+
+// isFirstFrameRangeHint deliberately mirrors the server playback policy:
+// signed provider URLs are only a fast path for small reads at the beginning
+// of a file. Full GETs and ordinary seeks stay on OpenList's stable /dav path.
+func isFirstFrameRangeHint(method, rangeHeader string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	rangeHeader = strings.TrimSpace(rangeHeader)
+	if !strings.HasPrefix(rangeHeader, "bytes=") {
+		return false
+	}
+	rangeSpec := strings.TrimSpace(strings.TrimPrefix(rangeHeader, "bytes="))
+	if rangeSpec == "" || strings.Contains(rangeSpec, ",") {
+		return false
+	}
+	parts := strings.SplitN(rangeSpec, "-", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil || start < 0 || start > firstFrameStartSlackBytes {
+		return false
+	}
+	endText := strings.TrimSpace(parts[1])
+	if endText == "" {
+		return true
+	}
+	end, err := strconv.ParseInt(endText, 10, 64)
+	if err != nil || end < start {
+		return false
+	}
+	return end-start+1 <= firstFrameWindowBytes
+}
+
+func isOpenEndedByteRange(rangeHeader string) bool {
+	rangeHeader = strings.TrimSpace(rangeHeader)
+	if !strings.HasPrefix(rangeHeader, "bytes=") {
+		return false
+	}
+	rangeSpec := strings.TrimSpace(strings.TrimPrefix(rangeHeader, "bytes="))
+	if rangeSpec == "" || strings.Contains(rangeSpec, ",") {
+		return false
+	}
+	parts := strings.SplitN(rangeSpec, "-", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) != "" {
+		return false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	return err == nil && start >= 0
+}
+
+func encryptedDAVPath(encryptedPath string) string {
+	encryptedPath = strings.TrimSpace(encryptedPath)
+	if encryptedPath == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(encryptedPath); err == nil && parsed.IsAbs() {
+		encryptedPath = parsed.Path
+	}
+	if decoded, err := url.PathUnescape(encryptedPath); err == nil {
+		encryptedPath = decoded
+	}
+	if !strings.HasPrefix(encryptedPath, "/") {
+		encryptedPath = "/" + encryptedPath
+	}
+	switch {
+	case encryptedPath == "/dav" || strings.HasPrefix(encryptedPath, "/dav/"):
+		return encryptedPath
+	case encryptedPath == "/dav2":
+		return "/dav"
+	case strings.HasPrefix(encryptedPath, "/dav2/"):
+		return "/dav/" + strings.TrimPrefix(encryptedPath, "/dav2/")
+	case encryptedPath == "/d" || encryptedPath == "/p":
+		return "/dav"
+	case strings.HasPrefix(encryptedPath, "/d/"):
+		return "/dav/" + strings.TrimPrefix(encryptedPath, "/d/")
+	case strings.HasPrefix(encryptedPath, "/p/"):
+		return "/dav/" + strings.TrimPrefix(encryptedPath, "/p/")
+	default:
+		return "/dav" + encryptedPath
+	}
+}
+
+func (p *ProxyServer) encryptedDAVTargetURL(encryptedPath, rawQuery string) string {
+	if p == nil {
+		return ""
+	}
+	davPath := encryptedDAVPath(encryptedPath)
+	if davPath == "" {
+		return ""
+	}
+	target := strings.TrimRight(p.getAlistURL(), "/") + davPath
+	if strings.TrimSpace(rawQuery) != "" {
+		target += "?" + strings.TrimPrefix(rawQuery, "?")
+	}
+	return target
+}
+
+func redirectOriginalRawQuery(info *RedirectInfo) string {
+	if info == nil {
+		return ""
+	}
+	for _, candidate := range []string{info.OriginalURL, info.EncryptedPath} {
+		parsed, err := url.Parse(strings.TrimSpace(candidate))
+		if err == nil && parsed.RawQuery != "" {
+			return parsed.RawQuery
+		}
+	}
+	return ""
+}
+
+func isInternalAlistTarget(target, alistURL string) bool {
+	targetURL, targetErr := url.Parse(strings.TrimSpace(target))
+	alistTarget, alistErr := url.Parse(strings.TrimSpace(alistURL))
+	if targetErr != nil || alistErr != nil || targetURL.Host == "" || alistTarget.Host == "" {
+		return false
+	}
+	return strings.EqualFold(targetURL.Scheme, alistTarget.Scheme) &&
+		strings.EqualFold(targetURL.Host, alistTarget.Host)
+}
+
+func isExpiredSignedURLStatus(status int) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusNotFound
+}
+
 func rewriteRawURLForV2(body []byte, host, scheme string) []byte {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -107,6 +315,7 @@ func (o *PlayOrchestrator) resolveViaFsGet(ctx context.Context, host, scheme str
 	targetURL := fmt.Sprintf("%s://%s/api/fs/get", scheme, host)
 	req := httptest.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body)).WithContext(ctx)
 	cloneHeader(req.Header, srcHeaders)
+	req.Header.Del("Proxy-Authorization")
 	rec := httptest.NewRecorder()
 	o.proxy.handleFsGet(rec, req)
 	respBody := rewriteRawURLForV2(rec.Body.Bytes(), host, scheme)
@@ -120,6 +329,7 @@ func (p *ProxyServer) resolveRawURLViaFsGet(ctx context.Context, srcHeaders http
 	body, _ := json.Marshal(map[string]string{"path": displayPath})
 	req := httptest.NewRequest(http.MethodPost, "http://proxy.local/api/fs/get", bytes.NewReader(body)).WithContext(ctx)
 	cloneHeader(req.Header, srcHeaders)
+	req.Header.Del("Proxy-Authorization")
 	rec := httptest.NewRecorder()
 	p.handleFsGet(rec, req)
 	if cached, ok := p.loadFileCache(displayPath); ok && cached != nil {
@@ -128,6 +338,69 @@ func (p *ProxyServer) resolveRawURLViaFsGet(ctx context.Context, srcHeaders http
 		}
 	}
 	return "", 0
+}
+
+// resolveEncryptedRawURLViaFsGet bypasses the display-path fallback machinery.
+// The request body contains only the already encrypted object path, so a stale
+// signed URL can never cause a retry against a plaintext filename.
+func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHeaders http.Header, encryptedPath string) (string, int64) {
+	if p == nil {
+		return "", 0
+	}
+	apiPath := encryptedDAVPath(encryptedPath)
+	apiPath = strings.TrimPrefix(apiPath, "/dav")
+	if apiPath == "" {
+		apiPath = "/"
+	}
+	body, err := json.Marshal(map[string]string{"path": apiPath})
+	if err != nil {
+		return "", 0
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(p.getAlistURL(), "/")+"/api/fs/get", bytes.NewReader(body))
+	if err != nil {
+		return "", 0
+	}
+	cloneHeader(req.Header, srcHeaders)
+	req.Header.Del("Host")
+	req.Header.Del("Range")
+	req.Header.Del("Content-Length")
+	req.Header.Del("Proxy-Authorization")
+	req.Header.Set("Content-Type", "application/json")
+	client := p.httpClientSnapshot()
+	if client == nil {
+		return "", 0
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", 0
+	}
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
+	if err != nil {
+		return "", 0
+	}
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			RawURL string  `json:"raw_url"`
+			Size   float64 `json:"size"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil || (payload.Code != 0 && payload.Code != http.StatusOK) {
+		return "", 0
+	}
+	rawURL := strings.TrimSpace(payload.Data.RawURL)
+	if rawURL == "" {
+		return "", 0
+	}
+	size := int64(payload.Data.Size)
+	if size < 0 {
+		size = 0
+	}
+	return rawURL, size
 }
 
 func (o *PlayOrchestrator) streamViaRedirect(ctx context.Context, w http.ResponseWriter, srcReq *http.Request, token string) {
@@ -486,13 +759,16 @@ func redirectDisplayPath(info *RedirectInfo) string {
 }
 
 func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey string, requestHeaders http.Header, info *RedirectInfo) (*RedirectInfo, bool) {
-	displayPath := redirectDisplayPath(info)
-	if p == nil || info == nil || displayPath == "" {
+	if p == nil || info == nil || encryptedDAVPath(info.EncryptedPath) == "" {
 		return nil, false
 	}
-	headers := info.Headers.Clone()
+	headers := make(http.Header)
+	cloneHeader(headers, info.Headers)
 	for key, values := range requestHeaders {
-		if strings.EqualFold(key, "Range") || strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+		if strings.EqualFold(key, "Range") ||
+			strings.EqualFold(key, "Host") ||
+			strings.EqualFold(key, "Content-Length") ||
+			strings.EqualFold(key, "Proxy-Authorization") {
 			continue
 		}
 		headers.Del(key)
@@ -500,25 +776,54 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 			headers.Add(key, value)
 		}
 	}
-	rawURL, size := p.resolveRawURLViaFsGet(ctx, headers, displayPath)
+	rawURL, size := p.resolveEncryptedRawURLViaFsGet(ctx, headers, info.EncryptedPath)
 	if strings.TrimSpace(rawURL) == "" {
 		return nil, false
 	}
 	refreshed := cloneRedirectInfo(info)
 	refreshed.RedirectURL = rawURL
-	if size > 0 {
+	refreshed.Headers = headers
+	rawIdentityChanged := strings.TrimSpace(rawURL) != strings.TrimSpace(info.RedirectURL)
+	if rawIdentityChanged {
+		// A new signed URL may point at a replacement object at the same path.
+		// Never carry a V2 nonce across that identity boundary without
+		// confirming the new 32-byte content header.
+		refreshed.ContentVersion = 0
+		refreshed.HeaderLen = 0
+		refreshed.NonceField = nil
+		refreshed.FileSize = size
+		refreshed.CiphertextSize = size
+		if refreshed.PasswdInfo != nil && refreshed.PasswdInfo.Enable {
+			encProbePath := strings.TrimPrefix(encryptedDAVPath(refreshed.EncryptedPath), "/dav")
+			meta, confirmed := p.inspectEncryptedContentWithFallbackConfirmed(
+				ctx,
+				rawURL,
+				headers,
+				refreshed.PasswdInfo,
+				size,
+				encProbePath,
+			)
+			if confirmed {
+				refreshed.ContentVersion = meta.Version
+				refreshed.HeaderLen = meta.HeaderLen
+				refreshed.NonceField = cloneNonceField(meta.NonceField)
+				refreshed.CiphertextSize = meta.TotalCiphertextSize()
+				refreshed.FileSize = meta.PlainSize
+			}
+		}
+	} else if size > 0 {
 		if refreshed.ContentVersion == ContentVersionV2 && refreshed.HeaderLen > 0 {
-			// handleFsGet exposes and caches the decrypted (plain-text) size for
-			// V2 content. Do not subtract the V2 header a second time when a
-			// signed raw_url is refreshed.
-			refreshed.FileSize = size
-			refreshed.CiphertextSize = size + refreshed.HeaderLen
+			// The strict encrypted-path resolver reads OpenList directly, so size
+			// is the ciphertext representation (including the V2 header).
+			refreshed.CiphertextSize = size
+			if size > refreshed.HeaderLen {
+				refreshed.FileSize = size - refreshed.HeaderLen
+			}
 		} else {
 			refreshed.FileSize = size
 			refreshed.CiphertextSize = size
 		}
 	}
-	refreshed.Headers = headers
 	if redirectKey != "" {
 		p.storeRedirectCache(redirectKey, refreshed)
 	}
@@ -574,10 +879,12 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 		return fileSize
 	}
 
-	headers := info.Headers
+	var requestHeaders http.Header
 	if r != nil {
-		headers = r.Header
+		requestHeaders = r.Header
 	}
+	headers := headersWithStoredOriginCredentials(requestHeaders, info.Headers)
+	applyPlaybackOriginCredentials(headers, headers, info.RedirectURL, p.getAlistURL())
 	probed := p.forceProbeRemoteFileSizeWithPathCtx(ctx, info.RedirectURL, headers, encPathPattern)
 	if probed > 0 {
 		fileSize = probed
@@ -605,6 +912,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		fileSize = redirectRawFileSize(info, fileSize)
 	}
 	clientRangeHeader := strings.TrimSpace(r.Header.Get("Range"))
+	openEndedClientRange := isOpenEndedByteRange(clientRangeHeader)
 	upstreamRangeHeader := clientRangeHeader
 	startPos, endPos, hasRange, rangeErr := parseSingleRange(clientRangeHeader, fileSize)
 	if rangeErr != nil {
@@ -660,7 +968,23 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		if !cachedMetaLoaded {
 			log.Debugf("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%s encProbePath=%q",
 				info.PasswdInfo.EncType, fileSize, safeURLForLog(info.RedirectURL), encProbePath)
-			meta = p.inspectEncryptedContentWithFallback(ctx, info.RedirectURL, r.Header, info.PasswdInfo, fileSize, encProbePath)
+			inspectHeaders := headersWithStoredOriginCredentials(r.Header, info.Headers)
+			var metaConfirmed bool
+			meta, metaConfirmed = p.inspectEncryptedContentWithFallbackConfirmed(
+				ctx,
+				info.RedirectURL,
+				inspectHeaders,
+				info.PasswdInfo,
+				fileSize,
+				encProbePath,
+			)
+			if !metaConfirmed {
+				return &StreamOutcome{
+					Err:           fmt.Errorf("unable to confirm encrypted content metadata"),
+					FailureReason: "metadata_probe_failed",
+					Retryable:     true,
+				}
+			}
 			log.Debugf("[v2-diag] inspection result: isV2=%v version=%d plainSize=%d cipherSize=%d headerLen=%d",
 				meta.IsV2(), meta.Version, meta.PlainSize, meta.CiphertextSize, meta.HeaderLen)
 
@@ -783,15 +1107,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			return nil, err
 		}
 		p.applyRoutingHints(req, current.Provider, current.Driver)
-		for key, values := range r.Header {
-			lowerKey := strings.ToLower(key)
-			if lowerKey == "host" || lowerKey == "referer" || lowerKey == "authorization" {
-				continue
-			}
-			for _, value := range values {
-				req.Header.Add(key, value)
-			}
-		}
+		copyPlaybackStreamHeaders(req.Header, r.Header, current.Headers, targetURL, p.getAlistURL())
 		if upstreamRangeHeader == "" {
 			req.Header.Del("Range")
 		} else {
@@ -842,13 +1158,32 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			Retryable:     true,
 		}
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if isExpiredSignedURLStatus(resp.StatusCode) {
 		if refreshed, ok := p.refreshRedirectInfo(ctx, redirectKey, r.Header, info); ok {
 			resp.Body.Close()
 			info = refreshed
 			resp, err = doStreamRequest(info)
 			if err != nil {
 				return &StreamOutcome{Err: err, FailureReason: "network_error", Retryable: true}
+			}
+		}
+	}
+	if isExpiredSignedURLStatus(resp.StatusCode) {
+		// Some providers report expired signed URLs as 404. Bypass the stale
+		// URL through the encrypted /dav object path; never derive this fallback
+		// from OriginalURL because that is the plaintext display path.
+		internalTarget := p.encryptedDAVTargetURL(info.EncryptedPath, redirectOriginalRawQuery(info))
+		if internalTarget != "" && internalTarget != info.RedirectURL {
+			resp.Body.Close()
+			internalInfo := cloneRedirectInfo(info)
+			internalInfo.RedirectURL = internalTarget
+			resp, err = doStreamRequest(internalInfo)
+			if err != nil {
+				return &StreamOutcome{Err: err, FailureReason: "network_error", Retryable: true}
+			}
+			info = internalInfo
+			if redirectKey != "" {
+				p.storeRedirectCache(redirectKey, internalInfo)
 			}
 		}
 	}
@@ -926,6 +1261,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		}
 	}
 
+	actualWindowEnd := int64(-1)
 	if clientRangeHeader != "" && strategy == StreamStrategyRange && upstreamIsRange {
 		contentRangeHeader := resp.Header.Get("Content-Range")
 		actualRange, validContentRange := parseContentRange(contentRangeHeader)
@@ -935,13 +1271,32 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			expectedStart = meta.UpstreamOffset(startPos)
 			expectedEnd = meta.UpstreamOffset(endPos)
 		}
-		if !validContentRange || actualRange.Start != expectedStart || actualRange.End < expectedEnd {
+		validOpenEndedWindow := openEndedClientRange &&
+			validContentRange &&
+			actualRange.Start == expectedStart &&
+			actualRange.End >= expectedStart
+		if !validContentRange || actualRange.Start != expectedStart || (actualRange.End < expectedEnd && !validOpenEndedWindow) {
 			p.markRangeIncompatible(info.RedirectURL, info.OriginalURL)
 			return &StreamOutcome{
 				Err:           fmt.Errorf("upstream Content-Range %q does not cover requested interval %d-%d", contentRangeHeader, expectedStart, expectedEnd),
 				FailureReason: "range_unsupported",
 				Retryable:     true,
 				StatusCode:    statusCode,
+			}
+		}
+		if validOpenEndedWindow {
+			actualWindowEnd = actualRange.End
+			if meta.IsV2() {
+				actualWindowEnd -= meta.HeaderLen
+			}
+			if actualWindowEnd < startPos {
+				p.markRangeIncompatible(info.RedirectURL, info.OriginalURL)
+				return &StreamOutcome{
+					Err:           fmt.Errorf("upstream Content-Range %q maps before requested plaintext offset %d", contentRangeHeader, startPos),
+					FailureReason: "range_unsupported",
+					Retryable:     true,
+					StatusCode:    statusCode,
+				}
 			}
 		}
 		p.markRangeCompatible(info.RedirectURL, info.OriginalURL)
@@ -1011,6 +1366,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			StatusCode:      http.StatusRequestedRangeNotSatisfiable,
 		}
 	}
+	if actualWindowEnd >= startPos && actualWindowEnd < endPos {
+		endPos = actualWindowEnd
+	}
 
 	var encryptor FlowEncryptor
 	if meta.IsV2() {
@@ -1061,6 +1419,14 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
 			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		} else if strategy == StreamStrategyFull {
+			maxDiscard := p.rangeSkipMaxBytes()
+			if maxDiscard > 0 && startPos > maxDiscard {
+				return &StreamOutcome{
+					Err:           fmt.Errorf("full seek offset too large"),
+					FailureReason: "full_seek_too_large",
+					Retryable:     true,
+				}
+			}
 			discardLength := startPos
 			if meta.IsV2() {
 				discardLength += meta.HeaderLen
@@ -1155,7 +1521,44 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	if decodeDisabled {
 		fileSize = redirectRawFileSize(info, fileSize)
 	}
+	refreshRangeInfo := func() bool {
+		refreshed, refreshedOK := o.proxy.refreshRedirectInfo(r.Context(), key, r.Header, info)
+		if !refreshedOK {
+			return false
+		}
+		info = refreshed
+		if decodeDisabled {
+			fileSize = redirectRawFileSize(info, info.FileSize)
+		} else if info.FileSize > 0 {
+			fileSize = info.FileSize
+		} else {
+			fileSize = o.resolveFileSize(r.Context(), r, info)
+		}
+		return fileSize > 0
+	}
 	log.Debugf("V2 redirect resolve: original=%s redirect=%s size=%d range=%q", safeURLForLog(info.OriginalURL), safeURLForLog(info.RedirectURL), fileSize, r.Header.Get("Range"))
+	if fileSize == 0 && shouldDecryptRedirect(r, info) && info.PasswdInfo != nil {
+		inspectHeaders := headersWithStoredOriginCredentials(r.Header, info.Headers)
+		encProbePath := strings.TrimPrefix(encryptedDAVPath(info.EncryptedPath), "/dav")
+		meta, confirmed := o.proxy.inspectEncryptedContentWithFallbackConfirmed(
+			r.Context(),
+			info.RedirectURL,
+			inspectHeaders,
+			info.PasswdInfo,
+			0,
+			encProbePath,
+		)
+		if confirmed && meta.IsV2() && meta.PlainSize > 0 {
+			info.ContentVersion = meta.Version
+			info.HeaderLen = meta.HeaderLen
+			info.NonceField = cloneNonceField(meta.NonceField)
+			info.CiphertextSize = meta.CiphertextSize
+			info.FileSize = meta.PlainSize
+			fileSize = meta.PlainSize
+			o.proxy.storeRedirectCache(key, info)
+			log.Infof("V2 play: recovered unknown file size from encrypted header plainSize=%d cipherSize=%d", meta.PlainSize, meta.CiphertextSize)
+		}
+	}
 	if fileSize == 0 {
 		if shouldDecryptRedirect(r, info) {
 			log.Warnf("V2 play: refusing encrypted passthrough because file size is unknown")
@@ -1169,14 +1572,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		o.proxy.applyRoutingHints(req, info.Provider, info.Driver)
-		for headerKey, values := range r.Header {
-			lowerKey := strings.ToLower(headerKey)
-			if lowerKey != "host" && lowerKey != "authorization" && lowerKey != "referer" {
-				for _, value := range values {
-					req.Header.Add(headerKey, value)
-				}
-			}
-		}
+		copyPlaybackStreamHeaders(req.Header, r.Header, info.Headers, info.RedirectURL, o.proxy.getAlistURL())
 		client := o.proxy.streamClientSnapshot()
 		if client == nil {
 			http.Error(w, "stream client unavailable", http.StatusBadGateway)
@@ -1199,9 +1595,18 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	if _, _, _, err := parseSingleRange(r.Header.Get("Range"), fileSize); err != nil {
-		writeRangeNotSatisfiable(w, fileSize)
-		return
+	rangeHeader := r.Header.Get("Range")
+	if _, _, _, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr != nil {
+		rangeStart, hasRangeStart := parseRangeStart(rangeHeader)
+		if !hasRangeStart || rangeStart < fileSize || !refreshRangeInfo() {
+			writeRangeNotSatisfiable(w, fileSize)
+			return
+		}
+		if _, _, _, refreshedRangeErr := parseSingleRange(rangeHeader, fileSize); refreshedRangeErr != nil {
+			writeRangeNotSatisfiable(w, fileSize)
+			return
+		}
+		log.Infof("V2 play: refreshed stale size before range validation start=%d size=%d", rangeStart, fileSize)
 	}
 
 	provider := info.Provider
@@ -1212,6 +1617,15 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	strategies := []StreamStrategy{StreamStrategyRange}
 	if !decodeDisabled && o.proxy.strategySelector != nil {
 		strategies = o.proxy.strategySelector.Select(provider)
+	}
+	rangeStart, hasRangeStart := parseRangeStart(rangeHeader)
+	maxDiscard := o.proxy.rangeSkipMaxBytes()
+	largeSeek := hasRangeStart && maxDiscard > 0 && rangeStart > maxDiscard
+	if largeSeek {
+		// Chunked/full strategies would have to discard an unbounded prefix.
+		// A fresh signed URL may support this seek even when an old provider
+		// capability sample did not, so Range is the only safe attempt.
+		strategies = []StreamStrategy{StreamStrategyRange}
 	}
 
 	attempted := make(map[StreamStrategy]struct{}, len(strategies)+2)
@@ -1247,6 +1661,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 
 	var outcome *StreamOutcome
+	rangeRefreshAttempted := false
 	for _, strategy := range strategies {
 		if _, alreadyAttempted := attempted[strategy]; alreadyAttempted {
 			continue
@@ -1258,7 +1673,14 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		if outcome.ResponseStarted {
 			break
 		}
+		if outcome.FailureReason == "metadata_probe_failed" {
+			break
+		}
 		if outcome.FailureReason == "range_unsupported" && strategy == StreamStrategyRange {
+			if largeSeek {
+				log.Warnf("V2 play: upstream ignored Range at offset=%d; refusing a no-Range retry above discard limit=%d", rangeStart, maxDiscard)
+				break
+			}
 			if _, alreadyAttempted := attempted[StreamStrategyChunked]; !alreadyAttempted {
 				log.Warnf("V2 play: range unsupported, falling back to chunked")
 				outcome = tryStrategy(StreamStrategyChunked)
@@ -1273,8 +1695,32 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 				}
 			}
 		} else if outcome.FailureReason == "range_unsatisfiable" && strategy == StreamStrategyRange {
+			if !rangeRefreshAttempted {
+				rangeRefreshAttempted = true
+				if refreshRangeInfo() {
+					delete(attempted, StreamStrategyRange)
+					log.Warnf("V2 play: range unsatisfiable, refreshed signed URL and size before retry")
+					outcome = tryStrategy(StreamStrategyRange)
+					if outcome.Err == nil {
+						return
+					}
+					if outcome.ResponseStarted {
+						break
+					}
+				}
+			}
+			if outcome.FailureReason != "range_unsatisfiable" {
+				break
+			}
+			if start, ok := parseRangeStart(rangeHeader); ok {
+				maxDiscard := o.proxy.rangeSkipMaxBytes()
+				if maxDiscard > 0 && start > maxDiscard {
+					log.Warnf("V2 play: refreshed range remains unsatisfiable at offset=%d; refusing full discard above limit=%d", start, maxDiscard)
+					break
+				}
+			}
 			if _, alreadyAttempted := attempted[StreamStrategyFull]; !alreadyAttempted {
-				log.Warnf("V2 play: range unsatisfiable, falling back to full")
+				log.Warnf("V2 play: refreshed range remains unsatisfiable, using bounded full fallback")
 				outcome = tryStrategy(StreamStrategyFull)
 				if outcome.Err == nil {
 					return
@@ -1294,14 +1740,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		o.proxy.applyRoutingHints(req, info.Provider, info.Driver)
-		for headerKey, values := range r.Header {
-			lowerKey := strings.ToLower(headerKey)
-			if lowerKey != "host" && lowerKey != "authorization" && lowerKey != "referer" {
-				for _, value := range values {
-					req.Header.Add(headerKey, value)
-				}
-			}
-		}
+		copyPlaybackStreamHeaders(req.Header, r.Header, info.Headers, info.RedirectURL, o.proxy.getAlistURL())
 		client := o.proxy.streamClientSnapshot()
 		if client == nil {
 			http.Error(w, "stream client unavailable", http.StatusBadGateway)

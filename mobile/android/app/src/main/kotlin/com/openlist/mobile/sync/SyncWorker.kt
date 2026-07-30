@@ -17,7 +17,13 @@ import com.openlist.mobile.R
 import com.openlist.mobile.config.AppConfig
 import com.openlist.mobile.model.openlist.Logger
 import com.openlist.mobile.model.openlist.OpenList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -25,11 +31,13 @@ import openlistlib.Openlistlib
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * WorkManager Worker：执行单个同步任务
@@ -61,9 +69,19 @@ class SyncWorker(
         const val DEFAULT_PROXY_PORT = 5344L
         private val logDateFormatter = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
         private const val TASK_POLL_INTERVAL_MS = 3000L
+        private const val PLAYBACK_POLL_INTERVAL_MS = 1000L
+        private const val PLAYBACK_PROBE_FAILURE_LIMIT = 5
+        private const val PLAYBACK_PROBE_FAILURE_WATCHDOG_MS = 20_000L
+        private const val PLAYBACK_UPLOAD_LIMIT_KBPS = 128
+        private const val UPLOAD_BUFFER_SIZE = 256 * 1024
         private const val V2_HEADER_SIZE = 32L
         private const val FOREGROUND_CHANNEL_ID = "media_backup_sync"
         private const val FOREGROUND_NOTIFICATION_ID = 53440
+        // PeriodicWorkRequest cannot share a unique WorkManager chain with an
+        // ad-hoc OneTimeWorkRequest without replacing the periodic schedule.
+        // WorkManager runs both workers in this process, so this task-scoped
+        // mutex closes that cross-chain concurrency gap.
+        private val taskExecutionMutexes = ConcurrentHashMap<String, Mutex>()
     }
 
     private data class UploadTaskSubmission(
@@ -86,6 +104,62 @@ class SyncWorker(
         val isDir: Boolean,
         val message: String,
     )
+
+    private data class PlaybackActivity(
+        val active: Boolean,
+        val activeStreams: Int,
+        val resumeAfterMs: Long,
+    )
+
+    private data class PlaybackProbeDecision(
+        val active: Boolean,
+        val conservative: Boolean = false,
+        val releasedByWatchdog: Boolean = false,
+        val consecutiveFailures: Int = 0,
+    )
+
+    private class PlaybackProbeGuard {
+        private var lastKnownActive = false
+        private var consecutiveFailures = 0
+        private var failureWindowStartedAtMs = 0L
+
+        fun observe(activity: PlaybackActivity?, nowMs: Long): PlaybackProbeDecision {
+            if (activity != null) {
+                lastKnownActive = activity.active
+                consecutiveFailures = 0
+                failureWindowStartedAtMs = 0L
+                return PlaybackProbeDecision(active = activity.active)
+            }
+
+            if (!lastKnownActive) {
+                return PlaybackProbeDecision(active = false)
+            }
+
+            if (consecutiveFailures == 0) {
+                failureWindowStartedAtMs = nowMs
+            }
+            consecutiveFailures++
+            val watchdogElapsedMs = nowMs - failureWindowStartedAtMs
+            if (consecutiveFailures >= PLAYBACK_PROBE_FAILURE_LIMIT ||
+                watchdogElapsedMs >= PLAYBACK_PROBE_FAILURE_WATCHDOG_MS) {
+                val failures = consecutiveFailures
+                lastKnownActive = false
+                consecutiveFailures = 0
+                failureWindowStartedAtMs = 0L
+                return PlaybackProbeDecision(
+                    active = false,
+                    releasedByWatchdog = true,
+                    consecutiveFailures = failures,
+                )
+            }
+
+            return PlaybackProbeDecision(
+                active = true,
+                conservative = true,
+                consecutiveFailures = consecutiveFailures,
+            )
+        }
+    }
 
     private data class ScanProgressState(
         var visitedDirectories: Int = 0,
@@ -116,6 +190,17 @@ class SyncWorker(
             recordHistory(context, taskId, 0, 0, 0, 0, 1, listOf("任务配置解析失败: ${e.message ?: "unknown error"}"))
             return@withContext Result.failure()
         }
+
+        val taskExecutionMutex = taskExecutionMutexes[taskId] ?: run {
+            val newMutex = Mutex()
+            taskExecutionMutexes.putIfAbsent(taskId, newMutex) ?: newMutex
+        }
+        if (!taskExecutionMutex.tryLock()) {
+            Log.i(TAG, "Waiting for another backup run of task $taskId to finish")
+            taskExecutionMutex.lock()
+        }
+        try {
+            currentCoroutineContext().ensureActive()
 
         SyncRecordStore.clearLogs(context, taskId)
         foregroundTitle = taskConfig.name
@@ -255,6 +340,7 @@ class SyncWorker(
         var abortedByFatalError = false
 
         for ((index, file) in filesToUpload.withIndex()) {
+            currentCoroutineContext().ensureActive()
             if (abortedByFatalError) {
                 break
             }
@@ -291,7 +377,9 @@ class SyncWorker(
                 remotePath
             )
 
+            currentCoroutineContext().ensureActive()
             val remoteProbe = probeRemoteFile(remotePath, authToken)
+            currentCoroutineContext().ensureActive()
             val localSize = file.length()
             val sizeMatchesRemote = remoteProbe.size != null &&
                 (remoteProbe.size == localSize || remoteProbe.size == localSize + V2_HEADER_SIZE)
@@ -347,6 +435,17 @@ class SyncWorker(
 
             newOrModified.add(file)
             val currentSkippedCount = skippedByLocalRecord + skippedByRemotePresence
+            awaitPlaybackIdle(
+                taskName = taskConfig.name,
+                fileName = file.name,
+                traceId = traceId,
+                taskId = taskId,
+                scannedFiles = filesToUpload.size,
+                pendingFiles = newOrModified.size,
+                skippedFiles = currentSkippedCount,
+                uploadedFiles = successCount,
+                failedFiles = failureCount,
+            )
             try {
                 publishProgress(
                     phase = "UPLOADING",
@@ -419,6 +518,8 @@ class SyncWorker(
                     failedFiles = failureCount,
                 )
                 Log.d(TAG, "Uploaded: ${file.absolutePath} -> $remotePath")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 failureCount++
                 val errorMsg = "${file.name}: ${e.message}"
@@ -527,6 +628,8 @@ class SyncWorker(
                         logSync(traceId, taskId, "cleanup", cleanupError, LogLevel.WARN)
                         Log.w(TAG, cleanupError)
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     cleanupFailureCount++
                     val cleanupError = "删除本地源文件失败 file=${file.absolutePath} error=${e.message}"
@@ -586,6 +689,9 @@ class SyncWorker(
             Result.success() // 主流程完成，单文件失败不影响
         } else {
             Result.success()
+        }
+        } finally {
+            taskExecutionMutex.unlock()
         }
     }
 
@@ -701,7 +807,14 @@ class SyncWorker(
         displayPath: String,
         uploadSpeedLimitKbps: Int = 0,
     ) {
-        val submission = submitUploadTask(file, remotePath, authToken, uploadSpeedLimitKbps)
+        val submission = submitUploadTask(
+            file = file,
+            remotePath = remotePath,
+            authToken = authToken,
+            traceId = traceId,
+            taskId = taskId,
+            uploadSpeedLimitKbps = uploadSpeedLimitKbps,
+        )
         logSync(
             traceId,
             taskId,
@@ -733,12 +846,131 @@ class SyncWorker(
         )
     }
 
-    private fun submitUploadTask(
+    private suspend fun awaitPlaybackIdle(
+        taskName: String,
+        fileName: String,
+        traceId: String,
+        taskId: String,
+        scannedFiles: Int,
+        pendingFiles: Int,
+        skippedFiles: Int,
+        uploadedFiles: Int,
+        failedFiles: Int,
+    ) {
+        var paused = false
+        val probeGuard = PlaybackProbeGuard()
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            if (isStopped) {
+                throw CancellationException("Media backup stopped while waiting for playback to become idle")
+            }
+            val activity = getPlaybackActivity()
+            currentCoroutineContext().ensureActive()
+            val decision = probeGuard.observe(activity, android.os.SystemClock.elapsedRealtime())
+            if (!decision.active) {
+                if (paused) {
+                    if (decision.releasedByWatchdog) {
+                        logSync(
+                            traceId,
+                            taskId,
+                            "qos",
+                            "播放状态连续探测失败 ${decision.consecutiveFailures} 次，watchdog 解除暂停 file=$fileName",
+                            LogLevel.WARN,
+                        )
+                    } else {
+                        logSync(traceId, taskId, "qos", "播放已空闲，恢复媒体备份 file=$fileName")
+                    }
+                }
+                return
+            }
+
+            if (!paused) {
+                paused = true
+                logSync(
+                    traceId,
+                    taskId,
+                    "qos",
+                    "检测到播放或连续 seek，暂停提交新的备份上传 file=$fileName activeStreams=${activity?.activeStreams ?: 0}",
+                )
+                val waitSeconds =
+                    (((activity?.resumeAfterMs ?: PLAYBACK_POLL_INTERVAL_MS)
+                        .coerceAtLeast(PLAYBACK_POLL_INTERVAL_MS) + 999L) / 1000L)
+                publishProgress(
+                    phase = "PAUSED_FOR_PLAYBACK",
+                    currentPhaseDetail = "播放优先，备份将在空闲后自动恢复",
+                    currentFile = fileName,
+                    scannedFiles = scannedFiles,
+                    pendingFiles = pendingFiles,
+                    skippedFiles = skippedFiles,
+                    uploadedFiles = uploadedFiles,
+                    failedFiles = failedFiles,
+                )
+                updateForegroundNotification(
+                    title = taskName,
+                    detail = "播放优先，备份暂停（空闲保护 ${waitSeconds}s）",
+                    progress = 0,
+                    indeterminate = true,
+                )
+            } else if (decision.conservative && decision.consecutiveFailures == 1) {
+                logSync(
+                    traceId,
+                    taskId,
+                    "qos",
+                    "播放状态探测瞬时失败，保持备份暂停直至探测恢复或 watchdog 到期 file=$fileName",
+                    LogLevel.WARN,
+                )
+            }
+            delay(PLAYBACK_POLL_INTERVAL_MS)
+        }
+    }
+
+    private suspend fun getPlaybackActivity(): PlaybackActivity? {
+        currentCoroutineContext().ensureActive()
+        val activity = runInterruptible(Dispatchers.IO) {
+            val url = URL("${proxyBaseUrl()}/api/play/activity")
+            val conn = url.openConnection() as HttpURLConnection
+            try {
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 1000
+                conn.readTimeout = 1000
+                conn.setRequestProperty("Accept", "application/json")
+                conn.setRequestProperty("Connection", "close")
+                if (conn.responseCode !in 200..299) {
+                    return@runInterruptible null
+                }
+                val body = conn.inputStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (body.isBlank()) {
+                    return@runInterruptible null
+                }
+                val json = JSONObject(body)
+                PlaybackActivity(
+                    active = json.optBoolean("active", false),
+                    activeStreams = json.optInt("active_streams", 0).coerceAtLeast(0),
+                    resumeAfterMs = json.optLong("resume_after_ms", 0L).coerceAtLeast(0L),
+                )
+            } catch (e: Exception) {
+                if (Thread.currentThread().isInterrupted) {
+                    throw e
+                }
+                Log.d(TAG, "Playback activity probe unavailable; media backup remains fail-open: ${e.message}")
+                null
+            } finally {
+                conn.disconnect()
+            }
+        }
+        currentCoroutineContext().ensureActive()
+        return activity
+    }
+
+    private suspend fun submitUploadTask(
         file: File,
         remotePath: String,
         authToken: String,
+        traceId: String,
+        taskId: String,
         uploadSpeedLimitKbps: Int = 0,
     ): UploadTaskSubmission {
+        currentCoroutineContext().ensureActive()
         val url = URL("${proxyBaseUrl()}/api/fs/put")
         val conn = url.openConnection() as HttpURLConnection
         try {
@@ -757,45 +989,35 @@ class SyncWorker(
             conn.setRequestProperty("Content-Type", "application/octet-stream")
             conn.setRequestProperty("Authorization", authToken)
 
-            // Write file body with optional rate limiting
+            currentCoroutineContext().ensureActive()
             FileInputStream(file).use { input ->
-                conn.outputStream.use { output ->
-                    if (uploadSpeedLimitKbps > 0) {
-                        val bufferSize = 64 * 1024
-                        val bytesPerSecond = uploadSpeedLimitKbps * 1024L
-                        val buffer = ByteArray(bufferSize)
-                        var totalWritten = 0L
-                        val startTime = System.nanoTime()
-                        var read: Int
-                        while (input.read(buffer).also { read = it } != -1) {
-                            output.write(buffer, 0, read)
-                            totalWritten += read
-                            val elapsed = (System.nanoTime() - startTime).toDouble() / 1_000_000_000.0
-                            if (elapsed > 0) {
-                                val expectedTime = totalWritten.toDouble() / bytesPerSecond
-                                val sleepMs = ((expectedTime - elapsed) * 1000).toLong()
-                                if (sleepMs > 5) {
-                                    Thread.sleep(sleepMs.coerceAtMost(500))
-                                }
-                            }
-                        }
-                        output.flush()
-                    } else {
-                        input.copyTo(output, 8192)
-                    }
+                val output = runInterruptible(Dispatchers.IO) { conn.outputStream }
+                output.use {
+                    streamUploadBody(
+                        input = input,
+                        output = it,
+                        file = file,
+                        traceId = traceId,
+                        taskId = taskId,
+                        configuredSpeedLimitKbps = uploadSpeedLimitKbps,
+                    )
                 }
             }
+            currentCoroutineContext().ensureActive()
 
-            val responseCode = conn.responseCode
+            val responseCode = runInterruptible(Dispatchers.IO) { conn.responseCode }
+            currentCoroutineContext().ensureActive()
             val responseBody = try {
-                if (responseCode in 200..299) {
-                    conn.inputStream?.bufferedReader()?.readText().orEmpty()
-                } else {
-                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                runInterruptible(Dispatchers.IO) {
+                    val stream = if (responseCode in 200..299) conn.inputStream else conn.errorStream
+                    stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 ""
             }
+            currentCoroutineContext().ensureActive()
 
             if (responseCode >= 400) {
                 appLog(
@@ -845,8 +1067,141 @@ class SyncWorker(
                 progress = taskJson?.optDouble("progress", 0.0) ?: 0.0,
                 status = taskJson?.optString("status").orEmpty(),
             )
+        } catch (e: CancellationException) {
+            conn.disconnect()
+            throw e
         } finally {
             conn.disconnect()
+        }
+    }
+
+    private suspend fun streamUploadBody(
+        input: FileInputStream,
+        output: OutputStream,
+        file: File,
+        traceId: String,
+        taskId: String,
+        configuredSpeedLimitKbps: Int,
+    ) {
+        val buffer = ByteArray(UPLOAD_BUFFER_SIZE)
+        val probeGuard = PlaybackProbeGuard()
+        var nextPlaybackProbeAtMs = 0L
+        var playbackActive = false
+        var effectiveLimitBytesPerSecond = -1L
+        var rateWindowStartedAtNs = System.nanoTime()
+        var rateWindowBytes = 0L
+
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            if (isStopped) {
+                throw CancellationException("Media backup stopped while streaming ${file.name}")
+            }
+
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            if (nowMs >= nextPlaybackProbeAtMs) {
+                val activity = getPlaybackActivity()
+                currentCoroutineContext().ensureActive()
+                val decision = probeGuard.observe(activity, android.os.SystemClock.elapsedRealtime())
+                if (decision.releasedByWatchdog) {
+                    logSync(
+                        traceId,
+                        taskId,
+                        "qos",
+                        "上传中播放状态连续探测失败 ${decision.consecutiveFailures} 次，watchdog 恢复常规上传速率 file=${file.name}",
+                        LogLevel.WARN,
+                    )
+                } else if (decision.conservative && decision.consecutiveFailures == 1) {
+                    logSync(
+                        traceId,
+                        taskId,
+                        "qos",
+                        "上传中播放状态探测瞬时失败，保守维持播放限速 file=${file.name}",
+                        LogLevel.WARN,
+                    )
+                }
+
+                if (decision.active != playbackActive) {
+                    if (decision.active) {
+                        val playbackLimitKbps =
+                            effectiveUploadLimitBytesPerSecond(
+                                configuredSpeedLimitKbps,
+                                playbackActive = true,
+                            ) / 1024L
+                        logSync(
+                            traceId,
+                            taskId,
+                            "qos",
+                            "上传中检测到播放或 seek，动态限速至 ${playbackLimitKbps}KiB/s file=${file.name} activeStreams=${activity?.activeStreams ?: 0}",
+                        )
+                    } else if (!decision.releasedByWatchdog) {
+                        logSync(
+                            traceId,
+                            taskId,
+                            "qos",
+                            "播放空闲，恢复常规上传速率 file=${file.name}",
+                        )
+                    }
+                    playbackActive = decision.active
+                }
+                nextPlaybackProbeAtMs =
+                    android.os.SystemClock.elapsedRealtime() + PLAYBACK_POLL_INTERVAL_MS
+            }
+
+            val newEffectiveLimit =
+                effectiveUploadLimitBytesPerSecond(configuredSpeedLimitKbps, playbackActive)
+            if (newEffectiveLimit != effectiveLimitBytesPerSecond) {
+                effectiveLimitBytesPerSecond = newEffectiveLimit
+                rateWindowStartedAtNs = System.nanoTime()
+                rateWindowBytes = 0L
+            }
+            val chunkSize = if (effectiveLimitBytesPerSecond > 0L) {
+                (effectiveLimitBytesPerSecond / 4L)
+                    .coerceIn(1024L, UPLOAD_BUFFER_SIZE.toLong())
+                    .toInt()
+            } else {
+                buffer.size
+            }
+
+            val read = runInterruptible(Dispatchers.IO) {
+                input.read(buffer, 0, chunkSize)
+            }
+            currentCoroutineContext().ensureActive()
+            if (read < 0) {
+                break
+            }
+            runInterruptible(Dispatchers.IO) {
+                output.write(buffer, 0, read)
+            }
+            currentCoroutineContext().ensureActive()
+
+            if (effectiveLimitBytesPerSecond > 0L) {
+                rateWindowBytes += read
+                val expectedSeconds =
+                    rateWindowBytes.toDouble() / effectiveLimitBytesPerSecond.toDouble()
+                val elapsedSeconds =
+                    (System.nanoTime() - rateWindowStartedAtNs).toDouble() / 1_000_000_000.0
+                val delayMs = ((expectedSeconds - elapsedSeconds) * 1000.0).toLong()
+                if (delayMs > 5L) {
+                    delay(delayMs.coerceAtMost(PLAYBACK_POLL_INTERVAL_MS))
+                }
+            }
+        }
+        runInterruptible(Dispatchers.IO) { output.flush() }
+        currentCoroutineContext().ensureActive()
+    }
+
+    private fun effectiveUploadLimitBytesPerSecond(
+        configuredSpeedLimitKbps: Int,
+        playbackActive: Boolean,
+    ): Long {
+        val configuredLimit =
+            configuredSpeedLimitKbps.coerceAtLeast(0).toLong() * 1024L
+        val playbackLimit =
+            if (playbackActive) PLAYBACK_UPLOAD_LIMIT_KBPS * 1024L else 0L
+        return when {
+            configuredLimit > 0L && playbackLimit > 0L -> minOf(configuredLimit, playbackLimit)
+            configuredLimit > 0L -> configuredLimit
+            else -> playbackLimit
         }
     }
 
@@ -867,11 +1222,16 @@ class SyncWorker(
         var lastProgressBucket = -1
         var lastStatus = ""
         while (true) {
+            currentCoroutineContext().ensureActive()
+            if (isStopped) {
+                throw CancellationException("Media backup stopped while waiting for upload task $uploadTaskId")
+            }
             val elapsedMs = System.currentTimeMillis() - startedAt
             if (elapsedMs > timeoutMs) {
                 throw Exception("上传任务超时: uploadTaskId=$uploadTaskId elapsed=${elapsedMs / 1000}s")
             }
             val snapshot = getUploadTaskSnapshot(uploadTaskId, authToken)
+            currentCoroutineContext().ensureActive()
             val progressBucket = snapshot.progress.toInt()
             if (progressBucket != lastProgressBucket || snapshot.status != lastStatus) {
                 lastProgressBucket = progressBucket
@@ -920,57 +1280,72 @@ class SyncWorker(
                     )
                 }
             }
-            Thread.sleep(TASK_POLL_INTERVAL_MS)
+            delay(TASK_POLL_INTERVAL_MS)
         }
     }
 
-    private fun getUploadTaskSnapshot(
+    private suspend fun getUploadTaskSnapshot(
         uploadTaskId: String,
         authToken: String,
     ): UploadTaskSnapshot {
-        val encodedTid = URLEncoder.encode(uploadTaskId, Charsets.UTF_8.name())
-        val url = URL("${proxyBaseUrl()}/api/task/upload/info?tid=$encodedTid")
-        val conn = url.openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 15000
-            conn.readTimeout = 30000
-            conn.setRequestProperty("Accept", "application/json")
-            conn.setRequestProperty("Authorization", authToken)
-            conn.setRequestProperty("Connection", "close")
-            val responseCode = conn.responseCode
-            val responseBody = try {
-                if (responseCode in 200..299) {
-                    conn.inputStream?.bufferedReader()?.readText().orEmpty()
-                } else {
-                    conn.errorStream?.bufferedReader()?.readText().orEmpty()
+        currentCoroutineContext().ensureActive()
+        val snapshot = runInterruptible(Dispatchers.IO) {
+            val encodedTid = URLEncoder.encode(uploadTaskId, Charsets.UTF_8.name())
+            val url = URL("${proxyBaseUrl()}/api/task/upload/info?tid=$encodedTid")
+            val conn = url.openConnection() as HttpURLConnection
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 15000
+                conn.readTimeout = 30000
+                conn.setRequestProperty("Accept", "application/json")
+                conn.setRequestProperty("Authorization", authToken)
+                conn.setRequestProperty("Connection", "close")
+                val responseCode = conn.responseCode
+                val responseBody = try {
+                    val stream =
+                        if (responseCode in 200..299) conn.inputStream else conn.errorStream
+                    stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                } catch (_: Exception) {
+                    ""
                 }
-            } catch (_: Exception) {
-                ""
+                if (responseCode >= 400) {
+                    throw Exception("HTTP $responseCode: $responseBody")
+                }
+                val json = JSONObject(responseBody)
+                val apiCode = json.optInt("code", -1)
+                if (apiCode != 200) {
+                    throw Exception("API code $apiCode: ${json.optString("message")}")
+                }
+                val data = json.optJSONObject("data")
+                    ?: throw Exception("task info data missing")
+                UploadTaskSnapshot(
+                    id = data.optString("id"),
+                    state = data.optInt("state", -1),
+                    progress = data.optDouble("progress", 0.0),
+                    status = data.optString("status"),
+                    error = data.optString("error"),
+                )
+            } finally {
+                conn.disconnect()
             }
-            if (responseCode >= 400) {
-                throw Exception("HTTP $responseCode: $responseBody")
-            }
-            val json = JSONObject(responseBody)
-            val apiCode = json.optInt("code", -1)
-            if (apiCode != 200) {
-                throw Exception("API code $apiCode: ${json.optString("message")}")
-            }
-            val data = json.optJSONObject("data")
-                ?: throw Exception("task info data missing")
-            return UploadTaskSnapshot(
-                id = data.optString("id"),
-                state = data.optInt("state", -1),
-                progress = data.optDouble("progress", 0.0),
-                status = data.optString("status"),
-                error = data.optString("error"),
-            )
-        } finally {
-            conn.disconnect()
         }
+        currentCoroutineContext().ensureActive()
+        return snapshot
     }
 
-    private fun probeRemoteFile(
+    private suspend fun probeRemoteFile(
+        remotePath: String,
+        authToken: String,
+    ): RemoteFileProbe {
+        currentCoroutineContext().ensureActive()
+        val probe = runInterruptible(Dispatchers.IO) {
+            probeRemoteFileBlocking(remotePath, authToken)
+        }
+        currentCoroutineContext().ensureActive()
+        return probe
+    }
+
+    private fun probeRemoteFileBlocking(
         remotePath: String,
         authToken: String,
     ): RemoteFileProbe {
@@ -1035,32 +1410,47 @@ class SyncWorker(
                 message = "ok"
             )
         } catch (e: Exception) {
+            if (Thread.currentThread().isInterrupted) {
+                throw e
+            }
             return RemoteFileProbe(false, null, false, e.message ?: "probe-failed")
         } finally {
             conn.disconnect()
         }
     }
 
-    private fun clearSucceededUploadTasks(authToken: String) {
-        val url = URL("${proxyBaseUrl()}/api/task/upload/clear_succeeded")
-        val conn = url.openConnection() as HttpURLConnection
+    private suspend fun clearSucceededUploadTasks(authToken: String) {
+        currentCoroutineContext().ensureActive()
         try {
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 10000
-            conn.readTimeout = 20000
-            conn.setRequestProperty("Accept", "application/json")
-            conn.setRequestProperty("Authorization", authToken)
-            conn.setRequestProperty("Connection", "close")
-            val responseCode = conn.responseCode
-            if (responseCode !in 200..299) {
-                val responseBody = conn.errorStream?.bufferedReader()?.readText().orEmpty()
-                appLog(LogLevel.WARN, "清理成功上传任务失败：http=$responseCode body=${compactBody(responseBody)}")
+            runInterruptible(Dispatchers.IO) {
+                val url = URL("${proxyBaseUrl()}/api/task/upload/clear_succeeded")
+                val conn = url.openConnection() as HttpURLConnection
+                try {
+                    conn.requestMethod = "POST"
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 20000
+                    conn.setRequestProperty("Accept", "application/json")
+                    conn.setRequestProperty("Authorization", authToken)
+                    conn.setRequestProperty("Connection", "close")
+                    val responseCode = conn.responseCode
+                    if (responseCode !in 200..299) {
+                        val responseBody =
+                            conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                        appLog(
+                            LogLevel.WARN,
+                            "清理成功上传任务失败：http=$responseCode body=${compactBody(responseBody)}",
+                        )
+                    }
+                } finally {
+                    conn.disconnect()
+                }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             appLog(LogLevel.WARN, "清理成功上传任务异常：${e.message}")
-        } finally {
-            conn.disconnect()
         }
+        currentCoroutineContext().ensureActive()
     }
 
     private fun estimateTaskTimeoutMs(fileSize: Long): Long {

@@ -76,9 +76,23 @@ func TestInspectEncryptedContentFallbackOnlyForUnconfirmedProbe(t *testing.T) {
 			client := &http.Client{Transport: v2ProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
 				switch req.URL.Host {
 				case "initial.local":
+					for _, key := range sensitivePlaybackHeaders {
+						if got := req.Header.Get(key); got != "" {
+							t.Fatalf("external probe received %s=%q", key, got)
+						}
+					}
 					calls = append(calls, "initial:"+req.URL.Path)
 					return tt.initial(req)
 				case "alist.local:5244":
+					if got := req.Header.Get("Authorization"); got != "Bearer local-only" {
+						t.Fatalf("internal fallback Authorization=%q", got)
+					}
+					if got := req.Header.Get("Cookie"); got != "session=local-only" {
+						t.Fatalf("internal fallback Cookie=%q", got)
+					}
+					if got := req.Header.Get("Proxy-Authorization"); got != "" {
+						t.Fatalf("internal fallback leaked Proxy-Authorization=%q", got)
+					}
 					calls = append(calls, "alist:"+req.URL.Path)
 					if req.URL.Path == "/dav/video.bin" {
 						return v1ProbeResponse(req, int(ContentHeaderSize())), nil
@@ -105,7 +119,11 @@ func TestInspectEncryptedContentFallbackOnlyForUnconfirmedProbe(t *testing.T) {
 			meta := p.inspectEncryptedContentWithFallback(
 				context.Background(),
 				"http://initial.local/raw/video.bin",
-				make(http.Header),
+				http.Header{
+					"Authorization":       []string{"Bearer local-only"},
+					"Cookie":              []string{"session=local-only"},
+					"Proxy-Authorization": []string{"Basic proxy-local-only"},
+				},
 				encPath,
 				4096,
 				"/video.bin",
