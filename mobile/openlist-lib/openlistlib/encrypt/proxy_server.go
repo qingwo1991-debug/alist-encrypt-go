@@ -549,6 +549,12 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/dav", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAV)))
 	mux.HandleFunc("/dav2/", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAVV2)))
 	mux.HandleFunc("/dav2", internal.WrapHandler(p.withPlaybackActivity(p.handleWebDAVV2)))
+	// 管理后台（enc-webui）：与 docker 版本对齐，挂在 /index 和 /public 下，
+	// 根路径 / 留给 OpenList 文件列表（透传到 5244）。
+	mux.HandleFunc("/index", p.handleEncWebUIIndex)
+	if encFS := encWebUIFileServer(); encFS != nil {
+		mux.Handle("/public/", http.StripPrefix("/public/", encFS))
+	}
 	// 根路径：直接代理到 OpenList (Alist)
 	mux.HandleFunc("/", p.handleRoot)
 

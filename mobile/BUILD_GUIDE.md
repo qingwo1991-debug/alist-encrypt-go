@@ -16,6 +16,7 @@ npm ci
 npm run build
 
 cd ../openlist-lib
+bash scripts/install_openlist_web.sh
 bash scripts/install_enc_web.sh
 
 cd scripts
@@ -26,7 +27,10 @@ cd scripts
 This installs the reviewed mobile Web UI and populates
 `mobile/android/app/libs/` with the AAR used by the app. The `init_openlist.sh`
 and `init_web.sh` scripts are only for an explicit upstream refresh and are not
-part of a reproducible release build.
+part of a reproducible release build. `install_openlist_web.sh` fetches a pinned
+OpenList frontend release so the embedded OpenList server serves the file
+listing at `/` (matching docker); the enc-webui management console remains at
+`/index` and `/public`.
 
 ## APK
 
