@@ -385,6 +385,7 @@ jobs:
       - name: Build and install reviewed mobile Web UI
         run: |
           set -euo pipefail
+          bash mobile/openlist-lib/scripts/install_openlist_web.sh
           npm ci --prefix mobile/enc-webui
           npm run build --prefix mobile/enc-webui
           bash mobile/openlist-lib/scripts/install_enc_web.sh
