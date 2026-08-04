@@ -139,22 +139,27 @@ func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]File
 		var record FileMetaRecord
 		var isActive int
 		var upstreamFetchedAt sql.NullTime
+		// Several columns are NULL-able in the schema (encrypted_path, name,
+		// nonce_field, etag, content_type, raw_url, sign). Scanning NULL into a
+		// plain string/[]byte fails, so use Null wrappers and coerce to empty.
+		var encryptedPath, name, etag, contentType, rawURL, rawURLAuthScope, sign sql.NullString
+		var nonceField []byte
 		if err := rows.Scan(
 			&record.KeyHash,
 			&record.ProviderHost,
 			&record.OriginalPath,
-			&record.EncryptedPath,
-			&record.Name,
+			&encryptedPath,
+			&name,
 			&record.Size,
 			&record.CiphertextSize,
 			&record.ContentVersion,
 			&record.HeaderLen,
-			&record.NonceField,
-			&record.ETag,
-			&record.ContentType,
-			&record.RawURL,
-			&record.RawURLAuthScope,
-			&record.Sign,
+			&nonceField,
+			&etag,
+			&contentType,
+			&rawURL,
+			&rawURLAuthScope,
+			&sign,
 			&record.StatusCode,
 			&record.UpdatedAt,
 			&record.LastAccessed,
@@ -163,6 +168,14 @@ func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]File
 		); err != nil {
 			return nil, err
 		}
+		record.EncryptedPath = encryptedPath.String
+		record.Name = name.String
+		record.ETag = etag.String
+		record.ContentType = contentType.String
+		record.RawURL = rawURL.String
+		record.RawURLAuthScope = rawURLAuthScope.String
+		record.Sign = sign.String
+		record.NonceField = nonceField
 		record.Active = isActive == 1
 		if upstreamFetchedAt.Valid {
 			record.UpstreamFetchedAt = upstreamFetchedAt.Time
