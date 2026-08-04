@@ -10,7 +10,6 @@ export default {
     'encrypt online': '在线加解密',
     'file transfer': '文件转存',
     'description': '介绍',
-    'Other': '系统信息',
     
     'Error Log': '错误日志',
     'Error Index': '错误日志列表',

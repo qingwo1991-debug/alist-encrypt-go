@@ -124,7 +124,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/store/config'
 import { useBasicStore } from '@/store/basic'
-import { upatePasswordReq, updateUsernameReq, getStatsReq } from '@/api/user'
+import { getStatsReq, upatePasswordReq, updateUsernameReq } from '@/api/user'
 import { ElMessage } from 'element-plus'
 
 const labelPosition = ref('right')
@@ -164,7 +164,7 @@ const runtime = reactive({
   queueLen: 0,
   updatedAt: ''
 })
-let statsTimer = null
+let statsTimer: number | null = null
 
 const hitRateText = computed(() => {
   const rate = Number(runtime.consumerHitRate) || 0
