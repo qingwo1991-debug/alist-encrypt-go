@@ -98,21 +98,27 @@ const (
 )
 
 var builtinDirectProviders = map[string]struct{}{
-	"aliyundriveopen": {},
-	"baidunetdisk":    {},
-	"baiduphoto":      {},
-	"cloud189":        {},
-	"cloud189pc":      {},
-	"open123":         {},
-	"pan115":          {},
-	"quarkoruc":       {},
-	"weiyun":          {},
-	"wps":             {},
+	"aliyundriveopen":   {},
+	"baidunetdisk":      {},
+	"baiduphoto":        {},
+	"chinaunicom":       {},
+	"china_unicom_cloud": {},
+	"cloud189":          {},
+	"cloud189pc":        {},
+	"open123":           {},
+	"pan115":            {},
+	"quarkoruc":         {},
+	"unicom":            {},
+	"unicom_cloud":      {},
+	"weiyun":            {},
+	"wo_cloud":          {},
+	"wps":               {},
 }
 
 var builtinProxyProviders = map[string]struct{}{
 	"onedrive":    {},
 	"onedriveapp": {},
+	"googledrive": {},
 	"googlephoto": {},
 	"mega":        {},
 	"mediafire":   {},

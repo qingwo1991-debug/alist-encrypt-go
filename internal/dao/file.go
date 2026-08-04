@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"encoding/json"
 	"net/url"
 	"strings"
 	"sync"
@@ -290,6 +291,35 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		return nil
 	}
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
+}
+
+// List iterates every FileInfo persisted in BoltDB. It is used to back the
+// DB_EXPORT metadata endpoint when MySQL is not enabled, so a mobile/other
+// deployment can still sync the preheat metadata from a default (BoltDB) server.
+func (d *FileDAO) List(limit int) []*FileInfo {
+	if d == nil || d.store == nil {
+		return nil
+	}
+	all, err := d.store.GetAll(storage.BucketFileInfo)
+	if err != nil {
+		log.Warn().Err(err).Msg("FileDAO.List: failed to read file info bucket")
+		return nil
+	}
+	out := make([]*FileInfo, 0, len(all))
+	for path, raw := range all {
+		var info FileInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			continue
+		}
+		if info.Path == "" {
+			info.Path = path
+		}
+		out = append(out, &info)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // SetComplete stores a fully-populated FileInfo without the read-before-write merge.

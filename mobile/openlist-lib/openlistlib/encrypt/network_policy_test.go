@@ -95,6 +95,46 @@ func TestProxyResolverDefaultUsesEnvProxyForPublicHosts(t *testing.T) {
 	}
 }
 
+func TestProxyResolverBuiltinUnicomDirect(t *testing.T) {
+	setProxyEnvironment(t)
+	// 联通云盘（国内直连）即使开着梯子也应直连，不被路由到代理。
+	for _, provider := range []string{"unicom_cloud", "china_unicom_cloud", "wo_cloud", "unicom", "chinaunicom"} {
+		req := httptest.NewRequest(http.MethodGet, "https://tjdownload.pan.wo.cn/openapi/download?fid=x", nil)
+		req.Header.Set("X-Encrypt-Provider", provider)
+		resolver := newProxyResolver(&ProxyConfig{
+			EnableLocalBypass: false, // 显式关闭本地绕过，仅验证内置直连规则
+			RoutingMode:       routingModeByProvider,
+		})
+		proxyURL, err := resolver(req)
+		if err != nil {
+			t.Fatalf("[%s] resolver returned err: %v", provider, err)
+		}
+		if proxyURL != nil {
+			t.Fatalf("[%s] expected direct connection for unicom provider, got proxy %v", provider, proxyURL)
+		}
+	}
+}
+
+func TestProxyResolverBuiltinGoogleDriveProxy(t *testing.T) {
+	setProxyEnvironment(t)
+	// Google Drive（跨境）应走系统代理。
+	for _, provider := range []string{"googledrive", "google_drive"} {
+		req := httptest.NewRequest(http.MethodGet, "https://drive.google.com/d/x", nil)
+		req.Header.Set("X-Encrypt-Provider", provider)
+		resolver := newProxyResolver(&ProxyConfig{
+			EnableLocalBypass: false,
+			RoutingMode:       routingModeByProvider,
+		})
+		proxyURL, err := resolver(req)
+		if err != nil {
+			t.Fatalf("[%s] resolver returned err: %v", provider, err)
+		}
+		if proxyURL == nil {
+			t.Fatalf("[%s] expected proxy for googledrive provider", provider)
+		}
+	}
+}
+
 func TestProxyResolverByProviderRule(t *testing.T) {
 	setProxyEnvironment(t)
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)

@@ -10,7 +10,7 @@ import (
 )
 
 func TestGetBuildInfo(t *testing.T) {
-	h := NewAPIHandler(config.DefaultConfig(), nil, nil, nil)
+	h := NewAPIHandler(config.DefaultConfig(), nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/enc-api/getBuildInfo", nil)
 	rr := httptest.NewRecorder()

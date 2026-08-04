@@ -26,6 +26,7 @@ type APIHandler struct {
 	jwtAuth    *auth.JWTAuth
 	userDAO    *dao.UserDAO
 	passwdDAO  *dao.PasswdDAO
+	fileDAO    *dao.FileDAO
 	mysqlStore *mysqlstore.Store
 	dictMgr    *proxydict.Manager
 	svc        *appservice.Service
@@ -34,7 +35,7 @@ type APIHandler struct {
 var deprecatedRangeCompatTTLWarned uint32
 
 // NewAPIHandler creates a new API handler
-func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.PasswdDAO, mysqlStore *mysqlstore.Store) *APIHandler {
+func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.PasswdDAO, fileDAO *dao.FileDAO, mysqlStore *mysqlstore.Store) *APIHandler {
 	expireHours := cfg.JWTExpire
 	if expireHours <= 0 {
 		expireHours = 48
@@ -45,6 +46,7 @@ func NewAPIHandler(cfg *config.Config, userDAO *dao.UserDAO, passwdDAO *dao.Pass
 		jwtAuth:    auth.NewJWTAuth(cfg.JWTSecret, time.Duration(expireHours)*time.Hour),
 		userDAO:    userDAO,
 		passwdDAO:  passwdDAO,
+		fileDAO:    fileDAO,
 		mysqlStore: mysqlStore,
 		dictMgr:    dictMgr,
 		svc: appservice.New(appservice.Deps{
@@ -326,11 +328,6 @@ func (h *APIHandler) SaveSchemeConfig(w http.ResponseWriter, r *http.Request) {
 
 // ExportFileMeta exports file metadata from MySQL for external sync
 func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
-	if h.mysqlStore == nil {
-		RespondAPIError(w, 500, "mysql not enabled")
-		return
-	}
-
 	limit := 1000
 	offset := 0
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -361,30 +358,95 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filter := mysqlstore.FileMetaFilter{
-		ProviderHost: r.URL.Query().Get("provider"),
-		OriginalPath: r.URL.Query().Get("path"),
-		PathPrefix:   r.URL.Query().Get("path_prefix"),
-		UpdatedAfter: updatedAfter,
-		CursorKey:    r.URL.Query().Get("cursor"),
-		Limit:        limit,
-		Offset:       offset,
-	}
+	// MySQL is the preferred metadata backend. When it is not enabled (the
+	// default BoltDB deployment), fall back to the file info cache so mobile
+	// DB_EXPORT sync still has metadata to pull.
+	if h.mysqlStore != nil {
+		filter := mysqlstore.FileMetaFilter{
+			ProviderHost: r.URL.Query().Get("provider"),
+			OriginalPath: r.URL.Query().Get("path"),
+			PathPrefix:   r.URL.Query().Get("path_prefix"),
+			UpdatedAfter: updatedAfter,
+			CursorKey:    r.URL.Query().Get("cursor"),
+			Limit:        limit,
+			Offset:       offset,
+		}
 
-	records, err := h.svc.ExportFileMeta(r.Context(), filter)
-	if err != nil {
-		RespondAPIError(w, 500, err.Error())
+		records, err := h.svc.ExportFileMeta(r.Context(), filter)
+		if err != nil {
+			RespondAPIError(w, 500, err.Error())
+			return
+		}
+
+		var maxUpdated time.Time
+		nextCursor := ""
+		for _, record := range records {
+			if record.UpdatedAt.After(maxUpdated) {
+				maxUpdated = record.UpdatedAt
+			}
+			nextCursor = record.KeyHash
+		}
+		nextSince := int64(0)
+		nextSinceRFC3339 := ""
+		if !maxUpdated.IsZero() {
+			nextSince = maxUpdated.Unix()
+			nextSinceRFC3339 = maxUpdated.UTC().Format(time.RFC3339)
+		}
+
+		RespondSuccess(w, map[string]interface{}{
+			"items":              records,
+			"limit":              limit,
+			"offset":             offset,
+			"has_more":           len(records) == limit,
+			"next_since":         nextSince,
+			"next_since_rfc3339": nextSinceRFC3339,
+			"next_cursor":        nextCursor,
+		})
 		return
 	}
 
+	if h.fileDAO == nil {
+		RespondAPIError(w, 500, "no metadata backend available")
+		return
+	}
+
+	all := h.fileDAO.List(limit + offset)
+	records := make([]mysqlstore.FileMetaRecord, 0, len(all))
 	var maxUpdated time.Time
 	nextCursor := ""
-	for _, record := range records {
+	for i, info := range all {
+		if i < offset {
+			continue
+		}
+		providerHost := ProviderKey(info.RawURL, info.Path)
+		record := mysqlstore.FileMetaRecord{
+			KeyHash:           mysqlstore.KeyHash(providerHost, info.Path),
+			ProviderHost:      providerHost,
+			OriginalPath:      info.Path,
+			EncryptedPath:     info.EncryptedPath,
+			Name:              info.Name,
+			Size:              info.Size,
+			CiphertextSize:    info.CiphertextSize,
+			ContentVersion:    info.ContentVersion,
+			HeaderLen:         info.HeaderLen,
+			NonceField:        append([]byte(nil), info.NonceField...),
+			RawURL:            info.RawURL,
+			RawURLAuthScope:   info.RawURLAuthScope,
+			Sign:              info.Sign,
+			UpstreamFetchedAt: info.UpstreamFetchedAt,
+			UpdatedAt:         info.Modified,
+			LastAccessed:      info.Modified,
+		}
+		if record.UpdatedAt.IsZero() {
+			record.UpdatedAt = info.UpstreamFetchedAt
+		}
 		if record.UpdatedAt.After(maxUpdated) {
 			maxUpdated = record.UpdatedAt
 		}
 		nextCursor = record.KeyHash
+		records = append(records, record)
 	}
+
 	nextSince := int64(0)
 	nextSinceRFC3339 := ""
 	if !maxUpdated.IsZero() {
@@ -396,10 +458,11 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 		"items":              records,
 		"limit":              limit,
 		"offset":             offset,
-		"has_more":           len(records) == limit,
+		"has_more":           len(all) > limit+offset,
 		"next_since":         nextSince,
 		"next_since_rfc3339": nextSinceRFC3339,
 		"next_cursor":        nextCursor,
+		"backend":            "boltdb",
 	})
 }
 
@@ -436,7 +499,16 @@ func exportLimitAndCursor(r *http.Request) (int, string) {
 // ExportStrategy exports strategy metadata for DB_EXPORT sync.
 func (h *APIHandler) ExportStrategy(w http.ResponseWriter, r *http.Request) {
 	if h.mysqlStore == nil {
-		RespondAPIError(w, 500, "mysql not enabled")
+		// Strategy learning lives in MySQL; without it the endpoint reports an
+		// empty set so mobile DB_EXPORT sync degrades to size-only instead of
+		// failing the whole cycle.
+		RespondSuccess(w, map[string]interface{}{
+			"items":       []interface{}{},
+			"has_more":    false,
+			"next_since":  int64(0),
+			"next_cursor": "",
+			"limit":       1000,
+		})
 		return
 	}
 	records, err := h.svc.ExportStrategies(r.Context())
@@ -499,7 +571,15 @@ func (h *APIHandler) ExportStrategy(w http.ResponseWriter, r *http.Request) {
 // ExportRangeCompat exports range compatibility metadata for DB_EXPORT sync.
 func (h *APIHandler) ExportRangeCompat(w http.ResponseWriter, r *http.Request) {
 	if h.mysqlStore == nil {
-		RespondAPIError(w, 500, "mysql not enabled")
+		// Range compatibility state is stored per-provider in range_compat.json
+		// when MySQL is off; exporting an empty set keeps mobile sync healthy.
+		RespondSuccess(w, map[string]interface{}{
+			"items":       []interface{}{},
+			"has_more":    false,
+			"next_since":  int64(0),
+			"next_cursor": "",
+			"limit":       1000,
+		})
 		return
 	}
 	records, err := h.svc.ExportRangeCompats(r.Context())

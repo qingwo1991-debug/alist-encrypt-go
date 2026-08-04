@@ -670,7 +670,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                     Card(
                       elevation: 0,
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(20),
                         side: BorderSide(
                           color: _proxyRunning
                               ? Colors.green.withOpacity(0.3)
@@ -728,7 +728,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                               onPressed: _toggleProxy,
                               style: FilledButton.styleFrom(
                                 shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
+                                  borderRadius: BorderRadius.circular(14),
                                 ),
                               ),
                               child: Text(_proxyRunning ? '停止' : '启动'),
@@ -1238,7 +1238,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                           final config = _encryptPaths[index];
                           return Card(
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                              borderRadius: BorderRadius.circular(16),
                               side: BorderSide(
                                 color: config.enable
                                     ? Colors.green.withOpacity(0.3)
@@ -1273,7 +1273,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                                       decoration: BoxDecoration(
                                         color: Colors.teal.withOpacity(0.1),
-                                        borderRadius: BorderRadius.circular(4),
+                                        borderRadius: BorderRadius.circular(6),
                                       ),
                                       child: Text(
                                         config.encType.toUpperCase(),

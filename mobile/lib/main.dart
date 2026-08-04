@@ -66,50 +66,88 @@ class MyApp extends StatelessWidget {
           theme: ThemeData(
             useMaterial3: true,
             colorSchemeSeed: Colors.teal,
+            // iOS 风格：更柔和圆角 + 半透明层次
             cardTheme: CardThemeData(
               elevation: 0,
+              color: Colors.white.withOpacity(0.72),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: BorderSide(color: Colors.grey.withOpacity(0.15)),
+                borderRadius: BorderRadius.circular(20),
+                side: BorderSide(color: Colors.grey.withOpacity(0.10)),
               ),
             ),
             appBarTheme: const AppBarTheme(
               centerTitle: false,
               scrolledUnderElevation: 2,
+              backgroundColor: Colors.transparent,
+              surfaceTintColor: Colors.transparent,
+              titleTextStyle: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                color: Colors.black87,
+              ),
             ),
             snackBarTheme: SnackBarThemeData(
               behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
             ),
-            inputDecorationTheme: const InputDecorationTheme(
-              border: OutlineInputBorder(),
+            inputDecorationTheme: InputDecorationTheme(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+              filled: true,
+              fillColor: Colors.grey.withOpacity(0.06),
+            ),
+            navigationBarTheme: NavigationBarThemeData(
+              surfaceTintColor: Colors.transparent,
+              indicatorColor: Colors.teal.withOpacity(0.18),
+              labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+              elevation: 0,
             ),
           ),
           darkTheme: ThemeData(
             useMaterial3: true,
             brightness: Brightness.dark,
             colorSchemeSeed: Colors.teal,
+            // iOS 深色：更深的卡片 + 半透明层次
             cardTheme: CardThemeData(
               elevation: 0,
+              color: Colors.white.withOpacity(0.06),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(20),
                 side: BorderSide(color: Colors.white.withOpacity(0.08)),
               ),
             ),
             appBarTheme: const AppBarTheme(
               centerTitle: false,
               scrolledUnderElevation: 2,
+              backgroundColor: Colors.transparent,
+              surfaceTintColor: Colors.transparent,
+              titleTextStyle: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
+              ),
             ),
             snackBarTheme: SnackBarThemeData(
               behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
             ),
-            inputDecorationTheme: const InputDecorationTheme(
-              border: OutlineInputBorder(),
+            inputDecorationTheme: InputDecorationTheme(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.06),
             ),
             navigationBarTheme: NavigationBarThemeData(
               surfaceTintColor: Colors.transparent,
-              indicatorColor: Colors.teal.withOpacity(0.2),
+              indicatorColor: Colors.teal.withOpacity(0.24),
+              labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+              elevation: 0,
             ),
           ),
           locale: appLocale,

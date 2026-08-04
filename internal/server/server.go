@@ -127,7 +127,7 @@ func (s *Server) setupRoutes() {
 
 // createHandlers initializes all request handlers.
 func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *handler.AlistHandler, *handler.WebDAVHandler, *handler.StatsHandler) {
-	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO, s.mysqlStore)
+	apiHandler := handler.NewAPIHandler(s.cfg, s.userDAO, s.passwdDAO, s.fileDAO, s.mysqlStore)
 	strategyStore := handler.StrategyStore(handler.NewMemoryStrategyStore())
 	var metaStore handler.FileMetaStore
 
