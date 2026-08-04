@@ -14,6 +14,10 @@ import (
 
 const defaultRangeCompatReprobe = 30 * time.Minute
 
+// redirectMaxHopsDefault caps how many redirects the range-capability probe
+// follows. Matches the config default for decrypt redirects.
+const redirectMaxHopsDefault = 2
+
 // RangeCompatStats returns range compatibility cache stats
 func (s *StreamProxy) RangeCompatStats() map[string]interface{} {
 	alist := s.alistServerSnapshot()
@@ -288,6 +292,14 @@ func (s *StreamProxy) ShouldBackgroundProbeRange(targetURL, storageKey string) b
 // ProbeRangeCompatibility sends a lightweight range probe and updates learning
 // state. It returns true only when the upstream produced a definitive range
 // result; transport/auth failures are not reported as a successful warmup.
+//
+// The probe starts at the caller-supplied target (often the internal Alist
+// /d/ or /dav/ URL, which responds 302 to a signed CDN URL). Range capability
+// belongs to the storage/CDN that serves bytes, not the Alist front-end, so the
+// probe follows redirects (up to redirectMaxHops) before assessing the final
+// response. Without this, a 302 from Alist was never classified and the storage
+// was permanently stuck at "unknown range", forcing every seek through a
+// Range → Chunked → Full retry chain.
 func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL string, authHeaders http.Header, storageKey string) bool {
 	if !s.ShouldBackgroundProbeRange(targetURL, storageKey) {
 		return false
@@ -301,21 +313,63 @@ func (s *StreamProxy) ProbeRangeCompatibility(ctx context.Context, targetURL str
 	probeCtx, cancel := context.WithTimeout(ctx, s.rangeProbeTimeout())
 	defer cancel()
 
-	req, err := httputil.NewRequest(http.MethodGet, targetURL).
-		WithContext(probeCtx).
-		Build()
-	if err != nil {
+	currentURL := strings.TrimSpace(targetURL)
+	if currentURL == "" {
 		return false
 	}
-	req.Header.Set("Range", "bytes=0-0")
-	req.Header.Set("Accept-Encoding", "identity")
-	copyProbeAuthHeaders(req, authHeaders)
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		if s.rangeStats != nil {
-			atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+	origHost := ""
+	if parsed, err := url.Parse(currentURL); err == nil {
+		origHost = parsed.Host
+	}
+	maxHops := redirectMaxHopsDefault
+	if s != nil && s.cfg != nil {
+		if configured := s.cfg.AlistServerSnapshot().RedirectMaxHops; configured > 0 {
+			maxHops = configured
 		}
+	}
+
+	var resp *http.Response
+	for redirect := 0; redirect <= maxHops; redirect++ {
+		req, err := httputil.NewRequest(http.MethodGet, currentURL).
+			WithContext(probeCtx).
+			Build()
+		if err != nil {
+			return false
+		}
+		req.Header.Set("Range", "bytes=0-0")
+		req.Header.Set("Accept-Encoding", "identity")
+		copyProbeAuthHeaders(req, authHeaders)
+		// Drop credentials when a redirect crosses hosts (e.g. Alist -> CDN).
+		if parsed, perr := url.Parse(currentURL); perr == nil {
+			if origHost != "" && !strings.EqualFold(parsed.Host, origHost) {
+				req.Header.Del("Authorization")
+				req.Header.Del("Cookie")
+			}
+		}
+
+		resp, err = s.client.Do(req)
+		if err != nil {
+			if s.rangeStats != nil {
+				atomic.AddUint64(&s.rangeStats.probeFailure, 1)
+			}
+			return false
+		}
+		if isRedirectStatus(resp.StatusCode) {
+			location := strings.TrimSpace(resp.Header.Get("Location"))
+			resp.Body.Close()
+			if location == "" {
+				return false
+			}
+			nextURL := resolveRedirectURL(req.URL, location)
+			if nextURL == "" || strings.EqualFold(nextURL, currentURL) {
+				return false
+			}
+			currentURL = nextURL
+			continue
+		}
+		break
+	}
+	if resp == nil {
 		return false
 	}
 	defer resp.Body.Close()

@@ -26,17 +26,15 @@
             </div>
           </div>
           <div class="section-tabs">
-            <div class="section-tab section-tab--active">
-              <div class="section-tab__title">Alist 服务配置</div>
-              <div class="section-tab__desc">连接、解密、预热和观测的主控制台。</div>
-            </div>
-            <div class="section-tab">
-              <div class="section-tab__title">WebDAV</div>
-              <div class="section-tab__desc">与服务配置保持同一套卡片和表单语言。</div>
-            </div>
-            <div class="section-tab">
-              <div class="section-tab__title">在线加密</div>
-              <div class="section-tab__desc">统一入口和状态表达，避免信息孤岛。</div>
+            <div
+              v-for="tab in quickTabs"
+              :key="tab.path"
+              class="section-tab"
+              :class="{ 'section-tab--active': tab.path === activeTabPath }"
+              @click="goTab(tab.path)"
+            >
+              <div class="section-tab__title">{{ tab.title }}</div>
+              <div class="section-tab__desc">{{ tab.desc }}</div>
             </div>
           </div>
         </div>
@@ -493,6 +491,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   cleanupLegacyBoltDBReq,
@@ -518,6 +517,20 @@ const dialogFolderFormVisible = ref(false)
 const activeName = ref('encode')
 const expandedSections = ref(['connection', 'scan', 'password'])
 const statsRefreshTimer = ref(null)
+const route = useRoute()
+const router = useRouter()
+
+const quickTabs = [
+  { path: '/setting-alist/index', title: 'Alist 服务配置', desc: '连接、解密、预热和观测的主控制台。' },
+  { path: '/setting-webdav/index', title: 'WebDAV', desc: '多个 WebDAV 实例与密码规则管理。' },
+  { path: '/encrypt-online/index', title: '在线加密', desc: '在线加密与解密入口。' }
+]
+const activeTabPath = ref('/setting-alist/index')
+const goTab = (path) => {
+  if (path !== activeTabPath.value && router) {
+    router.push(path)
+  }
+}
 const providerOptions = ref([])
 const scanValidationResult = ref(null)
 const cleanupMsg = ref('')
@@ -901,6 +914,7 @@ const triggerDirSyncScan = async () => {
 }
 
 onMounted(async () => {
+  activeTabPath.value = route?.path || '/setting-alist/index'
   const res = await getAlistConfigReq()
   for (const passwdInfo of res.data.passwdList) {
     passwdInfo.id = Math.random()
@@ -955,6 +969,16 @@ onUnmounted(() => {
 .setting-collapse {
   border: none;
   background: transparent;
+}
+
+.section-tab {
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.section-tab:hover {
+  transform: translateY(-2px);
+  border-color: rgba(108, 142, 230, 0.3);
 }
 
 .section-banner {

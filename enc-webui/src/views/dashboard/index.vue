@@ -59,20 +59,31 @@
           <div class="panel-card__header">
             <div>
               <div class="panel-card__title">运行摘要</div>
-              <div class="panel-card__subtitle">围绕 Go 版本的稳定性和维护效率来表达工程感。</div>
+              <div class="panel-card__subtitle">解密流、预热状态与真实命中情况，每 8 秒自动刷新。最后更新 {{ runtime.updatedAt || '-' }}</div>
             </div>
+            <el-button link type="primary" :loading="false" @click="fetchRuntimeStats">刷新</el-button>
           </div>
 
           <div class="stats-grid">
             <div class="stats-card">
-              <div class="stats-card__label">Engine</div>
-              <div class="stats-card__value">Go</div>
-              <div class="stats-card__meta">更稳定的代理与并发处理模型。</div>
+              <div class="stats-card__label">解密流负载</div>
+              <div class="stats-card__value">{{ runtime.activeStreams }}<span class="stats-card__unit">/{{ runtime.maxStreams }}</span></div>
+              <div class="stats-card__meta">当前 {{ streamLoad }}%，累计拒绝 {{ runtime.rejectedStreams }}</div>
             </div>
             <div class="stats-card">
-              <div class="stats-card__label">Panel</div>
-              <div class="stats-card__value">Unified</div>
-              <div class="stats-card__meta">服务配置、WebDAV 和在线加密使用同一套视觉语言。</div>
+              <div class="stats-card__label">预热状态</div>
+              <div class="stats-card__value">{{ runtime.warmReady }}<span class="stats-card__unit"> ready</span></div>
+              <div class="stats-card__meta">过期 {{ runtime.warmStale }} · 失效 {{ runtime.warmInvalid }}</div>
+            </div>
+            <div class="stats-card">
+              <div class="stats-card__label">真实命中</div>
+              <div class="stats-card__value">{{ runtime.consumerHitTotal }}</div>
+              <div class="stats-card__meta">命中率 {{ hitRateText }}（warm 成功 {{ runtime.filesSucceeded }}）</div>
+            </div>
+            <div class="stats-card">
+              <div class="stats-card__label">预取队列</div>
+              <div class="stats-card__value">{{ runtime.queueLen }}</div>
+              <div class="stats-card__meta">待处理任务数</div>
             </div>
           </div>
         </section>
@@ -109,11 +120,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/store/config'
 import { useBasicStore } from '@/store/basic'
-import { upatePasswordReq, updateUsernameReq } from '@/api/user'
+import { upatePasswordReq, updateUsernameReq, getStatsReq } from '@/api/user'
 import { ElMessage } from 'element-plus'
 
 const labelPosition = ref('right')
@@ -138,6 +149,63 @@ const userForm = reactive({
 const refSearchForm = ref()
 userForm.username = userInfo.username
 userForm.originalUsername = userInfo.username
+
+// ---- live runtime summary ----
+const runtime = reactive({
+  activeStreams: 0,
+  maxStreams: 0,
+  rejectedStreams: 0,
+  warmReady: 0,
+  warmStale: 0,
+  warmInvalid: 0,
+  consumerHitTotal: 0,
+  consumerHitRate: 0,
+  filesSucceeded: 0,
+  queueLen: 0,
+  updatedAt: ''
+})
+let statsTimer = null
+
+const hitRateText = computed(() => {
+  const rate = Number(runtime.consumerHitRate) || 0
+  return `${(rate * 100).toFixed(1)}%`
+})
+
+const streamLoad = computed(() => {
+  if (!runtime.maxStreams) return 0
+  return Math.min(100, Math.round((runtime.activeStreams / runtime.maxStreams) * 100))
+})
+
+const fetchRuntimeStats = async () => {
+  try {
+    const res = await getStatsReq({ reqLoading: false })
+    const data = res?.data || {}
+    const sched = data.probe_scheduler || {}
+    const stream = data.stream || {}
+    const limiter = stream.limit || {}
+    runtime.activeStreams = limiter.active_streams ?? 0
+    runtime.maxStreams = limiter.max_active ?? 32
+    runtime.rejectedStreams = limiter.rejected_streams ?? 0
+    runtime.warmReady = sched.warm_state_counts?.warm_ready ?? 0
+    runtime.warmStale = sched.warm_state_counts?.warm_stale ?? 0
+    runtime.warmInvalid = sched.warm_state_counts?.warm_invalid ?? 0
+    runtime.consumerHitTotal = sched.consumer_hit_total ?? 0
+    runtime.consumerHitRate = sched.consumer_hit_rate ?? 0
+    runtime.filesSucceeded = sched.files_succeeded_total ?? 0
+    runtime.queueLen = sched.queue_len ?? 0
+    runtime.updatedAt = new Date().toLocaleTimeString()
+  } catch {
+    /* dashboard stays silent on stats failure */
+  }
+}
+
+onMounted(() => {
+  fetchRuntimeStats()
+  statsTimer = window.setInterval(() => fetchRuntimeStats(), 8000)
+})
+onUnmounted(() => {
+  if (statsTimer) window.clearInterval(statsTimer)
+})
 
 const updatePasswd = () => {
   if (!userForm.password) {
@@ -191,6 +259,13 @@ const updateUsername = () => {
 <style scoped lang="scss">
 .dashboard-page {
   padding: 6px 0 30px;
+}
+
+.stats-card__unit {
+  margin-left: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
 }
 
 .dashboard-shell {

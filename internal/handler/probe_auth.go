@@ -92,6 +92,27 @@ func buildProbeAuthVariants(cfg *config.Config, requestHeaders http.Header) []ht
 	return variants
 }
 
+// injectProbeAuthFallback sets the configured scan credential (Basic auth or
+// raw Authorization header) on a request that carries none of its own. Used by
+// size-resolution HEAD/Range probes that must reach Alist's protected /d/ and
+// /dav/ endpoints even when the client request was unauthenticated.
+func injectProbeAuthFallback(req *http.Request, cfg *config.Config) {
+	if req == nil || cfg == nil {
+		return
+	}
+	alist := cfg.AlistServerSnapshot()
+	if raw := strings.TrimSpace(alist.ScanAuthHeader); raw != "" {
+		req.Header.Set("Authorization", extractAuthorizationValue(raw))
+		return
+	}
+	username := strings.TrimSpace(alist.ScanUsername)
+	password := strings.TrimSpace(alist.ScanPassword)
+	if username != "" && password != "" {
+		basic := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		req.Header.Set("Authorization", "Basic "+basic)
+	}
+}
+
 func probeJWTCacheKey(alistURL, username, password string) [sha256.Size]byte {
 	alistURL = strings.TrimRight(strings.TrimSpace(alistURL), "/")
 	return sha256.Sum256([]byte(alistURL + "\x00" + username + "\x00" + password))

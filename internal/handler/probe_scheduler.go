@@ -590,7 +590,19 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 			ps.invalidateJWTCache()
 		}
 	}
-	if ps.stream != nil && ps.stream.ProbeRangeCompatibility(probeCtx, item.file.TargetURL, authHeaders, item.file.CompatStorageKey) {
+	// Probe Range capability against the URL a real player will hit. The alist
+	// /d/ or /dav/ front-end responds 401/302 and does not itself serve Range, so
+	// probing it teaches nothing and leaves files_range_probed at zero. Prefer
+	// the cached raw_url (the actual CDN/object URL) that was fetched above;
+	// fall back to the internal target and let ProbeRangeCompatibility follow
+	// redirects to the real storage.
+	probeTargetURL := item.file.TargetURL
+	if ps.fileDAO != nil {
+		if info, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && info != nil && strings.TrimSpace(info.RawURL) != "" {
+			probeTargetURL = info.RawURL
+		}
+	}
+	if ps.stream != nil && ps.stream.ProbeRangeCompatibility(probeCtx, probeTargetURL, authHeaders, item.file.CompatStorageKey) {
 		resultState.rangeProbed = true
 		atomic.AddUint64(&ps.filesRangeProbed, 1)
 	}

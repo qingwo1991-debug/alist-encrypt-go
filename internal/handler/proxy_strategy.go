@@ -155,6 +155,14 @@ func (h *ProxyHandler) executeHEADRequestHTTP(headURL, realPath string, r *http.
 		return 0, err
 	}
 
+	// The caller may reach /d/ without credentials (raw browser URL, some WebDAV
+	// clients). Alist's /d/ requires a token, so a bare HEAD returns 401 and the
+	// size is misreported as unknown, forcing a slower full resolution chain.
+	// Fall back to the configured scan identity when the request carries none.
+	if headReq.Header.Get("Authorization") == "" && headReq.Header.Get("Cookie") == "" {
+		injectProbeAuthFallback(headReq, h.cfg)
+	}
+
 	headResp, err := h.shortClient.Do(headReq)
 	if err != nil {
 		trace.Logf(ctx, "head-request", "HEAD request failed: %v", err)

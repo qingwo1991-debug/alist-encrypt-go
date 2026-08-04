@@ -51,7 +51,7 @@ export const constantRoutes = [
         path: 'index',
         component: () => import('@/views/setting-alist/index.vue'),
         name: 'alist',
-        meta: { title: 'Setting alist', icon: 'example' }
+        meta: { title: 'Setting alist', icon: 'form' }
       }
     ]
   },
@@ -63,7 +63,7 @@ export const constantRoutes = [
         path: 'index',
         component: () => import('@/views/setting-webdav/index.vue'),
         name: 'webdav',
-        meta: { title: 'Setting webdav', icon: 'example' }
+        meta: { title: 'Setting webdav', icon: 'link' }
       }
     ]
   },
@@ -75,7 +75,7 @@ export const constantRoutes = [
         path: 'index',
         component: () => import('@/views/encrypt-local/index.vue'),
         name: 'encrypt-local',
-        meta: { title: 'encrypt local', icon: 'example' }
+        meta: { title: 'encrypt local', icon: 'lock' }
       }
     ]
   },
@@ -87,7 +87,7 @@ export const constantRoutes = [
         path: 'index',
         component: () => import('@/views/encrypt-online/index.vue'),
         name: 'encrypt-online',
-        meta: { title: 'encrypt online', icon: 'example' }
+        meta: { title: 'encrypt online', icon: 'eye' }
       }
     ]
   },
@@ -99,7 +99,19 @@ export const constantRoutes = [
         path: 'index',
         component: () => import('@/views/folder-convert/index.vue'),
         name: 'file transfer',
-        meta: { title: 'file transfer', icon: 'example' }
+        meta: { title: 'file transfer', icon: 'table' }
+      }
+    ]
+  },
+  {
+    path: '/other',
+    component: Layout,
+    children: [
+      {
+        path: 'index',
+        component: () => import('@/views/other/index.vue'),
+        name: 'other',
+        meta: { title: 'Other', icon: 'chart' }
       }
     ]
   },

@@ -1,15 +1,16 @@
 export default {
   router: {
-    Dashboard: '首页',
+    Dashboard: '控制台',
     LowCodePlatFrom: '低代码平台',
     RBAC: '用户权限角色',
-    'Setting alist': '配置alist',
-    'Setting webdav': '其他webdav',
+    'Setting alist': '服务配置',
+    'Setting webdav': 'WebDAV 配置',
     'find password': '找回密码',
     'encrypt local': '本地加解密',
     'encrypt online': '在线加解密',
     'file transfer': '文件转存',
     'description': '介绍',
+    'Other': '系统信息',
     
     'Error Log': '错误日志',
     'Error Index': '错误日志列表',
