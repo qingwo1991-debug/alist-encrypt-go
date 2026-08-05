@@ -5,8 +5,6 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:openlist_mobile/contant/native_bridge.dart';
 
-import '../../generated/l10n.dart';
-
 /// 播放统计页：设置统计导出密码 + 导出播放/删除统计。
 ///
 /// 入口在设置页"播放统计"。
