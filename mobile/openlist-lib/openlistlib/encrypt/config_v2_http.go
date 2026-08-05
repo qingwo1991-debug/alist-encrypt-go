@@ -146,6 +146,7 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"enableDecryptedBlockCache":       cfg.EnableDecryptedBlockCache,
 		"decryptedBlockCacheMb":           cfg.DecryptedBlockCacheMB,
 		"decryptedBlockSizeKb":            cfg.DecryptedBlockSizeKB,
+		"statsPassword":                   cfg.StatsPassword,
 		"encryptPaths":                    paths,
 	}
 }
@@ -292,6 +293,9 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := body["enableDecryptedBlockCache"].(bool); ok {
 		p.config.EnableDecryptedBlockCache = v
+	}
+	if v, ok := body["statsPassword"].(string); ok {
+		p.config.StatsPassword = strings.TrimSpace(v)
 	}
 	if v, ok := parseIntAny(body["decryptedBlockCacheMb"]); ok {
 		p.config.DecryptedBlockCacheMB = clampInt(v, 16, 2048)

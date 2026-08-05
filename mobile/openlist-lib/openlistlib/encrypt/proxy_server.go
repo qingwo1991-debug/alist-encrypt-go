@@ -536,6 +536,7 @@ func (p *ProxyServer) Start() error {
 	mux.HandleFunc("/api/encrypt/localState", p.handleLocalState)
 	mux.HandleFunc("/api/encrypt/localExport", p.handleLocalExport)
 	mux.HandleFunc("/api/encrypt/localImport", p.handleLocalImport)
+	mux.HandleFunc("/api/encrypt/exportStats", p.handleExportStats)
 	mux.HandleFunc("/api/encrypt/restart", p.handleRestart)
 	mux.HandleFunc("/public/sync-stats.html", p.handleSyncStatsPage)
 	mux.HandleFunc("/api/play/resolve", internal.WrapHandler(p.handlePlayResolve))

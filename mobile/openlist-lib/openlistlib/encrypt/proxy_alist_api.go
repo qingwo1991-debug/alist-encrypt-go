@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -473,6 +474,50 @@ func (p *ProxyServer) handleLocalExport(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"code": 200,
 		"data": data,
+	})
+}
+
+// handleExportStats 导出播放/删除统计。用独立统计密码鉴权（query ?password= 或
+// X-Stats-Password 头）。未配置 StatsPassword 时返回 404（功能关闭）。
+func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := p.configSnapshot()
+	if cfg == nil || strings.TrimSpace(cfg.StatsPassword) == "" {
+		http.Error(w, "stats disabled", http.StatusNotFound)
+		return
+	}
+	given := r.URL.Query().Get("password")
+	if given == "" {
+		given = r.Header.Get("X-Stats-Password")
+	}
+	if given != cfg.StatsPassword {
+		http.Error(w, "invalid stats password", http.StatusUnauthorized)
+		return
+	}
+	limit := 0
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			limit = n
+		}
+	}
+	plays, err := p.ListPlaybackStats(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	dels, err := p.ListDeletionStats(limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code":      200,
+		"playbacks": plays,
+		"deletions": dels,
 	})
 }
 
