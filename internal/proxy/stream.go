@@ -96,6 +96,7 @@ type StreamOutcome struct {
 	NoLearning      bool
 	BytesWritten    int64
 	ExpectedBytes   int64
+	WallDuration    time.Duration // 流式写出墙钟时长（统计播放时长近似）
 	ResponseStarted bool
 	StatusCode      int
 	ContentType     string

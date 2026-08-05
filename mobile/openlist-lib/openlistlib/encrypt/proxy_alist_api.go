@@ -503,6 +503,8 @@ func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) 
 			limit = n
 		}
 	}
+	// 先落库进行中的播放会话，导出才是完整视图。
+	p.flushPlaybackSessions()
 	plays, err := p.ListPlaybackStats(limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1153,6 +1155,9 @@ func (p *ProxyServer) handleFsMoveCopy(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 	srcDir, _ := reqData["src_dir"].(string)
+	dstDir, _ := reqData["dst_dir"].(string)
+	// 记录明文展示名（加密转换前），供成功后判断目标是否被覆盖删除。
+	originalNames := anyToStringSlice(reqData["names"])
 	encPath := p.findEncryptPath(srcDir)
 	if encPath != nil && encPath.EncName {
 		names := anyToStringSlice(reqData["names"])
@@ -1170,7 +1175,28 @@ func (p *ProxyServer) handleFsMoveCopy(w http.ResponseWriter, r *http.Request, a
 		reqData["names"] = converted
 		body, _ = json.Marshal(reqData)
 	}
-	p.proxyFSJSON(w, r, apiPath, body)
+	status, respBody, respErr := p.doFSRequest(r.Context(), r.Header, apiPath, body)
+	if respErr != nil {
+		http.Error(w, respErr.Error(), http.StatusBadGateway)
+		return
+	}
+	// MOVE/COPY 成功：目标若此前在缓存中（被列出/播放过），即被覆盖删除。
+	// dst == src（自己动自己）不算删除；同目录同名的原地 MOVE 也会被排除。
+	if status == http.StatusOK && !fsRemoveNotFound(status, respBody) {
+		for _, name := range originalNames {
+			dstDisplayPath := path.Join(dstDir, name)
+			srcDisplayPath := path.Join(srcDir, name)
+			if dstDisplayPath == srcDisplayPath {
+				continue
+			}
+			if _, existed := p.loadFileCache(dstDisplayPath); existed {
+				p.recordDeletionStats(dstDisplayPath)
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(respBody)
 }
 
 func (p *ProxyServer) handleFsRename(w http.ResponseWriter, r *http.Request) {

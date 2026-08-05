@@ -1527,6 +1527,13 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 			for i, name := range reqData.Names {
 				srcDisplayPath := path.Join(reqData.SrcDir, name)
 				dstDisplayPath := path.Join(reqData.DstDir, name)
+					// MOVE/COPY 覆盖 = 目标文件被删除。目标此前在缓存里（被列出/
+					// 播放过）才记：避免把"新建到不存在的路径"误记为删除。
+					if h.statsRecorder != nil {
+						if _, destExisted := h.fileDAO.Get(url.QueryEscape(dstDisplayPath)); destExisted {
+							h.statsRecorder.RecordDeletion(dstDisplayPath)
+						}
+					}
 
 				// For move operations, delete the source cache entry
 				if isMove {
@@ -1542,6 +1549,14 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 				if found && passwdInfo.EncName && i < len(fileNames) {
 					dstEncPath := path.Join(reqData.DstDir, fileNames[i])
 					h.fileDAO.SetEncPathMapping(dstDisplayPath, dstEncPath)
+				}
+
+				// 目标被覆盖 = 一次删除。仅当缓存中确实见过目标（避免"目标
+				// 原本不存在"的假阳性）；dst == src 时是自己动自己，不算删除。
+				if h.statsRecorder != nil && dstDisplayPath != srcDisplayPath {
+					if _, ok := h.fileDAO.Get(dstDisplayPath); ok {
+						h.statsRecorder.RecordDeletion(dstDisplayPath)
+					}
 				}
 			}
 			log.Debug().Str("endpoint", endpoint).Int("count", len(reqData.Names)).Msg("Updated cache for moved/copied files")

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -904,6 +905,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	p := o.proxy
 	ctx := r.Context()
 
+	// 墙钟起点：用于统计本次流式写出的时长（近似播放时长）。
+	streamWallStart := time.Now()
+
 	// Do not let failures from one signed cloud URL trip the process-wide
 	// control-plane breaker. A newly selected video may use a healthy provider,
 	// and request cancellation already bounds abandoned seek attempts.
@@ -1507,7 +1511,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		if provider == "" {
 			provider = ProviderKey(info.RedirectURL, "")
 		}
-		o.proxy.recordPlaybackStats(displayPath, provider, written, fileSize, written == expectedLength, "")
+		o.proxy.recordPlaybackStats(displayPath, provider, written, fileSize, written == expectedLength, "", time.Since(streamWallStart).Seconds(), startPos)
 	}
 
 	return &StreamOutcome{StatusCode: statusCode}
@@ -1657,7 +1661,8 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 					if provider == "" {
 						provider = ProviderKey(info.RedirectURL, "")
 					}
-					o.proxy.recordPlaybackStats(displayPath, provider, int64(len(data)), fileSize, true, "")
+					// 缓存命中写出几乎瞬时，时长按 0 记：seek 语义由会话聚合的 seekCount 表达。
+					o.proxy.recordPlaybackStats(displayPath, provider, int64(len(data)), fileSize, true, "", 0, start)
 				}
 				return
 			}

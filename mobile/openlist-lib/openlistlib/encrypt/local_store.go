@@ -302,7 +302,8 @@ func initLocalSchema(db *sql.DB) error {
             duration_secs REAL NOT NULL DEFAULT 0,
             played_at INTEGER NOT NULL,
             completed INTEGER NOT NULL DEFAULT 0,
-            content_type TEXT NOT NULL DEFAULT ''
+            content_type TEXT NOT NULL DEFAULT '',
+            seek_count INTEGER NOT NULL DEFAULT 0
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_playback_stats_played_at ON playback_stats(played_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_playback_stats_path ON playback_stats(path);`,
@@ -321,7 +322,7 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`INSERT INTO local_db_meta (key, value, updated_at)
-	        VALUES ('schema_version', '5', strftime('%s','now'))
+	        VALUES ('schema_version', '6', strftime('%s','now'))
 	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
@@ -343,6 +344,7 @@ func migrateLocalSchema(db *sql.DB) error {
 		`ALTER TABLE local_media_size ADD COLUMN raw_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE local_media_size ADD COLUMN sign TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE local_media_size ADD COLUMN upstream_fetched_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE playback_stats ADD COLUMN seek_count INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
 		if _, err := db.Exec(stmt); err != nil {
@@ -1264,7 +1266,7 @@ func (s *localStore) SetMeta(key, value string) error {
 
 // ===== 播放/删除统计 =====
 
-// PlaybackStatsRecord 一次真实播放（有字节写出的流式请求）。
+// PlaybackStatsRecord 一次播放会话（多条 Range 流式请求合并后落库）。
 type PlaybackStatsRecord struct {
 	ID           string  `json:"id"`
 	Path         string  `json:"path"`
@@ -1275,6 +1277,7 @@ type PlaybackStatsRecord struct {
 	PlayedAt     int64   `json:"played_at"` // Unix 秒
 	Completed    bool    `json:"completed"`
 	ContentType  string  `json:"content_type,omitempty"`
+	SeekCount    int     `json:"seek_count"` // 会话内快进/快退次数
 }
 
 // DeletionStatsRecord 一次文件删除。
@@ -1304,9 +1307,9 @@ func (s *localStore) AppendPlayback(rec PlaybackStatsRecord) error {
 		completed = 1
 	}
 	if _, err := s.db.Exec(`INSERT OR IGNORE INTO playback_stats
-        (id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.ID, rec.Path, rec.Provider, rec.BytesServed, rec.TotalBytes, rec.DurationSecs, rec.PlayedAt, completed, rec.ContentType); err != nil {
+        (id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type, seek_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.Path, rec.Provider, rec.BytesServed, rec.TotalBytes, rec.DurationSecs, rec.PlayedAt, completed, rec.ContentType, rec.SeekCount); err != nil {
 		return err
 	}
 	return s.pruneStatsIfNeeded()
@@ -1360,7 +1363,7 @@ func (s *localStore) ListPlaybackStats(limit int) ([]PlaybackStatsRecord, error)
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := s.db.Query(`SELECT id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type
+	rows, err := s.db.Query(`SELECT id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type, seek_count
         FROM playback_stats ORDER BY played_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1370,7 +1373,7 @@ func (s *localStore) ListPlaybackStats(limit int) ([]PlaybackStatsRecord, error)
 	for rows.Next() {
 		var rec PlaybackStatsRecord
 		var completed int
-		if err := rows.Scan(&rec.ID, &rec.Path, &rec.Provider, &rec.BytesServed, &rec.TotalBytes, &rec.DurationSecs, &rec.PlayedAt, &completed, &rec.ContentType); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Path, &rec.Provider, &rec.BytesServed, &rec.TotalBytes, &rec.DurationSecs, &rec.PlayedAt, &completed, &rec.ContentType, &rec.SeekCount); err != nil {
 			return nil, err
 		}
 		rec.Completed = completed == 1

@@ -198,6 +198,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					Provider:     req.ProviderKey,
 					BytesServed:  result.BytesWritten,
 					TotalBytes:   size,
+					DurationSecs: result.WallDuration.Seconds(),
 					PlayedAt:     time.Now(),
 					Completed:    result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
 					ContentType:  result.ContentType,

@@ -108,6 +108,8 @@ type ProxyServer struct {
 
 	playbackActivityOnce sync.Once
 	playbackActivity     *playbackActivityTracker
+	playbackSessionOnce  sync.Once
+	playbackSession      *playbackSessionTracker
 
 	// DB export sync JWT token cache: reused across sync cycles to avoid
 	// redundant login calls. Invalidated on 401 errors.

@@ -636,10 +636,12 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 
 	// Convert destination path from header
 	destination := r.Header.Get("Destination")
+	destDisplayPath := ""
 	if destination != "" {
 		destURL, err := url.Parse(destination)
 		if err == nil {
 			destPath := strings.TrimPrefix(destURL.Path, "/dav")
+			destDisplayPath = destPath
 			destPasswd, destFound := h.passwdDAO.FindByPath(destPath)
 			if destFound && destPasswd.EncName {
 				converter := encryption.NewFileNameConverter(destPasswd.Password, destPasswd.EncType, destPasswd.EncSuffix)
@@ -688,6 +690,11 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		log.Warn().Err(err).Msg("Upstream response body read failed")
 		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
 		return
+	}
+	// RFC 4918：MOVE/COPY 覆盖已存在目标成功返回 204（新建返回 201）。
+	// 目标被覆盖 = 一次"删除"。明文展示路径记录到统计。
+	if resp.StatusCode == http.StatusNoContent && destDisplayPath != "" && h.statsRecorder != nil {
+		h.statsRecorder.RecordDeletion(destDisplayPath)
 	}
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)

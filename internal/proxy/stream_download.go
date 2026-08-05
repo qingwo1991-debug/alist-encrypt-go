@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/alist-encrypt-go/internal/backoff"
 	"github.com/alist-encrypt-go/internal/config"
@@ -291,6 +292,8 @@ func (s *StreamProxy) DecryptedBlockCacheStats() map[string]interface{} {
 
 func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
 	result := &StreamOutcome{}
+	// 墙钟起点：成功写出时用于统计播放时长（近似）。
+	streamStart := time.Now()
 	cbGate := s.circuitBreakerFor(targetURL)
 	allowLoose := false
 	enableSniff := true
@@ -588,6 +591,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	defer putBuffer(buf)
 	written, err := io.CopyBuffer(w, readerToStream, *buf)
 	result.BytesWritten = written
+	result.WallDuration = time.Since(streamStart)
 	if err == nil && result.ExpectedBytes > 0 && written < result.ExpectedBytes {
 		err = io.ErrUnexpectedEOF
 		result.FailureReason = "upstream_truncated"

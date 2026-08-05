@@ -3854,6 +3854,39 @@ func (p *ProxyServer) proxyFSJSON(w http.ResponseWriter, r *http.Request, apiPat
 	copyWithBuffer(w, resp.Body)
 }
 
+// doFSRequest 向 alist 的 /api/fs/* 端点发 JSON 请求并返回状态 + 响应体。
+func (p *ProxyServer) doFSRequest(ctx context.Context, srcHeaders http.Header, apiPath string, body []byte) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.getAlistURL()+apiPath, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	for key, values := range srcHeaders {
+		if strings.EqualFold(key, "Host") || strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := p.httpClientSnapshot()
+	if client == nil {
+		return 0, nil, errors.New("upstream client unavailable")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, respBody, nil
+}
+
 func (p *ProxyServer) doFSRemoveRequest(ctx context.Context, srcHeaders http.Header, reqData map[string]interface{}) (int, []byte, error) {
 	body, _ := json.Marshal(reqData)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.getAlistURL()+"/api/fs/remove", bytes.NewReader(body))

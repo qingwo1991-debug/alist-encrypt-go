@@ -480,6 +480,7 @@ func ExportEncryptStatsJson(password string) string {
 	if server == nil {
 		return `{"error":"proxy not running"}`
 	}
+	server.flushPlaybackSessions()
 	plays, err := server.ListPlaybackStats(0)
 	if err != nil {
 		return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`

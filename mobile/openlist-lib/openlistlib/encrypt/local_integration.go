@@ -114,25 +114,25 @@ func (p *ProxyServer) recordLocalObservation(providerURL, originalURL string, si
 
 // recordPlaybackStats 记录一次真实播放（有字节写出）到本地统计。
 // displayPath 为明文展示路径；provider 为归一化 provider host。
-func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string) {
+// durationSecs 为该次流式写出的墙钟耗时（近似播放时长）：首播=拉流耗时，
+// seek=seek 间隔。比恒 0 更有信息量，供导出给 AI 分析。
+// rangeStart 为本次请求的 Range 起始位置（无 Range 为 0），用于 seek 计数。
+//
+// 内部先喂给会话聚合器：同一路径活跃窗口内的多条请求合并为一条落库，
+// 避免导出时一次播放产生几十条 seek 噪声。
+func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string, durationSecs float64, rangeStart int64) {
 	if p == nil || p.localStore == nil || bytesServed <= 0 {
 		return
 	}
 	if strings.TrimSpace(displayPath) == "" {
 		displayPath = "(unknown)"
 	}
-	if err := p.localStore.AppendPlayback(PlaybackStatsRecord{
-		Path:         displayPath,
-		Provider:     provider,
-		BytesServed:  bytesServed,
-		TotalBytes:   totalBytes,
-		DurationSecs: 0,
-		PlayedAt:     time.Now().Unix(),
-		Completed:    completed,
-		ContentType:  contentType,
-	}); err != nil {
-		log.Debugf("[%s] failed to record playback stats: %v", internal.TagCache, err)
+	if durationSecs < 0 {
+		durationSecs = 0
 	}
+	p.ensurePlaybackSessionTracker().record(
+		displayPath, provider, contentType, bytesServed, totalBytes, durationSecs, completed, rangeStart,
+	)
 }
 
 // ListPlaybackStats 返回本地播放统计（供 gomobile 导出）。

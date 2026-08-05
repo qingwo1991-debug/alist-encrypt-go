@@ -159,6 +159,30 @@ func TestDualNetworkResolverIntegratesWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestRandJitterNWithinBounds(t *testing.T) {
+	for _, n := range []int{1, 2, 10, 100, 4096} {
+		for i := 0; i < 200; i++ {
+			if v := randJitterN(n); v < 0 || v >= n {
+				t.Fatalf("randJitterN(%d) = %d out of bounds", n, v)
+			}
+		}
+	}
+}
+
+func TestRandJitterNNoCollisionPattern(t *testing.T) {
+	// n 与并发窗口无关的散列：连续取值不应周期性重复（时钟抖动会每纳秒递增）。
+	n := 64
+	seen := map[int]bool{}
+	for i := 0; i < 64; i++ {
+		seen[randJitterN(n)] = true
+	}
+	// crypto/rand 命中全 64 值概率 ~1，而时钟 % 64 最多覆盖 64 个连续值（也全中），
+	// 所以这里只断言有变化，不要求全盖。
+	if len(seen) < 2 {
+		t.Fatalf("randJitterN produced degenerate single value in 64 draws")
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (func() bool {
 		for i := 0; i+len(sub) <= len(s); i++ {

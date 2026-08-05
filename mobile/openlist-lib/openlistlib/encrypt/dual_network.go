@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -563,12 +564,18 @@ func newDualNetworkDialer(base *net.Dialer) func(ctx context.Context, network, a
 }
 
 // randJitterN 返回 [0, n) 的随机整数（用于探测节流抖动）。
+// 探测是低频路径，直接用 crypto/rand：真随机，避免并发探测在同一时钟纳秒
+// 碰撞导致节流窗口同步（看起来像突发攻击）。
 func randJitterN(n int) int {
 	if n <= 1 {
 		return 0
 	}
-	// crypto/rand 太重，用 math/rand 的锁内实现即可；探测是低频路径。
-	return int(time.Now().UnixNano() % int64(n))
+	var b [4]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// crypto/rand 不可用（理论上不会），退化为时钟抖动。
+		return int(time.Now().UnixNano() % int64(n))
+	}
+	return int(uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3])) % n
 }
 
 // GetEncryptDualNetworkStatusJson 导出双网络状态（enabled + 双网络 fwmark + 延迟表样例）。
