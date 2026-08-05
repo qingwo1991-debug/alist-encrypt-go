@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -17,6 +18,7 @@ type StatsHandler struct {
 	proxyHandler  *ProxyHandler
 	webdavHandler *WebDAVHandler
 	streamProxy   *proxy.StreamProxy
+	statsStore    *StatsStore
 	startTime     time.Time
 }
 
@@ -31,6 +33,38 @@ func NewStatsHandler(cfg *config.Config, fileDAO *dao.FileDAO, alistHandler *Ali
 		streamProxy:   streamProxy,
 		startTime:     startTime,
 	}
+}
+
+// SetStatsStore 注入播放/删除统计存储（web 端经管理 JWT 读取）。
+func (h *StatsHandler) SetStatsStore(store *StatsStore) {
+	h.statsStore = store
+}
+
+// HandlePlaybackStats 返回播放/删除统计事件。走管理 JWT 鉴权（protected 路由），
+// 无需独立统计密码——能登录管理端即可查看。
+func (h *StatsHandler) HandlePlaybackStats(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.statsStore == nil {
+		RespondHTTPErrorWithStatus(w, "stats disabled", http.StatusNotFound)
+		return
+	}
+	limit := 0
+	if s := r.URL.Query().Get("limit"); s != "" {
+		limit, _ = strconv.Atoi(s)
+	}
+	plays, err := h.statsStore.ListPlayback(r.Context(), limit)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "stats read failed", http.StatusInternalServerError)
+		return
+	}
+	dels, err := h.statsStore.ListDeletions(r.Context(), limit)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "stats read failed", http.StatusInternalServerError)
+		return
+	}
+	RespondSuccess(w, map[string]interface{}{
+		"playbacks": plays,
+		"deletions": dels,
+	})
 }
 
 // HandleStats returns runtime stats

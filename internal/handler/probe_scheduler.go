@@ -20,6 +20,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/storage"
 )
 
 type ProbeScheduler struct {
@@ -92,6 +93,10 @@ type ProbeScheduler struct {
 	cachedJWTScope  [sha256.Size]byte
 	jwtMu           sync.Mutex
 	jwtFetcher      func(alistURL, username, password string) string
+
+	// 持久化：重启后恢复预热计数与 warm 状态。
+	store     *storage.Store
+	persister *probePersister
 }
 
 // RawURLFetcher fetches the signed raw_url for a display path from alist fs/get.
@@ -213,7 +218,7 @@ func (ps *ProbeScheduler) SetRawURLFetcher(f RawURLFetcher) {
 	ps.rawURLFetcher = f
 }
 
-func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy) *ProbeScheduler {
+func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy, store *storage.Store) *ProbeScheduler {
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	alist := config.AlistServer{}
 	if cfg != nil {
@@ -225,6 +230,7 @@ func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileM
 		fileDAO:                fileDAO,
 		metaStore:              metaStore,
 		stream:                 stream,
+		store:                  store,
 		enabled:                cfg != nil && alist.EnableBackgroundProbe,
 		ctx:                    workerCtx,
 		cancel:                 cancelWorkers,
@@ -241,6 +247,9 @@ func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileM
 		consumerHitsBySource:   make(map[string]uint64),
 		consumerHitsByScenario: make(map[string]uint64),
 	}
+
+	// 恢复持久化的预热计数与 warm 状态（只依赖 store，不依赖 config）。
+	ps.loadPersistedState()
 
 	if cfg == nil {
 		return ps
@@ -263,6 +272,7 @@ func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileM
 				ps.worker()
 			}()
 		}
+		ps.startPersistLoop()
 	}
 	return ps
 }
@@ -450,6 +460,8 @@ func (ps *ProbeScheduler) Stop() {
 			ps.cancel()
 		}
 		ps.workerWG.Wait()
+		// 最终落盘，确保退出前保留最新计数与 warm 状态。
+		ps.persistSnapshot()
 	})
 }
 

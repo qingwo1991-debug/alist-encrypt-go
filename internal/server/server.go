@@ -150,7 +150,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 		log.Warn().Err(err).Msg("Failed to initialize strategy selector")
 		strategySelector, _ = handler.NewStrategySelector(s.cfg, handler.NewMemoryStrategyStore())
 	}
-	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy)
+	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy, s.store)
 	s.probeScheduler = probeScheduler
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	proxyHandler.SetProbeScheduler(probeScheduler)
@@ -166,10 +166,6 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	alistHandler.StartDirSyncLoop()
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
-	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, alistHandler, proxyHandler, webdavHandler, s.streamProxy, startTime)
-	s.proxyHandler = proxyHandler
-	s.webdavHandler = webdavHandler
-
 	// 播放/删除统计：BoltDB stats bucket + 记录器接入三个 handler。
 	statsStore := handler.NewStatsStore(s.store)
 	statsRecorder := handler.NewBoltStatsRecorder(statsStore)
@@ -177,6 +173,10 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	webdavHandler.SetStatsRecorder(statsRecorder)
 	alistHandler.SetStatsRecorder(statsRecorder)
 	s.statsExportHandler = handler.NewStatsExportHandler(s.cfg, statsStore)
+	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, alistHandler, proxyHandler, webdavHandler, s.streamProxy, startTime)
+	statsHandler.SetStatsStore(statsStore)
+	s.proxyHandler = proxyHandler
+	s.webdavHandler = webdavHandler
 
 	return apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler
 }
@@ -219,6 +219,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 			protected.Any("/exportRangeCompat", ginWrap(apiHandler.ExportRangeCompat))
 			protected.Any("/cleanupLegacyBoltDB", ginWrap(apiHandler.CleanupLegacyBoltDB))
 			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
+			protected.Any("/getPlaybackStats", ginWrap(statsHandler.HandlePlaybackStats))
 			protected.Any("/getProxyDomainDictionary", ginWrap(apiHandler.GetProxyDomainDictionary))
 			protected.Any("/refreshProxyDomainDictionary", ginWrap(apiHandler.RefreshProxyDomainDictionary))
 			protected.Any("/getProxyRoutingConfig", ginWrap(apiHandler.GetProxyRoutingConfig))

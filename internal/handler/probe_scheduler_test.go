@@ -553,7 +553,7 @@ func TestProbeSchedulerStopPreventsNewWork(t *testing.T) {
 	cfg.AlistServer.ProbeMinDelayMs = 0
 	cfg.AlistServer.ProbeMaxDelayMs = 0
 
-	ps := NewProbeScheduler(cfg, nil, nil, nil)
+	ps := NewProbeScheduler(cfg, nil, nil, nil, nil)
 	ps.Stop()
 	// Stop is deliberately idempotent because the shared scheduler is reachable
 	// through more than one server handler.
