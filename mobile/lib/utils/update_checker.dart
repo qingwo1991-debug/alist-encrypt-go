@@ -5,6 +5,8 @@ import 'dart:io';
 
 import 'package:openlist_mobile/contant/native_bridge.dart';
 
+import 'proxy_speed_test.dart';
+
 class UpdateChecker {
   String owner;
   String repo;
@@ -93,6 +95,28 @@ class UpdateChecker {
       return fallback;
     }
     throw Exception('Failed to get apk download url for ABI: $_systemABI');
+  }
+
+  /// 拿到本设备要下载的那个 APK 的原始 URL，生成代理前缀候选，并行测速，
+  /// 返回按速度排序的下载源列表（第一个最快）。
+  ///
+  /// 语义：测速全失败或异常时返回 [原始URL] 单元素列表，调用方行为与
+  /// 现状（直接 `getApkDownloadUrl()`）完全一致。
+  Future<List<String>> getPreferredDownloadUrls() async {
+    final originalUrl = getApkDownloadUrl();
+    try {
+      final candidates = ProxySpeedTest.buildCandidateUrls(originalUrl);
+      final ranked = await ProxySpeedTest.getRankedWithCache(candidates);
+      final sources = ProxySpeedTest.selectDownloadSources(ranked);
+      if (sources.isEmpty) {
+        return [originalUrl];
+      }
+      log('UpdateChecker: preferred download sources=${sources.length}: $sources');
+      return sources;
+    } catch (e) {
+      log('UpdateChecker: speed test failed, fallback to original url: $e');
+      return [originalUrl];
+    }
   }
 
   String getUpdateContent() {

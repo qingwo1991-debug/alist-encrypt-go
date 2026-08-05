@@ -1,3 +1,5 @@
+import 'dart:developer' show log;
+
 import 'package:flutter/material.dart';
 
 import '../generated/l10n.dart';
@@ -10,13 +12,15 @@ class AppUpdateDialog extends StatelessWidget {
   final String apkUrl;
   final String htmlUrl;
   final String version;
+  final List<String>? downloadUrls; // 测速后的多源下载列表，可空
 
   const AppUpdateDialog(
       {super.key,
       required this.content,
       required this.apkUrl,
       required this.version,
-      required this.htmlUrl});
+      required this.htmlUrl,
+      this.downloadUrls});
 
   static bool _checking = false;
 
@@ -64,6 +68,15 @@ class AppUpdateDialog extends StatelessWidget {
 
       if (hasNewVersion) {
         if (!context.mounted) return;
+        // 并行测代理前缀：选最快源（多源时叠加带宽）。失败时 downloadUrls
+        // 为 null，进度弹窗走原始 URL 单源（现状行为）。
+        List<String>? downloadUrls;
+        try {
+          downloadUrls = await checker.getPreferredDownloadUrls();
+        } catch (e) {
+          log('更新测速失败，使用原始 URL 下载: $e');
+        }
+        if (!context.mounted) return;
         showDialog(
           context: context,
           barrierDismissible: false,
@@ -74,6 +87,7 @@ class AppUpdateDialog extends StatelessWidget {
               apkUrl: checker.getApkDownloadUrl(),
               htmlUrl: checker.getHtmlUrl(),
               version: checker.getDisplayVersion(),
+              downloadUrls: downloadUrls,
             );
           },
         );
@@ -162,7 +176,7 @@ class AppUpdateDialog extends StatelessWidget {
                 title: Text(S.of(context).directDownloadApk),
                 subtitle: Text(S.of(context).directDownloadMethodDesc),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () async {
+                onTap: () {
                   Navigator.pop(context);
                   showDialog(
                     context: context,
@@ -171,6 +185,7 @@ class AppUpdateDialog extends StatelessWidget {
                     builder: (context) => AppUpdateProgressDialog(
                       apkUrl: apkUrl,
                       version: version,
+                      urls: downloadUrls,
                     ),
                   );
                 },

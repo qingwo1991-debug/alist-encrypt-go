@@ -9,11 +9,13 @@ import '../utils/download_manager.dart';
 class AppUpdateProgressDialog extends StatefulWidget {
   final String apkUrl;
   final String version;
+  final List<String>? urls; // 多源分段列表（测速后排好的最快源们），可空
 
   const AppUpdateProgressDialog({
     super.key,
     required this.apkUrl,
     required this.version,
+    this.urls,
   });
 
   @override
@@ -43,6 +45,7 @@ class _AppUpdateProgressDialogState extends State<AppUpdateProgressDialog> {
 
     final result = await DownloadManager.downloadWithProgressCallback(
       url: widget.apkUrl,
+      urls: widget.urls,
       filename: 'OpenList_${widget.version}.apk',
       cancelToken: _cancelToken,
       onProgress: (progress, received, total) {

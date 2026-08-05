@@ -134,6 +134,15 @@ class DownloadManager {
     return filename;
   }
 
+  /// 多源分段：从 index 开始轮转取源，让相邻段落到不同源（带宽叠加）。
+  static List<String> _rotatedChunkUrls(List<String> chunkUrls, int index) {
+    final result = <String>[];
+    for (var i = 0; i < chunkUrls.length; i++) {
+      result.add(chunkUrls[(index + i) % chunkUrls.length]);
+    }
+    return result;
+  }
+
   static List<_DownloadChunk> _buildDownloadChunks(int totalBytes) {
     return List.generate(_downloadThreads, (index) {
       final start = index * (totalBytes ~/ _downloadThreads);
@@ -173,6 +182,7 @@ class DownloadManager {
 
   static Future<void> _downloadChunk({
     required String url,
+    List<String>? chunkUrls,
     required Directory partsDirectory,
     required _DownloadChunk chunk,
     required int totalBytes,
@@ -189,48 +199,73 @@ class DownloadManager {
       headers['If-Range'] = ifRange;
     }
 
-    final response = await _dio.get<ResponseBody>(
-      url,
-      cancelToken: cancelToken,
-      options: Options(
-        headers: headers,
-        responseType: ResponseType.stream,
-        followRedirects: true,
-        validateStatus: (status) => status != null,
-      ),
-    );
-
-    final responseBody = response.data;
-    final contentRange = _parseContentRange(
-      response.headers.value('content-range'),
-    );
-    final validRange = response.statusCode == HttpStatus.partialContent &&
-        contentRange != null &&
-        contentRange.start == chunk.start &&
-        contentRange.end == chunk.end &&
-        contentRange.total == totalBytes;
-    if (!validRange) {
-      await _discardResponseBody(responseBody);
-      throw StateError(
-        'invalid range response for bytes=${chunk.start}-${chunk.end}: '
-        'status=${response.statusCode} '
-        'content-range=${response.headers.value('content-range')}',
-      );
-    }
-
-    final declaredLength = int.tryParse(
-      response.headers.value(Headers.contentLengthHeader) ?? '',
-    );
-    if (declaredLength != null && declaredLength != chunk.length) {
-      await _discardResponseBody(responseBody);
-      throw StateError(
-        'invalid range length for bytes=${chunk.start}-${chunk.end}',
-      );
+    // 多源分段：本段首选第 index%len 个源；失败时依次换下一个源重试。
+    // 仅当提供多源列表时才轮换，否则始终用主 url（现状行为）。
+    final candidates = (chunkUrls != null && chunkUrls.isNotEmpty)
+        ? _rotatedChunkUrls(chunkUrls, chunk.index)
+        : <String>[url];
+    ResponseBody? responseBody;
+    int? statusCode;
+    dynamic lastError;
+    for (var i = 0; i < candidates.length; i++) {
+      _throwIfCancelled(cancelToken);
+      final candidate = candidates[i];
+      try {
+        final response = await _dio.get<ResponseBody>(
+          candidate,
+          cancelToken: cancelToken,
+          options: Options(
+            headers: headers,
+            responseType: ResponseType.stream,
+            followRedirects: true,
+            validateStatus: (status) => status != null,
+          ),
+        );
+        statusCode = response.statusCode;
+        final contentRange = _parseContentRange(
+          response.headers.value('content-range'),
+        );
+        final validRange = response.statusCode == HttpStatus.partialContent &&
+            contentRange != null &&
+            contentRange.start == chunk.start &&
+            contentRange.end == chunk.end &&
+            contentRange.total == totalBytes;
+        if (validRange) {
+          final declaredLength = int.tryParse(
+            response.headers.value(Headers.contentLengthHeader) ?? '',
+          );
+          if (declaredLength != null && declaredLength != chunk.length) {
+            await _discardResponseBody(response.data);
+            throw StateError(
+              'invalid range length for bytes=${chunk.start}-${chunk.end}',
+            );
+          }
+          if (response.data == null) {
+            await _discardResponseBody(response.data);
+            throw StateError(
+              'missing range body for bytes=${chunk.start}-${chunk.end}',
+            );
+          }
+          responseBody = response.data;
+          break;
+        }
+        // 无效范围：丢弃并试下一个源
+        await _discardResponseBody(response.data);
+        lastError = StateError(
+          'invalid range response for bytes=${chunk.start}-${chunk.end}: '
+          'status=${response.statusCode} '
+          'content-range=${response.headers.value('content-range')}',
+        );
+      } catch (e) {
+        lastError = e;
+        log('分片 ${chunk.index} 源 $candidate 失败，重试下一个源: $e');
+      }
     }
     if (responseBody == null) {
-      throw StateError(
-        'missing range body for bytes=${chunk.start}-${chunk.end}',
-      );
+      throw lastError ??
+          StateError(
+            'missing range body for bytes=${chunk.start}-${chunk.end}',
+          );
     }
 
     final partFile = File(
@@ -488,8 +523,13 @@ class DownloadManager {
   }
 
   /// 带进度回调的下载方法（用于更新弹窗等需要实时进度的场景）
+  ///
+  /// [urls] 可选：多源分段列表（测速后排好的最快源们）。提供时多线程分段的
+  /// 不同段轮转到不同源叠加带宽；某个源失败会在段级换下一个源重试。
+  /// 不提供则行为与现状一致（单源）。
   static Future<String?> downloadWithProgressCallback({
     required String url,
+    List<String>? urls,
     String? filename,
     CancelToken? cancelToken,
     required Function(double progress, int received, int total) onProgress,
@@ -508,10 +548,15 @@ class DownloadManager {
     String filePath = '${downloadDir.path}/$finalFilename';
     filePath = _getUniqueFilePath(filePath);
 
+    // 多源列表非空时以它为准（首个即首选 URL）。
+    final primaryUrl =
+        (urls != null && urls.isNotEmpty) ? urls.first : url;
+
     try {
       // 执行下载：优先多线程，失败回退单线程
       final multiOk = await _downloadMultiThread(
-        url: url,
+        url: primaryUrl,
+        chunkUrls: (urls != null && urls.length > 1) ? urls : null,
         filePath: filePath,
         cancelToken: cancelToken,
         onProgress: (received, total) {
@@ -525,7 +570,7 @@ class DownloadManager {
 
       if (!multiOk) {
         await _dio.download(
-          url,
+          primaryUrl,
           filePath,
           cancelToken: cancelToken,
           onReceiveProgress: (received, total) {
@@ -560,14 +605,19 @@ class DownloadManager {
   /// 多线程分片下载，失败返回 false 供调用方回退到单线程
   static Future<bool> _downloadMultiThread({
     required String url,
+    List<String>? chunkUrls,
     required String filePath,
     CancelToken? cancelToken,
     required void Function(int received, int total) onProgress,
   }) async {
     Directory? partsDirectory;
     try {
+      // HEAD 始终用首选 URL（最快源），确定 content-length/accept-ranges/etag。
+      final headUrl = (chunkUrls != null && chunkUrls.isNotEmpty)
+          ? chunkUrls.first
+          : url;
       final headResp = await _dio.head(
-        url,
+        headUrl,
         cancelToken: cancelToken,
         options: Options(
           headers: {'Accept-Encoding': 'identity'},
@@ -608,6 +658,7 @@ class DownloadManager {
       await Future.wait(chunks.map((chunk) {
         return _downloadChunk(
           url: url,
+          chunkUrls: chunkUrls,
           partsDirectory: currentPartsDirectory,
           chunk: chunk,
           totalBytes: contentLength,
