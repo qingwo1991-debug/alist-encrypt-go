@@ -68,6 +68,9 @@
             <div class="panel-card__title">播放统计</div>
             <div class="panel-card__subtitle">真实播放与删除事件（含 seek 次数与时长），供导出给 AI 分析。</div>
           </div>
+          <el-button type="primary" plain :disabled="exportingStats" @click="exportStatsJson">
+            {{ exportingStats ? '导出中...' : '导出 JSON' }}
+          </el-button>
         </div>
         <div class="pb-summary-grid">
           <div class="pb-summary">
@@ -149,6 +152,40 @@ const loadPlaybackStats = async () => {
     deletions.value = data.deletions || []
   } catch {
     /* silent */
+  }
+}
+
+const exportingStats = ref(false)
+
+// 导出全量播放/删除统计为 JSON 文件（走管理 JWT，无需独立密码）。
+const exportStatsJson = async () => {
+  exportingStats.value = true
+  try {
+    const res = await getPlaybackStatsReq({
+      reqLoading: false,
+      params: { limit: 0 }
+    })
+    const data = res?.data || {}
+    const payload = {
+      exported_at: new Date().toISOString(),
+      playbacks: data.playbacks || [],
+      deletions: data.deletions || []
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json'
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `playback-stats-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch {
+    /* silent */
+  } finally {
+    exportingStats.value = false
   }
 }
 
