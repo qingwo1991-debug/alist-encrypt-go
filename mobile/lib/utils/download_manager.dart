@@ -205,7 +205,6 @@ class DownloadManager {
         ? _rotatedChunkUrls(chunkUrls, chunk.index)
         : <String>[url];
     ResponseBody? responseBody;
-    int? statusCode;
     dynamic lastError;
     for (var i = 0; i < candidates.length; i++) {
       _throwIfCancelled(cancelToken);
@@ -221,7 +220,6 @@ class DownloadManager {
             validateStatus: (status) => status != null,
           ),
         );
-        statusCode = response.statusCode;
         final contentRange = _parseContentRange(
           response.headers.value('content-range'),
         );
