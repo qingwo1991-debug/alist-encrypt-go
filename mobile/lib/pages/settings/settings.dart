@@ -1,5 +1,6 @@
 import 'package:openlist_mobile/contant/native_bridge.dart';
 import 'package:openlist_mobile/generated_api.dart';
+import 'package:openlist_mobile/pages/settings/playback_stats_page.dart';
 import 'package:openlist_mobile/pages/settings/preference_widgets.dart';
 import 'package:openlist_mobile/pages/settings/troubleshooting_page.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
@@ -215,6 +216,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   );
                 }
               }
+            },
+          ),
+          BasicPreference(
+            title: '播放统计',
+            subtitle: '设置统计导出密码并导出播放/删除记录',
+            leading: const Icon(Icons.analytics),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const PlaybackStatsPage(),
+                ),
+              );
             },
           ),
           DividerPreference(title: S.of(context).uiSettings),
