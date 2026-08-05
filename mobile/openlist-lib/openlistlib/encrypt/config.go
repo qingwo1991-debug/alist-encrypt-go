@@ -617,6 +617,14 @@ func (m *ConfigManager) RemoveEncryptPath(index int) error {
 	return m.saveConfigLocked()
 }
 
+// SetStatsPassword 设置统计导出访问密码（独立于管理/加密密码）。
+func (m *ConfigManager) SetStatsPassword(password string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.config.StatsPassword = password
+	return m.saveConfigLocked()
+}
+
 // SetAdminPassword 设置管理密码
 func (m *ConfigManager) SetAdminPassword(password string) error {
 	m.mutex.Lock()

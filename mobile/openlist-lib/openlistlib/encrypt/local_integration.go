@@ -1,7 +1,10 @@
 package encrypt
 
 import (
+	"net/http"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
@@ -106,5 +109,78 @@ func (p *ProxyServer) recordLocalObservation(providerURL, originalURL string, si
 	if strategy != "" {
 		networkType := string(GetNetworkState())
 		p.localStore.AddStrategy(key, providerHost, originalPath, networkType, strategy, now)
+	}
+}
+
+// recordPlaybackStats 记录一次真实播放（有字节写出）到本地统计。
+// displayPath 为明文展示路径；provider 为归一化 provider host。
+func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string) {
+	if p == nil || p.localStore == nil || bytesServed <= 0 {
+		return
+	}
+	if strings.TrimSpace(displayPath) == "" {
+		displayPath = "(unknown)"
+	}
+	if err := p.localStore.AppendPlayback(PlaybackStatsRecord{
+		Path:         displayPath,
+		Provider:     provider,
+		BytesServed:  bytesServed,
+		TotalBytes:   totalBytes,
+		DurationSecs: 0,
+		PlayedAt:     time.Now().Unix(),
+		Completed:    completed,
+		ContentType:  contentType,
+	}); err != nil {
+		log.Debugf("[%s] failed to record playback stats: %v", internal.TagCache, err)
+	}
+}
+
+// ListPlaybackStats 返回本地播放统计（供 gomobile 导出）。
+func (p *ProxyServer) ListPlaybackStats(limit int) ([]PlaybackStatsRecord, error) {
+	if p == nil || p.localStore == nil {
+		return nil, nil
+	}
+	return p.localStore.ListPlaybackStats(limit)
+}
+
+// ListDeletionStats 返回本地删除统计（供 gomobile 导出）。
+func (p *ProxyServer) ListDeletionStats(limit int) ([]DeletionStatsRecord, error) {
+	if p == nil || p.localStore == nil {
+		return nil, nil
+	}
+	return p.localStore.ListDeletionStats(limit)
+}
+
+// displayPathFromPlaybackRequest 从播放请求中提取明文展示路径。
+// 优先用 /redirect 的 lastUrl 查询参数（URL 解码后），回退到 info.OriginalURL 的路径部分。
+func displayPathFromPlaybackRequest(r *http.Request, info *RedirectInfo) string {
+	if r != nil && r.URL != nil {
+		if lastURL := r.URL.Query().Get("lastUrl"); lastURL != "" {
+			if decoded, err := url.QueryUnescape(lastURL); err == nil && strings.TrimSpace(decoded) != "" {
+				return decoded
+			}
+		}
+	}
+	if info != nil {
+		if p := strings.TrimSpace(info.OriginalURL); p != "" {
+			if u, err := url.Parse(p); err == nil && u.Path != "" {
+				return u.Path
+			}
+			return p
+		}
+		if p := strings.TrimSpace(info.EncryptedPath); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// recordDeletionStats 记录一次文件删除到本地统计。
+func (p *ProxyServer) recordDeletionStats(displayPath string) {
+	if p == nil || p.localStore == nil || strings.TrimSpace(displayPath) == "" {
+		return
+	}
+	if err := p.localStore.AppendDeletion(displayPath); err != nil {
+		log.Debugf("[%s] failed to record deletion stats: %v", internal.TagCache, err)
 	}
 }

@@ -329,6 +329,16 @@ func (m *EncryptProxyManager) VerifyAdminPassword(password string) bool {
 	return m.configManager.VerifyAdminPassword(password)
 }
 
+// SetStatsPassword 设置统计导出访问密码（独立于管理密码）。
+func (m *EncryptProxyManager) SetStatsPassword(password string) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	return m.configManager.SetStatsPassword(password)
+}
+
 // SetAdminPassword 设置管理密码
 func (m *EncryptProxyManager) SetAdminPassword(password string) error {
 	m.mutex.Lock()
@@ -448,6 +458,45 @@ func VerifyEncryptAdminPassword(password string) bool {
 // SetEncryptAdminPassword 设置管理密码（供 gomobile 调用）
 func SetEncryptAdminPassword(password string) error {
 	return GetEncryptManager().SetAdminPassword(password)
+}
+
+// SetEncryptStatsPassword 设置统计导出访问密码（供 gomobile 调用，独立于管理密码）。
+func SetEncryptStatsPassword(password string) error {
+	return GetEncryptManager().SetStatsPassword(password)
+}
+
+// ExportEncryptStatsJson 导出播放/删除统计 JSON（供 gomobile 调用）。
+// 需要 password 与配置的 StatsPassword 一致才返回数据，否则返回错误 JSON。
+func ExportEncryptStatsJson(password string) string {
+	manager := GetEncryptManager()
+	config := manager.GetConfig()
+	if config == nil || config.StatsPassword == "" {
+		return `{"error":"stats disabled"}`
+	}
+	if password != config.StatsPassword {
+		return `{"error":"invalid stats password"}`
+	}
+	server := manager.proxyServer
+	if server == nil {
+		return `{"error":"proxy not running"}`
+	}
+	plays, err := server.ListPlaybackStats(0)
+	if err != nil {
+		return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`
+	}
+	dels, err := server.ListDeletionStats(0)
+	if err != nil {
+		return `{"error":"` + strings.ReplaceAll(err.Error(), `"`, `'`) + `"}`
+	}
+	payload := map[string]interface{}{
+		"playbacks": plays,
+		"deletions": dels,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return `{"error":"marshal failed"}`
+	}
+	return string(data)
 }
 
 // GetEncryptPathsJson 获取加密路径列表 JSON（供 gomobile 调用）

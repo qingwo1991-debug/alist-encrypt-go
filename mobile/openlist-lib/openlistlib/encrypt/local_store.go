@@ -3,6 +3,7 @@ package encrypt
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -292,13 +293,35 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`CREATE INDEX IF NOT EXISTS idx_local_provider_catalog_updated_at ON local_provider_catalog(updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS playback_stats (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
+            bytes_served INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            duration_secs REAL NOT NULL DEFAULT 0,
+            played_at INTEGER NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            content_type TEXT NOT NULL DEFAULT ''
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_playback_stats_played_at ON playback_stats(played_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_playback_stats_path ON playback_stats(path);`,
+		`CREATE TABLE IF NOT EXISTS deletion_stats (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            deleted_at INTEGER NOT NULL,
+            last_play_at INTEGER NOT NULL DEFAULT 0,
+            since_last_play_secs REAL NOT NULL DEFAULT -1
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_deletion_stats_deleted_at ON deletion_stats(deleted_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_deletion_stats_path ON deletion_stats(path);`,
 		`CREATE TABLE IF NOT EXISTS local_db_meta (
 	            key TEXT PRIMARY KEY,
 	            value TEXT NOT NULL,
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`INSERT INTO local_db_meta (key, value, updated_at)
-	        VALUES ('schema_version', '4', strftime('%s','now'))
+	        VALUES ('schema_version', '5', strftime('%s','now'))
 	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
@@ -1237,4 +1260,146 @@ func (s *localStore) SetMeta(key, value string) error {
         VALUES (?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, key, value, time.Now().Unix())
 	return err
+}
+
+// ===== 播放/删除统计 =====
+
+// PlaybackStatsRecord 一次真实播放（有字节写出的流式请求）。
+type PlaybackStatsRecord struct {
+	ID           string  `json:"id"`
+	Path         string  `json:"path"`
+	Provider     string  `json:"provider"`
+	BytesServed  int64   `json:"bytes_served"`
+	TotalBytes   int64   `json:"total_bytes"`
+	DurationSecs float64 `json:"duration_secs"`
+	PlayedAt     int64   `json:"played_at"` // Unix 秒
+	Completed    bool    `json:"completed"`
+	ContentType  string  `json:"content_type,omitempty"`
+}
+
+// DeletionStatsRecord 一次文件删除。
+type DeletionStatsRecord struct {
+	ID                string  `json:"id"`
+	Path              string  `json:"path"`
+	DeletedAt         int64   `json:"deleted_at"` // Unix 秒
+	LastPlayAt        int64   `json:"last_play_at"` // Unix 秒，0=无播放
+	SinceLastPlaySecs float64 `json:"since_last_play_secs"` // -1=无播放
+}
+
+const maxPlaybackStatsRows = 200000
+
+// AppendPlayback 追加一条播放统计。
+func (s *localStore) AppendPlayback(rec PlaybackStatsRecord) error {
+	if s == nil || s.db == nil || strings.TrimSpace(rec.Path) == "" {
+		return nil
+	}
+	if rec.PlayedAt <= 0 {
+		rec.PlayedAt = time.Now().Unix()
+	}
+	if rec.ID == "" {
+		rec.ID = fmt.Sprintf("%d-%s", rec.PlayedAt, rec.Path)
+	}
+	completed := 0
+	if rec.Completed {
+		completed = 1
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO playback_stats
+        (id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.Path, rec.Provider, rec.BytesServed, rec.TotalBytes, rec.DurationSecs, rec.PlayedAt, completed, rec.ContentType); err != nil {
+		return err
+	}
+	return s.pruneStatsIfNeeded()
+}
+
+// AppendDeletion 追加一条删除统计，并反查该路径最后一次播放时间。
+func (s *localStore) AppendDeletion(path string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	now := time.Now().Unix()
+	lastPlayAt := int64(0)
+	if err := s.db.QueryRow(`SELECT played_at FROM playback_stats WHERE path = ? ORDER BY played_at DESC LIMIT 1`, path).Scan(&lastPlayAt); err != nil {
+		if err != sql.ErrNoRows {
+			return err
+		}
+		lastPlayAt = 0
+	}
+	since := float64(-1)
+	if lastPlayAt > 0 {
+		since = float64(now - lastPlayAt)
+	}
+	id := fmt.Sprintf("%d-%s", now, path)
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO deletion_stats
+        (id, path, deleted_at, last_play_at, since_last_play_secs)
+        VALUES (?, ?, ?, ?, ?)`, id, path, now, lastPlayAt, since); err != nil {
+		return err
+	}
+	return s.pruneStatsIfNeeded()
+}
+
+// pruneStatsIfNeeded 播放/删除统计过多时清理最旧的。
+func (s *localStore) pruneStatsIfNeeded() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	for _, table := range []string{"playback_stats", "deletion_stats"} {
+		if _, err := s.db.Exec(`DELETE FROM ` + table + ` WHERE id IN (
+            SELECT id FROM ` + table + ` ORDER BY id DESC LIMIT -1 OFFSET ?)`, maxPlaybackStatsRows); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListPlaybackStats 按时间升序返回播放统计。
+func (s *localStore) ListPlaybackStats(limit int) ([]PlaybackStatsRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.Query(`SELECT id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type
+        FROM playback_stats ORDER BY played_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]PlaybackStatsRecord, 0, 64)
+	for rows.Next() {
+		var rec PlaybackStatsRecord
+		var completed int
+		if err := rows.Scan(&rec.ID, &rec.Path, &rec.Provider, &rec.BytesServed, &rec.TotalBytes, &rec.DurationSecs, &rec.PlayedAt, &completed, &rec.ContentType); err != nil {
+			return nil, err
+		}
+		rec.Completed = completed == 1
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// ListDeletionStats 按时间升序返回删除统计。
+func (s *localStore) ListDeletionStats(limit int) ([]DeletionStatsRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.Query(`SELECT id, path, deleted_at, last_play_at, since_last_play_secs
+        FROM deletion_stats ORDER BY deleted_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]DeletionStatsRecord, 0, 64)
+	for rows.Next() {
+		var rec DeletionStatsRecord
+		if err := rows.Scan(&rec.ID, &rec.Path, &rec.DeletedAt, &rec.LastPlayAt, &rec.SinceLastPlaySecs); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }

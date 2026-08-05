@@ -1039,6 +1039,10 @@ func (p *ProxyServer) handleFsRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !fsRemoveNotFound(status, respBody) {
+		// 整批删除成功：记录每个明文展示路径的删除统计。
+		for _, name := range originalNames {
+			p.recordDeletionStats(path.Join(dir, name))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write(respBody)
@@ -1067,6 +1071,7 @@ func (p *ProxyServer) handleFsRemove(w http.ResponseWriter, r *http.Request) {
 			finalBody = retryBody
 			if !fsRemoveNotFound(retryStatus, retryBody) {
 				succeeded = true
+				p.recordDeletionStats(path.Join(dir, name))
 				break
 			}
 		}

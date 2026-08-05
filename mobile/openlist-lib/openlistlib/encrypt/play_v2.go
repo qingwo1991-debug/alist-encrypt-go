@@ -1500,6 +1500,15 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	}
 	log.Debugf("V2 redirect stream copy complete: url=%s strategy=%s written=%d status=%d",
 		safeURLForLog(info.RedirectURL), strategy, written, statusCode)
+	// 播放统计：记录一次真实播放（有字节写出）。
+	if written > 0 && o.proxy != nil && o.proxy.localStore != nil {
+		displayPath := displayPathFromPlaybackRequest(r, info)
+		provider := info.Provider
+		if provider == "" {
+			provider = ProviderKey(info.RedirectURL, "")
+		}
+		o.proxy.recordPlaybackStats(displayPath, provider, written, fileSize, written == expectedLength, "")
+	}
 
 	return &StreamOutcome{StatusCode: statusCode}
 }
@@ -1641,6 +1650,15 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write(data)
 				log.Debugf("V2 play: served %d bytes from decrypted block cache start=%d end=%d", len(data), start, end)
+				// 播放统计：缓存命中也是一次有效播放。
+				if len(data) > 0 && o.proxy != nil && o.proxy.localStore != nil {
+					displayPath := displayPathFromPlaybackRequest(r, info)
+					provider := info.Provider
+					if provider == "" {
+						provider = ProviderKey(info.RedirectURL, "")
+					}
+					o.proxy.recordPlaybackStats(displayPath, provider, int64(len(data)), fileSize, true, "")
+				}
 				return
 			}
 		}

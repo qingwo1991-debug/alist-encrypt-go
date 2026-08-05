@@ -593,6 +593,9 @@ type ProxyConfig struct {
 	// "cellular"(蜂窝优先)。默认 auto。wifi/cellular 优先时仍保留延迟迟滞阈值，
 	// 避免在两条网络间抖动。
 	DualNetworkPreference string `json:"dualNetworkPreference,omitempty"`
+	// StatsPassword: 播放统计导出接口的独立访问密码（APK 端）。为空表示统计接口不可用。
+	// 独立于管理/加密密码。与服务端 StatsPassword 各自独立配置。
+	StatsPassword string `json:"statsPassword,omitempty"`
 	// RoutingMode: 路由模式，off 或 by_provider
 	RoutingMode string `json:"routingMode,omitempty"`
 	// ProviderRuleSource: provider 路由规则来源（预留）
