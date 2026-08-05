@@ -52,6 +52,7 @@ type ProxyHandler struct {
 	prefetchLastAt        int64 // Unix nano
 	stopCleanup           chan struct{}
 	stopCleanupOnce       sync.Once
+	statsRecorder         StatsRecorder
 }
 
 const (
@@ -162,6 +163,10 @@ func (h *ProxyHandler) Stop() {
 
 func (h *ProxyHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
+}
+
+func (h *ProxyHandler) SetStatsRecorder(recorder StatsRecorder) {
+	h.statsRecorder = recorder
 }
 
 func (h *ProxyHandler) cleanupRedirects() {
@@ -315,6 +320,7 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		FirstFrameCount:       &h.firstFrameCount,
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
+		StatsRecorder:         h.statsRecorder,
 	})
 }
 
@@ -583,6 +589,7 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		FirstFrameCount:       &h.firstFrameCount,
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
+		StatsRecorder:         h.statsRecorder,
 	})
 }
 

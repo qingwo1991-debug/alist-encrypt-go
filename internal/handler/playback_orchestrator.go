@@ -43,6 +43,15 @@ type decryptPlaybackRequest struct {
 	FirstFrameCount       *uint64
 	FirstFrameFallbacks   *uint64
 	WarmupEnqueueCount    *uint64
+
+	StatsRecorder StatsRecorder
+}
+
+// StatsRecorder 播放统计的记录接口。为 nil 时不记录（保持零开销）。
+type StatsRecorder interface {
+	RecordPlayback(ev PlaybackEvent)
+	// RecordDeletion 记录一次文件删除。path 为展示路径（明文）。
+	RecordDeletion(path string)
 }
 
 func executeDecryptPlayback(req decryptPlaybackRequest) {
@@ -183,6 +192,17 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 			}
 			maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, result.ExpectedBytes)
+			if req.StatsRecorder != nil {
+				req.StatsRecorder.RecordPlayback(PlaybackEvent{
+					Path:         req.FileItem.DisplayPath,
+					Provider:     req.ProviderKey,
+					BytesServed:  result.BytesWritten,
+					TotalBytes:   size,
+					PlayedAt:     time.Now(),
+					Completed:    result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
+					ContentType:  result.ContentType,
+				})
+			}
 			return true, "", nil
 		}
 

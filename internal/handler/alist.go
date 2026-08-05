@@ -46,6 +46,7 @@ type AlistHandler struct {
 	dirSyncStop    sync.Once
 	fsMetaGroup    singleflight.Group
 	fsMetaMu       sync.Mutex
+	statsRecorder  StatsRecorder
 	fsMetaCache    map[string]fsMetaCacheEntry
 
 	fsMetaRequests         uint64
@@ -135,6 +136,10 @@ func (h *AlistHandler) startDirSyncWork(work func(context.Context)) bool {
 
 func (h *AlistHandler) SetDirSyncStore(store DirSyncStore) {
 	h.dirSyncStore = store
+}
+
+func (h *AlistHandler) SetStatsRecorder(recorder StatsRecorder) {
+	h.statsRecorder = recorder
 }
 
 func (h *AlistHandler) Stats() map[string]interface{} {
@@ -1320,6 +1325,9 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 					h.probe.InvalidateWarm(displayPath, "fs_remove")
 				}
 				log.Debug().Str("path", displayPath).Msg("Cleared cache for deleted file")
+				if h.statsRecorder != nil {
+					h.statsRecorder.RecordDeletion(displayPath)
+				}
 			}
 		}
 	}

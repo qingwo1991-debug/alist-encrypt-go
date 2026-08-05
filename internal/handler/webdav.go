@@ -46,6 +46,7 @@ type WebDAVHandler struct {
 	firstFrameCount       uint64
 	firstFrameFallbacks   uint64
 	warmupEnqueueCount    uint64
+	statsRecorder         StatsRecorder
 }
 
 const propfindPersistentWriteThreshold = 128
@@ -141,6 +142,10 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 func (h *WebDAVHandler) SetProbeScheduler(probe *ProbeScheduler) {
 	h.probe = probe
+}
+
+func (h *WebDAVHandler) SetStatsRecorder(recorder StatsRecorder) {
+	h.statsRecorder = recorder
 }
 
 // Stop terminates background maintenance goroutines owned by the WebDAV handler.
@@ -383,6 +388,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		FirstFrameCount:       &h.firstFrameCount,
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
+		StatsRecorder:         h.statsRecorder,
 	})
 }
 
@@ -599,6 +605,9 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		log.Warn().Err(err).Msg("Upstream response body read failed")
 		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
 		return
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && h.statsRecorder != nil {
+		h.statsRecorder.RecordDeletion(davPath)
 	}
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)

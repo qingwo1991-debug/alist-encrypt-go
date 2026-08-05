@@ -196,6 +196,9 @@ type Config struct {
 	DataDir   string        `json:"data_dir,omitempty"`
 	JWTSecret string        `json:"jwt_secret,omitempty"`
 	JWTExpire int           `json:"jwt_expire,omitempty"`
+	// StatsPassword: 播放统计导出接口的独立访问密码。为空表示统计接口不可用（默认关闭）。
+	// 独立于管理/加密密码，避免统计接口复用登录鉴权。
+	StatsPassword string `json:"stats_password,omitempty"`
 
 	// Internal
 	configPath string
@@ -230,6 +233,16 @@ func (c *Config) AlistServerSnapshot() AlistServer {
 	out.PasswdList = clonePasswdList(c.AlistServer.PasswdList)
 	out.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), c.AlistServer.StreamStrategyOverrides...)
 	return out
+}
+
+// StatsPasswordSnapshot 线程安全地读取统计访问密码。
+func (c *Config) StatsPasswordSnapshot() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.StatsPassword
 }
 
 // WebDAVServersSnapshot returns a deep copy suitable for API responses.
@@ -432,9 +445,10 @@ func DefaultConfig() *Config {
 			CleanupIntervalHours:   24,
 			DisableCleanup:         false,
 		},
-		DataDir:   "./data",
-		JWTSecret: "",
-		JWTExpire: 48,
+		DataDir:        "./data",
+		JWTSecret:      "",
+		JWTExpire:      48,
+		StatsPassword:  "",
 	}
 }
 
@@ -620,13 +634,14 @@ func (c *Config) snapshotLocked() *Config {
 		webDAVServers[i].PasswdList = clonePasswdList(webDAVServers[i].PasswdList)
 	}
 	snapshot := &Config{
-		AlistServer:  alistServer,
-		WebDAVServer: webDAVServers,
-		Port:         c.Port,
-		DataDir:      c.DataDir,
-		JWTSecret:    c.JWTSecret,
-		JWTExpire:    c.JWTExpire,
-		configPath:   c.configPath,
+		AlistServer:   alistServer,
+		WebDAVServer:  webDAVServers,
+		Port:          c.Port,
+		DataDir:       c.DataDir,
+		JWTSecret:     c.JWTSecret,
+		JWTExpire:     c.JWTExpire,
+		StatsPassword: c.StatsPassword,
+		configPath:    c.configPath,
 	}
 	if c.Scheme != nil {
 		value := *c.Scheme
@@ -732,6 +747,7 @@ func (c *Config) assignSnapshotLocked(src *Config) {
 	c.DataDir = src.DataDir
 	c.JWTSecret = src.JWTSecret
 	c.JWTExpire = src.JWTExpire
+	c.StatsPassword = src.StatsPassword
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

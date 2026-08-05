@@ -37,13 +37,14 @@ type Server struct {
 	streamProxy    *proxy.StreamProxy
 	userDAO        *dao.UserDAO
 	fileDAO        *dao.FileDAO
-	passwdDAO      *dao.PasswdDAO
-	proxyHandler   *handler.ProxyHandler
-	alistHandler   *handler.AlistHandler
-	webdavHandler  *handler.WebDAVHandler
-	probeScheduler *handler.ProbeScheduler
-	probeCancel    context.CancelFunc
-	probeWG        sync.WaitGroup
+	passwdDAO         *dao.PasswdDAO
+	proxyHandler      *handler.ProxyHandler
+	alistHandler      *handler.AlistHandler
+	webdavHandler     *handler.WebDAVHandler
+	probeScheduler    *handler.ProbeScheduler
+	probeCancel       context.CancelFunc
+	probeWG           sync.WaitGroup
+	statsExportHandler *handler.StatsExportHandler
 }
 
 // New creates a new server instance
@@ -169,6 +170,14 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	s.proxyHandler = proxyHandler
 	s.webdavHandler = webdavHandler
 
+	// 播放/删除统计：BoltDB stats bucket + 记录器接入三个 handler。
+	statsStore := handler.NewStatsStore(s.store)
+	statsRecorder := handler.NewBoltStatsRecorder(statsStore)
+	proxyHandler.SetStatsRecorder(statsRecorder)
+	webdavHandler.SetStatsRecorder(statsRecorder)
+	alistHandler.SetStatsRecorder(statsRecorder)
+	s.statsExportHandler = handler.NewStatsExportHandler(s.cfg, statsStore)
+
 	return apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler
 }
 
@@ -228,6 +237,13 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 	// players (Artplayer etc.) cannot include JWT headers when fetching media,
 	// so requiring auth here would block all playback in web UI.
 	r.Any("/redirect/:key", ginWrap(proxyHandler.HandleRedirect))
+
+	// /api/encrypt/exportStats - 播放/删除统计导出。
+	// 无 JWT：用独立的 stats_password 鉴权（query ?password= 或 X-Stats-Password 头）。
+	// 未配置 StatsPassword 时返回 404（功能关闭）。
+	if s.statsExportHandler != nil {
+		r.GET("/api/encrypt/exportStats", ginWrap(s.statsExportHandler.ExportStats))
+	}
 
 	// /dav/* - WebDAV proxy (supports all WebDAV methods: PROPFIND, MKCOL, etc.)
 	davGroup := r.Group("/dav")
