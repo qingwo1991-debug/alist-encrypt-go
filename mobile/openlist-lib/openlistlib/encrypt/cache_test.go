@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 )
@@ -282,5 +283,44 @@ func TestParallelDecrypt(t *testing.T) {
 		decryptedName := task.fileMap["name"].(string)
 		// 解密后应该是原始名称或 orig_ 前缀的名称
 		t.Logf("Task %d: encrypted=%s, decrypted=%s", i, task.name, decryptedName)
+	}
+}
+
+// TestDecryptedBlockCacheWriteThroughAndHit verifies the decrypted block cache
+// write-through path: bytes written by a redirect stream are cached, and a later
+// range fully inside that region is served without re-fetching upstream.
+func TestDecryptedBlockCacheWriteThroughAndHit(t *testing.T) {
+	cache := newDecryptedBlockCache(4*1024*1024, 256*1024)
+	if cache == nil {
+		t.Fatalf("expected non-nil cache")
+	}
+	baseKey := "unit|file.mp4"
+
+	// Write-through: simulate a stream that produced 1MB of plaintext starting at 0.
+	payload := make([]byte, 1024*1024)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	reader := newDecryptedCacheReader(bytes.NewReader(payload), cache, baseKey, 0)
+	dst := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, dst); err != nil {
+		t.Fatalf("read-through failed: %v", err)
+	}
+	if !bytes.Equal(dst, payload) {
+		t.Fatalf("read-through data mismatch")
+	}
+
+	// Now a range that is fully within the cached region should hit.
+	got, ok := cache.getRange(baseKey, 100, 2000)
+	if !ok {
+		t.Fatalf("expected cache hit for in-region range")
+	}
+	if !bytes.Equal(got, payload[100:2100]) {
+		t.Fatalf("cache hit data mismatch")
+	}
+
+	// A range beyond the cached region should miss.
+	if _, ok := cache.getRange(baseKey, 2*1024*1024, 16); ok {
+		t.Fatalf("expected cache miss for out-of-region range")
 	}
 }

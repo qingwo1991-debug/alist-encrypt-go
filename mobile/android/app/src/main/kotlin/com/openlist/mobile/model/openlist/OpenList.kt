@@ -142,6 +142,14 @@ object OpenList : Event, LogCallback {
         }
     }
 
+    fun setEncryptDualNetworkMarks(wifiFwmark: Long, cellFwmark: Long, enabled: Boolean) {
+        runCatching {
+            Openlistlib.setEncryptDualNetworkMarks(wifiFwmark, cellFwmark, enabled)
+        }.onFailure { e ->
+            Log.e(TAG, "Failed to set dual network marks", e)
+        }
+    }
+
     @SuppressLint("SdCardPath")
     @Synchronized
     fun startup() {

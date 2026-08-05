@@ -1,0 +1,322 @@
+package encrypt
+
+import (
+	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+)
+
+const maxDecryptedCacheServeBytes = 16 * 1024 * 1024
+
+type decryptedBlockCache struct {
+	mu        sync.Mutex
+	maxBytes  int64
+	blockSize int64
+	usedBytes int64
+	hitCount  uint64
+	missCount uint64
+	putCount  uint64
+	evictions uint64
+	items     map[string]*list.Element
+	lru       *list.List
+}
+
+type decryptedBlockEntry struct {
+	key  string
+	data []byte
+}
+
+func newDecryptedBlockCache(maxBytes, blockSize int64) *decryptedBlockCache {
+	if maxBytes <= 0 || blockSize <= 0 {
+		return nil
+	}
+	return &decryptedBlockCache{
+		maxBytes:  maxBytes,
+		blockSize: blockSize,
+		items:     make(map[string]*list.Element),
+		lru:       list.New(),
+	}
+}
+
+func (c *decryptedBlockCache) getRange(baseKey string, start, length int64) ([]byte, bool) {
+	if c == nil || baseKey == "" || start < 0 || length <= 0 {
+		return nil, false
+	}
+	if length > c.maxServeBytes() {
+		c.mu.Lock()
+		c.missCount++
+		c.mu.Unlock()
+		return nil, false
+	}
+	out := make([]byte, 0, minInt64(length, c.blockSize))
+	remaining := length
+	blockStart := (start / c.blockSize) * c.blockSize
+	blockOffset := start - blockStart
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for remaining > 0 {
+		key := c.blockKey(baseKey, blockStart)
+		elem, ok := c.items[key]
+		if !ok {
+			c.missCount++
+			return nil, false
+		}
+		entry := elem.Value.(*decryptedBlockEntry)
+		need := c.blockSize - blockOffset
+		if remaining < need {
+			need = remaining
+		}
+		if int64(len(entry.data)) < blockOffset+need {
+			c.missCount++
+			return nil, false
+		}
+		out = append(out, entry.data[blockOffset:blockOffset+need]...)
+		c.lru.MoveToFront(elem)
+		remaining -= need
+		blockStart += c.blockSize
+		blockOffset = 0
+	}
+	c.hitCount++
+	return out, true
+}
+
+func (c *decryptedBlockCache) putBlock(baseKey string, blockStart int64, data []byte) {
+	if c == nil || baseKey == "" || blockStart < 0 || blockStart%c.blockSize != 0 || len(data) == 0 {
+		return
+	}
+	if int64(len(data)) > c.blockSize {
+		data = data[:c.blockSize]
+	}
+	key := c.blockKey(baseKey, blockStart)
+	copyData := append([]byte(nil), data...)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.items[key]; ok {
+		entry := elem.Value.(*decryptedBlockEntry)
+		c.usedBytes -= int64(len(entry.data))
+		entry.data = copyData
+		c.usedBytes += int64(len(entry.data))
+		c.putCount++
+		c.lru.MoveToFront(elem)
+		c.evictLocked()
+		return
+	}
+	entry := &decryptedBlockEntry{key: key, data: copyData}
+	elem := c.lru.PushFront(entry)
+	c.items[key] = elem
+	c.usedBytes += int64(len(copyData))
+	c.putCount++
+	c.evictLocked()
+}
+
+func (c *decryptedBlockCache) evictLocked() {
+	for c.usedBytes > c.maxBytes {
+		elem := c.lru.Back()
+		if elem == nil {
+			return
+		}
+		entry := elem.Value.(*decryptedBlockEntry)
+		delete(c.items, entry.key)
+		c.usedBytes -= int64(len(entry.data))
+		c.lru.Remove(elem)
+		c.evictions++
+	}
+}
+
+func (c *decryptedBlockCache) stats() map[string]interface{} {
+	if c == nil {
+		return map[string]interface{}{
+			"enabled": false,
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return map[string]interface{}{
+		"enabled":        true,
+		"entries":        len(c.items),
+		"used_bytes":     c.usedBytes,
+		"max_bytes":      c.maxBytes,
+		"block_size":     c.blockSize,
+		"hit_count":      c.hitCount,
+		"miss_count":     c.missCount,
+		"put_count":      c.putCount,
+		"eviction_count": c.evictions,
+	}
+}
+
+func (c *decryptedBlockCache) maxServeBytes() int64 {
+	if c == nil || c.maxBytes <= 0 {
+		return 0
+	}
+	if c.maxBytes < maxDecryptedCacheServeBytes {
+		return c.maxBytes
+	}
+	return maxDecryptedCacheServeBytes
+}
+
+func (c *decryptedBlockCache) blockKey(baseKey string, offset int64) string {
+	return baseKey + "|" + itoa64(offset/c.blockSize)
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func itoa64(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}
+
+type decryptedCacheReader struct {
+	src        io.Reader
+	cache      *decryptedBlockCache
+	baseKey    string
+	nextOffset int64
+	blockStart int64
+	pending    []byte
+}
+
+func newDecryptedCacheReader(src io.Reader, cache *decryptedBlockCache, baseKey string, start int64) io.Reader {
+	if cache == nil || baseKey == "" || start < 0 {
+		return src
+	}
+	return &decryptedCacheReader{
+		src:        src,
+		cache:      cache,
+		baseKey:    baseKey,
+		nextOffset: start,
+		blockStart: (start / cache.blockSize) * cache.blockSize,
+	}
+}
+
+func (r *decryptedCacheReader) Read(p []byte) (int, error) {
+	n, err := r.src.Read(p)
+	if n > 0 {
+		r.add(p[:n])
+	}
+	if err == io.EOF {
+		r.flushPending()
+	}
+	return n, err
+}
+
+func (r *decryptedCacheReader) add(data []byte) {
+	for len(data) > 0 {
+		blockOff := r.nextOffset - r.blockStart
+		if blockOff != int64(len(r.pending)) {
+			r.pending = r.pending[:0]
+		}
+		space := r.cache.blockSize - blockOff
+		if space <= 0 {
+			r.flushPending()
+			r.blockStart += r.cache.blockSize
+			continue
+		}
+		if blockOff != 0 && len(r.pending) == 0 {
+			skip := int(space)
+			if skip > len(data) {
+				skip = len(data)
+			}
+			r.nextOffset += int64(skip)
+			data = data[skip:]
+			if r.nextOffset-r.blockStart >= r.cache.blockSize {
+				r.blockStart += r.cache.blockSize
+			}
+			continue
+		}
+		take := int(space)
+		if take > len(data) {
+			take = len(data)
+		}
+		r.pending = append(r.pending, data[:take]...)
+		r.nextOffset += int64(take)
+		data = data[take:]
+		if int64(len(r.pending)) == r.cache.blockSize {
+			r.flushPending()
+			r.blockStart += r.cache.blockSize
+		}
+	}
+}
+
+func (r *decryptedCacheReader) flushPending() {
+	if len(r.pending) == 0 {
+		return
+	}
+	r.cache.putBlock(r.baseKey, r.blockStart, r.pending)
+	r.pending = r.pending[:0]
+}
+
+func newDecryptedBlockCacheFromProxyConfig(cfg *ProxyConfig) *decryptedBlockCache {
+	if cfg == nil {
+		return nil
+	}
+	if !cfg.EnableDecryptedBlockCache {
+		return nil
+	}
+	cacheMB := cfg.DecryptedBlockCacheMB
+	if cacheMB <= 0 {
+		cacheMB = defaultDecryptedBlockCacheMB
+	}
+	if cacheMB < 16 {
+		cacheMB = 16
+	}
+	if cacheMB > 2048 {
+		cacheMB = 2048
+	}
+	blockKB := cfg.DecryptedBlockSizeKB
+	if blockKB <= 0 {
+		blockKB = defaultDecryptedBlockSizeKB
+	}
+	if blockKB < 32 {
+		blockKB = 32
+	}
+	if blockKB > 4096 {
+		blockKB = 4096
+	}
+	return newDecryptedBlockCache(int64(cacheMB)*1024*1024, int64(blockKB)*1024)
+}
+
+// decryptedCacheBaseKey builds a stable, unique key for the decrypted block
+// cache for a given V2 redirect. It must be identical across separate seek
+// requests for the same logical file so cache hits actually hit.
+func (p *ProxyServer) decryptedCacheBaseKey(info *RedirectInfo, meta ContentMeta) string {
+	if p == nil || info == nil {
+		return ""
+	}
+	if info.PasswdInfo == nil || !info.PasswdInfo.Enable {
+		return ""
+	}
+	stableID := strings.TrimSpace(info.RedirectURL)
+	if stableID == "" {
+		stableID = strings.TrimSpace(info.OriginalURL)
+	}
+	if stableID == "" {
+		return ""
+	}
+	passHash := sha256.Sum256([]byte(info.PasswdInfo.Password))
+	targetHash := sha256.Sum256([]byte(stableID))
+	nonceHex := ""
+	if len(info.NonceField) > 0 {
+		nonceHex = hex.EncodeToString(info.NonceField)
+	}
+	return fmt.Sprintf("%x|%x|%d|%d|%d|%s",
+		targetHash[:8], passHash[:8], info.HeaderLen, info.CiphertextSize, meta.PlainSize, nonceHex)
+}

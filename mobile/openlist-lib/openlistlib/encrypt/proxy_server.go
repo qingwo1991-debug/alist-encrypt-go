@@ -70,6 +70,7 @@ type ProxyServer struct {
 	rangeProbeQueue     chan string
 	rangeProbeDone      chan struct{}
 	rangeProbeWG        sync.WaitGroup
+	decryptedBlockCache *decryptedBlockCache
 	cleanupTicker       *time.Ticker
 	cleanupDone         chan struct{}
 	localStore          *localStore
@@ -372,6 +373,15 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 			KeepAlive: 60 * time.Second, // TCP KeepAlive，防止连接被中间设备断开
 		}).DialContext,
 	}
+	// 双网络（可选）：若开关开启且拿到双 fwmark，DialContext 按 host 绑定网络。
+	// 开关关闭时 newDualNetworkDialer 返回 base.DialContext，零行为变化。
+	baseDialer := &net.Dialer{
+		Timeout:   upstreamTimeout,
+		KeepAlive: 60 * time.Second,
+	}
+	if dualDialer := newDualNetworkDialer(baseDialer); dualDialer != nil {
+		transport.DialContext = dualDialer
+	}
 	streamTransport := transport.Clone()
 	// Limit only the wait for response headers. streamClient.Timeout remains
 	// zero, so long-running video bodies are not capped by this deadline.
@@ -469,6 +479,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		providerCatalog:    make(map[string]string),
 		providerSourceMask: make(map[string]int),
 		uploadMeta:         make(map[string]uploadMetaEntry),
+		decryptedBlockCache: newDecryptedBlockCacheFromProxyConfig(config),
 		cleanupDone:        make(chan struct{}),
 		metaSyncDone:       make(chan struct{}),
 	}
@@ -788,6 +799,12 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		transport = oldTransport.Clone()
 		transport.ResponseHeaderTimeout = time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600))*time.Second + 2*time.Second
 		transport.Proxy = newProxyResolver(config)
+		if dualDialer := newDualNetworkDialer(&net.Dialer{
+			Timeout:   time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600)) * time.Second,
+			KeepAlive: 60 * time.Second,
+		}); dualDialer != nil {
+			transport.DialContext = dualDialer
+		}
 	}
 	streamTransport := oldStreamTransport
 	if oldStreamTransport != nil {

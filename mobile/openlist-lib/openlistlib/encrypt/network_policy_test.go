@@ -223,6 +223,46 @@ func TestProxyResolverUnmatchedDefaultProxy(t *testing.T) {
 	}
 }
 
+func TestIsControlPlaneHost(t *testing.T) {
+	cases := []struct {
+		host   string
+		cfg    *ProxyConfig
+		want   bool
+	}{
+		{"192.168.1.10", &ProxyConfig{AlistHost: "192.168.1.10", AlistPort: 5244}, true},
+		{"192.168.1.11", &ProxyConfig{AlistHost: "192.168.1.10", AlistPort: 5244}, false},
+		{"nas.home", &ProxyConfig{AlistHost: "nas.home", AlistPort: 5244}, true},
+		{"nas.home", &ProxyConfig{AlistHost: "http://nas.home:5244", AlistPort: 5244}, true},
+		{"example.com", &ProxyConfig{AlistHost: "nas.home", AlistPort: 5244}, false},
+	}
+	for _, c := range cases {
+		if got := isControlPlaneHost(c.cfg, c.host); got != c.want {
+			t.Fatalf("host=%s cfg=%s got=%v want=%v", c.host, c.cfg.AlistHost, got, c.want)
+		}
+	}
+}
+
+func TestProxyResolverControlPlaneBypassesProxy(t *testing.T) {
+	setProxyEnvironment(t)
+	// Even with "unmatched -> proxy" default and local bypass disabled, the
+	// configured OpenList/alist control plane must always go direct.
+	req := httptest.NewRequest(http.MethodGet, "http://192.168.1.10:5244/dav/", nil)
+	resolver := newProxyResolver(&ProxyConfig{
+		AlistHost:               "192.168.1.10",
+		AlistPort:               5244,
+		EnableLocalBypass:       false,
+		RoutingMode:             routingModeByProvider,
+		RoutingUnmatchedDefault: routingActionProxy,
+	})
+	proxyURL, err := resolver(req)
+	if err != nil {
+		t.Fatalf("resolver returned err: %v", err)
+	}
+	if proxyURL != nil {
+		t.Fatalf("expected control-plane request to bypass proxy, got %v", proxyURL)
+	}
+}
+
 func TestHandleProxyDoesNotFastFailOnBackoff(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

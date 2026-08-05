@@ -64,6 +64,19 @@ const (
 	upstreamFailureThreshold = 3
 	// defaultStreamEngineVersion 默认播放内核版本（V2）
 	defaultStreamEngineVersion = 2
+	// defaultDecryptedBlockCacheMB 解密块缓存默认上限（MB）
+	defaultDecryptedBlockCacheMB = 128
+	// defaultDecryptedBlockSizeKB 解密块缓存默认块大小（KB）
+	defaultDecryptedBlockSizeKB = 256
+	// defaultDualNetworkProbeIntervalSecs 双网络延迟探测最小间隔（秒）
+	defaultDualNetworkProbeIntervalSecs = 300
+	// dualNetworkPreference* 双网络选路偏好
+	dualNetworkPrefAuto     = "auto"
+	dualNetworkPrefWiFi     = "wifi"
+	dualNetworkPrefCellular = "cellular"
+	// dualNetworkPrefHysteresis WiFi优先/蜂窝优先时的延迟迟滞阈值。
+	// 只有"非优先网络比优先网络快超过该值"才切过去，避免抖动。
+	dualNetworkPrefHysteresis = 100 * time.Millisecond
 )
 
 // streamBufferSize 流传输缓冲区大小 (默认 512KB)
@@ -568,6 +581,18 @@ type ProxyConfig struct {
 	UpstreamBackoffSeconds int `json:"upstreamBackoffSeconds,omitempty"`
 	// EnableLocalBypass: 对 localhost/私网地址绕过环境代理
 	EnableLocalBypass bool `json:"enableLocalBypass,omitempty"`
+	// EnableDualNetwork: 启用双网络(WiFi+蜂窝)延迟自适应切换。默认关闭；
+	// 开启后 Go 拨号时按 provider 目标 host 的实测延迟把 socket 绑定到
+	// 更快的网络接口，失败快速切到另一条。绝不增加首帧延迟。
+	EnableDualNetwork bool `json:"enableDualNetwork,omitempty"`
+	// DualNetworkProbeIntervalSecs: 双网络延迟探测的最小间隔（秒）。
+	// 只对真实已解析出的目标 host 做极小 HEAD/Range 探测并严格节流，
+	// 避免被 CDN 判定为扫描/攻击。
+	DualNetworkProbeIntervalSecs int `json:"dualNetworkProbeIntervalSecs,omitempty"`
+	// DualNetworkPreference: 双网络选路偏好，"auto"(按延迟) | "wifi"(WiFi优先) |
+	// "cellular"(蜂窝优先)。默认 auto。wifi/cellular 优先时仍保留延迟迟滞阈值，
+	// 避免在两条网络间抖动。
+	DualNetworkPreference string `json:"dualNetworkPreference,omitempty"`
 	// RoutingMode: 路由模式，off 或 by_provider
 	RoutingMode string `json:"routingMode,omitempty"`
 	// ProviderRuleSource: provider 路由规则来源（预留）
@@ -626,6 +651,12 @@ type ProxyConfig struct {
 	StreamBufferKB int `json:"streamBufferKb,omitempty"`
 	// StreamEngineVersion: 播放内核版本，1=legacy，2=v2
 	StreamEngineVersion int `json:"streamEngineVersion,omitempty"`
+	// EnableDecryptedBlockCache: 启用解密块缓存（重复 seek 命中内存缓存，避免反复回源 CDN）
+	EnableDecryptedBlockCache bool `json:"enableDecryptedBlockCache,omitempty"`
+	// DecryptedBlockCacheMB: 解密块缓存上限（MB）
+	DecryptedBlockCacheMB int `json:"decryptedBlockCacheMb,omitempty"`
+	// DecryptedBlockSizeKB: 解密块大小（KB）
+	DecryptedBlockSizeKB int `json:"decryptedBlockSizeKb,omitempty"`
 	// EnableDBExportSync: 启用通过 DB_EXPORT_API 拉取元数据到本地数据库
 	EnableDBExportSync bool `json:"enableDbExportSync,omitempty"`
 	// DBExportBaseURL: 远端加密服务地址，例如 http://127.0.0.1:5344

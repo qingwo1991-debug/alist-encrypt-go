@@ -51,6 +51,8 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
   bool _saving = false;
   bool _enableLocalBypass = true;
   bool _enableRouting = true;
+  bool _enableDualNetwork = false;
+  String _dualNetworkPreference = 'auto';
   String _routingUnmatchedDefault = 'proxy';
   String _catalogStatus = '';
   List<String> _providerCandidates = [];
@@ -138,6 +140,10 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
           ? config['enableLocalBypass'] as bool
           : true;
       _enableRouting = (config['routingMode'] ?? 'by_provider').toString() != 'off';
+      _enableDualNetwork = config['enableDualNetwork'] is bool
+          ? config['enableDualNetwork'] as bool
+          : false;
+      _dualNetworkPreference = (config['dualNetworkPreference'] ?? 'auto').toString();
       _routingUnmatchedDefault =
           (config['routingUnmatchedDefault'] ?? 'proxy').toString().toLowerCase() == 'direct'
           ? 'direct'
@@ -221,6 +227,8 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
           'config': {
             'routingMode': _enableRouting ? 'by_provider' : 'off',
             'routingUnmatchedDefault': _routingUnmatchedDefault,
+            'enableDualNetwork': _enableDualNetwork,
+            'dualNetworkPreference': _dualNetworkPreference,
             'providerRuleSource': 'builtin+custom',
             'providerRoutingRules': filteredRules,
           }
@@ -520,6 +528,29 @@ class _ProviderRoutingPageState extends State<ProviderRoutingPage> {
                   value: _enableRouting,
                   onChanged: (v) => setState(() => _enableRouting = v),
                 ),
+                SwitchListTile(
+                  title: const Text('双网络自动切换（WiFi + 蜂窝）'),
+                  subtitle: const Text('按 WiFi/蜂窝到目标网盘的实测延迟自动选择更快网络，失败快速切换。探测低频且仅针对真实目标，不影响首帧'),
+                  value: _enableDualNetwork,
+                  onChanged: (v) => setState(() => _enableDualNetwork = v),
+                ),
+                if (_enableDualNetwork)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('双网络选路偏好'),
+                    subtitle: const Text('自动=按延迟选最优；WiFi优先/蜂窝优先=在另一条显著更快(>100ms)时才切换，兼顾省流量'),
+                    trailing: DropdownButton<String>(
+                      value: _dualNetworkPreference,
+                      items: const [
+                        DropdownMenuItem(value: 'auto', child: Text('自动（按延迟）')),
+                        DropdownMenuItem(value: 'wifi', child: Text('WiFi 优先')),
+                        DropdownMenuItem(value: 'cellular', child: Text('蜂窝优先')),
+                      ],
+                      onChanged: (v) {
+                        if (v != null) setState(() => _dualNetworkPreference = v);
+                      },
+                    ),
+                  ),
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('本地/私网直连（全局）'),

@@ -1472,9 +1472,21 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	readerToStream = io.LimitReader(readerToStream, expectedLength)
 
 	decryptReader := NewDecryptReader(readerToStream, encryptor)
+	// Write-through decrypted block cache: bytes produced for this redirect are
+	// cached in 256KB blocks, so a later seek that lands inside an already-played
+	// region is served from memory instead of re-fetching + re-decrypting from the
+	// CDN. This directly counters the "repeated tail seek" stall pattern.
+	streamStart := startPos
+	if !hasRange {
+		streamStart = 0
+	}
+	var streamSource io.Reader = decryptReader
+	if cache := p.decryptedBlockCache; cache != nil {
+		streamSource = newDecryptedCacheReader(decryptReader, cache, p.decryptedCacheBaseKey(info, meta), streamStart)
+	}
 	w.WriteHeader(statusCode)
 
-	written, err := copyWithBuffer(w, decryptReader)
+	written, err := copyWithBuffer(w, streamSource)
 	if err != nil {
 		log.Warnf("V2 redirect stream copy failed: url=%s strategy=%s written=%d ctxErr=%v err=%v",
 			safeURLForLog(info.RedirectURL), strategy, written, r.Context().Err(), err)
@@ -1607,6 +1619,31 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		log.Infof("V2 play: refreshed stale size before range validation start=%d size=%d", rangeStart, fileSize)
+	}
+
+	// Decrypted block cache hit: if the requested range is entirely inside an
+	// already-played (and therefore already-decrypted) region, serve it straight
+	// from memory. No upstream fetch, no CDN re-handshake, no re-decrypt.
+	if cache := o.proxy.decryptedBlockCache; cache != nil && !decodeDisabled && r.Method == http.MethodGet && fileSize > 0 && shouldDecryptRedirect(r, info) && info.PasswdInfo != nil {
+		if start, end, hasRange, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr == nil && hasRange {
+			meta := ContentMeta{
+				Version:        info.ContentVersion,
+				HeaderLen:      info.HeaderLen,
+				NonceField:     info.NonceField,
+				CiphertextSize: info.CiphertextSize,
+				PlainSize:      fileSize,
+			}
+			length := end - start + 1
+			if data, ok := cache.getRange(o.proxy.decryptedCacheBaseKey(info, meta), start, length); ok {
+				w.Header().Set("Accept-Ranges", "bytes")
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+				w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(data)
+				log.Debugf("V2 play: served %d bytes from decrypted block cache start=%d end=%d", len(data), start, end)
+				return
+			}
+		}
 	}
 
 	provider := info.Provider

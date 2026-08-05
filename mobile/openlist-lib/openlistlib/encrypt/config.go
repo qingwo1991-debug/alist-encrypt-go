@@ -34,6 +34,9 @@ func DefaultConfig() *ProxyConfig {
 		ProbeBudgetSeconds:              5,
 		UpstreamBackoffSeconds:          20,
 		EnableLocalBypass:               true,
+		EnableDualNetwork:               false,
+		DualNetworkProbeIntervalSecs:    defaultDualNetworkProbeIntervalSecs,
+		DualNetworkPreference:           dualNetworkPrefAuto,
 		RoutingMode:                     routingModeByProvider,
 		ProviderRuleSource:              "builtin+custom",
 		RoutingUnmatchedDefault:         routingActionProxy,
@@ -76,6 +79,13 @@ func DefaultConfig() *ProxyConfig {
 		// password silently exposes every new installation to weak encryption.
 		EncryptPaths:  []*EncryptPath{},
 		AdminPassword: randomAdminPassword(),
+		// Decrypted block cache for repeated seeks within a played region. This
+		// directly addresses the "player seeks the tail of a large file repeatedly"
+		// pattern: replayed/backtracked bytes are served from memory instead of
+		// re-fetching+re-decrypting from the CDN.
+		EnableDecryptedBlockCache: true,
+		DecryptedBlockCacheMB:     defaultDecryptedBlockCacheMB,
+		DecryptedBlockSizeKB:      defaultDecryptedBlockSizeKB,
 	}
 }
 
@@ -155,6 +165,16 @@ func (m *ConfigManager) Load() error {
 		rawBackoff == 0 {
 		config.EnableLocalBypass = true
 	}
+	config.DualNetworkPreference = normalizeDualNetworkPreference(config.DualNetworkPreference)
+	if config.DualNetworkProbeIntervalSecs <= 0 {
+		config.DualNetworkProbeIntervalSecs = defaultDualNetworkProbeIntervalSecs
+	}
+	if config.DualNetworkProbeIntervalSecs < 60 {
+		config.DualNetworkProbeIntervalSecs = 60
+	}
+	if config.DualNetworkProbeIntervalSecs > 86400 {
+		config.DualNetworkProbeIntervalSecs = 86400
+	}
 	config.RoutingMode = normalizeRoutingMode(config.RoutingMode)
 	if strings.TrimSpace(config.ProviderRuleSource) == "" {
 		config.ProviderRuleSource = "builtin+custom"
@@ -209,6 +229,24 @@ func (m *ConfigManager) Load() error {
 	}
 	if config.StreamEngineVersion <= 0 {
 		config.StreamEngineVersion = defaultStreamEngineVersion
+	}
+	if config.DecryptedBlockCacheMB <= 0 {
+		config.DecryptedBlockCacheMB = defaultDecryptedBlockCacheMB
+	}
+	if config.DecryptedBlockCacheMB < 16 {
+		config.DecryptedBlockCacheMB = 16
+	}
+	if config.DecryptedBlockCacheMB > 2048 {
+		config.DecryptedBlockCacheMB = 2048
+	}
+	if config.DecryptedBlockSizeKB <= 0 {
+		config.DecryptedBlockSizeKB = defaultDecryptedBlockSizeKB
+	}
+	if config.DecryptedBlockSizeKB < 32 {
+		config.DecryptedBlockSizeKB = 32
+	}
+	if config.DecryptedBlockSizeKB > 4096 {
+		config.DecryptedBlockSizeKB = 4096
 	}
 	if !config.EnableParallelDecrypt && !rawEnableParallelDecrypt &&
 		rawParallelDecryptConcurrency == 0 && rawStreamBufferKB == 0 {

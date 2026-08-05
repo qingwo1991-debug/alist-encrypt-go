@@ -53,6 +53,8 @@ func configV2Docs() []configDocItem {
 		{Key: "upstreamBackoffSeconds", Label: "退避窗口", Description: "上游失败后的快速失败窗口", Min: 1, Max: 300, Default: defaults.UpstreamBackoffSeconds, Unit: "秒"},
 		{Key: "storageMapRefreshMinutes", Label: "存储映射刷新", Description: "admin storage 列表缓存刷新周期", Min: 1, Max: 1440, Default: defaults.StorageMapRefreshMinutes, Unit: "分钟"},
 		{Key: "routingUnmatchedDefault", Label: "未匹配默认动作", Description: "未命中 provider/driver 规则时默认 direct/proxy", Default: defaults.RoutingUnmatchedDefault},
+		{Key: "enableDualNetwork", Label: "双网络切换", Description: "按 WiFi/蜂窝 到目标网盘的实测延迟自动选择更快网络，失败快速切换。默认关闭", Default: defaults.EnableDualNetwork},
+		{Key: "dualNetworkProbeIntervalSecs", Label: "双网络探测间隔", Description: "对真实目标 host 的最小延迟探测最小间隔（防被 CDN 判为扫描）", Min: 60, Max: 86400, Default: defaults.DualNetworkProbeIntervalSecs, Unit: "秒"},
 		{Key: "providerCatalogEnabled", Label: "Provider目录缓存", Description: "启用 provider 目录缓存与后台刷新", Default: defaults.ProviderCatalogEnabled},
 		{Key: "providerCatalogTtlMinutes", Label: "Provider目录TTL", Description: "provider 目录后台刷新周期", Min: 5, Max: 10080, Default: defaults.ProviderCatalogTTLMinutes, Unit: "分钟"},
 		{Key: "providerCatalogBootstrapOnStart", Label: "启动刷新目录", Description: "服务启动后异步刷新 provider 目录", Default: defaults.ProviderCatalogBootstrapOnStart},
@@ -61,6 +63,9 @@ func configV2Docs() []configDocItem {
 		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
 		{Key: "parallelDecryptConcurrency", Label: "并行解密并发", Description: "大文件并行解密线程数", Min: 1, Max: 32, Default: defaults.ParallelDecryptConcurrency},
 		{Key: "streamBufferKb", Label: "流缓冲", Description: "流式解密缓冲区大小", Min: 64, Max: 4096, Default: defaults.StreamBufferKB, Unit: "KB"},
+		{Key: "enableDecryptedBlockCache", Label: "解密块缓存", Description: "重复 seek 时从内存直接返回已解密的字节，避免反复回源 CDN", Default: defaults.EnableDecryptedBlockCache},
+		{Key: "decryptedBlockCacheMb", Label: "解密块缓存上限", Description: "解密块缓存最大占用内存", Min: 16, Max: 2048, Default: defaults.DecryptedBlockCacheMB, Unit: "MB"},
+		{Key: "decryptedBlockSizeKb", Label: "解密块大小", Description: "解密块缓存单个块大小", Min: 32, Max: 4096, Default: defaults.DecryptedBlockSizeKB, Unit: "KB"},
 		{Key: "webdavNegativeCacheTtlMinutes", Label: "WebDAV负缓存", Description: "WebDAV 404 负缓存时长", Min: 1, Max: 1440, Default: defaults.WebDAVNegativeCacheTTLMinutes, Unit: "分钟"},
 		{Key: "dbExportSyncIntervalSeconds", Label: "同步周期", Description: "DB_EXPORT 增量同步轮询间隔", Min: minDBExportSyncIntervalSecs, Max: 3600, Default: defaults.DBExportSyncIntervalSeconds, Unit: "秒"},
 		{Key: "localSizeRetentionDays", Label: "Size保留", Description: "本地 size 记录保留时长", Min: 1, Max: 3650, Default: defaults.LocalSizeRetentionDays, Unit: "天"},
@@ -100,6 +105,9 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"probeBudgetSeconds":              cfg.ProbeBudgetSeconds,
 		"upstreamBackoffSeconds":          cfg.UpstreamBackoffSeconds,
 		"enableLocalBypass":               cfg.EnableLocalBypass,
+		"enableDualNetwork":               cfg.EnableDualNetwork,
+		"dualNetworkProbeIntervalSecs":    cfg.DualNetworkProbeIntervalSecs,
+		"dualNetworkPreference":           cfg.DualNetworkPreference,
 		"routingMode":                     cfg.RoutingMode,
 		"providerRuleSource":              cfg.ProviderRuleSource,
 		"routingUnmatchedDefault":         cfg.RoutingUnmatchedDefault,
@@ -135,6 +143,9 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"debugMaskSensitive":              cfg.DebugMaskSensitive,
 		"debugSampleRate":                 cfg.DebugSampleRate,
 		"debugLogBodyBytes":               cfg.DebugLogBodyBytes,
+		"enableDecryptedBlockCache":       cfg.EnableDecryptedBlockCache,
+		"decryptedBlockCacheMb":           cfg.DecryptedBlockCacheMB,
+		"decryptedBlockSizeKb":            cfg.DecryptedBlockSizeKB,
 		"encryptPaths":                    paths,
 	}
 }
@@ -222,6 +233,15 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	if v, ok := body["enableLocalBypass"].(bool); ok {
 		p.config.EnableLocalBypass = v
 	}
+	if v, ok := body["enableDualNetwork"].(bool); ok {
+		p.config.EnableDualNetwork = v
+	}
+	if v, ok := parseIntAny(body["dualNetworkProbeIntervalSecs"]); ok {
+		p.config.DualNetworkProbeIntervalSecs = clampInt(v, 60, 86400)
+	}
+	if v, ok := body["dualNetworkPreference"].(string); ok {
+		p.config.DualNetworkPreference = normalizeDualNetworkPreference(v)
+	}
 	if v, ok := body["routingMode"].(string); ok {
 		p.config.RoutingMode = normalizeRoutingMode(v)
 	}
@@ -269,6 +289,15 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := parseIntAny(body["webdavNegativeCacheTtlMinutes"]); ok {
 		p.config.WebDAVNegativeCacheTTLMinutes = clampInt(v, 1, 1440)
+	}
+	if v, ok := body["enableDecryptedBlockCache"].(bool); ok {
+		p.config.EnableDecryptedBlockCache = v
+	}
+	if v, ok := parseIntAny(body["decryptedBlockCacheMb"]); ok {
+		p.config.DecryptedBlockCacheMB = clampInt(v, 16, 2048)
+	}
+	if v, ok := parseIntAny(body["decryptedBlockSizeKb"]); ok {
+		p.config.DecryptedBlockSizeKB = clampInt(v, 32, 4096)
 	}
 	if v, ok := body["enableH2C"].(bool); ok {
 		p.config.EnableH2C = v

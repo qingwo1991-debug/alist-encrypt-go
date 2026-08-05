@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
@@ -163,6 +164,10 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 		}
 		return proxyForURL(req.URL)
 	}
+	probeInterval := time.Duration(0)
+	if config != nil && config.DualNetworkProbeIntervalSecs > 0 {
+		probeInterval = time.Duration(config.DualNetworkProbeIntervalSecs) * time.Second
+	}
 	return func(req *http.Request) (*url.URL, error) {
 		if req == nil || req.URL == nil {
 			return nil, nil
@@ -175,9 +180,27 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 		provider := req.Header.Get("X-Encrypt-Provider")
 		driver := req.Header.Get("X-Encrypt-Driver")
 
+		// The configured OpenList/alist server is the control plane of this proxy.
+		// WebDAV list requests (PROPFIND), fs/get, admin API and probe calls all
+		// target it and carry no provider/driver routing hints, so with the default
+		// "unmatched -> proxy" policy they would be forced through the system proxy
+		// (VPN), timing out the list when the VPN is unreachable. Always route the
+		// control-plane host directly, independent of provider routing.
+		if isControlPlaneHost(config, host) {
+			return nil, nil
+		}
+
 		if config.EnableLocalBypass && isLocalOrPrivateHost(host) {
 			return nil, nil
 		}
+
+		// 双网络：请求级选路，记录该 host 的 fwmark，供 DialContext 拨号时绑定。
+		// 只在开关开启且拿到双 fwmark 时生效；否则 resolve 返回 0，拨号零变化。
+		pref := ""
+		if config != nil {
+			pref = config.DualNetworkPreference
+		}
+		_ = resolveDualNetworkMark(req, probeInterval, pref)
 
 		if mode != routingModeOff {
 			if action, ok := matchRoutingRules(config, provider, driver); ok {

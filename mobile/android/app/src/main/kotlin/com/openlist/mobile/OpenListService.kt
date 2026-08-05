@@ -14,6 +14,7 @@ import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.net.wifi.WifiManager
@@ -76,6 +77,12 @@ class OpenListService : Service(), OpenList.Listener {
     private var mDbSyncJob: Job? = null
     private var mConnectivityManager: ConnectivityManager? = null
     private var mNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    // 双网络（WiFi+蜂窝）：缓存各自的 Network 对象，用于计算 fwmark 绑定。
+    @Volatile
+    private var mWifiNetwork: Network? = null
+    @Volatile
+    private var mCellNetwork: Network? = null
 
     // Database sync interval in milliseconds (5 minutes)
     private val DB_SYNC_INTERVAL = 5 * 60 * 1000L
@@ -261,24 +268,83 @@ class OpenListService : Service(), OpenList.Listener {
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                rememberDualNetwork(network)
                 updateNetworkStateFromActive()
+                pushDualNetworkMarks()
             }
 
             override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                rememberDualNetwork(network)
                 updateNetworkStateFromCapabilities(networkCapabilities)
+                pushDualNetworkMarks()
             }
 
             override fun onLost(network: Network) {
+                if (mWifiNetwork == network) mWifiNetwork = null
+                if (mCellNetwork == network) mCellNetwork = null
                 updateNetworkStateFromActive()
+                pushDualNetworkMarks()
             }
         }
         mNetworkCallback = callback
 
         try {
-            connectivityManager.registerDefaultNetworkCallback(callback)
+            // 同时监听 WiFi 与蜂窝两条网络（registerDefaultNetworkCallback 只会给当前
+            // 生效的那一条，无法同时拿到 WiFi+蜂窝两个 Network 对象做双网络绑定）。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val request = NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .build()
+                connectivityManager.registerNetworkCallback(request, callback)
+            } else {
+                // API < 24 退化为默认回调（只能跟踪生效网络，双网络不完整但可编译）。
+                connectivityManager.registerDefaultNetworkCallback(callback)
+            }
             updateNetworkStateFromActive()
+            pushDualNetworkMarks()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register network callback", e)
+        }
+    }
+
+    /**
+     * 根据网络能力把 network 归入 WiFi 或蜂窝缓存。
+     */
+    private fun rememberDualNetwork(network: Network) {
+        val connectivityManager = mConnectivityManager ?: return
+        val caps = connectivityManager.getNetworkCapabilities(network) ?: return
+        when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> mWifiNetwork = network
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> mCellNetwork = network
+        }
+    }
+
+    /**
+     * 计算双网络的 fwmark 并推送给 Go。
+     * Android 网络 -> fwmark = (netId << 16)，netId 取 getNetworkHandle() 的低 32 位。
+     * API < 26 无法精确取 netId，返回 0（表示不绑定），Go 侧自然退化。
+     */
+    private fun pushDualNetworkMarks() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // 低版本无法可靠取 netId，禁用绑定。
+            OpenList.setEncryptDualNetworkMarks(0L, 0L, false)
+            return
+        }
+        val wifiMark = mWifiNetwork?.let { networkFwmark(it) } ?: 0L
+        val cellMark = mCellNetwork?.let { networkFwmark(it) } ?: 0L
+        val enabled = wifiMark != 0L && cellMark != 0L
+        OpenList.setEncryptDualNetworkMarks(wifiMark, cellMark, enabled)
+    }
+
+    private fun networkFwmark(network: Network): Long {
+        return try {
+            val handle = network.getNetworkHandle()
+            val netId = (handle and 0xffffffffL)
+            (netId shl 16) and 0xffffffffL
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to compute network fwmark", e)
+            0L
         }
     }
 

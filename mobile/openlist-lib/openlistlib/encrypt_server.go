@@ -405,6 +405,17 @@ func SetEncryptNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeB
 	return GetEncryptManager().SetNetworkPolicy(int(upstreamTimeoutSeconds), int(probeTimeoutSeconds), int(probeBudgetSeconds), int(upstreamBackoffSeconds), enableLocalBypass)
 }
 
+// SetEncryptDualNetworkMarks 设置双网络(WiFi+蜂窝)的 fwmark 与开关（供 gomobile 调用）。
+// wifiFwmark/cellFwmark 为 0 表示"该网络不可绑定"；enabled=false 时完全不改默认拨号路径。
+func SetEncryptDualNetworkMarks(wifiFwmark, cellFwmark int64, enabled bool) {
+	encrypt.SetEncryptDualNetworkMarks(wifiFwmark, cellFwmark, enabled)
+}
+
+// GetEncryptDualNetworkStatusJson 返回双网络状态 JSON（供 gomobile 调用，可选延迟面板用）。
+func GetEncryptDualNetworkStatusJson() string {
+	return encrypt.GetEncryptDualNetworkStatusJson()
+}
+
 // SetEncryptAdvancedConfigJson 设置解密和缓存配置（供 gomobile 调用）
 func SetEncryptAdvancedConfigJson(configJSON string) error {
 	return GetEncryptManager().SetAdvancedConfigJSON(configJSON)

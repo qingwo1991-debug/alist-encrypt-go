@@ -166,6 +166,38 @@ func isLocalOrPrivateHost(host string) bool {
 	return false
 }
 
+// isControlPlaneHost reports whether host matches the configured OpenList/alist
+// server that this proxy serves. Control-plane traffic (WebDAV PROPFIND list,
+// fs/get, admin API, probes) must always go direct to the backend, never
+// through a system proxy/VPN, or the list will stall when the VPN is down.
+func isControlPlaneHost(config *ProxyConfig, host string) bool {
+	if config == nil {
+		return false
+	}
+	alistHost := strings.TrimSpace(config.AlistHost)
+	if alistHost == "" {
+		return false
+	}
+	// Strip scheme/port if the admin entered a full URL.
+	if u, err := url.Parse(alistHost); err == nil && u.Hostname() != "" {
+		alistHost = u.Hostname()
+	}
+	alistHost = strings.TrimSpace(strings.ToLower(alistHost))
+	if alistHost == "" {
+		return false
+	}
+	h := strings.TrimSpace(strings.ToLower(host))
+	if h == alistHost {
+		return true
+	}
+	// Match by IP when configured by name (or vice versa) so a DNS change at the
+	// system level cannot pull the control plane through a VPN.
+	if ip := net.ParseIP(alistHost); ip != nil {
+		return h == ip.String()
+	}
+	return false
+}
+
 func syncMapLen(m *sync.Map) int {
 	if m == nil {
 		return 0
