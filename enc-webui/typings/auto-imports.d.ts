@@ -42,6 +42,7 @@ declare global {
   const getCurrentScope: typeof import('vue').getCurrentScope
   const getCurrentWatcher: typeof import('vue').getCurrentWatcher
   const getLangInstance: typeof import('../src/hooks/use-common.js').getLangInstance
+  const getPlaybackStatsReq: typeof import('../src/api/user.js').getPlaybackStatsReq
   const getProxyDomainDictionaryReq: typeof import('../src/api/user.js').getProxyDomainDictionaryReq
   const getProxyRoutingConfigReq: typeof import('../src/api/user.js').getProxyRoutingConfigReq
   const getQueryParam: typeof import('../src/hooks/use-self-router.js').getQueryParam

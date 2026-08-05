@@ -188,6 +188,14 @@ export const getStatsReq = (extraConfig = {}) => {
   })
 }
 
+export const getPlaybackStatsReq = (extraConfig = {}) => {
+  return axiosReq({
+    url: '/enc-api/getPlaybackStats',
+    method: 'post',
+    ...extraConfig
+  })
+}
+
 export const cleanupLegacyBoltDBReq = () => {
   return axiosReq({
     url: '/enc-api/cleanupLegacyBoltDB',

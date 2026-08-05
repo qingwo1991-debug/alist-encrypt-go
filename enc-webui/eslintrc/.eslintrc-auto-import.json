@@ -53,6 +53,7 @@
     "getCurrentScope": true,
     "getCurrentWatcher": true,
     "getLangInstance": true,
+    "getPlaybackStatsReq": true,
     "getProxyDomainDictionaryReq": true,
     "getProxyRoutingConfigReq": true,
     "getQueryParam": true,

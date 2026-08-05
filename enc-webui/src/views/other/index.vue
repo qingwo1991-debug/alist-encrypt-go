@@ -61,13 +61,70 @@
           </div>
         </div>
       </section>
+
+      <section class="panel-card">
+        <div class="panel-card__header">
+          <div>
+            <div class="panel-card__title">播放统计</div>
+            <div class="panel-card__subtitle">真实播放与删除事件（含 seek 次数与时长），供导出给 AI 分析。</div>
+          </div>
+        </div>
+        <div class="pb-summary-grid">
+          <div class="pb-summary">
+            <div class="pb-summary__label">播放次数</div>
+            <div class="pb-summary__value">{{ playbackSummary.played }}</div>
+          </div>
+          <div class="pb-summary">
+            <div class="pb-summary__label">删除次数</div>
+            <div class="pb-summary__value">{{ playbackSummary.deleted }}</div>
+          </div>
+          <div class="pb-summary">
+            <div class="pb-summary__label">累计播放时长</div>
+            <div class="pb-summary__value">{{ playbackSummary.durationText }}</div>
+          </div>
+          <div class="pb-summary">
+            <div class="pb-summary__label">总 seek 次数</div>
+            <div class="pb-summary__value">{{ playbackSummary.seeks }}</div>
+          </div>
+        </div>
+
+        <el-tabs v-model="statsTab" class="pb-tabs">
+          <el-tab-pane label="播放记录" name="playback">
+            <el-table :data="playbacks" size="small" max-height="360" empty-text="暂无播放记录">
+              <el-table-column prop="path" label="路径" min-width="200" show-overflow-tooltip />
+              <el-table-column prop="provider" label="源" min-width="120" show-overflow-tooltip />
+              <el-table-column label="时长" width="90">
+                <template #default="{ row }">{{ fmtDuration(row.duration_secs) }}</template>
+              </el-table-column>
+              <el-table-column prop="seek_count" label="seek" width="70" align="center" />
+              <el-table-column label="字节" width="110" align="right">
+                <template #default="{ row }">{{ fmtBytes(row.bytes_served) }}</template>
+              </el-table-column>
+              <el-table-column label="时间" width="150">
+                <template #default="{ row }">{{ fmtTime(row.played_at) }}</template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="删除记录" name="deletion">
+            <el-table :data="deletions" size="small" max-height="360" empty-text="暂无删除记录">
+              <el-table-column prop="path" label="路径" min-width="200" show-overflow-tooltip />
+              <el-table-column label="距上次播放" width="140">
+                <template #default="{ row }">{{ fmtSince(row.since_last_play_secs) }}</template>
+              </el-table-column>
+              <el-table-column label="删除时间" width="150">
+                <template #default="{ row }">{{ fmtTime(row.deleted_at) }}</template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
+      </section>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { getStatsReq } from '@/api/user'
+import { getPlaybackStatsReq, getStatsReq } from '@/api/user'
 
 const buildInfo = reactive({})
 const runtime = reactive({
@@ -78,6 +135,70 @@ const runtime = reactive({
 })
 const refreshing = ref(false)
 let timer = null
+
+// 播放/删除统计
+const statsTab = ref('playback')
+const playbacks = ref([])
+const deletions = ref([])
+
+const loadPlaybackStats = async () => {
+  try {
+    const res = await getPlaybackStatsReq({ reqLoading: false })
+    const data = res?.data || {}
+    playbacks.value = data.playbacks || []
+    deletions.value = data.deletions || []
+  } catch {
+    /* silent */
+  }
+}
+
+const playbackSummary = computed(() => {
+  let played = 0
+  let deleted = 0
+  let duration = 0
+  let seeks = 0
+  for (const p of playbacks.value) {
+    played += 1
+    duration += Number(p.duration_secs) || 0
+    seeks += Number(p.seek_count) || 0
+  }
+  deleted = deletions.value.length
+  return {
+    played,
+    deleted,
+    seeks,
+    durationText: fmtDuration(duration)
+  }
+})
+
+const fmtDuration = (secs) => {
+  const s = Number(secs) || 0
+  if (s < 60) return `${s.toFixed(0)}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+const fmtBytes = (b) => {
+  const n = Number(b) || 0
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)}MB`
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)}GB`
+}
+
+const fmtSince = (secs) => {
+  const n = Number(secs) || 0
+  if (n < 0) return '从未播放'
+  return fmtDuration(n)
+}
+
+const fmtTime = (ts) => {
+  if (!ts) return '-'
+  const d = new Date(Number(ts) * 1000)
+  if (Number.isNaN(d.getTime())) return String(ts)
+  const p = (v) => String(v).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
 
 const loadAll = async () => {
   refreshing.value = true
@@ -131,7 +252,11 @@ const cacheCards = computed(() => {
 
 onMounted(() => {
   loadAll()
-  timer = window.setInterval(() => loadAll(), 10000)
+  loadPlaybackStats()
+  timer = window.setInterval(() => {
+    loadAll()
+    loadPlaybackStats()
+  }, 10000)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -141,6 +266,18 @@ onUnmounted(() => {
 <style scoped lang="scss">
 .system-info-page {
   padding: 6px 0 30px;
+  animation: page-fade-in 0.4s ease;
+}
+
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .system-info-shell {
@@ -186,6 +323,44 @@ onUnmounted(() => {
   background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
   box-shadow: var(--app-shadow-md);
   padding: 16px;
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+}
+
+.metric-card:hover {
+  transform: translateY(-3px);
+  border-color: var(--app-border-strong);
+  box-shadow: var(--app-glow-primary);
+}
+
+.pb-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.pb-summary {
+  border: 1px solid var(--app-border-color);
+  border-radius: var(--app-radius-md);
+  background: linear-gradient(180deg, var(--app-surface-soft), var(--app-surface));
+  padding: 14px 16px;
+}
+
+.pb-summary__label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+
+.pb-summary__value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--el-color-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-tabs {
+  margin-top: 4px;
 }
 
 .metric-card__title {
