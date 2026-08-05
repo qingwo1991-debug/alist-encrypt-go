@@ -38,11 +38,11 @@
             </div>
           </div>
           <div class="kv-grid">
-            <div class="kv-row"><span>预热成功</span><strong>{{ sched.files_succeeded_total ?? 0 }}</strong></div>
-            <div class="kv-row"><span>真实命中</span><strong>{{ sched.consumer_hit_total ?? 0 }}</strong></div>
+            <div class="kv-row"><span>预热成功</span><strong>{{ runtime.sched?.files_succeeded_total ?? 0 }}</strong></div>
+            <div class="kv-row"><span>真实命中</span><strong>{{ runtime.sched?.consumer_hit_total ?? 0 }}</strong></div>
             <div class="kv-row"><span>命中率</span><strong>{{ hitRateText }}</strong></div>
-            <div class="kv-row"><span>Range 探测</span><strong>{{ sched.files_range_probed ?? 0 }}</strong></div>
-            <div class="kv-row"><span>首帧预热入队</span><strong>{{ stream.warmup_enqueue_count ?? 0 }}</strong></div>
+            <div class="kv-row"><span>Range 探测</span><strong>{{ runtime.sched?.files_range_probed ?? 0 }}</strong></div>
+            <div class="kv-row"><span>首帧预热入队</span><strong>{{ runtime.stream?.warmup_enqueue_count ?? 0 }}</strong></div>
           </div>
         </section>
       </div>
@@ -217,14 +217,14 @@ const loadAll = async () => {
 }
 
 const hitRateText = computed(() => {
-  const rate = Number(runtime.sched.consumer_hit_rate) || 0
+  const rate = Number(runtime.sched?.consumer_hit_rate) || 0
   return `${(rate * 100).toFixed(1)}%`
 })
 
 const cacheCards = computed(() => {
-  const dec = runtime.cache.decrypted_block_cache || {}
-  const fsz = runtime.cache.file_size_cache || {}
-  const pc = runtime.cache.path_cache || {}
+  const dec = runtime.cache?.decrypted_block_cache || {}
+  const fsz = runtime.cache?.file_size_cache || {}
+  const pc = runtime.cache?.path_cache || {}
   const cards = []
   if (dec.enabled !== undefined) {
     cards.push({

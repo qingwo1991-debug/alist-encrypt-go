@@ -111,7 +111,7 @@ export const constantRoutes = [
         path: 'index',
         component: () => import('@/views/other/index.vue'),
         name: 'other',
-        meta: { title: 'Other', icon: 'chart' }
+        meta: { title: 'Stats', icon: 'chart' }
       }
     ]
   },

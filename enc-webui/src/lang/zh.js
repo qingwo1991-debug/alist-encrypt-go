@@ -49,7 +49,8 @@ export default {
     'Rich Text': '富文本',
     Table: '表格',
     Guid: '使用引导',
-    Other: '其他'
+    Other: '其他',
+    Stats: '统计'
   },
 
   tagsView: {
