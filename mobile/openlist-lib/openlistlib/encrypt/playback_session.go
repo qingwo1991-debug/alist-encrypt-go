@@ -186,8 +186,9 @@ func (p *ProxyServer) ensurePlaybackSessionTracker() *playbackSessionTracker {
 	return p.playbackSession
 }
 
-// flushPlaybackSessions 落库所有进行中的播放会话（进程退出/导出前调用）。
-func (p *ProxyServer) flushPlaybackSessions() {
+// FlushPlaybackSessions 落库所有进行中的播放会话（进程退出/导出前调用）。
+// 导出方法：跨包（顶层 openlistlib 的 ExportEncryptStatsJson）需要调用。
+func (p *ProxyServer) FlushPlaybackSessions() {
 	if p == nil || p.playbackSession == nil {
 		return
 	}

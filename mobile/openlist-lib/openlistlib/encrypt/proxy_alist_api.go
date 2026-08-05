@@ -504,7 +504,7 @@ func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	// 先落库进行中的播放会话，导出才是完整视图。
-	p.flushPlaybackSessions()
+	p.FlushPlaybackSessions()
 	plays, err := p.ListPlaybackStats(limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
