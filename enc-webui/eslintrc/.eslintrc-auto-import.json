@@ -23,6 +23,7 @@
     "casHandleChange": true,
     "checkFilePathReq": true,
     "cleanupLegacyBoltDBReq": true,
+    "clearPlaybackStatsReq": true,
     "cloneDeep": true,
     "closeElLoading": true,
     "commonUtil": true,

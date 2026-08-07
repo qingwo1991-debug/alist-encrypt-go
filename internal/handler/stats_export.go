@@ -12,12 +12,18 @@ import (
 
 // StatsExportHandler 提供播放/删除统计的导出接口，用独立统计密码保护。
 type StatsExportHandler struct {
-	cfg   *config.Config
-	store *StatsStore
+	cfg     *config.Config
+	store   *StatsStore
+	flusher func() // 导出前落库进行中的播放会话（由 server 注入 recorder.FlushSessions）
 }
 
 func NewStatsExportHandler(cfg *config.Config, store *StatsStore) *StatsExportHandler {
 	return &StatsExportHandler{cfg: cfg, store: store}
+}
+
+// SetFlusher 注入会话落库回调。
+func (h *StatsExportHandler) SetFlusher(f func()) {
+	h.flusher = f
 }
 
 // ExportStats 导出统计事件。需要 `password` 与配置的 StatsPassword 一致才放行。
@@ -26,6 +32,10 @@ func (h *StatsExportHandler) ExportStats(w http.ResponseWriter, r *http.Request)
 	if h == nil || h.cfg == nil || h.store == nil {
 		RespondHTTPErrorWithStatus(w, "stats disabled", http.StatusNotFound)
 		return
+	}
+	// 先落库进行中的播放会话，导出才是完整视图。
+	if h.flusher != nil {
+		h.flusher()
 	}
 	statsPassword := h.cfg.StatsPasswordSnapshot()
 	if statsPassword == "" {

@@ -68,9 +68,12 @@
             <div class="panel-card__title">播放统计</div>
             <div class="panel-card__subtitle">真实播放与删除事件（含 seek 次数与时长），供导出给 AI 分析。</div>
           </div>
-          <el-button type="primary" plain :disabled="exportingStats" @click="exportStatsJson">
-            {{ exportingStats ? '导出中...' : '导出 JSON' }}
-          </el-button>
+          <div class="pb-actions">
+            <el-button type="danger" plain size="small" @click="clearStats">清空</el-button>
+            <el-button type="primary" plain :disabled="exportingStats" @click="exportStatsJson">
+              {{ exportingStats ? '导出中...' : '导出 JSON' }}
+            </el-button>
+          </div>
         </div>
         <div class="pb-summary-grid">
           <div class="pb-summary">
@@ -127,7 +130,8 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { getPlaybackStatsReq, getStatsReq } from '@/api/user'
+import { ElMessageBox } from 'element-plus'
+import { clearPlaybackStatsReq, getPlaybackStatsReq, getStatsReq } from '@/api/user'
 
 const buildInfo = reactive({})
 const runtime = reactive({
@@ -156,6 +160,26 @@ const loadPlaybackStats = async () => {
 }
 
 const exportingStats = ref(false)
+
+// 清空全部播放/删除统计（重新积累）。带确认。
+const clearStats = async () => {
+  try {
+    await ElMessageBox.confirm('确定清空全部播放/删除统计？此操作不可撤销。', '清空统计', {
+      confirmButtonText: '清空',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return // 用户取消
+  }
+  try {
+    await clearPlaybackStatsReq({ reqLoading: false })
+    playbacks.value = []
+    deletions.value = []
+  } catch {
+    /* silent */
+  }
+}
 
 // 导出全量播放/删除统计为 JSON 文件（走管理 JWT，无需独立密码）。
 const exportStatsJson = async () => {
@@ -398,6 +422,12 @@ onUnmounted(() => {
 
 .pb-tabs {
   margin-top: 4px;
+}
+
+.pb-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .metric-card__title {

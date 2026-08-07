@@ -19,6 +19,7 @@ type StatsHandler struct {
 	webdavHandler *WebDAVHandler
 	streamProxy   *proxy.StreamProxy
 	statsStore    *StatsStore
+	statsFlusher  func()
 	startTime     time.Time
 }
 
@@ -40,12 +41,21 @@ func (h *StatsHandler) SetStatsStore(store *StatsStore) {
 	h.statsStore = store
 }
 
+// SetStatsFlusher 注入播放会话落库回调（读取前 flush）。
+func (h *StatsHandler) SetStatsFlusher(f func()) {
+	h.statsFlusher = f
+}
+
 // HandlePlaybackStats 返回播放/删除统计事件。走管理 JWT 鉴权（protected 路由），
 // 无需独立统计密码——能登录管理端即可查看。
 func (h *StatsHandler) HandlePlaybackStats(w http.ResponseWriter, r *http.Request) {
 	if h == nil || h.statsStore == nil {
 		RespondHTTPErrorWithStatus(w, "stats disabled", http.StatusNotFound)
 		return
+	}
+	// 先落库进行中的播放会话，读取才是完整视图。
+	if h.statsFlusher != nil {
+		h.statsFlusher()
 	}
 	limit := 0
 	if s := r.URL.Query().Get("limit"); s != "" {
@@ -65,6 +75,22 @@ func (h *StatsHandler) HandlePlaybackStats(w http.ResponseWriter, r *http.Reques
 		"playbacks": plays,
 		"deletions": dels,
 	})
+}
+
+// HandleClearPlaybackStats 清空全部播放/删除统计（管理 JWT 保护）。
+func (h *StatsHandler) HandleClearPlaybackStats(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.statsStore == nil {
+		RespondHTTPErrorWithStatus(w, "stats disabled", http.StatusNotFound)
+		return
+	}
+	if h.statsFlusher != nil {
+		h.statsFlusher()
+	}
+	if err := h.statsStore.ClearPlaybackStats(); err != nil {
+		RespondHTTPErrorWithStatus(w, "stats clear failed", http.StatusInternalServerError)
+		return
+	}
+	RespondSuccessMsg(w, "stats cleared")
 }
 
 // HandleStats returns runtime stats

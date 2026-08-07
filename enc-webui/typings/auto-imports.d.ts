@@ -12,6 +12,7 @@ declare global {
   const casHandleChange: typeof import('../src/hooks/use-element.js').casHandleChange
   const checkFilePathReq: typeof import('../src/api/user.js').checkFilePathReq
   const cleanupLegacyBoltDBReq: typeof import('../src/api/user.js').cleanupLegacyBoltDBReq
+  const clearPlaybackStatsReq: typeof import('../src/api/user.js').clearPlaybackStatsReq
   const cloneDeep: typeof import('../src/hooks/use-common.js').cloneDeep
   const closeElLoading: typeof import('../src/hooks/use-element.js').closeElLoading
   const commonUtil: typeof import('../src/utils/common-util.js').default

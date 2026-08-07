@@ -173,8 +173,10 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	webdavHandler.SetStatsRecorder(statsRecorder)
 	alistHandler.SetStatsRecorder(statsRecorder)
 	s.statsExportHandler = handler.NewStatsExportHandler(s.cfg, statsStore)
+	s.statsExportHandler.SetFlusher(statsRecorder.FlushSessions)
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, alistHandler, proxyHandler, webdavHandler, s.streamProxy, startTime)
 	statsHandler.SetStatsStore(statsStore)
+	statsHandler.SetStatsFlusher(statsRecorder.FlushSessions)
 	s.proxyHandler = proxyHandler
 	s.webdavHandler = webdavHandler
 
@@ -220,6 +222,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 			protected.Any("/cleanupLegacyBoltDB", ginWrap(apiHandler.CleanupLegacyBoltDB))
 			protected.Any("/getStats", ginWrap(statsHandler.HandleStats))
 			protected.Any("/getPlaybackStats", ginWrap(statsHandler.HandlePlaybackStats))
+			protected.Any("/clearPlaybackStats", ginWrap(statsHandler.HandleClearPlaybackStats))
 			protected.Any("/getProxyDomainDictionary", ginWrap(apiHandler.GetProxyDomainDictionary))
 			protected.Any("/refreshProxyDomainDictionary", ginWrap(apiHandler.RefreshProxyDomainDictionary))
 			protected.Any("/getProxyRoutingConfig", ginWrap(apiHandler.GetProxyRoutingConfig))

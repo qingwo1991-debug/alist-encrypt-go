@@ -31,6 +31,8 @@ const (
 )
 
 // PlaybackEvent 一次真实播放（有字节写出的范围请求/流式）。
+// 会话聚合后：同路径 30s 窗口内的多条 Range 请求合并为一条记录，
+// SeekCount 累计窗口内的 seek 次数。
 type PlaybackEvent struct {
 	ID            string    `json:"id"`
 	Path          string    `json:"path"`            // 展示路径（明文）
@@ -41,6 +43,8 @@ type PlaybackEvent struct {
 	PlayedAt      time.Time `json:"played_at"`
 	Completed     bool      `json:"completed"`       // 是否完整写出（非客户端中断）
 	ContentType   string    `json:"content_type,omitempty"`
+	RangeStart    int64     `json:"range_start,omitempty"` // 本请求 Range 起始位置（无 Range 为 0）
+	SeekCount     int       `json:"seek_count"`            // 会话内快进/快退次数
 }
 
 // DeletionEvent 一次文件删除。
@@ -234,26 +238,64 @@ func (s *StatsStore) pruneLockedIfNeeded() error {
 	})
 }
 
+// ClearPlaybackStats 清空所有播放/删除统计事件（保留预热计数等其他键）。
+func (s *StatsStore) ClearPlaybackStats() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	all, err := s.store.GetAll(storage.BucketStats)
+	if err != nil {
+		return err
+	}
+	var toDelete []string
+	for k := range all {
+		if strings.HasPrefix(k, statsKeyPlayPrefix) || strings.HasPrefix(k, statsKeyDelPrefix) {
+			toDelete = append(toDelete, k)
+		}
+	}
+	if len(toDelete) == 0 {
+		return nil
+	}
+	return s.store.UpdateBucket(storage.BucketStats, func(tx *storage.BucketTx) error {
+		for _, k := range toDelete {
+			tx.Delete(k)
+		}
+		return nil
+	})
+}
+
 // BoltStatsRecorder 实现 StatsRecorder，把播放事件写入 StatsStore。
+// 播放事件先经会话聚合器合并（同路径 30s 窗口内的 Range 请求算一次播放），
+// 避免"播放次数"被播放器的多次 Range/seek 请求虚高。
 type BoltStatsRecorder struct {
-	store *StatsStore
+	store       *StatsStore
+	aggregator  *serverPlaybackSessionAggregator
 }
 
 func NewBoltStatsRecorder(store *StatsStore) *BoltStatsRecorder {
 	if store == nil {
 		return nil
 	}
-	return &BoltStatsRecorder{store: store}
+	r := &BoltStatsRecorder{store: store}
+	r.aggregator = newServerPlaybackSessionAggregator(store)
+	return r
 }
 
-// RecordPlayback 异步写入播放事件，失败仅记日志不阻塞播放。
+// RecordPlayback 把播放事件喂给会话聚合器；窗口内合并，超窗才落库。
+// 失败仅记日志不阻塞播放。
 func (r *BoltStatsRecorder) RecordPlayback(ev PlaybackEvent) {
-	if r == nil || r.store == nil {
+	if r == nil || r.aggregator == nil {
 		return
 	}
-	if err := r.store.RecordPlayback(context.Background(), ev); err != nil {
-		log.Warn().Err(err).Str("path", ev.Path).Msg("failed to record playback stats")
+	r.aggregator.record(ev)
+}
+
+// FlushSessions 落库所有进行中的播放会话（导出前调用，保证统计完整）。
+func (r *BoltStatsRecorder) FlushSessions() {
+	if r == nil || r.aggregator == nil {
+		return
 	}
+	r.aggregator.flushAll()
 }
 
 // RecordDeletion 异步写入删除事件。

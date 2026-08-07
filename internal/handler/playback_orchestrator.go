@@ -202,6 +202,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					PlayedAt:     time.Now(),
 					Completed:    result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
 					ContentType:  result.ContentType,
+					RangeStart:   rangeStartFromHeader(r.Header.Get("Range")),
 				})
 			}
 			return true, "", nil
@@ -790,4 +791,20 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 	case "range_unsatisfiable", "decrypt_validation_failed", "timeout":
 		req.FileDAO.InvalidateDisplayPath(req.FileItem.DisplayPath)
 	}
+}
+
+// rangeStartFromHeader 解析 Range 头的起始位置（无 Range / 无法解析返回 0）。
+func rangeStartFromHeader(header string) int64 {
+	if header == "" {
+		return 0
+	}
+	parsed, err := httputil.ParseRange(header, -1)
+	if err != nil || parsed == nil || len(parsed.Ranges) == 0 {
+		return 0
+	}
+	start := parsed.Ranges[0].Start
+	if start < 0 {
+		return 0
+	}
+	return start
 }
