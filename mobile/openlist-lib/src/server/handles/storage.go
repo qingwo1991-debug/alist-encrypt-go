@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -186,24 +187,24 @@ func LoadAllStorages(c *gin.Context) {
 	}
 	conf.ResetStoragesLoadSignal()
 	go func(storages []model.Storage) {
+		var wg sync.WaitGroup
 		for _, storage := range storages {
-			storageDriver, err := op.GetStorageByMountPath(storage.MountPath)
-			if err != nil {
-				log.Errorf("failed get storage driver: %+v", err)
-				continue
-			}
-			// drop the storage in the driver
-			if err := storageDriver.Drop(context.Background()); err != nil {
-				log.Errorf("failed drop storage: %+v", err)
-				continue
-			}
-			if err := op.LoadStorage(context.Background(), storage); err != nil {
-				log.Errorf("failed get enabled storages: %+v", err)
-				continue
-			}
-			log.Infof("success load storage: [%s], driver: [%s]",
-				storage.MountPath, storage.Driver)
+			wg.Add(1)
+			go func(s model.Storage) {
+				defer wg.Done()
+				if storageDriver, err := op.GetStorageByMountPath(s.MountPath); err == nil {
+					_ = storageDriver.Drop(context.Background())
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				if err := op.LoadStorage(ctx, s); err != nil {
+					log.Errorf("failed load storage [%s]: %+v", s.MountPath, err)
+				} else {
+					log.Infof("success load storage: [%s], driver: [%s]", s.MountPath, s.Driver)
+				}
+			}(storage)
 		}
+		wg.Wait()
 		conf.SendStoragesLoadedSignal()
 	}(storages)
 	common.SuccessResp(c)
