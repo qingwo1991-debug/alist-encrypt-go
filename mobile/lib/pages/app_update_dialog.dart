@@ -3,6 +3,7 @@ import 'dart:developer' show log;
 import 'package:flutter/material.dart';
 
 import '../generated/l10n.dart';
+import '../utils/app_logger.dart';
 import '../utils/update_checker.dart';
 import '../utils/intent_utils.dart';
 import 'app_update_progress_dialog.dart';
@@ -24,16 +25,18 @@ class AppUpdateDialog extends StatelessWidget {
 
   static bool _checking = false;
 
-  static checkUpdateAndShowDialog(
-      BuildContext context, ValueChanged<bool>? checkFinished) async {
+  static Future<void> checkUpdateAndShowDialog(
+      BuildContext context, ValueChanged<bool>? checkFinished,
+      {bool isSilent = false}) async {
     if (_checking) {
       return;
     }
     _checking = true;
     var loadingShown = false;
+    final traceId = AppLogger.newTraceId('update-check');
     final checker = UpdateChecker(owner: "qingwo1991-debug", repo: "alist-encrypt-go");
     try {
-      if (context.mounted) {
+      if (!isSilent && context.mounted) {
         loadingShown = true;
         showDialog(
           context: context,
@@ -56,8 +59,10 @@ class AppUpdateDialog extends StatelessWidget {
         );
       }
 
+      await AppLogger.info('[update][trace=$traceId] 检查更新开始 (isSilent=$isSilent)');
       await checker.downloadData();
       final hasNewVersion = await checker.hasNewVersion();
+      await AppLogger.info('[update][trace=$traceId] 检查更新完成: hasNewVersion=$hasNewVersion, latest=${checker.getTag()}');
 
       checkFinished?.call(hasNewVersion);
 
@@ -73,8 +78,10 @@ class AppUpdateDialog extends StatelessWidget {
         List<String>? downloadUrls;
         try {
           downloadUrls = await checker.getPreferredDownloadUrls();
+          await AppLogger.info('[update][trace=$traceId] 测速完成，可用加速源数: ${downloadUrls.length}');
         } catch (e) {
           log('更新测速失败，使用原始 URL 下载: $e');
+          await AppLogger.warn('[update][trace=$traceId] 测速失败，回退原始 URL: $e');
         }
         if (!context.mounted) return;
         showDialog(
@@ -93,15 +100,17 @@ class AppUpdateDialog extends StatelessWidget {
         );
       }
     } catch (e) {
+      await AppLogger.warn('[update][trace=$traceId] 检查更新失败: $e');
       checkFinished?.call(false);
       if (loadingShown && context.mounted) {
         Navigator.of(context, rootNavigator: true).pop();
         loadingShown = false;
       }
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${S.of(context).updateFailed}: $e')),
-      );
+      if (!isSilent && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${S.of(context).updateFailed}: $e')),
+        );
+      }
     } finally {
       _checking = false;
     }

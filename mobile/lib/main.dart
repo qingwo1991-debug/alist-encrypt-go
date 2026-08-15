@@ -303,7 +303,7 @@ class _MainController extends GetxController {
 
     WidgetsBinding.instance.addPostFrameCallback((timeStamp) async {
       if (await NativeBridge.appConfig.isAutoCheckUpdateEnabled()) {
-        AppUpdateDialog.checkUpdateAndShowDialog(Get.context!, null);
+        AppUpdateDialog.checkUpdateAndShowDialog(Get.context!, null, isSilent: true);
       }
     });
 

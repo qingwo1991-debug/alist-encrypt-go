@@ -63,7 +63,7 @@ object OpenList : Event, LogCallback {
 
     override fun onStartError(type: String, msg: String) {
         Log.e(TAG, "onStartError: $type, $msg")
-        Logger.log(LogLevel.FATAL, type, msg)
+        Logger.log(LogLevel.FATAL, mDateFormatter.format(System.currentTimeMillis()), "[$type][error] $msg")
     }
 
     private val mDateFormatter by lazy  { SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())}
@@ -86,11 +86,11 @@ object OpenList : Event, LogCallback {
         require(normalizedPassword.length >= 4) { "管理员密码至少需要 4 位" }
 
         Log.d(TAG, "setAdminPassword begin length=${normalizedPassword.length}")
-        logMobile(LogLevel.INFO, "开始更新 OpenList 管理员密码")
+        logMobile(LogLevel.INFO, "[bridge][auth] 开始更新 OpenList 管理员密码")
         val running = isRunning()
         Log.d(TAG, "setAdminPassword isRunning=$running")
         if (!running) {
-            logMobile(LogLevel.INFO, "OpenList 未运行，先初始化配置")
+            logMobile(LogLevel.INFO, "[bridge][auth] OpenList 未运行，先初始化配置")
             init()
         }
 
@@ -98,11 +98,11 @@ object OpenList : Event, LogCallback {
         Openlistlib.setConfigData(dataDir)
 
         Log.d(TAG, "setAdminPassword updating OpenList admin")
-        logMobile(LogLevel.INFO, "正在写入 OpenList 管理员密码")
+        logMobile(LogLevel.INFO, "[bridge][auth] 正在写入 OpenList 管理员密码")
         Openlistlib.setAdminPassword(normalizedPassword)
         AppConfig.encryptAdminPassword = normalizedPassword
         Log.d(TAG, "setAdminPassword cached OpenList admin password for mobile auth")
-        logMobile(LogLevel.INFO, "OpenList 管理员密码更新流程已返回")
+        logMobile(LogLevel.INFO, "[bridge][auth] OpenList 管理员密码更新完成")
         Log.d(TAG, "setAdminPassword completed")
     }
 

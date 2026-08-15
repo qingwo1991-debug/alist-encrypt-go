@@ -44,7 +44,16 @@ func Init(event Event, cb LogCallback) error {
 	shutdownHookUuid = bootstrap.RegisterEndpointShutdownHook(event.OnShutdown)
 	logFormatter = &internal.MyFormatter{
 		OnLog: func(entry *log.Entry) {
-			cb.OnLog(int16(entry.Level), entry.Time.UnixMilli(), entry.Message)
+			msg := entry.Message
+			if len(entry.Data) > 0 {
+				var sb strings.Builder
+				sb.WriteString(msg)
+				for k, v := range entry.Data {
+					sb.WriteString(fmt.Sprintf(" [%s=%v]", k, v))
+				}
+				msg = sb.String()
+			}
+			cb.OnLog(int16(entry.Level), entry.Time.UnixMilli(), msg)
 		},
 	}
 	if utils.Log == nil {
