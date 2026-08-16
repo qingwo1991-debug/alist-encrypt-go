@@ -287,6 +287,9 @@ func NewHttpClient() *http.Client {
 		Proxy:           http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
 	}
+	// IPv4 优先拨号：移动网络对 IPv6 出站常被拒/中止，国内云盘 API/CDN
+	// 需要优先走 IPv4（IPv6 兜底）。
+	transport.DialContext = PreferIPv4DialContext(transport.DialContext)
 
 	SetProxyIfConfigured(transport)
 

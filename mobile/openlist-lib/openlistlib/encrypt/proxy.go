@@ -111,21 +111,21 @@ const (
 )
 
 var builtinDirectProviders = map[string]struct{}{
-	"aliyundriveopen":   {},
-	"baidunetdisk":      {},
-	"baiduphoto":        {},
-	"chinaunicom":       {},
+	"aliyundriveopen":    {},
+	"baidunetdisk":       {},
+	"baiduphoto":         {},
+	"chinaunicom":        {},
 	"china_unicom_cloud": {},
-	"cloud189":          {},
-	"cloud189pc":        {},
-	"open123":           {},
-	"pan115":            {},
-	"quarkoruc":         {},
-	"unicom":            {},
-	"unicom_cloud":      {},
-	"weiyun":            {},
-	"wo_cloud":          {},
-	"wps":               {},
+	"cloud189":           {},
+	"cloud189pc":         {},
+	"open123":            {},
+	"pan115":             {},
+	"quarkoruc":          {},
+	"unicom":             {},
+	"unicom_cloud":       {},
+	"weiyun":             {},
+	"wo_cloud":           {},
+	"wps":                {},
 }
 
 var builtinProxyProviders = map[string]struct{}{
@@ -1242,6 +1242,13 @@ func (p *ProxyServer) markUpstreamFailure(err error) {
 	if isClientSideStreamAbort(err) {
 		return
 	}
+	// 内嵌本地 alist（回环地址）：连接失败多为进程后台冻结/瞬时网络问题，
+	// 恢复后立即可用。若对本地连接激活 backoff 快速失败窗口，用户把
+	// APK 切回前台后的首次刷新会继续失败（"切后台后刷新不出数据"）。
+	// 本地连接要么立即成功要么立即拒绝，无需 backoff 保护。
+	if p.upstreamIsLocalLoopback() {
+		return
+	}
 	p.upstreamMu.Lock()
 	defer p.upstreamMu.Unlock()
 	p.upstreamFailures++
@@ -1252,6 +1259,26 @@ func (p *ProxyServer) markUpstreamFailure(err error) {
 		return
 	}
 	p.upstreamDownAt = time.Now().Add(p.upstreamBackoff())
+}
+
+// upstreamIsLocalLoopback 判断上游 alist 是否为内嵌本地服务（回环地址）。
+func (p *ProxyServer) upstreamIsLocalLoopback() bool {
+	host := ""
+	if p != nil {
+		p.mutex.RLock()
+		if p.config != nil {
+			host = p.config.AlistHost
+		}
+		p.mutex.RUnlock()
+	}
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	lower := strings.ToLower(host)
+	return lower == "localhost"
 }
 
 func (p *ProxyServer) markUpstreamSuccess() {
@@ -1270,7 +1297,10 @@ func isClientSideStreamAbort(err error) bool {
 		return false
 	}
 	lower := strings.ToLower(err.Error())
+	// context deadline exceeded：多为代理侧保护性超时（如 PROPFIND 8s
+	// 截断）或客户端/网络冻结，不代表上游服务不可用，不应计入 backoff。
 	return strings.Contains(lower, "context canceled") ||
+		strings.Contains(lower, "context deadline exceeded") ||
 		strings.Contains(lower, "connection reset by peer") ||
 		strings.Contains(lower, "broken pipe")
 }

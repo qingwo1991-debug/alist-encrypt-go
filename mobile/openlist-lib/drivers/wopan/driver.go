@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
@@ -29,7 +30,14 @@ func (d *Wopan) GetAddition() driver.Additional {
 }
 
 func (d *Wopan) Init(ctx context.Context) error {
-	d.client = wopan.DefaultWithRefreshToken(d.RefreshToken)
+	// 注入 IPv4 优先的 HTTP client：移动网络对 IPv6 出站常被拒/中止，
+	// SDK 默认 resty client 走系统解析可能优先 IPv6，导致联通云盘
+	// API（panservice.mail.wo.cn）连接失败、列表超时。
+	d.client = wopan.New(
+		wopan.WithRefreshToken(d.RefreshToken),
+		wopan.WithUA(wopan.DefaultUA),
+		wopan.WithClient(base.HttpClient),
+	)
 	d.client.SetAccessToken(d.AccessToken)
 	d.client.OnRefreshToken(func(accessToken, refreshToken string) {
 		d.AccessToken = accessToken
