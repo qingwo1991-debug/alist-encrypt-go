@@ -567,18 +567,38 @@ class DownloadManager {
       );
 
       if (!multiOk) {
-        await _dio.download(
-          primaryUrl,
-          filePath,
-          cancelToken: cancelToken,
-          onReceiveProgress: (received, total) {
-            double progress = 0.0;
-            if (total > 0) {
-              progress = received / total;
+        final fallbackUrls = (urls != null && urls.isNotEmpty) ? urls : [url];
+        bool singleOk = false;
+        Object? lastErr;
+
+        for (final downloadCandidate in fallbackUrls) {
+          try {
+            await _dio.download(
+              downloadCandidate,
+              filePath,
+              cancelToken: cancelToken,
+              onReceiveProgress: (received, total) {
+                double progress = 0.0;
+                if (total > 0) {
+                  progress = received / total;
+                }
+                onProgress(progress, received, total);
+              },
+            );
+            singleOk = true;
+            break;
+          } catch (e) {
+            lastErr = e;
+            if (e is DioException && e.type == DioExceptionType.cancel) {
+              rethrow;
             }
-            onProgress(progress, received, total);
-          },
-        );
+            log('单线程从 $downloadCandidate 下载失败，尝试下一个镜像源: $e');
+          }
+        }
+
+        if (!singleOk) {
+          throw lastErr ?? Exception('All fallback download URLs failed');
+        }
       }
 
       // 下载完成

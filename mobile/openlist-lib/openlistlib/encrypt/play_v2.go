@@ -1492,14 +1492,28 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 
 	written, err := copyWithBuffer(w, streamSource)
 	if err != nil {
-		log.Warnf("V2 redirect stream copy failed: url=%s strategy=%s written=%d ctxErr=%v err=%v",
-			safeURLForLog(info.RedirectURL), strategy, written, r.Context().Err(), err)
+		ctxErr := r.Context().Err()
+		isClientDisconnect := ctxErr != nil || strings.Contains(strings.ToLower(err.Error()), "broken pipe") || strings.Contains(strings.ToLower(err.Error()), "connection reset by peer")
+		if isClientDisconnect {
+			log.Debugf("V2 redirect stream ended by client disconnect (seek/close): url=%s strategy=%s written=%d",
+				safeURLForLog(info.RedirectURL), strategy, written)
+		} else {
+			log.Warnf("V2 redirect stream copy failed: url=%s strategy=%s written=%d ctxErr=%v err=%v",
+				safeURLForLog(info.RedirectURL), strategy, written, ctxErr, err)
+		}
 		return &StreamOutcome{Err: err, FailureReason: "stream_error", Retryable: true, ResponseStarted: true}
 	}
 	if written != expectedLength {
-		err = fmt.Errorf("decrypted stream truncated: wrote %d of %d bytes: %w", written, expectedLength, io.ErrUnexpectedEOF)
-		log.Warnf("V2 redirect stream truncated: url=%s strategy=%s written=%d expected=%d ctxErr=%v",
-			safeURLForLog(info.RedirectURL), strategy, written, expectedLength, r.Context().Err())
+		ctxErr := r.Context().Err()
+		isClientDisconnect := ctxErr != nil
+		if isClientDisconnect {
+			log.Debugf("V2 redirect stream interrupted by client: url=%s written=%d expected=%d",
+				safeURLForLog(info.RedirectURL), written, expectedLength)
+		} else {
+			err = fmt.Errorf("decrypted stream truncated: wrote %d of %d bytes: %w", written, expectedLength, io.ErrUnexpectedEOF)
+			log.Warnf("V2 redirect stream truncated: url=%s strategy=%s written=%d expected=%d ctxErr=%v",
+				safeURLForLog(info.RedirectURL), strategy, written, expectedLength, ctxErr)
+		}
 		return &StreamOutcome{Err: err, FailureReason: "stream_truncated", Retryable: true, ResponseStarted: true}
 	}
 	log.Debugf("V2 redirect stream copy complete: url=%s strategy=%s written=%d status=%d",

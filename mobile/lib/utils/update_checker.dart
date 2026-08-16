@@ -43,20 +43,43 @@ class UpdateChecker {
 
   static Future<Map<String, dynamic>> _getLatestRelease(
       String owner, String repo, {required Duration timeout}) async {
-    final client = HttpClient()..connectionTimeout = timeout;
-    final req = await client.getUrl(
-        Uri.parse('https://api.github.com/repos/$owner/$repo/releases/latest'));
-    req.headers.set('Accept', 'application/vnd.github+json');
-    req.headers.set('User-Agent', 'alist-encrypt-go');
-    final response = await req.close().timeout(timeout);
+    final candidateUrls = [
+      'https://api.github.com/repos/$owner/$repo/releases/latest',
+      'https://gh-proxy.com/https://api.github.com/repos/$owner/$repo/releases/latest',
+      'https://ghp.ci/https://api.github.com/repos/$owner/$repo/releases/latest',
+      'https://ghproxy.net/https://api.github.com/repos/$owner/$repo/releases/latest',
+    ];
 
-    if (response.statusCode == HttpStatus.ok) {
-      final body = await response.transform(utf8.decoder).join().timeout(timeout);
-      return json.decode(body);
-    } else {
-      throw Exception(
-          'Failed to get latest release, status code: ${response.statusCode}');
+    final perRequestTimeout = Duration(
+      milliseconds: (timeout.inMilliseconds / candidateUrls.length).clamp(2500, 5000).toInt(),
+    );
+
+    Object? lastError;
+    for (final url in candidateUrls) {
+      HttpClient? client;
+      try {
+        client = HttpClient()..connectionTimeout = perRequestTimeout;
+        final req = await client.getUrl(Uri.parse(url)).timeout(perRequestTimeout);
+        req.headers.set('Accept', 'application/vnd.github+json');
+        req.headers.set('User-Agent', 'alist-encrypt-go');
+        final response = await req.close().timeout(perRequestTimeout);
+
+        if (response.statusCode == HttpStatus.ok) {
+          final body = await response.transform(utf8.decoder).join().timeout(perRequestTimeout);
+          final decoded = json.decode(body);
+          if (decoded is Map<String, dynamic> && decoded.containsKey('tag_name')) {
+            return decoded;
+          }
+        }
+      } catch (e) {
+        lastError = e;
+        log('UpdateChecker: fetch release from $url failed: $e');
+      } finally {
+        client?.close(force: true);
+      }
     }
+
+    throw Exception('Failed to get latest release across all mirrors: $lastError');
   }
 
   String getTag() {
