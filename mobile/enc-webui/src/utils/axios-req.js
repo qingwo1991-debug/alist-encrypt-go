@@ -22,6 +22,10 @@ const cleanupRequest = (config) => {
 const codeMatches = (code, candidates) => candidates.has(String(code))
 
 const errorMessage = (err) => {
+  const status = err?.response?.status
+  if (status === 502 || status === 504 || err?.message === 'Network Error' || err?.code === 'ECONNABORTED') {
+    return '后端服务正在启动或连接超时，请稍候重试'
+  }
   return err?.response?.data?.msg || err?.response?.data?.message || err?.message || String(err || '请求失败')
 }
 
