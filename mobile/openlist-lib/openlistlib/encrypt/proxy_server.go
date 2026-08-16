@@ -379,21 +379,21 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		ResponseHeaderTimeout: upstreamTimeout + 2*time.Second,
 		ForceAttemptHTTP2:     true, // 启用 HTTP/2 (HTTPS)
 		TLSClientConfig:       &tls.Config{},
-		// 连接建立优化
-		DialContext: (&net.Dialer{
-			Timeout:   upstreamTimeout,
-			KeepAlive: 60 * time.Second, // TCP KeepAlive，防止连接被中间设备断开
-		}).DialContext,
+	}
+	// 连接建立优化：IPv4 优先（IPv6 出站被拒时回退 IPv4）+ TCP KeepAlive。
+	baseDialer := &net.Dialer{
+		Timeout:   upstreamTimeout,
+		KeepAlive: 60 * time.Second, // TCP KeepAlive，防止连接被中间设备断开
+	}
+	upstreamDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return baseDialer.DialContext(ctx, network, addr)
 	}
 	// 双网络（可选）：若开关开启且拿到双 fwmark，DialContext 按 host 绑定网络。
 	// 开关关闭时 newDualNetworkDialer 返回 base.DialContext，零行为变化。
-	baseDialer := &net.Dialer{
-		Timeout:   upstreamTimeout,
-		KeepAlive: 60 * time.Second,
-	}
 	if dualDialer := newDualNetworkDialer(baseDialer); dualDialer != nil {
-		transport.DialContext = dualDialer
+		upstreamDial = dualDialer
 	}
+	transport.DialContext = preferIPv4DialContext(upstreamDial)
 	streamTransport := transport.Clone()
 	// Limit only the wait for response headers. streamClient.Timeout remains
 	// zero, so long-running video bodies are not capped by this deadline.
@@ -812,12 +812,17 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		transport = oldTransport.Clone()
 		transport.ResponseHeaderTimeout = time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600))*time.Second + 2*time.Second
 		transport.Proxy = newProxyResolver(config)
-		if dualDialer := newDualNetworkDialer(&net.Dialer{
+		baseDialer := &net.Dialer{
 			Timeout:   time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600)) * time.Second,
 			KeepAlive: 60 * time.Second,
-		}); dualDialer != nil {
-			transport.DialContext = dualDialer
 		}
+		upstreamDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return baseDialer.DialContext(ctx, network, addr)
+		}
+		if dualDialer := newDualNetworkDialer(baseDialer); dualDialer != nil {
+			upstreamDial = dualDialer
+		}
+		transport.DialContext = preferIPv4DialContext(upstreamDial)
 	}
 	streamTransport := oldStreamTransport
 	if oldStreamTransport != nil {
