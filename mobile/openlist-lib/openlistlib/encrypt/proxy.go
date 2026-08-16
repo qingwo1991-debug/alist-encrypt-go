@@ -803,6 +803,69 @@ func (p *ProxyServer) clearWebdavNegative(requestPath string) {
 	delete(p.webdavNegativeCache, key)
 }
 
+// storageCooldownTTL 失败存储冷却时长：存储连续 5xx 失败后，短时间内
+// PROPFIND 直接快速失败，避免 WebDAV 播放器（如 VidHub/Infuse）在
+// 根目录/存储列表阶段被不可达存储（如无梯子时的谷歌云盘）拖住 8-23 秒。
+const storageCooldownTTL = 15 * time.Second
+
+// webdavPropfindTimeout WebDAV 列表（PROPFIND）转发到 alist 的上游超时上限。
+// alist 对不可达存储的内部超时可能长达 8-23 秒，这里收紧到 8 秒，
+// 保证播放器初始连接最多等待 8 秒而不是 23 秒以上。
+const webdavPropfindTimeout = 8 * time.Second
+
+// storagePrefixFromPath 提取 WebDAV 路径的首个存储名，如
+// "/dav/谷歌云盘1991/电影/x.mp4" -> "谷歌云盘1991"。
+func storagePrefixFromPath(filePath string) string {
+	p := strings.TrimPrefix(filePath, "/dav")
+	p = strings.TrimPrefix(p, "/")
+	if p == "" {
+		return ""
+	}
+	if idx := strings.Index(p, "/"); idx >= 0 {
+		return p[:idx]
+	}
+	return p
+}
+
+func (p *ProxyServer) markStorageCooldown(filePath string) {
+	prefix := storagePrefixFromPath(filePath)
+	if prefix == "" {
+		return
+	}
+	p.ensureRuntimeCaches()
+	p.storageCooldownMu.Lock()
+	defer p.storageCooldownMu.Unlock()
+	p.storageCooldown[prefix] = time.Now().Add(storageCooldownTTL)
+}
+
+func (p *ProxyServer) clearStorageCooldown(filePath string) {
+	prefix := storagePrefixFromPath(filePath)
+	if prefix == "" {
+		return
+	}
+	p.storageCooldownMu.Lock()
+	defer p.storageCooldownMu.Unlock()
+	delete(p.storageCooldown, prefix)
+}
+
+func (p *ProxyServer) isStorageInCooldown(filePath string) bool {
+	prefix := storagePrefixFromPath(filePath)
+	if prefix == "" {
+		return false
+	}
+	p.storageCooldownMu.Lock()
+	defer p.storageCooldownMu.Unlock()
+	until, ok := p.storageCooldown[prefix]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(p.storageCooldown, prefix)
+		return false
+	}
+	return true
+}
+
 func normalizeRulePrefix(raw string) (string, bool) {
 	if raw == "" || strings.HasPrefix(raw, "^") {
 		return "", false
@@ -3975,6 +4038,13 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	}
 	// 1. 查找加密配置
 	filePath := r.URL.Path
+	// 存储冷却快速失败：存储最近 5xx 失败时 PROPFIND 直接返回，
+	// 不再转发 alist 等待其内部 8-23 秒超时，避免播放器初始连接被拖垮。
+	if r.Method == "PROPFIND" && p.isStorageInCooldown(filePath) {
+		log.Infof("%s WebDAV storage cooldown: path=%s skipping upstream probe", internal.LogPrefix(ctx, internal.TagProxy), filePath)
+		http.Error(w, "storage temporarily unavailable", http.StatusBadGateway)
+		return
+	}
 	matchPath := filePath
 	if strings.HasPrefix(matchPath, "/dav/") {
 		matchPath = strings.TrimPrefix(matchPath, "/dav")
@@ -4243,7 +4313,14 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	reqCtx := r.Context()
 	var cancel context.CancelFunc
 	if r.Method != http.MethodGet {
-		reqCtx, cancel = context.WithTimeout(r.Context(), p.upstreamTimeout())
+		timeout := p.upstreamTimeout()
+		if r.Method == "PROPFIND" && timeout > webdavPropfindTimeout {
+			// WebDAV 列表请求：单个存储不可达时（如无梯子时的谷歌云盘），
+			// alist 内部可能要 8-23 秒才超时返回 502。收紧代理层转发超时，
+			// 让播放器初始连接尽快失败/继续，不被慢存储拖垮。
+			timeout = webdavPropfindTimeout
+		}
+		reqCtx, cancel = context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 	}
 	req, err := http.NewRequestWithContext(reqCtx, r.Method, targetURL, body)
@@ -4527,6 +4604,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			p.markWebdavNegative(negativeCachePath)
 		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			p.clearWebdavNegative(negativeCachePath)
+			p.clearStorageCooldown(filePath)
+		} else if resp.StatusCode >= 500 {
+			// 5xx：存储可能不可达（如无梯子时的谷歌云盘），进入冷却，
+			// 短时间内同存储的 PROPFIND 直接快速失败，不再空等上游超时。
+			p.markStorageCooldown(filePath)
 		}
 	}
 

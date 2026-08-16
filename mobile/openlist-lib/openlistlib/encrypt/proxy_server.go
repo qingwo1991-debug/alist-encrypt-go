@@ -84,6 +84,10 @@ type ProxyServer struct {
 	prefetchRecent      *shardedAnyMap // dirPath -> time.Time
 	webdavNegativeMu    sync.Mutex
 	webdavNegativeCache map[string]time.Time // path -> expireAt
+	storageCooldownMu   sync.Mutex
+	storageCooldown     map[string]time.Time // storage prefix -> cooldown until
+	redirectSizeMu      sync.Mutex
+	redirectSizeCache   map[string]redirectSizeEntry // encryptedPath -> last confirmed size
 	rawURLNegativeMu    sync.Mutex
 	rawURLNegativeCache map[string]time.Time // signed URL -> expireAt
 	prefixRules         []encryptPrefixRule
@@ -135,6 +139,12 @@ func (s *ProxyServer) ensureRuntimeCaches() {
 		}
 		if s.webdavNegativeCache == nil {
 			s.webdavNegativeCache = make(map[string]time.Time)
+		}
+		if s.storageCooldown == nil {
+			s.storageCooldown = make(map[string]time.Time)
+		}
+		if s.redirectSizeCache == nil {
+			s.redirectSizeCache = make(map[string]redirectSizeEntry)
 		}
 		if s.rawURLNegativeCache == nil {
 			s.rawURLNegativeCache = make(map[string]time.Time)

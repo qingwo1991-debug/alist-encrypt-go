@@ -561,6 +561,44 @@ func parseRange(header string, size int64) (start, end int64, hasRange bool) {
 	return start, end, hasRange
 }
 
+// redirectSizeRefreshTTL 文件大小刷新结果缓存时长：同一文件重复的尾部探测
+// 或 seek 校验在 TTL 内直接复用上次上游 fs/get 的结果，不再每次触发
+// 1.5 秒的上游刷新。
+const redirectSizeRefreshTTL = 30 * time.Second
+
+// redirectSizeEntry 记录一次上游 fs/get 确认的文件大小及其时间。
+type redirectSizeEntry struct {
+	Size        int64
+	RefreshedAt time.Time
+}
+
+func (p *ProxyServer) storeRedirectSizeRefresh(encryptedPath string, size int64) {
+	if p == nil || encryptedPath == "" || size <= 0 {
+		return
+	}
+	p.ensureRuntimeCaches()
+	p.redirectSizeMu.Lock()
+	defer p.redirectSizeMu.Unlock()
+	p.redirectSizeCache[encryptedPath] = redirectSizeEntry{Size: size, RefreshedAt: time.Now()}
+}
+
+func (p *ProxyServer) loadRedirectSizeRefresh(encryptedPath string) (int64, bool) {
+	if p == nil || encryptedPath == "" {
+		return 0, false
+	}
+	p.redirectSizeMu.Lock()
+	defer p.redirectSizeMu.Unlock()
+	entry, ok := p.redirectSizeCache[encryptedPath]
+	if !ok {
+		return 0, false
+	}
+	if time.Since(entry.RefreshedAt) > redirectSizeRefreshTTL {
+		delete(p.redirectSizeCache, encryptedPath)
+		return 0, false
+	}
+	return entry.Size, true
+}
+
 func writeRangeNotSatisfiable(w http.ResponseWriter, size int64) {
 	if size < 0 {
 		size = 0
@@ -1561,6 +1599,15 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		fileSize = redirectRawFileSize(info, fileSize)
 	}
 	refreshRangeInfo := func() bool {
+		// 文件级刷新结果缓存：同一文件短时间内重复的尾部探测/seek 校验
+		// 不再每次触发上游 fs/get（约 1.5 秒），直接用上次确认的大小。
+		if cachedSize, ok := o.proxy.loadRedirectSizeRefresh(info.EncryptedPath); ok {
+			fileSize = cachedSize
+			info = cloneRedirectInfo(info)
+			info.FileSize = cachedSize
+			o.proxy.storeRedirectCache(key, info)
+			return fileSize > 0
+		}
 		refreshed, refreshedOK := o.proxy.refreshRedirectInfo(r.Context(), key, r.Header, info)
 		if !refreshedOK {
 			return false
@@ -1572,6 +1619,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			fileSize = info.FileSize
 		} else {
 			fileSize = o.resolveFileSize(r.Context(), r, info)
+		}
+		if fileSize > 0 {
+			o.proxy.storeRedirectSizeRefresh(info.EncryptedPath, fileSize)
 		}
 		return fileSize > 0
 	}
@@ -1637,6 +1687,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	rangeHeader := r.Header.Get("Range")
 	if _, _, _, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr != nil {
 		rangeStart, hasRangeStart := parseRangeStart(rangeHeader)
+		// 播放器（VidHub/Infuse 等）常用 "bytes=<size+N>-" 尾部探测确认文件
+		// 完整性，期望立即收到 416。refreshRangeInfo 内部按文件缓存刷新结果
+		// （TTL 30 秒），同一文件重复探测只在首次触发上游刷新（约 1.5 秒），
+		// 后续探测直接返回 416，播放器起播不再被反复拖慢。
 		if !hasRangeStart || rangeStart < fileSize || !refreshRangeInfo() {
 			writeRangeNotSatisfiable(w, fileSize)
 			return

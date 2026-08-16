@@ -13,6 +13,7 @@ import 'package:get/get.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../contant/log_level.dart';
 import '../../contant/native_bridge.dart';
 import '../../generated/l10n.dart';
 import '../../utils/admin_auth_manager.dart';
@@ -254,22 +255,10 @@ content: Text('${S.of(context).logsExportFailed}: $e'),
   }
 
   String _getLevelString(int level) {
-    switch (level) {
-      case 0:
-        return 'TRACE';
-      case 1:
-        return 'DEBUG';
-      case 2:
-        return 'INFO';
-      case 3:
-        return 'WARN';
-      case 4:
-        return 'ERROR';
-      case 5:
-        return 'FATAL';
-      default:
-        return 'UNKNOWN';
-    }
+    // 与 contant/log_level.dart 的 LogLevel 常量保持一致：
+    // panic=0, fatal=1, error=2, warn=3, info=4, debug=5, trace=6。
+    // 历史上这里映射错位导致 info 级日志导出后显示为 [ERROR]。
+    return LogLevel.toStr(level);
   }
 
   @override
