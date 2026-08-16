@@ -28,6 +28,7 @@ func InitClient() {
 		}),
 	).SetTLSClientConfig(&tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify})
 	NoRedirectClient.SetHeader("user-agent", UserAgent)
+	NoRedirectClient.SetTransport(net.PreferIPv4Transport(&http.Transport{}))
 	net.SetRestyProxyIfConfigured(NoRedirectClient)
 
 	RestyClient = NewRestyClient()
@@ -40,7 +41,8 @@ func NewRestyClient() *resty.Client {
 		SetRetryCount(3).
 		SetRetryResetReaders(true).
 		SetTimeout(DefaultTimeout).
-		SetTLSClientConfig(&tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify})
+		SetTLSClientConfig(&tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify}).
+		SetTransport(net.PreferIPv4Transport(&http.Transport{}))
 
 	net.SetRestyProxyIfConfigured(client)
 	return client

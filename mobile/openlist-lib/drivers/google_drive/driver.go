@@ -20,6 +20,9 @@ type GoogleDrive struct {
 	AccessToken            string
 	ServiceAccountFile     int
 	ServiceAccountFileList []string
+	// refreshTokenCtx 绑定 Init 传入的超时 ctx：无梯子/网络不可达时
+	// token 刷新能在 3s 内失败，而不是挂在 resty 30s×3 重试上拖住启动。
+	refreshTokenCtx context.Context
 }
 
 func (d *GoogleDrive) Config() driver.Config {
@@ -34,6 +37,7 @@ func (d *GoogleDrive) Init(ctx context.Context) error {
 	if d.ChunkSize == 0 {
 		d.ChunkSize = 5
 	}
+	d.refreshTokenCtx = ctx
 	return d.refreshToken()
 }
 

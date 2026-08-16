@@ -57,14 +57,17 @@ func (d *GoogleDrive) refreshToken() error {
 			AccessToken  string `json:"access_token"`
 			ErrorMessage string `json:"text"`
 		}
-		_, err := base.RestyClient.R().
+		req := base.RestyClient.R().
 			SetResult(&resp).
 			SetQueryParams(map[string]string{
 				"refresh_ui": d.RefreshToken,
 				"server_use": "true",
 				"driver_txt": "googleui_go",
-			}).
-			Get(u)
+			})
+		if d.refreshTokenCtx != nil {
+			req.SetContext(d.refreshTokenCtx)
+		}
+		_, err := req.Get(u)
 		if err != nil {
 			return err
 		}
@@ -180,13 +183,18 @@ func (d *GoogleDrive) refreshToken() error {
 	url := "https://www.googleapis.com/oauth2/v4/token"
 	var resp base.TokenResp
 	var e TokenError
-	res, err := base.RestyClient.R().SetResult(&resp).SetError(&e).
+	req := base.RestyClient.R().
+		SetResult(&resp).SetError(&e).
 		SetFormData(map[string]string{
 			"client_id":     d.ClientID,
 			"client_secret": d.ClientSecret,
 			"refresh_token": d.RefreshToken,
 			"grant_type":    "refresh_token",
-		}).Post(url)
+		})
+	if d.refreshTokenCtx != nil {
+		req.SetContext(d.refreshTokenCtx)
+	}
+	res, err := req.Post(url)
 	if err != nil {
 		return err
 	}
