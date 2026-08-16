@@ -73,6 +73,26 @@ class AppUpdateDialog extends StatelessWidget {
 
       if (hasNewVersion) {
         if (!context.mounted) return;
+        // 先安全获取 APK 下载地址：镜像返回的 release JSON 可能缺少
+        // assets（或 ABI 不匹配），此时直接提示失败，而不是在弹窗
+        // builder 里抛异常导致白屏。
+        final String apkUrl;
+        try {
+          apkUrl = checker.getApkDownloadUrl();
+        } catch (e) {
+          await AppLogger.warn('[update][trace=$traceId] 获取 APK 下载地址失败: $e');
+          checkFinished?.call(false);
+          if (loadingShown && context.mounted) {
+            Navigator.of(context, rootNavigator: true).pop();
+            loadingShown = false;
+          }
+          if (!isSilent && context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('${S.of(context).updateFailed}: $e')),
+            );
+          }
+          return;
+        }
         // 并行测代理前缀：选最快源（多源时叠加带宽）。失败时 downloadUrls
         // 为 null，进度弹窗走原始 URL 单源（现状行为）。
         List<String>? downloadUrls;
@@ -91,7 +111,7 @@ class AppUpdateDialog extends StatelessWidget {
           builder: (context) {
             return AppUpdateDialog(
               content: checker.getUpdateContent(),
-              apkUrl: checker.getApkDownloadUrl(),
+              apkUrl: apkUrl,
               htmlUrl: checker.getHtmlUrl(),
               version: checker.getDisplayVersion(),
               downloadUrls: downloadUrls,

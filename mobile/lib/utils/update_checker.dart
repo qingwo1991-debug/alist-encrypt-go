@@ -103,21 +103,22 @@ class UpdateChecker {
   }
 
   String getApkDownloadUrl() {
-    final assets = data['assets'];
+    final assets = (data['assets'] as List?) ?? const [];
     String? fallback;
     for (var asset in assets) {
       final name = asset['name']?.toString() ?? '';
       if (fallback == null && name.endsWith('.apk')) {
-        fallback = asset['browser_download_url'];
+        fallback = asset['browser_download_url']?.toString();
       }
       if (name.contains(_systemABI)) {
-        return asset['browser_download_url'];
+        return asset['browser_download_url']?.toString() ?? '';
       }
     }
     if (fallback != null) {
       return fallback;
     }
-    throw Exception('Failed to get apk download url for ABI: $_systemABI');
+    throw Exception(
+        'Failed to get apk download url for ABI: $_systemABI (assets=${assets.length})');
   }
 
   /// 拿到本设备要下载的那个 APK 的原始 URL，生成代理前缀候选，并行测速，
@@ -126,7 +127,13 @@ class UpdateChecker {
   /// 语义：测速全失败或异常时返回 [原始URL] 单元素列表，调用方行为与
   /// 现状（直接 `getApkDownloadUrl()`）完全一致。
   Future<List<String>> getPreferredDownloadUrls() async {
-    final originalUrl = getApkDownloadUrl();
+    final String originalUrl;
+    try {
+      originalUrl = getApkDownloadUrl();
+    } catch (e) {
+      log('UpdateChecker: getApkDownloadUrl failed: $e');
+      rethrow;
+    }
     try {
       final candidates = ProxySpeedTest.buildCandidateUrls(originalUrl);
       final ranked = await ProxySpeedTest.getRankedWithCache(candidates);
