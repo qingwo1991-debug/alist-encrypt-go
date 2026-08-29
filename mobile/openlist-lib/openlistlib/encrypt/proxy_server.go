@@ -600,6 +600,7 @@ func (p *ProxyServer) Start() error {
 	p.running = true
 	proxyPort := p.config.ProxyPort
 	prewarmConfiguredV2KeysAsync(p.config)
+	warmEncryptedRootDirsAsync(p, p.config)
 	go func() {
 		log.Infof("[%s] Encrypt proxy server starting on port %d", internal.TagServer, proxyPort)
 		err := server.Serve(listener)

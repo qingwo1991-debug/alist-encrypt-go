@@ -4511,9 +4511,38 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		p.markUpstreamFailure(err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+		// 一次透明重试：连接池中的坏连接/瞬态降级会让 WebDAV 客户端看到瞬时 502。
+		// 只对幂等方法（GET/HEAD/PROPFIND）重试，PUT/COPY/MOVE 等非幂等操作不重试。
+		retried := false
+		if r.Method == http.MethodGet || r.Method == http.MethodHead ||
+			(r.Method == "PROPFIND" && len(reqBodyBytes) > 0) {
+			retryBody := io.Reader(nil)
+			if len(reqBodyBytes) > 0 {
+				retryBody = bytes.NewReader(reqBodyBytes)
+			}
+			if proxyReq, proxyErr := http.NewRequestWithContext(reqCtx, r.Method, targetURL, retryBody); proxyErr == nil {
+				proxyReq.Header = req.Header.Clone()
+				// 重试用 nil body 时，清理遗留的长度/传输头，避免
+				// "Content-Length 与 body 不符"导致的 411/400。
+				if retryBody == nil {
+					proxyReq.Header.Del("Content-Length")
+					proxyReq.Header.Del("Transfer-Encoding")
+				}
+				retried = true
+				resp, err = client.Do(proxyReq)
+				if err == nil {
+					log.Debugf("%s WebDAV client.Do retry success after first error: path=%s", internal.LogPrefix(ctx, internal.TagProxy), filePath)
+				}
+			}
+		}
+		if err != nil {
+			p.markUpstreamFailure(err)
+			if retried {
+				log.Errorf("%s WebDAV client.Do failed after retry: %v", internal.LogPrefix(ctx, internal.TagProxy), err)
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
 	}
 	p.markUpstreamSuccess()
 	rawURLFallbackHandled := false
