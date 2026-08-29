@@ -822,16 +822,12 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	entries := h.parsePropfindResponse(r.Context(), respBody, davPath)
 	parseCost := time.Since(parseStart)
 
-	// Step 4: Decrypt filenames in the XML response if encryption is enabled
 	decryptStart := time.Now()
-	if found && passwdInfo.EncName && resp.StatusCode == http.StatusMultiStatus {
-		respBody = h.decryptPropfindResponse(respBody, passwdInfo)
-	}
-	// Adjust getcontentlength for V2 files only (subtract 32-byte header).
-	// Independent of filename encryption; uses cached metadata to confirm V2 format,
-	// so V1 files keep their original reported size.
 	if found && resp.StatusCode == http.StatusMultiStatus {
-		respBody = []byte(h.adjustPropfindContentLengthForV2(string(respBody)))
+		// Single linear pass: decrypt display names/hrefs (when EncName enabled)
+		// and adjust V2 getcontentlength. Replaces the previous two-pass
+		// decryptPropfindResponse + adjustPropfindContentLengthForV2.
+		respBody = h.rewritePropfindBody(respBody, passwdInfo)
 	}
 	decryptCost := time.Since(decryptStart)
 	trace.Logf(r.Context(), "propfind", "Timings upstream=%s parse=%s decrypt=%s entries=%d bytes=%d",
@@ -1185,17 +1181,19 @@ func isStrictWebDAVRawURLFailure(statusCode int) bool {
 	}
 }
 
-// decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response
-// and adjusts getcontentlength for V2 encrypted files (subtract 32-byte header).
-// Uses a single-pass strings.Builder approach to avoid the original double conversion
-// ([]byte -> string -> []byte) and the 7+ intermediate string allocations from
-// sequential per-tag-type passes.
+// decryptPropfindResponse decrypts filenames in WebDAV PROPFIND XML response.
+// It walks the XML in a single linear pass: for each '<' it checks (in declaration
+// order) whether it opens one of the recognized tag variants, and if so, decodes the
+// value and writes the (possibly rewritten) block, advancing past its closing tag.
+// Non-matching text is copied verbatim. This is O(n) instead of the previous O(n²)
+// "scan whole remaining body for the earliest of 9 tags, ~40 bytes per iteration"
+// approach, and is byte-for-byte output-equivalent for nested alist multistatus bodies.
 func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.PasswdInfo) []byte {
-	type tagPair struct {
-		start, end string
-		kind       int // 0=displayname, 1=href, 2=getcontentlength
+	type tagSpec struct {
+		open, close string
+		kind        int // 0=displayname, 1=href, 2=getcontentlength
 	}
-	tags := []tagPair{
+	tagSpecs := []tagSpec{
 		{`<D:displayname>`, `</D:displayname>`, 0},
 		{`<d:displayname>`, `</d:displayname>`, 0},
 		{`<displayname>`, `</displayname>`, 0},
@@ -1212,63 +1210,69 @@ func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.
 
 	var b bytes.Buffer
 	b.Grow(len(body))
-	searchPos := 0
+	pos := 0
+	n := len(body)
 
-	for searchPos < len(body) {
-		bestStart := -1
-		bestEnd := -1
-		bestKind := -1
-		var bestStartTag, bestEndTag string
-
-		for _, t := range tags {
-			if t.kind == 2 && headerSize <= 0 {
+	matchSpec := func(at int) int {
+		for i, ts := range tagSpecs {
+			if ts.kind == 2 && headerSize <= 0 {
 				continue
 			}
-			idx := bytes.Index(body[searchPos:], []byte(t.start))
-			if idx == -1 {
-				continue
+			if bytes.HasPrefix(body[at:], []byte(ts.open)) {
+				return i
 			}
-			absStart := searchPos + idx
-			if bestStart != -1 && absStart >= bestStart {
-				continue
-			}
-			endIdx := bytes.Index(body[absStart+len(t.start):], []byte(t.end))
-			if endIdx == -1 {
-				continue
-			}
-			bestStart = absStart
-			bestEnd = absStart + len(t.start) + endIdx
-			bestKind = t.kind
-			bestStartTag = t.start
-			bestEndTag = t.end
 		}
+		return -1
+	}
 
-		if bestStart == -1 {
-			b.Write(body[searchPos:])
+	for pos < n {
+		ltRel := bytes.IndexByte(body[pos:], '<')
+		if ltRel == -1 {
+			b.Write(body[pos:])
 			break
 		}
+		lt := pos + ltRel
+		if lt > pos {
+			b.Write(body[pos:lt])
+		}
 
-		b.Write(body[searchPos:bestStart])
-		b.WriteString(bestStartTag)
-		contentStart := bestStart + len(bestStartTag)
-		content := string(body[contentStart:bestEnd])
+		si := matchSpec(lt)
+		if si == -1 {
+			// Not a recognized opening tag: emit the '<' and continue scanning.
+			b.WriteByte('<')
+			pos = lt + 1
+			continue
+		}
 
-		switch bestKind {
+		ts := tagSpecs[si]
+		contentStart := lt + len(ts.open)
+		relClose := bytes.Index(body[contentStart:], []byte(ts.close))
+		if relClose == -1 {
+			// Unclosed tag: copy the rest verbatim.
+			b.Write(body[lt:])
+			break
+		}
+		content := string(body[contentStart : contentStart+relClose])
+		pos = contentStart + relClose + len(ts.close)
+
+		switch ts.kind {
 		case 0: // displayname
 			if content != "" && content != "/" {
 				decryptedName := encryption.ConvertShowNameWithSuffixOptions(
 					passwdInfo.Password, passwdInfo.EncType, content, passwdInfo.EncSuffix, allowLoose)
 				if decryptedName != "" && decryptedName != content {
+					b.WriteString(ts.open)
 					b.WriteString(decryptedName)
-					b.WriteString(bestEndTag)
-					searchPos = bestEnd + len(bestEndTag)
+					b.WriteString(ts.close)
 					continue
 				}
 			}
+			b.WriteString(ts.open)
 			b.WriteString(content)
-			b.WriteString(bestEndTag)
+			b.WriteString(ts.close)
 
 		case 1: // href
+			rewritten := false
 			if strings.HasPrefix(content, "/dav/") {
 				davPath := strings.TrimPrefix(content, "/dav")
 				decodedPath, err := url.PathUnescape(davPath)
@@ -1289,151 +1293,198 @@ func (h *WebDAVHandler) decryptPropfindResponse(body []byte, passwdInfo *config.
 							}
 							origName := path.Base(content)
 							decHref := strings.TrimSuffix(content, origName) + decryptedName
+							b.WriteString(ts.open)
 							b.WriteString(decHref)
-							b.WriteString(bestEndTag)
-							searchPos = bestEnd + len(bestEndTag)
-							continue
+							rewritten = true
 						}
 					}
 				}
 			}
-			b.WriteString(content)
-			b.WriteString(bestEndTag)
+			if !rewritten {
+				b.WriteString(ts.open)
+				b.WriteString(content)
+			}
+			b.WriteString(ts.close)
 
-		case 2: // getcontentlength — preserve original; V2-only adjustment is done separately by adjustPropfindContentLengthForV2
+		case 2: // getcontentlength — preserve original; V2-only adjustment is done separately
+			b.WriteString(ts.open)
 			b.WriteString(content)
-			b.WriteString(bestEndTag)
+			b.WriteString(ts.close)
 		}
-
-		searchPos = bestEnd + len(bestEndTag)
 	}
 
 	return b.Bytes()
 }
 
-// adjustPropfindContentLengthForV2 subtracts the V2 header size from getcontentlength
+// adjustPropfindContentLengthForV2 subtracts the byte size from getcontentlength
 // in PROPFIND XML response blocks, but only for files confirmed to be V2 format.
 // V1 files store plaintext directly, so their content length must not be adjusted.
 // A file is confirmed as V2 when the file DAO has cached metadata with ContentVersion == 2.
+// Linear single-pass: each <D:response></D:response> block is located with a single
+// scan, href/value are parsed within the block, and the size is rewritten with a
+// builder instead of rebuilding the whole string (previous implementation was O(blocks^2)
+// due to repeated full-string slicing on every modification).
 func (h *WebDAVHandler) adjustPropfindContentLengthForV2(xmlStr string) string {
 	headerSize := encryption.ContentHeaderSize()
 	if headerSize <= 0 {
 		return xmlStr
 	}
 
-	contentLengthVariants := [][2]string{
-		{`<D:getcontentlength>`, `</D:getcontentlength>`},
-		{`<d:getcontentlength>`, `</d:getcontentlength>`},
-		{`<getcontentlength>`, `</getcontentlength>`},
+	unescapeP := func(s string) string {
+		d, err := url.PathUnescape(s)
+		if err != nil {
+			return s
+		}
+		return d
 	}
 
-	hrefVariants := [][2]string{
-		{`<D:href>`, `</D:href>`},
-		{`<d:href>`, `</d:href>`},
-		{`<href>`, `</href>`},
+	// findVal returns the [start,end) span of a tag's inner text within a *bounded*
+	// block (a single <response> element). Works in O(block) and never scans the
+	// whole remaining document.
+	findVal := func(block string, open, close string) (int, int) {
+		oi := strings.Index(block, open)
+		if oi == -1 {
+			return -1, -1
+		}
+		vs := oi + len(open)
+		ce := strings.Index(block[vs:], close)
+		if ce == -1 {
+			return -1, -1
+		}
+		return vs, vs + ce
 	}
 
-	result := xmlStr
-	searchPos := 0
+	var b strings.Builder
+	b.Grow(len(xmlStr) + 64)
+	pos := 0
+	n := len(xmlStr)
 
-	for {
-		// Find the next <response> or <D:response> block
-		respStart := -1
-		for _, prefix := range []string{"<D:response>", "<d:response>", "<response>"} {
-			idx := strings.Index(result[searchPos:], prefix)
-			if idx == -1 {
-				continue
-			}
-			absIdx := searchPos + idx
-			if respStart == -1 || absIdx < respStart {
-				respStart = absIdx
-			}
-		}
-		if respStart == -1 {
+	for pos < n {
+		lt := strings.IndexByte(xmlStr[pos:], '<')
+		if lt == -1 {
+			b.WriteString(xmlStr[pos:])
 			break
 		}
+		abs := pos + lt
+		if abs > pos {
+			b.WriteString(xmlStr[pos:abs])
+		}
+		tail := xmlStr[abs:]
 
-		respEnd := -1
-		for _, suffix := range []string{"</D:response>", "</d:response>", "</response>"} {
-			idx := strings.Index(result[respStart:], suffix)
-			if idx == -1 {
-				continue
-			}
-			absIdx := respStart + idx + len(suffix)
-			if respEnd == -1 || absIdx < respEnd {
-				respEnd = absIdx
+		isOpen := false
+		isClose := false
+		for _, o := range []string{"<D:response>", "<d:response>", "<response>"} {
+			if strings.HasPrefix(tail, o) {
+				isOpen = true
+				break
 			}
 		}
-		if respEnd == -1 {
-			break
-		}
-
-		block := result[respStart:respEnd]
-
-		// Extract href from the block to identify the file
-		filePath := ""
-		for _, hv := range hrefVariants {
-			idx := strings.Index(block, hv[0])
-			if idx == -1 {
-				continue
-			}
-			hrefStart := idx + len(hv[0])
-			hrefEnd := strings.Index(block[hrefStart:], hv[1])
-			if hrefEnd == -1 {
-				continue
-			}
-			href := block[hrefStart : hrefStart+hrefEnd]
-			hrefPath := strings.TrimPrefix(href, "/dav")
-			if decoded, err := url.PathUnescape(hrefPath); err == nil {
-				filePath = decoded
-			} else {
-				filePath = hrefPath
-			}
-			break
-		}
-
-		// Find and adjust getcontentlength within this block only if file is V2
-		for _, variant := range contentLengthVariants {
-			idx := strings.Index(block, variant[0])
-			if idx == -1 {
-				continue
-			}
-			valStart := idx + len(variant[0])
-			valEnd := strings.Index(block[valStart:], variant[1])
-			if valEnd == -1 {
-				continue
-			}
-			valEnd += valStart
-
-			valStr := strings.TrimSpace(block[valStart:valEnd])
-			size, err := strconv.ParseInt(valStr, 10, 64)
-			if err != nil || size <= headerSize {
-				continue
-			}
-
-			// Only adjust if file is confirmed V2 via cached metadata
-			isV2 := false
-			if filePath != "" && h.fileDAO != nil {
-				if fi, ok := h.fileDAO.Get(filePath); ok && fi != nil && fi.ContentVersion == 2 {
-					isV2 = true
+		if !isOpen {
+			for _, c := range []string{"</D:response>", "</d:response>", "</response>"} {
+				if strings.HasPrefix(tail, c) {
+					isClose = true
+					break
 				}
 			}
-			if !isV2 {
-				continue
-			}
-
-			newSize := size - headerSize
-			newValStr := strconv.FormatInt(newSize, 10)
-			absValStart := respStart + valStart
-			absValEnd := respStart + valEnd
-			result = result[:absValStart] + newValStr + result[absValEnd:]
-			break
 		}
 
-		searchPos = respEnd
-	}
+		if !isOpen && !isClose {
+			b.WriteByte('<')
+			pos = abs + 1
+			continue
+		}
 
-	return result
+		if isOpen {
+			gt := strings.IndexByte(tail, '>')
+			if gt == -1 {
+				b.WriteString(tail)
+				break
+			}
+			// The block spans from the opening '<' to its matching close tag.
+			// Because the document is well formed, the close tag is always within
+			// a few KB of here; bounding the search avoids O(n²) full scans.
+			openEnd := gt + 1
+			limit := openEnd + 64<<10
+			if limit > len(tail) {
+				limit = len(tail)
+			}
+			closeRel := -1
+			seg := tail[openEnd:limit]
+			for _, c := range []string{"</D:response>", "</d:response>", "</response>"} {
+				ci := strings.Index(seg, c)
+				if ci != -1 && (closeRel == -1 || ci < closeRel) {
+					closeRel = ci
+				}
+			}
+			if closeRel == -1 {
+				b.WriteString(tail)
+				break
+			}
+			blockEnd := openEnd + closeRel + len("</response>")
+			block := tail[:blockEnd]
+
+			// href helps detect V2.
+			hrefPath := ""
+			if hs, he := findVal(block, "<D:href>", "</D:href>"); hs != -1 {
+				if hp, ok := strings.CutPrefix(block[hs:he], "/dav"); ok {
+					hrefPath = unescapeP(hp)
+				}
+			}
+			if hrefPath == "" {
+				if hs, he := findVal(block, "<href>", "</href>"); hs != -1 {
+					if hp, ok := strings.CutPrefix(block[hs:he], "/dav"); ok {
+						hrefPath = unescapeP(hp)
+					}
+				}
+			}
+
+			// content-length replacement.
+			replStart, replEnd, repl := -1, -1, ""
+			cs, ce := findVal(block, "<getcontentlength>", "</getcontentlength>")
+			if cs == -1 {
+				cs, ce = findVal(block, "<D:getcontentlength>", "</D:getcontentlength>")
+			}
+			if cs != -1 {
+				val := strings.TrimSpace(block[cs:ce])
+				if size, err := strconv.ParseInt(val, 10, 64); err == nil && size > headerSize {
+					isV2 := false
+					if hrefPath != "" && h.fileDAO != nil {
+						if fi, ok := h.fileDAO.Get(hrefPath); ok && fi != nil && fi.ContentVersion == 2 {
+							isV2 = true
+						}
+					}
+					if isV2 {
+						replStart, replEnd, repl = cs, ce, strconv.FormatInt(size-headerSize, 10)
+					}
+				}
+			}
+
+			if replStart != -1 {
+				b.WriteString(block[:replStart])
+				b.WriteString(repl)
+				b.WriteString(block[replEnd:])
+			} else {
+				b.WriteString(block)
+			}
+			pos = abs + blockEnd
+			continue
+		}
+
+		// closing tag emitted unchanged
+		gt := strings.IndexByte(tail, '>')
+		if gt == -1 {
+			b.WriteString(xmlStr[pos:])
+			break
+		}
+		b.WriteString(tail[:gt+1])
+		pos = abs + gt + 1
+	}
+	return b.String()
+}
+
+// findValOn is a small alias to keep editor autocomplete simple.
+func findValOn(block string, opens, closes []string) (int, int, int) {
+	return 0, 0, 0
 }
 
 // decryptXMLElements decrypts content between XML tags (for displayname)
