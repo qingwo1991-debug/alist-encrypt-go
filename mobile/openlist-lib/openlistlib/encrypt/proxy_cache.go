@@ -35,6 +35,22 @@ type CachedRedirectInfo struct {
 	ExpireAt time.Time
 }
 
+// webdavListCacheEntry PROPFIND 目录列表响应缓存。
+// 同一目录被 VidHub/Infuse 等 WebDAV 客户端在一段时间内重复请求（进目录、
+// 排序列、拉详情），冷存储（如联通云盘 WoPan 上游约 1.5~2.2s）重复打上游
+// 极拖体验。把深度 ≤1 的目录 PROPFIND 响应短 TTL 缓存，重复请求直接走缓存。
+type webdavListCacheEntry struct {
+	Body     []byte
+	Status   int
+	ExpireAt time.Time
+}
+
+// webdavListCacheTTL 目录列表缓存 TTL。比文件级缓存更短，避免上层内容变动
+// 长期不可见；5 秒覆盖玩家进入目录后的一连串探询即可。
+const webdavListCacheTTL = 5 * time.Second
+
+var webdavListCacheMaxEntries = 2048
+
 // startCacheCleanup 启动定期缓存清理
 func (p *ProxyServer) startCacheCleanup() {
 	p.cleanupTicker = time.NewTicker(2 * time.Minute)
@@ -95,8 +111,17 @@ func (p *ProxyServer) cleanupExpiredCache() {
 	p.trimPrefetchRecentLocked(now, prefetchRecentMaxEntries)
 	p.prefetchRecentMu.Unlock()
 
+	// 清理过期的目录列表缓存。
+	p.webdavListCacheMu.Lock()
+	for k, v := range p.webdavListCache {
+		if v == nil || !now.Before(v.ExpireAt) {
+			delete(p.webdavListCache, k)
+		}
+	}
+	p.webdavListCacheMu.Unlock()
+
 	if deletedCount > 0 {
-		log.Debugf("[%s] Cache cleanup: removed %d expired file entries", internal.TagCache, deletedCount)
+		log.Debugf("[%s] Cache cleanup: removed %d expired entries", internal.TagCache, deletedCount)
 	}
 	p.maybeRefreshProviderCatalog(nil)
 }
@@ -450,4 +475,80 @@ func (p *ProxyServer) loadRedirectCache(key string) (*RedirectInfo, bool) {
 		}
 	}
 	return nil, false
+}
+
+// storeWebdavListCache 缓存目录 PROPFIND 响应正文。key 为不带 /dav 前缀的
+// 目录路径（与负缓存键一致），body 由调用方在解码/改写之前捕获。
+// 负缓存/目录内容发生改变时由 markWebdavNegative/clearWebdavNegative 联动
+// 使缓存失效，避免脏读。
+func (p *ProxyServer) storeWebdavListCache(dirPath string, status int, body []byte) {
+	if p == nil || dirPath == "" || status < 200 || status >= 300 {
+		return
+	}
+	p.ensureRuntimeCaches()
+	p.webdavListCacheMu.Lock()
+	defer p.webdavListCacheMu.Unlock()
+	if len(p.webdavListCache) >= webdavListCacheMaxEntries {
+		now := time.Now()
+		// 先移除已过期条目。
+		for k, v := range p.webdavListCache {
+			if v == nil || !now.Before(v.ExpireAt) {
+				delete(p.webdavListCache, k)
+				if len(p.webdavListCache) < webdavListCacheMaxEntries {
+					break
+				}
+			}
+		}
+		// 仍满（全是未过期）时逐出最早过期的一条，保证缓存不涨破上限。
+		if len(p.webdavListCache) >= webdavListCacheMaxEntries {
+			oldestKey := ""
+			var oldest time.Time
+			for k, v := range p.webdavListCache {
+				if oldestKey == "" || v.ExpireAt.Before(oldest) {
+					oldestKey = k
+					oldest = v.ExpireAt
+				}
+			}
+			if oldestKey != "" {
+				delete(p.webdavListCache, oldestKey)
+			}
+		}
+	}
+	p.webdavListCache[dirPath] = &webdavListCacheEntry{
+		Body:     body,
+		Status:   status,
+		ExpireAt: time.Now().Add(webdavListCacheTTL),
+	}
+}
+
+// loadWebdavListCache 读取目录 PROPFIND 缓存。
+func (p *ProxyServer) loadWebdavListCache(dirPath string) (int, []byte, bool) {
+	if p == nil || dirPath == "" {
+		return 0, nil, false
+	}
+	p.ensureRuntimeCaches()
+	p.webdavListCacheMu.Lock()
+	defer p.webdavListCacheMu.Unlock()
+	entry, ok := p.webdavListCache[dirPath]
+	if !ok || entry == nil {
+		return 0, nil, false
+	}
+	if time.Now().After(entry.ExpireAt) {
+		delete(p.webdavListCache, dirPath)
+		return 0, nil, false
+	}
+	return entry.Status, entry.Body, true
+}
+
+// invalidateWebdavListCache 使目录列表缓存失效（如目录被修改、上传、负缓存
+// 命中需要重查等）。注意：clearWebdavNegative 在成功响应时也会调用，用于
+// 防止残留目录缓存掩盖新内容。
+func (p *ProxyServer) invalidateWebdavListCache(dirPath string) {
+	if p == nil || dirPath == "" {
+		return
+	}
+	p.ensureRuntimeCaches()
+	p.webdavListCacheMu.Lock()
+	delete(p.webdavListCache, dirPath)
+	p.webdavListCacheMu.Unlock()
 }

@@ -324,3 +324,99 @@ func TestDecryptedBlockCacheWriteThroughAndHit(t *testing.T) {
 		t.Fatalf("expected cache miss for out-of-region range")
 	}
 }
+
+func TestWebdavListCacheStoreLoadInvalidate(t *testing.T) {
+	config := &ProxyConfig{
+		AlistHost: "localhost",
+		AlistPort: 5244,
+		ProxyPort: 5245,
+	}
+	server, err := NewProxyServer(config)
+	if err != nil {
+		t.Fatalf("Failed to create proxy server: %v", err)
+	}
+	defer server.stopCacheCleanup()
+
+	dir := "/156联通云盘/encrypt"
+	body := []byte("<multistatus>dummy</multistatus>")
+	server.storeWebdavListCache(dir, 207, body)
+
+	status, got, ok := server.loadWebdavListCache(dir)
+	if !ok {
+		t.Fatal("expected directory list cache hit after store")
+	}
+	if status != 207 || string(got) != string(body) {
+		t.Fatalf("unexpected cached payload: status=%d got=%q", status, got)
+	}
+
+	// 失效后应 miss
+	server.invalidateWebdavListCache(dir)
+	if _, _, ok := server.loadWebdavListCache(dir); ok {
+		t.Fatal("expected miss after invalidate")
+	}
+}
+
+func TestWebdavListCacheRespectsTTLAndNon200(t *testing.T) {
+	config := &ProxyConfig{
+		AlistHost: "localhost",
+		AlistPort: 5244,
+		ProxyPort: 5245,
+	}
+	server, err := NewProxyServer(config)
+	if err != nil {
+		t.Fatalf("Failed to create proxy server: %v", err)
+	}
+	defer server.stopCacheCleanup()
+
+	dir := "/dir"
+	// 4xx 不应写入缓存
+	server.storeWebdavListCache(dir, 404, []byte("<x/>"))
+	if _, _, ok := server.loadWebdavListCache(dir); ok {
+		t.Fatal("expected no cache for non-2xx status")
+	}
+
+	// 2xx 写入后，手动把 ExpireAt 拨到过去应 miss
+	server.storeWebdavListCache(dir, 207, []byte("<ok/>"))
+	server.webdavListCacheMu.Lock()
+	server.webdavListCache[dir].ExpireAt = time.Now().Add(-time.Second)
+	server.webdavListCacheMu.Unlock()
+	if _, _, ok := server.loadWebdavListCache(dir); ok {
+		t.Fatal("expected miss after TTL expiry")
+	}
+}
+
+func TestWebdavListCacheBoundUnderInsertRace(t *testing.T) {
+	config := &ProxyConfig{
+		AlistHost: "localhost",
+		AlistPort: 5244,
+		ProxyPort: 5245,
+	}
+	server, err := NewProxyServer(config)
+	if err != nil {
+		t.Fatalf("Failed to create proxy server: %v", err)
+	}
+	defer server.stopCacheCleanup()
+
+	// 强制压到上限，验证 store 仍不崩、过期清理后能放新条目。
+	prev := webdavListCacheMaxEntries
+	webdavListCacheMaxEntries = 4
+	defer func() { webdavListCacheMaxEntries = prev }()
+
+	for i := 0; i < 10; i++ {
+		server.storeWebdavListCache(
+			timexDirKey(i),
+			207,
+			[]byte("<>"),
+		)
+	}
+	server.webdavListCacheMu.Lock()
+	n := len(server.webdavListCache)
+	server.webdavListCacheMu.Unlock()
+	if n > 4 {
+		t.Fatalf("expected bounded list cache, got %d entries", n)
+	}
+}
+
+func timexDirKey(i int) string {
+	return "/test/dir" + string(rune('0'+i%10))
+}

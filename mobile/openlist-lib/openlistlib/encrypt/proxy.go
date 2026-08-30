@@ -791,6 +791,8 @@ func (p *ProxyServer) markWebdavNegative(requestPath string) {
 	p.webdavNegativeMu.Lock()
 	defer p.webdavNegativeMu.Unlock()
 	p.webdavNegativeCache[key] = time.Now().Add(p.webdavNegativeTTL())
+	// 同一路径被判不存在，目录列表缓存也不再可信，一并清除。
+	p.invalidateWebdavListCache(key)
 }
 
 func (p *ProxyServer) clearWebdavNegative(requestPath string) {
@@ -4202,6 +4204,13 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			})
 		}
 	}
+	// 首帧直连：首帧窗口内（扩到 32MB/起始≤1MB，覆盖 VidHub 等播放器前几十个
+	// 块的顺序读取），若命中文件缓存的签名 rawURL → 直连 CDN；否则再用一次严格
+	// fs/get 解析并回填缓存。
+	//
+	// 注意：只对首帧命中生效。普通 seek（大偏移）保持原有 alist /dav 转发链路，
+	// 因为签名 rawURL 可能本身带 Range/Bearer 限制，跨 seek 复用有 416 风险，
+	// 这会影响播放器 seek 的正确性，属于改动前就成立的行为，保持不动。
 	if r.Method == http.MethodGet && encPath != nil && isFirstFrameRangeHint(r.Method, clientRangeHeader) {
 		var rawURL string
 		if cached, ok := p.loadFileCache(filePath); ok {
@@ -4241,6 +4250,55 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		log.Warnf("%s WebDAV negative cache hit: path=%s negativePath=%s", internal.LogPrefix(ctx, internal.TagProxy), filePath, negativeCachePath)
 		http.Error(w, "object not found", http.StatusNotFound)
 		return
+	}
+
+	// 目录列表缓存：深度=1（一整个目录）的 PROPFIND 在短时间内重复播放时
+	// 直接回缓存，不再重复打冷存储上游。深度>1 是递归列举（不缓存，体积大、
+	// 极少重复）；深度=0 是单文件元数据探测，已被 fileCache/负缓存覆盖。
+	listDepth := ""
+	if r.Header.Get("Depth") != "" {
+		listDepth = strings.TrimSpace(r.Header.Get("Depth"))
+	}
+	// 列表缓存键与负缓存键同源：都基于 negativeCachePath（去掉 "/dav" 前缀的
+	// 目录路径），这样 mark/clearWebdavNegative 在同目录上能同步失效列表缓存。
+	webdavListCacheKey := p.webdavNegativeKey(negativeCachePath)
+
+	// 写操作会让目录内容发生变化（上传/删除/移动/复制/建目录），这些方法
+	// 处理完成后会丢弃目录列表缓存，避免返回旧快照。读类方法不失效，保持
+	// 缓存命中率。
+	switch r.Method {
+	case "PUT", "DELETE", "MOVE", "COPY", "MKCOL":
+		// 操作的目标是文件时 negativeCachePath 是文件路径；取其所在目录即可。
+		dirOfOp := path.Dir(negativeCachePath)
+		if dirOfOp == "." || dirOfOp == "/" {
+			dirOfOp = "/"
+		}
+		p.invalidateWebdavListCache(p.webdavNegativeKey(dirOfOp))
+		log.Debugf("%s WebDAV mutating %s invalidates directory list cache: dir=%s",
+			internal.LogPrefix(ctx, internal.TagProxy), r.Method, dirOfOp)
+	}
+
+	if listDepth == "1" {
+		if cachedStatus, cachedBody, ok := p.loadWebdavListCache(webdavListCacheKey); ok && cachedBody != nil {
+			// 命中：回明文解密后的列表正文。Content-Type 固定 XML；不加
+			// Content-Length，让 Go 按明文长度重新生成。
+			w.Header().Set("Content-Type", "text/xml; charset=utf-8")
+			w.WriteHeader(cachedStatus)
+			// 复用 processPropfindResponse：除了把明文正文写到 w，还会把解析出的
+			// 每个条目回填 fileCache（本书字幕探测依赖 fileCache 来判断文件是否
+			// 存在）。命中也重放一遍，保证 fileCache 与目录快照一致。
+			if encPath != nil && encPath.EncName {
+				if err := p.processPropfindResponse(bytes.NewReader(cachedBody), w, encPath); err != nil {
+					log.Warnf("%s WebDAV list cache reparse failed: dir=%s err=%v",
+						internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, err)
+				}
+			} else {
+				_, _ = w.Write(cachedBody)
+			}
+			log.Debugf("%s WebDAV directory list cache hit: dir=%s status=%d bytes=%d",
+				internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, cachedStatus, len(cachedBody))
+			return
+		}
 	}
 
 	rangeSuppressedByStrategy := false
@@ -4740,7 +4798,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 
 	// 5. 处理 PROPFIND 响应 (文件名解密)
 	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
-		// Remove Content-Length so Go will use chunked transfer when streaming the modified output.
+		// Remove Content-Length so Go will use chunked transfer when streaming the response body.
 		for key, values := range resp.Header {
 			if strings.ToLower(key) == "content-length" {
 				continue
@@ -4749,6 +4807,26 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				w.Header().Add(key, v)
 			}
 		}
+
+		// 目录列表缓存写入：只在列表请求（Depth=1）时缓存明文正文，供后续
+		// 重复进入同一目录直接复用（见上方 listDepth=="1" 命中分支）。
+		if listDepth == "1" {
+			var listBuf bytes.Buffer
+			multi := io.MultiWriter(w, &listBuf)
+			status := resp.StatusCode
+			w.WriteHeader(status)
+			if err := p.processPropfindResponse(resp.Body, multi, encPath); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if status >= 200 && status < 300 {
+				p.storeWebdavListCache(webdavListCacheKey, status, listBuf.Bytes())
+				log.Debugf("%s WebDAV directory list cached: dir=%s status=%d bytes=%d",
+					internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, status, listBuf.Len())
+			}
+			return
+		}
+
 		w.WriteHeader(resp.StatusCode)
 
 		if err := p.processPropfindResponse(resp.Body, w, encPath); err != nil {

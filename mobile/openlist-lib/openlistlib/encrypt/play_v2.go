@@ -141,6 +141,10 @@ func applyPlaybackOriginCredentials(dst, originHeaders http.Header, target, alis
 }
 
 const (
+	// firstFrameWindowBytes 首帧快速窗口：仅用于"是不是首帧读取"的分类。
+	// 保持原值 2MB/1KB，避免把更大的普通 seek 误判为首帧——签名 rawURL 直连
+	// 对偏移/长度有限制，误判会破坏 seek。首帧真正提速的关键在 rawURL 正确
+	// 解析后直连（已有），而非扩大窗口。
 	firstFrameWindowBytes     int64 = 2 * 1024 * 1024
 	firstFrameStartSlackBytes int64 = 1024
 )

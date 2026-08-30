@@ -57,6 +57,8 @@ type ProxyServer struct {
 	fileCacheCount      int64 // 缓存条目计数
 	redirectCacheMu     sync.Mutex
 	redirectCache       *shardedAnyMap
+	webdavListCacheMu   sync.Mutex
+	webdavListCache     map[string]*webdavListCacheEntry
 	sizeMapMu           sync.RWMutex
 	sizeMap             map[string]SizeMapEntry
 	sizeMapPath         string
@@ -148,6 +150,9 @@ func (s *ProxyServer) ensureRuntimeCaches() {
 		}
 		if s.rawURLNegativeCache == nil {
 			s.rawURLNegativeCache = make(map[string]time.Time)
+		}
+		if s.webdavListCache == nil {
+			s.webdavListCache = make(map[string]*webdavListCacheEntry)
 		}
 	})
 }
