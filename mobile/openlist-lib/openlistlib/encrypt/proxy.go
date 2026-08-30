@@ -808,7 +808,24 @@ func (p *ProxyServer) clearWebdavNegative(requestPath string) {
 // storageCooldownTTL 失败存储冷却时长：存储连续 5xx 失败后，短时间内
 // PROPFIND 直接快速失败，避免 WebDAV 播放器（如 VidHub/Infuse）在
 // 根目录/存储列表阶段被不可达存储（如无梯子时的谷歌云盘）拖住 8-23 秒。
-const storageCooldownTTL = 15 * time.Second
+// 单独一次瞬时 5xx 不再冷却整盘；需窗口内连续几次失败才触发，窗口也很短，
+// 避免个别文件/瞬时抖动误伤同一存储的其它 PROPFIND（"时好时坏"整盘 502）。
+const storageCooldownTTL = 5 * time.Second
+
+// storageCooldownFailThreshold 进入冷却所需的最小连续 5xx 失败次数。
+const storageCooldownFailThreshold = 2
+
+// storageCooldownFailWindow 失败计数累积窗口。连续失败需在此窗口内发生才
+// 计入冷却，窗口外自然过期清零，避免长时间零散失败最终拼成一个冷却。
+const storageCooldownFailWindow = 10 * time.Second
+
+// storageCooldownState 记录某个存储前缀的冷却截止，以及窗口内最近的连续失败次数。
+// 失败计数只在短窗口内累积，窗口过期自动清零，确保瞬时失败不粘滞。
+type storageCooldownState struct {
+	CooldownUntil       time.Time // 进入冷却后的冷却截止时间；零值表示未冷却
+	FailuresStart       time.Time // 当前失败计数窗口起点
+	ConsecutiveFailures int       // 窗口内连续 5xx 失败次数
+}
 
 // webdavPropfindTimeout WebDAV 列表（PROPFIND）转发到 alist 的上游超时上限。
 // alist 对不可达存储的内部超时可能长达 8-23 秒，这里收紧到 8 秒，
@@ -835,9 +852,31 @@ func (p *ProxyServer) markStorageCooldown(filePath string) {
 		return
 	}
 	p.ensureRuntimeCaches()
+	now := time.Now()
 	p.storageCooldownMu.Lock()
 	defer p.storageCooldownMu.Unlock()
-	p.storageCooldown[prefix] = time.Now().Add(storageCooldownTTL)
+
+	state := p.storageCooldown[prefix]
+	// 已经是冷却中，无需重复计数。
+	if now.Before(state.CooldownUntil) {
+		return
+	}
+	// 冷却过期后缓存状态已过期，当作全新开始。
+	// 失败计数只在 failWindow 内累积，窗口外重置。
+	if now.Sub(state.FailuresStart) > storageCooldownFailWindow {
+		state.FailuresStart = now
+		state.ConsecutiveFailures = 0
+	}
+	state.ConsecutiveFailures++
+	if state.ConsecutiveFailures < storageCooldownFailThreshold {
+		p.storageCooldown[prefix] = state
+		return
+	}
+	// 连续失败达到阈值，进入冷却。
+	state.CooldownUntil = now.Add(storageCooldownTTL)
+	state.FailuresStart = now
+	state.ConsecutiveFailures = 0
+	p.storageCooldown[prefix] = state
 }
 
 func (p *ProxyServer) clearStorageCooldown(filePath string) {
@@ -845,6 +884,7 @@ func (p *ProxyServer) clearStorageCooldown(filePath string) {
 	if prefix == "" {
 		return
 	}
+	p.ensureRuntimeCaches()
 	p.storageCooldownMu.Lock()
 	defer p.storageCooldownMu.Unlock()
 	delete(p.storageCooldown, prefix)
@@ -855,17 +895,25 @@ func (p *ProxyServer) isStorageInCooldown(filePath string) bool {
 	if prefix == "" {
 		return false
 	}
+	p.ensureRuntimeCaches()
 	p.storageCooldownMu.Lock()
 	defer p.storageCooldownMu.Unlock()
-	until, ok := p.storageCooldown[prefix]
+	state, ok := p.storageCooldown[prefix]
 	if !ok {
 		return false
 	}
-	if time.Now().After(until) {
-		delete(p.storageCooldown, prefix)
-		return false
+	now := time.Now()
+	// 已进入冷却且仍在窗口内 → 冷却中。
+	if now.Before(state.CooldownUntil) {
+		return true
 	}
-	return true
+	// CooldownUntil 非零但已过期，或进入过冷却：清理状态避免残留。
+	// 注意：CooldownUntil 为零表明该前缀只累计了失败次数、尚未触发冷却，
+	// 不应在此清理，否则会破坏跨请求的失败计数累积。
+	if !state.CooldownUntil.IsZero() {
+		delete(p.storageCooldown, prefix)
+	}
+	return false
 }
 
 func normalizeRulePrefix(raw string) (string, bool) {

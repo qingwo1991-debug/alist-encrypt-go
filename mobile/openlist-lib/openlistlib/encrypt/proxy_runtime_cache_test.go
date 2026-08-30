@@ -225,3 +225,110 @@ func BenchmarkPrefetchRecentInsertAtCapacity(b *testing.B) {
 		server.shouldSchedulePrefetch(fmt.Sprintf("new-%d", i))
 	}
 }
+
+// storageCooldownWrite 在持锁下改写存储冷却内部状态, 供测试推进时间/注入状态。
+func (p *ProxyServer) storageCooldownWrite(fn func(map[string]storageCooldownState)) {
+	p.ensureRuntimeCaches()
+	p.storageCooldownMu.Lock()
+	defer p.storageCooldownMu.Unlock()
+	fn(p.storageCooldown)
+}
+
+// storageCooldownLen 返回指定存储前缀的冷却状态条目数(0 表示无状态)。
+func (p *ProxyServer) storageCooldownLen(filePath string) int {
+	prefix := storagePrefixFromPath(filePath)
+	if prefix == "" {
+		return 0
+	}
+	p.storageCooldownMu.Lock()
+	defer p.storageCooldownMu.Unlock()
+	_, ok := p.storageCooldown[prefix]
+	if !ok {
+		return 0
+	}
+	return 1
+}
+
+func TestStorageCooldownNeedsTwoConsecutiveFailures(t *testing.T) {
+	server := newRuntimeCacheTestServer()
+	const filePath = "/dav/联通云盘/encrypt/movie.mp4"
+
+	// 第一次 5xx 不足阈值，不应该进入冷却。
+	server.markStorageCooldown(filePath)
+	if server.isStorageInCooldown(filePath) {
+		t.Fatal("single 5xx failure must not cool down the whole storage prefix")
+	}
+	// 第二次 5xx 达到阈值，进入冷却。
+	server.markStorageCooldown(filePath)
+	if !server.isStorageInCooldown(filePath) {
+		t.Fatal("two consecutive 5xx failures must enter cooldown")
+	}
+}
+
+func TestStorageCooldownClearedBySuccess(t *testing.T) {
+	server := newRuntimeCacheTestServer()
+	const filePath = "/dav/天翼云盘个人/电影/x.mp4"
+	server.markStorageCooldown(filePath)
+	server.markStorageCooldown(filePath)
+	if !server.isStorageInCooldown(filePath) {
+		t.Fatal("two consecutive failures should have entered cooldown")
+	}
+	// 成功响应清除冷却与失败计数，不再误伤后续请求。
+	server.clearStorageCooldown(filePath)
+	if server.isStorageInCooldown(filePath) {
+		t.Fatal("cooldown was not cleared after a successful response")
+	}
+	if got := server.storageCooldownLen(filePath); got != 0 {
+		t.Fatalf("storage cooldown state survived success: %d", got)
+	}
+}
+
+func TestStorageCooldownFailuresExpireOutsideWindow(t *testing.T) {
+	server := newRuntimeCacheTestServer()
+	const filePath = "/dav/天翼云盘个人/电影/z.mp4"
+	// 第一次失败在窗口外很久。
+	server.storageCooldownWrite(func(state map[string]storageCooldownState) {
+		state[storagePrefixFromPath(filePath)] = storageCooldownState{
+			FailuresStart:       time.Now().Add(-storageCooldownFailWindow - time.Second),
+			ConsecutiveFailures: 1,
+		}
+	})
+	// 第二次失败在窗口外，计数应重置为 1，仍未达阈值。
+	server.markStorageCooldown(filePath)
+	if server.isStorageInCooldown(filePath) {
+		t.Fatal("failures spaced beyond the window must not accumulate into a cooldown")
+	}
+}
+
+func TestStorageCooldownTTLExpires(t *testing.T) {
+	server := newRuntimeCacheTestServer()
+	const filePath = "/dav/联通云盘/encrypt/b.mp4"
+	server.markStorageCooldown(filePath)
+	server.markStorageCooldown(filePath)
+	if !server.isStorageInCooldown(filePath) {
+		t.Fatal("two consecutive failures should enter cooldown")
+	}
+	// 手动回拨冷却截止时间到过去,模拟 TTL 到期。
+	server.storageCooldownWrite(func(state map[string]storageCooldownState) {
+		st := state[storagePrefixFromPath(filePath)]
+		st.CooldownUntil = time.Now().Add(-time.Second)
+		state[storagePrefixFromPath(filePath)] = st
+	})
+	if server.isStorageInCooldown(filePath) {
+		t.Fatal("cooldown must expire after its TTL elapses")
+	}
+}
+
+func TestStorageCooldownDifferentPrefixesIndependent(t *testing.T) {
+	server := newRuntimeCacheTestServer()
+	const okPath = "/dav/联通云盘/encrypt/ok.mp4"
+	const badPath = "/dav/天翼云盘/encrypt/bad.mp4"
+	server.markStorageCooldown(badPath)
+	server.markStorageCooldown(badPath)
+	if !server.isStorageInCooldown(badPath) {
+		t.Fatal("bad storage should be in cooldown")
+	}
+	if server.isStorageInCooldown(okPath) {
+		t.Fatal("a different storage's cooldown must not affect an unrelated prefix")
+	}
+}

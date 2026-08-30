@@ -87,7 +87,7 @@ type ProxyServer struct {
 	webdavNegativeMu    sync.Mutex
 	webdavNegativeCache map[string]time.Time // path -> expireAt
 	storageCooldownMu   sync.Mutex
-	storageCooldown     map[string]time.Time // storage prefix -> cooldown until
+	storageCooldown     map[string]storageCooldownState // storage prefix -> cooldown / consecutive-failure state
 	redirectSizeMu      sync.Mutex
 	redirectSizeCache   map[string]redirectSizeEntry // encryptedPath -> last confirmed size
 	rawURLNegativeMu    sync.Mutex
@@ -143,7 +143,7 @@ func (s *ProxyServer) ensureRuntimeCaches() {
 			s.webdavNegativeCache = make(map[string]time.Time)
 		}
 		if s.storageCooldown == nil {
-			s.storageCooldown = make(map[string]time.Time)
+			s.storageCooldown = make(map[string]storageCooldownState)
 		}
 		if s.redirectSizeCache == nil {
 			s.redirectSizeCache = make(map[string]redirectSizeEntry)
@@ -478,27 +478,27 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 
 	server := &ProxyServer{
-		config:             cloneProxyConfig(config),
-		runtimeConfig:      config,
-		transport:          transport,
-		streamTransport:    streamTransport,
-		h2cTransport:       h2cTransport,
-		httpClient:         httpClient,
-		probeClient:        probeClient,
-		streamClient:       streamClient,
-		strategySelector:   strategySelector,
-		fileCache:          newShardedAnyMap(cacheShardCount),
-		redirectCache:      newShardedAnyMap(cacheShardCount),
-		prefetchRecent:     newShardedAnyMap(cacheShardCount),
-		seenProviders:      make(map[string]time.Time),
-		seenDrivers:        make(map[string]time.Time),
-		storageDriverMap:   make(map[string]string),
-		providerCatalog:    make(map[string]string),
-		providerSourceMask: make(map[string]int),
-		uploadMeta:         make(map[string]uploadMetaEntry),
+		config:              cloneProxyConfig(config),
+		runtimeConfig:       config,
+		transport:           transport,
+		streamTransport:     streamTransport,
+		h2cTransport:        h2cTransport,
+		httpClient:          httpClient,
+		probeClient:         probeClient,
+		streamClient:        streamClient,
+		strategySelector:    strategySelector,
+		fileCache:           newShardedAnyMap(cacheShardCount),
+		redirectCache:       newShardedAnyMap(cacheShardCount),
+		prefetchRecent:      newShardedAnyMap(cacheShardCount),
+		seenProviders:       make(map[string]time.Time),
+		seenDrivers:         make(map[string]time.Time),
+		storageDriverMap:    make(map[string]string),
+		providerCatalog:     make(map[string]string),
+		providerSourceMask:  make(map[string]int),
+		uploadMeta:          make(map[string]uploadMetaEntry),
 		decryptedBlockCache: newDecryptedBlockCacheFromProxyConfig(config),
-		cleanupDone:        make(chan struct{}),
-		metaSyncDone:       make(chan struct{}),
+		cleanupDone:         make(chan struct{}),
+		metaSyncDone:        make(chan struct{}),
 	}
 	httpClient.Transport = &instrumentedRoundTripper{base: httpClient.Transport, stats: &server.controlHTTPStats}
 	probeClient.Transport = &instrumentedRoundTripper{base: probeClient.Transport, stats: &server.probeHTTPStats}
