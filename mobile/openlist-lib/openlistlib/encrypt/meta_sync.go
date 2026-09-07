@@ -68,30 +68,32 @@ type dbExportLoginResponse struct {
 	} `json:"data"`
 }
 
+type dbExportFileMetaResponseDataItem struct {
+	KeyHash           string `json:"KeyHash"`
+	ProviderHost      string `json:"ProviderHost"`
+	OriginalPath      string `json:"OriginalPath"`
+	EncryptedPath     string `json:"EncryptedPath"`
+	Name              string `json:"Name"`
+	Size              int64  `json:"Size"`
+	CiphertextSize    int64  `json:"CiphertextSize"`
+	ContentVersion    int    `json:"ContentVersion"`
+	HeaderLen         int64  `json:"HeaderLen"`
+	NonceField        []byte `json:"NonceField"`
+	RawURL            string `json:"RawURL"`
+	Sign              string `json:"Sign"`
+	UpdatedAt         string `json:"UpdatedAt"`
+	LastAccessed      string `json:"LastAccessed"`
+	UpstreamFetchedAt string `json:"UpstreamFetchedAt"`
+}
+
 type dbExportFileMetaResponse struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
-		Items []struct {
-			KeyHash           string `json:"KeyHash"`
-			ProviderHost      string `json:"ProviderHost"`
-			OriginalPath      string `json:"OriginalPath"`
-			EncryptedPath     string `json:"EncryptedPath"`
-			Name              string `json:"Name"`
-			Size              int64  `json:"Size"`
-			CiphertextSize    int64  `json:"CiphertextSize"`
-			ContentVersion    int    `json:"ContentVersion"`
-			HeaderLen         int64  `json:"HeaderLen"`
-			NonceField        []byte `json:"NonceField"`
-			RawURL            string `json:"RawURL"`
-			Sign              string `json:"Sign"`
-			UpdatedAt         string `json:"UpdatedAt"`
-			LastAccessed      string `json:"LastAccessed"`
-			UpstreamFetchedAt string `json:"UpstreamFetchedAt"`
-		} `json:"items"`
-		HasMore    bool   `json:"has_more"`
-		NextSince  int64  `json:"next_since"`
-		NextCursor string `json:"next_cursor"`
+		Items      []dbExportFileMetaResponseDataItem `json:"items"`
+		HasMore    bool                                `json:"has_more"`
+		NextSince  int64                               `json:"next_since"`
+		NextCursor string                              `json:"next_cursor"`
 	} `json:"data"`
 }
 
@@ -124,6 +126,71 @@ func buildDBExportAPIURL(baseURL, endpoint string) string {
 		return b + strings.TrimPrefix(endpoint, "/enc-api")
 	}
 	return b + endpoint
+}
+
+// rebaseImportedMetaKey 将一套从服务端(DB_EXPORT)导入的元数据记录归一化到
+// "手机自身 alist 的 key" 上。
+//
+// 背景:服务端导出时 ProviderHost 取自 CDN(raw_url)的 host,而手机端消费时
+// lookup/buildLocalKey 用的是手机本地代理连的那台 alist(getAlistURL)的 host。
+// 两者的 md5(host+"::"+path) 永不相等 → 导入的 meta/strategy/range 在手机端
+// 永远查不到,等于白导。这里一律改成以手机自身 alist host 重算 key。
+//
+// 同时该 helper 也用于丢弃服务端的 RawURL/Sign(它们要么已过期、要么 host 是
+// CDN/不可从手机访问),让手机在播放时只信任自己 fs/get 新取的 raw_url。
+func (p *ProxyServer) rebaseImportedMetaKey(serverProviderHost, originalPath string) (string, bool) {
+	if strings.TrimSpace(originalPath) == "" {
+		return "", false
+	}
+	alistHost := ""
+	if p != nil {
+		if u, err := url.Parse(p.getAlistURL()); err == nil {
+			alistHost = strings.TrimSpace(u.Host)
+		}
+	}
+	if alistHost == "" {
+		// 兜底:拿不到本机 alist host 时退回服务端 host(总比完全不用强)。
+		alistHost = strings.TrimSpace(serverProviderHost)
+	}
+	if alistHost == "" || originalPath == "" {
+		return "", false
+	}
+	return buildLocalKey(alistHost, originalPath), true
+}
+
+// buildImportedSizeRecord 把一条服务端 meta 记录转换成可导入的本地记录:
+//  1. key 一律 rebase 到手机自身 alist host(否则服务端 CDN host 的 key 永远查不到);
+//  2. 丢弃服务端 RawURL/Sign —— CDN host 与过期 sign 手机端不可依赖,播放时自己 fs/get 取新;
+//  3. 保留 ContentVersion/HeaderLen/NonceField/Size(加密元信息,不随 raw 过期)。
+func (p *ProxyServer) buildImportedSizeRecord(item *dbExportFileMetaResponseDataItem, nowUnix int64) (*LocalSizeRecord, bool) {
+	if item == nil {
+		return nil, false
+	}
+	providerHost := strings.TrimSpace(item.ProviderHost)
+	originalPath := strings.TrimSpace(item.OriginalPath)
+	key, ok := p.rebaseImportedMetaKey(providerHost, originalPath)
+	if !ok || item.Size <= 0 {
+		return nil, false
+	}
+	updatedAt := parseRFC3339Unix(item.UpdatedAt, nowUnix)
+	lastAccessed := parseRFC3339Unix(item.LastAccessed, updatedAt)
+	return &LocalSizeRecord{
+		Key:               key,
+		ProviderHost:      providerHost,
+		OriginalPath:      originalPath,
+		EncryptedPath:     strings.TrimSpace(item.EncryptedPath),
+		Name:              strings.TrimSpace(item.Name),
+		Size:              item.Size,
+		CiphertextSize:    item.CiphertextSize,
+		ContentVersion:    item.ContentVersion,
+		HeaderLen:         item.HeaderLen,
+		NonceField:        append([]byte(nil), item.NonceField...),
+		RawURL:            "",
+		Sign:              "",
+		UpstreamFetchedAt: 0,
+		LastAccessed:      lastAccessed,
+		UpdatedAt:         updatedAt,
+	}, true
 }
 
 func parseRFC3339Unix(raw string, fallback int64) int64 {
@@ -529,34 +596,9 @@ func (p *ProxyServer) syncDBExportMetaEntity(ctx context.Context, cfg dbExportSy
 		payload := &LocalExport{Sizes: make([]LocalSizeRecord, 0, len(resp.Data.Items))}
 		nowUnix := time.Now().Unix()
 		for _, item := range resp.Data.Items {
-			key := strings.TrimSpace(item.KeyHash)
-			providerHost := strings.TrimSpace(item.ProviderHost)
-			originalPath := strings.TrimSpace(item.OriginalPath)
-			if key == "" && providerHost != "" && originalPath != "" {
-				key = buildLocalKey(providerHost, originalPath)
+			if rec, ok := p.buildImportedSizeRecord(&item, nowUnix); ok {
+				payload.Sizes = append(payload.Sizes, *rec)
 			}
-			if key == "" || providerHost == "" || originalPath == "" || item.Size <= 0 {
-				continue
-			}
-			updatedAt := parseRFC3339Unix(item.UpdatedAt, nowUnix)
-			lastAccessed := parseRFC3339Unix(item.LastAccessed, updatedAt)
-			payload.Sizes = append(payload.Sizes, LocalSizeRecord{
-				Key:               key,
-				ProviderHost:      providerHost,
-				OriginalPath:      originalPath,
-				EncryptedPath:     strings.TrimSpace(item.EncryptedPath),
-				Name:              strings.TrimSpace(item.Name),
-				Size:              item.Size,
-				CiphertextSize:    item.CiphertextSize,
-				ContentVersion:    item.ContentVersion,
-				HeaderLen:         item.HeaderLen,
-				NonceField:        append([]byte(nil), item.NonceField...),
-				RawURL:            strings.TrimSpace(item.RawURL),
-				Sign:              strings.TrimSpace(item.Sign),
-				UpstreamFetchedAt: parseRFC3339Unix(item.UpstreamFetchedAt, updatedAt),
-				LastAccessed:      lastAccessed,
-				UpdatedAt:         updatedAt,
-			})
 		}
 		if len(payload.Sizes) > 0 {
 			if err := p.localStore.Import(payload); err != nil {
@@ -613,11 +655,9 @@ func (p *ProxyServer) syncDBExportStrategyEntity(ctx context.Context, cfg dbExpo
 			originalPath := mapString(item, "OriginalPath", "original_path", "originalPath")
 			networkType := strings.ToLower(mapString(item, "NetworkType", "network_type", "networkType"))
 			strategy := strings.ToLower(mapString(item, "Strategy", "strategy"))
-			key := mapString(item, "KeyHash", "key_hash", "key", "Key")
-			if key == "" && providerHost != "" && originalPath != "" {
-				key = buildLocalKey(providerHost, originalPath)
-			}
-			if key == "" || providerHost == "" || originalPath == "" || networkType == "" || strategy == "" {
+			// 与服务端 ProviderHost(CDN host) 解耦,统一到手机自身 alist host。
+			key, ok := p.rebaseImportedMetaKey(providerHost, originalPath)
+			if !ok || networkType == "" || strategy == "" {
 				continue
 			}
 			updatedAt := parseAnyTimeUnix(item["UpdatedAt"], nowUnix)
@@ -678,15 +718,11 @@ func (p *ProxyServer) syncDBExportRangeCompatEntity(ctx context.Context, cfg dbE
 			return importedCount, err
 		}
 		for _, item := range resp.Data.Items {
-			key := mapString(item, "KeyHash", "key_hash", "key", "Key")
-			if key == "" {
-				providerHost := mapString(item, "ProviderHost", "provider_host", "providerHost")
-				originalPath := mapString(item, "OriginalPath", "original_path", "originalPath")
-				if providerHost != "" && originalPath != "" {
-					key = buildLocalKey(providerHost, originalPath)
-				}
-			}
-			if key == "" {
+			providerHost := mapString(item, "ProviderHost", "provider_host", "providerHost")
+			originalPath := mapString(item, "OriginalPath", "original_path", "originalPath")
+			// 与服务端 ProviderHost(CDN host) 解耦,统一到手机自身 alist host。
+			key, ok := p.rebaseImportedMetaKey(providerHost, originalPath)
+			if !ok {
 				continue
 			}
 			blockedUntilUnix := parseAnyTimeUnix(item["BlockedUntil"], 0)
