@@ -40,6 +40,7 @@ func DefaultConfig() *ProxyConfig {
 		RoutingMode:                     routingModeByProvider,
 		ProviderRuleSource:              "builtin+custom",
 		RoutingUnmatchedDefault:         routingActionProxy,
+		ProxyFallbackMode:               proxyFallbackModeDirectFirst,
 		ProviderCatalogEnabled:          true,
 		ProviderCatalogTTLMinutes:       720,
 		ProviderCatalogBootstrapOnStart: true,
@@ -180,6 +181,7 @@ func (m *ConfigManager) Load() error {
 		config.ProviderRuleSource = "builtin+custom"
 	}
 	config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(config.RoutingUnmatchedDefault)
+	config.ProxyFallbackMode = normalizeProxyFallbackMode(config.ProxyFallbackMode)
 	if !config.ProviderCatalogEnabled && config.ProviderCatalogTTLMinutes == 0 && config.StorageMapRefreshMinutes == 0 {
 		config.ProviderCatalogEnabled = true
 	}

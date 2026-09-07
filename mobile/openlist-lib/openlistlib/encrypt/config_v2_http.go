@@ -53,6 +53,7 @@ func configV2Docs() []configDocItem {
 		{Key: "upstreamBackoffSeconds", Label: "退避窗口", Description: "上游失败后的快速失败窗口", Min: 1, Max: 300, Default: defaults.UpstreamBackoffSeconds, Unit: "秒"},
 		{Key: "storageMapRefreshMinutes", Label: "存储映射刷新", Description: "admin storage 列表缓存刷新周期", Min: 1, Max: 1440, Default: defaults.StorageMapRefreshMinutes, Unit: "分钟"},
 		{Key: "routingUnmatchedDefault", Label: "未匹配默认动作", Description: "未命中 provider/driver 规则时默认 direct/proxy", Default: defaults.RoutingUnmatchedDefault},
+		{Key: "proxyFallbackMode", Label: "Proxy平台回退", Description: "内置 proxy 类平台（Google/OneDrive 等）优先直连、失败回退代理(direct_first) 或始终走代理(proxy)", Default: defaults.ProxyFallbackMode},
 		{Key: "enableDualNetwork", Label: "双网络切换", Description: "按 WiFi/蜂窝 到目标网盘的实测延迟自动选择更快网络，失败快速切换。默认关闭", Default: defaults.EnableDualNetwork},
 		{Key: "dualNetworkProbeIntervalSecs", Label: "双网络探测间隔", Description: "对真实目标 host 的最小延迟探测最小间隔（防被 CDN 判为扫描）", Min: 60, Max: 86400, Default: defaults.DualNetworkProbeIntervalSecs, Unit: "秒"},
 		{Key: "providerCatalogEnabled", Label: "Provider目录缓存", Description: "启用 provider 目录缓存与后台刷新", Default: defaults.ProviderCatalogEnabled},
@@ -111,6 +112,7 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"routingMode":                     cfg.RoutingMode,
 		"providerRuleSource":              cfg.ProviderRuleSource,
 		"routingUnmatchedDefault":         cfg.RoutingUnmatchedDefault,
+		"proxyFallbackMode":               normalizeProxyFallbackMode(cfg.ProxyFallbackMode),
 		"providerCatalogEnabled":          cfg.ProviderCatalogEnabled,
 		"providerCatalogTtlMinutes":       cfg.ProviderCatalogTTLMinutes,
 		"providerCatalogBootstrapOnStart": cfg.ProviderCatalogBootstrapOnStart,
@@ -251,6 +253,9 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := body["routingUnmatchedDefault"].(string); ok {
 		p.config.RoutingUnmatchedDefault = normalizeRoutingUnmatchedDefault(v)
+	}
+	if v, ok := body["proxyFallbackMode"].(string); ok {
+		p.config.ProxyFallbackMode = normalizeProxyFallbackMode(v)
 	}
 	if v, ok := body["providerCatalogEnabled"].(bool); ok {
 		p.config.ProviderCatalogEnabled = v

@@ -108,7 +108,29 @@ const (
 	routingActionProxy    = "proxy"
 	routingMatchProvider  = "provider"
 	routingMatchDriver    = "driver"
+
+	// proxyFallbackMode* describe how built-in proxy-class platforms (Google Drive,
+	// OneDrive, MEGA, MediaFire, Dropbox, GitHub) behave when routing is enabled.
+	// proxyFallbackModeDirectFirst: try direct first, fall back to env proxy.
+	// Without a reachable env proxy this never fails: it goes direct.
+	proxyFallbackModeDirectFirst = "direct_first"
+	// proxyFallbackModeProxy: always prefer env proxy, keep historical behavior.
+	proxyFallbackModeProxy = "proxy"
+	// proxyFallbackDirectProbeTimeout 直连可达性探测超时。VPN/TUN 由系统路由接管流量，
+	// 直连探测必须极快结束，绝不能拖慢首帧（350ms 亚秒级）。
+	proxyFallbackDirectProbeTimeout = 350 * time.Millisecond
+	// proxyFallbackDirectProbeMaxRequests 同一 host 的直连探测记录上限，防止记录表无限增长。
+	proxyFallbackDirectProbeMaxRequests = 4096
 )
+
+func normalizeProxyFallbackMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case proxyFallbackModeProxy:
+		return proxyFallbackModeProxy
+	default:
+		return proxyFallbackModeDirectFirst
+	}
+}
 
 var builtinDirectProviders = map[string]struct{}{
 	"aliyundriveopen":    {},
@@ -602,6 +624,10 @@ type ProxyConfig struct {
 	ProviderRuleSource string `json:"providerRuleSource,omitempty"`
 	// RoutingUnmatchedDefault: 未命中 provider/driver 规则时默认动作（direct/proxy）
 	RoutingUnmatchedDefault string `json:"routingUnmatchedDefault,omitempty"`
+	// ProxyFallbackMode: 内置 proxy 类平台（Google/OneDrive/MEGA 等）在启用分流的回退策略。
+	// "direct_first"(默认)：无可用 HTTP 代理或直连可达探测命中时先走直连（TUN/VPN 由系统
+	// 路由接管），仅当代理可用且直连失败才回退到环境代理。留空等价 direct_first。
+	ProxyFallbackMode string `json:"proxyFallbackMode,omitempty"`
 	// ProviderCatalogEnabled: 启用 provider 目录缓存
 	ProviderCatalogEnabled bool `json:"providerCatalogEnabled,omitempty"`
 	// ProviderCatalogTTLMinutes: provider 目录后台刷新周期

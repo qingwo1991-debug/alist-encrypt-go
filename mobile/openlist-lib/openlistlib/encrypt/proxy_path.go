@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
@@ -151,19 +153,31 @@ func matchBuiltinRouting(provider, driver string) (string, bool) {
 }
 
 func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
+	return newProxyResolverWithProbe(config, directProbeIsReachable)
+}
+
+// newProxyResolverWithProbe 与 newProxyResolver 等价，但直连可达性探测可注入，
+// 便于测试在无真实网络的环境下验证路由决策（也避免测试误连外网）。
+func newProxyResolverWithProbe(config *ProxyConfig, probeFn func(host string) bool) func(*http.Request) (*url.URL, error) {
 	// The resolver is invoked asynchronously by net/http. Capture a detached,
 	// immutable snapshot instead of the live configuration object.
 	config = cloneProxyConfig(config)
 	// http.ProxyFromEnvironment caches the process environment on first use.
 	// Build a resolver snapshot explicitly so configuration reloads and tests
 	// observe the environment that exists when this transport is constructed.
-	proxyForURL := httpproxy.FromEnvironment().ProxyFunc()
+	envCfg := httpproxy.FromEnvironment()
+	proxyForURL := envCfg.ProxyFunc()
 	envProxyFunc := func(req *http.Request) (*url.URL, error) {
 		if req == nil || req.URL == nil {
 			return nil, nil
 		}
 		return proxyForURL(req.URL)
 	}
+	// 没有任何可用 HTTP/SOCKS 代理（手机上很常见：VPN 只接管 TUN 路由、
+	// 不设置 HTTP_PROXY/HTTPS_PROXY 环境变量）时，内置 proxy 平台必须直接
+	// 走本地默认路由——TUN/VPN 由系统路由接管，proxy 类平台也能正常出网，
+	// 而不是卡在"空代理"上失败。
+	envProxyMissing := strings.TrimSpace(envCfg.HTTPProxy) == "" && strings.TrimSpace(envCfg.HTTPSProxy) == ""
 	probeInterval := time.Duration(0)
 	if config != nil && config.DualNetworkProbeIntervalSecs > 0 {
 		probeInterval = time.Duration(config.DualNetworkProbeIntervalSecs) * time.Second
@@ -213,6 +227,19 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 				if action == routingActionDirect {
 					return nil, nil
 				}
+				// 内置 proxy 类平台（Google/OneDrive/MEGA 等）：直连优先 + 代理回退。
+				// 手机无 VPN/无系统代理时 env 代理为空 → 直接零延迟走直连，绝不卡死；
+				// 有 HTTP/SOCKS 代理时先发 350ms 直连探测，失败即回退环境代理。
+				// TUN 模式由系统路由接管 IP，探测自然落在隧道内，无需额外处理。
+				if normalizeProxyFallbackMode(config.ProxyFallbackMode) == proxyFallbackModeProxy {
+					return envProxyFunc(req)
+				}
+				if envProxyMissing {
+					return nil, nil
+				}
+				if probeFn != nil && probeFn(host) {
+					return nil, nil
+				}
 				return envProxyFunc(req)
 			}
 			if normalizeRoutingUnmatchedDefault(config.RoutingUnmatchedDefault) == routingActionDirect {
@@ -222,6 +249,85 @@ func newProxyResolver(config *ProxyConfig) func(*http.Request) (*url.URL, error)
 
 		return envProxyFunc(req)
 	}
+}
+
+// directProbeTTL 直连可达性探测结果缓存时长。手机网络状态变化（开/关 VPN、
+// 切换 WiFi/蜂窝）时结果可能变化，因此缓存时间不必过长，既避免频繁探测 CDN
+// 又被判为扫描，又能比较快地感知网络切换。
+const directProbeTTL = 15 * time.Second
+
+// directProbeState 记录单个 host 最近一次直连可达性结论。
+type directProbeState struct {
+	reachable bool
+	at        time.Time
+}
+
+// directProbeCache 按 host 缓存直接可达性结论。net/http 的 Proxy 函数会被同一
+// transport 上的并发请求反复调用，绝大多数情况下应复用缓存，而不是每次都发起
+// 350ms 的 TCP 探测。
+var directProbeCache sync.Map // host(lower) -> *directProbeState
+
+// directProbeIsReachable 探测目标 CDN host 是否可直连。只做一次哑 TCP 握手到一个
+// 常见安全端口；若目标 host 只监听非标准端口（少见），结果可能为误报，但代价
+// 只是多回退一次到代理，不影响正确性。
+func directProbeIsReachable(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" {
+		return false
+	}
+	now := time.Now()
+	if v, ok := directProbeCache.Load(host); ok {
+		if st, ok := v.(*directProbeState); ok && now.Sub(st.at) < directProbeTTL {
+			return st.reachable
+		}
+	}
+	if directProbeCacheCount() >= proxyFallbackDirectProbeMaxRequests {
+		pruneDirectProbeCache()
+	}
+
+	// 在 resolver 阶段使用短超时 TCP 探测。直连可通（含 TUN 内）→ 后续拨号交给
+	// DialContext 走默认路由，成功路径零缓冲区请求。失败 → 回退环境代理。
+	ctx, cancel := context.WithTimeout(context.Background(), proxyFallbackDirectProbeTimeout)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, "443"))
+	if err == nil {
+		conn.Close()
+	}
+	reachable := err == nil
+	directProbeCache.Store(host, &directProbeState{reachable: reachable, at: now})
+	return reachable
+}
+
+// pruneDirectProbeCache 在缓存接近上限时删除最旧的一条。探测记录不是精确数据：
+// 大多数情况下只保留极少数常用 CDN host，因此贪心删最旧即可。
+func pruneDirectProbeCache() {
+	var oldest *directProbeState
+	var oldestHost string
+	directProbeCache.Range(func(k, v interface{}) bool {
+		st, ok := v.(*directProbeState)
+		if !ok || st == nil {
+			directProbeCache.Delete(k)
+			return true
+		}
+		if oldest == nil || st.at.Before(oldest.at) {
+			oldest = st
+			oldestHost, _ = k.(string)
+		}
+		return true
+	})
+	if oldestHost != "" {
+		directProbeCache.Delete(oldestHost)
+	}
+}
+
+func directProbeCacheCount() int {
+	n := 0
+	directProbeCache.Range(func(_, _ interface{}) bool {
+		n++
+		return true
+	})
+	return n
 }
 
 // EncryptPath 加密路径配置

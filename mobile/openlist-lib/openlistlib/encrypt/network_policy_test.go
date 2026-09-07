@@ -117,20 +117,92 @@ func TestProxyResolverBuiltinUnicomDirect(t *testing.T) {
 
 func TestProxyResolverBuiltinGoogleDriveProxy(t *testing.T) {
 	setProxyEnvironment(t)
-	// Google Drive（跨境）应走系统代理。
-	for _, provider := range []string{"googledrive", "google_drive"} {
+	// Google Drive（跨境）本应走系统代理；但直连优先模式下，直连探测命中时才回退
+	// 到代理——这里注入一个"探测失败"的 probe，验证代理仍然会得到选择。
+	for _, provider := range []string{"googledrive", "onedrive"} {
 		req := httptest.NewRequest(http.MethodGet, "https://drive.google.com/d/x", nil)
 		req.Header.Set("X-Encrypt-Provider", provider)
-		resolver := newProxyResolver(&ProxyConfig{
+		resolver := newProxyResolverWithProbe(&ProxyConfig{
 			EnableLocalBypass: false,
 			RoutingMode:       routingModeByProvider,
+		}, func(host string) bool { return false })
+		proxyURL, err := resolver(req)
+		if err != nil {
+			t.Fatalf("[%s] resolver returned err: %v", provider, err)
+		}
+		if proxyURL == nil {
+			t.Fatalf("[%s] expected proxy for googledrive provider when direct probe fails", provider)
+		}
+	}
+}
+
+func TestProxyResolverBuiltinGoogleDriveDirectWhenEnvProxyAbsent(t *testing.T) {
+	// 无 HTTP/SOCKS 代理环境变量（TUN/纯路由 VPN 常见）：内置 proxy 平台应直接
+	// 走直连，而不是因为"env 代理缺失"卡死。
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	for _, provider := range []string{"googledrive", "onedrive", "mega"} {
+		req := httptest.NewRequest(http.MethodGet, "https://drive.google.com/d/x", nil)
+		req.Header.Set("X-Encrypt-Provider", provider)
+		resolver := newProxyResolverWithProbe(&ProxyConfig{
+			EnableLocalBypass: false,
+			RoutingMode:       routingModeByProvider,
+		}, func(host string) bool { return false })
+		proxyURL, err := resolver(req)
+		if err != nil {
+			t.Fatalf("[%s] resolver returned err: %v", provider, err)
+		}
+		if proxyURL != nil {
+			t.Fatalf("[%s] expected direct connection (no env proxy) for %s, got %v", provider, provider, proxyURL)
+		}
+	}
+}
+
+func TestProxyResolverBuiltinProxy_ProbeReachableGoesDirect(t *testing.T) {
+	setProxyEnvironment(t)
+	// 有环境代理 + 直连可达（例如 TUN 内、或大陆直连 Google 能通）：
+	// 应优先直连，而不是无脑塞给代理。
+	for _, provider := range []string{"googledrive", "onedrive", "mega"} {
+		req := httptest.NewRequest(http.MethodGet, "https://drive.google.com/d/x", nil)
+		req.Header.Set("X-Encrypt-Provider", provider)
+		resolver := newProxyResolverWithProbe(&ProxyConfig{
+			EnableLocalBypass: false,
+			RoutingMode:       routingModeByProvider,
+		}, func(host string) bool { return true })
+		proxyURL, err := resolver(req)
+		if err != nil {
+			t.Fatalf("[%s] resolver returned err: %v", provider, err)
+		}
+		if proxyURL != nil {
+			t.Fatalf("[%s] expected direct when probe reachable, got %v", provider, proxyURL)
+		}
+	}
+}
+
+func TestProxyResolverBuiltinGoogleDriveProxyOnlyMode(t *testing.T) {
+	setProxyEnvironment(t)
+	// ProxyFallbackMode = "proxy"：不用探测也直接回退，保留旧行为。
+	for _, provider := range []string{"googledrive", "onedrive"} {
+		req := httptest.NewRequest(http.MethodGet, "https://drive.google.com/d/x", nil)
+		req.Header.Set("X-Encrypt-Provider", provider)
+		resolver := newProxyResolverWithProbe(&ProxyConfig{
+			EnableLocalBypass:  false,
+			RoutingMode:        routingModeByProvider,
+			ProxyFallbackMode:  proxyFallbackModeProxy,
+		}, func(host string) bool {
+			t.Fatalf("[%s] probe should not run in proxy-only mode for provider %s", provider, provider)
+			return false
 		})
 		proxyURL, err := resolver(req)
 		if err != nil {
 			t.Fatalf("[%s] resolver returned err: %v", provider, err)
 		}
 		if proxyURL == nil {
-			t.Fatalf("[%s] expected proxy for googledrive provider", provider)
+			t.Fatalf("[%s] expected proxy in proxy-only mode", provider)
 		}
 	}
 }

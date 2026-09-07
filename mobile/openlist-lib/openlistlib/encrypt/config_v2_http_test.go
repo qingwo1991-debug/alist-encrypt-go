@@ -228,6 +228,52 @@ func TestHandleConfigV2RoutingUnmatchedDefault(t *testing.T) {
 	}
 }
 
+func TestHandleConfigV2ProxyFallbackMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
+	p := &ProxyServer{config: cfg}
+
+	// 显式 "proxy" 会覆盖默认 direct_first 并持久化
+	body := map[string]interface{}{
+		"config": map[string]interface{}{
+			"proxyFallbackMode": "proxy",
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if p.config.ProxyFallbackMode != proxyFallbackModeProxy {
+		t.Fatalf("expected proxy, got %s", p.config.ProxyFallbackMode)
+	}
+
+	// 非法值回退默认 direct_first
+	body = map[string]interface{}{
+		"config": map[string]interface{}{
+			"proxyFallbackMode": "bogus",
+		},
+	}
+	raw, _ = json.Marshal(body)
+	req = httptest.NewRequest(http.MethodPost, "/api/encrypt/v2/config", bytes.NewReader(raw))
+	w = httptest.NewRecorder()
+	p.handleConfigV2(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	if p.config.ProxyFallbackMode != proxyFallbackModeDirectFirst {
+		t.Fatalf("expected invalid value fallback to direct_first, got %s", p.config.ProxyFallbackMode)
+	}
+
+	// 导出时应包含该字段
+	exported := p.exportConfigV2()
+	if v, ok := exported["proxyFallbackMode"]; !ok || v != proxyFallbackModeDirectFirst {
+		t.Fatalf("expected exported proxyFallbackMode=%s, got %v (present=%v)", proxyFallbackModeDirectFirst, v, ok)
+	}
+}
+
 func TestHandleConfigV2ProviderCatalogConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ConfigPath = filepath.Join(t.TempDir(), "encrypt_config.json")
