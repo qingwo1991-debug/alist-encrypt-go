@@ -817,8 +817,9 @@ func (p *ProxyServer) markWebdavNegative(requestPath string) {
 	p.webdavNegativeMu.Lock()
 	defer p.webdavNegativeMu.Unlock()
 	p.webdavNegativeCache[key] = time.Now().Add(p.webdavNegativeTTL())
-	// 同一路径被判不存在，目录列表缓存也不再可信，一并清除。
-	p.invalidateWebdavListCache(key)
+	// 不再清除目录列表快照：旧快照在未刷新成功前可作 stale 回退（手机端
+	// “冷存储抖动时总有历史列表可看”），真正删除的目录在快照过期后自然失效。
+	// _ = p.invalidateWebdavListCache(key)
 }
 
 func (p *ProxyServer) clearWebdavNegative(requestPath string) {
@@ -4133,6 +4134,12 @@ func (p *ProxyServer) buildRemoveNameCandidates(encPath *EncryptPath, dirPath, n
 func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if p.shouldFastFailUpstream() {
+		// 上游整体回退（最近连续失败）：目录列表优先回退历史快照，避免页面上
+		// 直接 503 空白。单文件探测仍走真实错误。
+		depthNow := strings.TrimSpace(r.Header.Get("Depth"))
+		if r.Method == "PROPFIND" && depthNow == "1" && p.serveStaleWebDAVFromRequestPath(w, ctx, r.URL.Path, depthNow, r.Header) {
+			return
+		}
 		_, remain, reason := p.upstreamBackoffState()
 		retryAfter := int(remain.Seconds())
 		if retryAfter < 1 {
@@ -4147,6 +4154,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// 存储冷却快速失败：存储最近 5xx 失败时 PROPFIND 直接返回，
 	// 不再转发 alist 等待其内部 8-23 秒超时，避免播放器初始连接被拖垮。
 	if r.Method == "PROPFIND" && p.isStorageInCooldown(filePath) {
+		// 冷却期间目录列表直接用历史快照兜底（同 stale 列表逻辑），避免 502。
+		depthNow := strings.TrimSpace(r.Header.Get("Depth"))
+		if p.serveStaleWebDAVFromRequestPath(w, ctx, filePath, depthNow, r.Header) {
+			return
+		}
 		log.Infof("%s WebDAV storage cooldown: path=%s skipping upstream probe", internal.LogPrefix(ctx, internal.TagProxy), filePath)
 		http.Error(w, "storage temporarily unavailable", http.StatusBadGateway)
 		return
@@ -4320,12 +4332,6 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			negativeCachePath = "/"
 		}
 	}
-	if r.Method == "PROPFIND" && p.webdavNegativeBlocked(negativeCachePath) {
-		log.Warnf("%s WebDAV negative cache hit: path=%s negativePath=%s", internal.LogPrefix(ctx, internal.TagProxy), filePath, negativeCachePath)
-		http.Error(w, "object not found", http.StatusNotFound)
-		return
-	}
-
 	// 目录列表缓存：深度=1（一整个目录）的 PROPFIND 在短时间内重复播放时
 	// 直接回缓存，不再重复打冷存储上游。深度>1 是递归列举（不缓存，体积大、
 	// 极少重复）；深度=0 是单文件元数据探测，已被 fileCache/负缓存覆盖。
@@ -4336,6 +4342,18 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// 列表缓存键与负缓存键同源：都基于 negativeCachePath（去掉 "/dav" 前缀的
 	// 目录路径），这样 mark/clearWebdavNegative 在同目录上能同步失效列表缓存。
 	webdavListCacheKey := p.webdavNegativeKey(negativeCachePath)
+
+	if r.Method == "PROPFIND" && p.webdavNegativeBlocked(negativeCachePath) {
+		// 负缓存命中“对象不存在”时优先回退历史快照：手机端之前能列出 1000+
+		// 项、现在却报 404/502 的抖动场景主要死在这里。只有深度=1（目录列表）
+		// 才回退；单文件 / 深度0 探测仍返回真实 404。
+		if listDepth == "1" && p.serveStaleWebDAVList(w, ctx, webdavListCacheKey, listDepth, negativeCachePath, filePath, r.Header) {
+			return
+		}
+		log.Warnf("%s WebDAV negative cache hit: path=%s negativePath=%s", internal.LogPrefix(ctx, internal.TagProxy), filePath, negativeCachePath)
+		http.Error(w, "object not found", http.StatusNotFound)
+		return
+	}
 
 	// 写操作会让目录内容发生变化（上传/删除/移动/复制/建目录），这些方法
 	// 处理完成后会丢弃目录列表缓存，避免返回旧快照。读类方法不失效，保持
@@ -4371,6 +4389,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			}
 			log.Debugf("%s WebDAV directory list cache hit: dir=%s status=%d bytes=%d",
 				internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, cachedStatus, len(cachedBody))
+			p.maybePersistDirList(ctx, webdavListCacheKey, cachedBody)
 			return
 		}
 	}
@@ -4672,6 +4691,10 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			if retried {
 				log.Errorf("%s WebDAV client.Do failed after retry: %v", internal.LogPrefix(ctx, internal.TagProxy), err)
 			}
+			// 上游网络错误时，列表（Depth=1）优先回退历史快照。
+			if r.Method == "PROPFIND" && listDepth == "1" && p.serveStaleWebDAVList(w, ctx, webdavListCacheKey, listDepth, negativeCachePath, filePath, r.Header) {
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -4885,6 +4908,14 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		// 目录列表缓存写入：只在列表请求（Depth=1）时缓存明文正文，供后续
 		// 重复进入同一目录直接复用（见上方 listDepth=="1" 命中分支）。
 		if listDepth == "1" {
+			// 上游返回 4xx/5xx（冷存储 404/502）时优先回退历史快照，而不是把错误
+			// 正文当 PROPFIND 响应写回客户端。真正删除的目录没有旧快照，仍按原样
+			// 透传真实错误状态。
+			if resp.StatusCode >= 400 {
+				if p.serveStaleWebDAVList(w, ctx, webdavListCacheKey, listDepth, negativeCachePath, filePath, r.Header) {
+					return
+				}
+			}
 			var listBuf bytes.Buffer
 			multi := io.MultiWriter(w, &listBuf)
 			status := resp.StatusCode
@@ -4898,6 +4929,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				log.Debugf("%s WebDAV directory list cached: dir=%s status=%d bytes=%d",
 					internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, status, listBuf.Len())
 			}
+			p.maybePersistDirList(ctx, webdavListCacheKey, listBuf.Bytes())
 			return
 		}
 

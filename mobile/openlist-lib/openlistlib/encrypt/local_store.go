@@ -29,7 +29,23 @@ type storeRecordKind int
 const (
 	recordKindSize storeRecordKind = iota
 	recordKindStrategy
+	recordKindFullMeta
 )
+
+// prewarmMeta is the optional full metadata payload attached to a
+// recordKindFullMeta record. Only the fields with a usable value are written;
+// zero/empty fields keep the previous row values via the ON CONFLICT upsert.
+type prewarmMeta struct {
+	encryptedPath     string
+	name              string
+	ciphertextSize    int64
+	contentVersion    int
+	headerLen         int64
+	nonceField        []byte
+	rawURL            string
+	sign              string
+	upstreamFetchedAt int64
+}
 
 type storeRecord struct {
 	kind         storeRecordKind
@@ -40,6 +56,7 @@ type storeRecord struct {
 	strategy     StreamStrategy
 	size         int64
 	accessedAt   time.Time
+	prewarm      *prewarmMeta
 }
 
 type localStore struct {
@@ -52,21 +69,21 @@ type localStore struct {
 }
 
 type LocalSizeRecord struct {
-	Key          string `json:"key"`
-	ProviderHost string `json:"provider_host"`
-	OriginalPath string `json:"original_path"`
-	EncryptedPath string `json:"encrypted_path,omitempty"`
-	Name         string `json:"name,omitempty"`
-	Size         int64  `json:"size"`
-	CiphertextSize int64 `json:"ciphertext_size,omitempty"`
-	ContentVersion int   `json:"content_version,omitempty"`
-	HeaderLen    int64  `json:"header_len,omitempty"`
-	NonceField   []byte `json:"nonce_field,omitempty"`
-	RawURL       string `json:"raw_url,omitempty"`
-	Sign         string `json:"sign,omitempty"`
-	UpstreamFetchedAt int64 `json:"upstream_fetched_at,omitempty"`
-	LastAccessed int64  `json:"last_accessed"`
-	UpdatedAt    int64  `json:"updated_at"`
+	Key               string `json:"key"`
+	ProviderHost      string `json:"provider_host"`
+	OriginalPath      string `json:"original_path"`
+	EncryptedPath     string `json:"encrypted_path,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Size              int64  `json:"size"`
+	CiphertextSize    int64  `json:"ciphertext_size,omitempty"`
+	ContentVersion    int    `json:"content_version,omitempty"`
+	HeaderLen         int64  `json:"header_len,omitempty"`
+	NonceField        []byte `json:"nonce_field,omitempty"`
+	RawURL            string `json:"raw_url,omitempty"`
+	Sign              string `json:"sign,omitempty"`
+	UpstreamFetchedAt int64  `json:"upstream_fetched_at,omitempty"`
+	LastAccessed      int64  `json:"last_accessed"`
+	UpdatedAt         int64  `json:"updated_at"`
 }
 
 type LocalStrategyRecord struct {
@@ -477,6 +494,30 @@ func (s *localStore) AddSize(key, providerHost, originalPath string, size int64,
 	})
 }
 
+// AddFullMeta 记录带完整元数据的文件观测（名称、加密路径、密文尺寸、头长度、
+// 随机数等）。与 AddSize 走同一张 local_media_size 表，靠 key 冲突后逐列覆盖
+// 已有信息。供目录列表预热/探测等"已知更多元数据"的写入路径使用。
+func (s *localStore) AddFullMeta(key, providerHost, originalPath string, size int64, meta *prewarmMeta, accessedAt time.Time) {
+	if s == nil || key == "" || providerHost == "" || originalPath == "" || size < 0 {
+		return
+	}
+	if GetNetworkState() == NetworkStateOffline {
+		return
+	}
+	if meta == nil {
+		meta = &prewarmMeta{}
+	}
+	s.enqueue(storeRecord{
+		kind:         recordKindFullMeta,
+		key:          key,
+		providerHost: providerHost,
+		originalPath: originalPath,
+		size:         size,
+		accessedAt:   accessedAt,
+		prewarm:      meta,
+	})
+}
+
 func (s *localStore) AddStrategy(key, providerHost, originalPath, networkType string, strategy StreamStrategy, accessedAt time.Time) {
 	if s == nil || key == "" || providerHost == "" || originalPath == "" || networkType == "" || strategy == "" {
 		return
@@ -638,6 +679,27 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 			}
 		case recordKindStrategy:
 			if _, err := insertStrategy.Exec(record.key, record.networkType, record.strategy, record.providerHost, record.originalPath, ts, ts); err != nil {
+				return err
+			}
+		case recordKindFullMeta:
+			pm := record.prewarm
+			var encryptedPath, name, rawURL, sign string
+			var ciphertextSize, headerLen int64
+			var contentVersion int
+			var nonce []byte
+			var upstreamFetchedAt int64
+			if pm != nil {
+				encryptedPath = pm.encryptedPath
+				name = pm.name
+				ciphertextSize = pm.ciphertextSize
+				contentVersion = pm.contentVersion
+				headerLen = pm.headerLen
+				nonce = cloneNonceField(pm.nonceField)
+				rawURL = pm.rawURL
+				sign = pm.sign
+				upstreamFetchedAt = pm.upstreamFetchedAt
+			}
+			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, encryptedPath, name, record.size, ciphertextSize, contentVersion, headerLen, nonce, rawURL, sign, upstreamFetchedAt, ts, ts); err != nil {
 				return err
 			}
 		}
@@ -1284,8 +1346,8 @@ type PlaybackStatsRecord struct {
 type DeletionStatsRecord struct {
 	ID                string  `json:"id"`
 	Path              string  `json:"path"`
-	DeletedAt         int64   `json:"deleted_at"` // Unix 秒
-	LastPlayAt        int64   `json:"last_play_at"` // Unix 秒，0=无播放
+	DeletedAt         int64   `json:"deleted_at"`           // Unix 秒
+	LastPlayAt        int64   `json:"last_play_at"`         // Unix 秒，0=无播放
 	SinceLastPlaySecs float64 `json:"since_last_play_secs"` // -1=无播放
 }
 
@@ -1347,8 +1409,8 @@ func (s *localStore) pruneStatsIfNeeded() error {
 		return nil
 	}
 	for _, table := range []string{"playback_stats", "deletion_stats"} {
-		if _, err := s.db.Exec(`DELETE FROM ` + table + ` WHERE id IN (
-            SELECT id FROM ` + table + ` ORDER BY id DESC LIMIT -1 OFFSET ?)`, maxPlaybackStatsRows); err != nil {
+		if _, err := s.db.Exec(`DELETE FROM `+table+` WHERE id IN (
+            SELECT id FROM `+table+` ORDER BY id DESC LIMIT -1 OFFSET ?)`, maxPlaybackStatsRows); err != nil {
 			return err
 		}
 	}
