@@ -38,16 +38,26 @@ type CachedRedirectInfo struct {
 // webdavListCacheEntry PROPFIND 目录列表响应缓存。
 // 同一目录被 VidHub/Infuse 等 WebDAV 客户端在一段时间内重复请求（进目录、
 // 排序列、拉详情），冷存储（如联通云盘 WoPan 上游约 1.5~2.2s）重复打上游
-// 极拖体验。把深度 ≤1 的目录 PROPFIND 响应短 TTL 缓存，重复请求直接走缓存。
+// 极拖体验。统一把深度 ≤1 的目录 PROPFIND 响应保留下来：
+//   - 短 TTL（webdavListCacheTTL）内直接回最新明文正文；
+//   - TTL 过后仍保留（直到 stale 上限）作为“陈旧快照”，上游失败/负缓存命中/
+//     冷却期时回退到上一次成功的列表，让移动端看到历史数据而不是空白/报错。
+//
+// ExpireAt 仅控制“新鲜”命中；StoredAt 用于判断快照年龄（供 stale 回退）。
 type webdavListCacheEntry struct {
-	Body     []byte
-	Status   int
-	ExpireAt time.Time
+	Body        []byte
+	Status      int
+	ExpireAt    time.Time
+	StoredAt    time.Time
+	StoredUntil time.Time
 }
 
-// webdavListCacheTTL 目录列表缓存 TTL。比文件级缓存更短，避免上层内容变动
+// webdavListCacheTTL 目录列表缓存新鲜 TTL。比文件级缓存更短，避免上层内容变动
 // 长期不可见；5 秒覆盖玩家进入目录后的一连串探询即可。
 const webdavListCacheTTL = 5 * time.Second
+
+// webdavStaleListMaxAge 陈旧快照最长保留时长；超过后不再回退，避免无界陈旧数据。
+const webdavStaleListMaxAge = 24 * time.Hour
 
 var webdavListCacheMaxEntries = 2048
 
@@ -111,10 +121,11 @@ func (p *ProxyServer) cleanupExpiredCache() {
 	p.trimPrefetchRecentLocked(now, prefetchRecentMaxEntries)
 	p.prefetchRecentMu.Unlock()
 
-	// 清理过期的目录列表缓存。
+	// 清理过期的目录列表缓存：只删除连 stale 窗口（StoredUntil）都过期的条目。
+	// 新鲜窗口（ExpireAt）过后仍保留作“陈旧快照”，供上游失败时回退。
 	p.webdavListCacheMu.Lock()
 	for k, v := range p.webdavListCache {
-		if v == nil || !now.Before(v.ExpireAt) {
+		if v == nil || !now.Before(v.StoredUntil) {
 			delete(p.webdavListCache, k)
 		}
 	}
@@ -490,23 +501,24 @@ func (p *ProxyServer) storeWebdavListCache(dirPath string, status int, body []by
 	defer p.webdavListCacheMu.Unlock()
 	if len(p.webdavListCache) >= webdavListCacheMaxEntries {
 		now := time.Now()
-		// 先移除已过期条目。
+		// 先移除连 stale 窗口都过期的条目（完全死亡）。
 		for k, v := range p.webdavListCache {
-			if v == nil || !now.Before(v.ExpireAt) {
+			if v == nil || !now.Before(v.StoredUntil) {
 				delete(p.webdavListCache, k)
 				if len(p.webdavListCache) < webdavListCacheMaxEntries {
 					break
 				}
 			}
 		}
-		// 仍满（全是未过期）时逐出最早过期的一条，保证缓存不涨破上限。
+		// 仍满时逐出保存时间最旧的一条，优先淘汰过期最快的快照，避免旧快照
+		// 长期霸占上限内的位置。
 		if len(p.webdavListCache) >= webdavListCacheMaxEntries {
 			oldestKey := ""
 			var oldest time.Time
 			for k, v := range p.webdavListCache {
-				if oldestKey == "" || v.ExpireAt.Before(oldest) {
+				if oldestKey == "" || v.StoredAt.Before(oldest) {
 					oldestKey = k
-					oldest = v.ExpireAt
+					oldest = v.StoredAt
 				}
 			}
 			if oldestKey != "" {
@@ -515,13 +527,15 @@ func (p *ProxyServer) storeWebdavListCache(dirPath string, status int, body []by
 		}
 	}
 	p.webdavListCache[dirPath] = &webdavListCacheEntry{
-		Body:     body,
-		Status:   status,
-		ExpireAt: time.Now().Add(webdavListCacheTTL),
+		Body:        body,
+		Status:      status,
+		ExpireAt:    time.Now().Add(webdavListCacheTTL),
+		StoredAt:    time.Now(),
+		StoredUntil: time.Now().Add(webdavStaleListMaxAge),
 	}
 }
 
-// loadWebdavListCache 读取目录 PROPFIND 缓存。
+// loadWebdavListCache 读取目录 PROPFIND 新鲜缓存（TTL 内命中）。
 func (p *ProxyServer) loadWebdavListCache(dirPath string) (int, []byte, bool) {
 	if p == nil || dirPath == "" {
 		return 0, nil, false
@@ -534,10 +548,35 @@ func (p *ProxyServer) loadWebdavListCache(dirPath string) (int, []byte, bool) {
 		return 0, nil, false
 	}
 	if time.Now().After(entry.ExpireAt) {
+		// 新鲜窗口已过但仍在 stale 窗口内：保留作旧快照，本函数按未命中处理。
+		if !time.Now().After(entry.StoredUntil) {
+			return 0, nil, false
+		}
 		delete(p.webdavListCache, dirPath)
 		return 0, nil, false
 	}
 	return entry.Status, entry.Body, true
+}
+
+// loadWebdavListCacheStale 读取目录列表缓存，即使已过新鲜 TTL 也返回（stale）。
+// 用于在负缓存 / 冷却 / 上游错误时回退到上一次成功的列表。返回过期前的
+// 获取时间，供调用方决定是否重试后台刷新。
+func (p *ProxyServer) loadWebdavListCacheStale(dirPath string) (int, []byte, time.Time, bool) {
+	if p == nil || dirPath == "" {
+		return 0, nil, time.Time{}, false
+	}
+	p.ensureRuntimeCaches()
+	p.webdavListCacheMu.Lock()
+	defer p.webdavListCacheMu.Unlock()
+	entry, ok := p.webdavListCache[dirPath]
+	if !ok || entry == nil {
+		return 0, nil, time.Time{}, false
+	}
+	if time.Now().After(entry.StoredUntil) {
+		delete(p.webdavListCache, dirPath)
+		return 0, nil, time.Time{}, false
+	}
+	return entry.Status, entry.Body, entry.StoredAt, true
 }
 
 // invalidateWebdavListCache 使目录列表缓存失效（如目录被修改、上传、负缓存
