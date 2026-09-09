@@ -195,7 +195,7 @@
                     <div>发现(累计次数): {{ probeStats.filesDiscoveredTotal }}，入队(累计): {{ probeStats.filesQueuedTotal }}，成功(累计): {{ probeStats.filesSucceededTotal }}</div>
                     <div>失败(累计): {{ probeStats.filesFailedTotal }}，跳过(累计): {{ probeStats.filesSkippedTotal }}</div>
                     <div>raw_url(累计): {{ probeStats.filesRawURLFetched }}，Range(累计): {{ probeStats.filesRangeProbed }}，落库(累计): {{ probeStats.filesMetaPersisted }}</div>
-                    <div>命中: {{ probeStats.consumerHitTotal }}，命中率: {{ probeConsumerHitRate }}</div>
+                    <div>命中文件(去重): {{ probeStats.uniqueConsumerHits ?? '-' }}，命中率: {{ probeConsumerHitRate }}（命中次数累计: {{ probeStats.consumerHitTotal }}）</div>
                     <div style="margin-top:4px;color:#909399;font-size:12px">说明：发现/入队/成功等为累计操作次数，同一文件被多轮扫描/列目录会重复计入，请以"独立文件"为准。</div>
                   </div>
                 </div>
@@ -617,6 +617,7 @@ const probeStats = reactive({
   filesRangeProbed: 0,
   filesMetaPersisted: 0,
   uniqueWarmedFiles: 0,
+  uniqueConsumerHits: 0,
   consumerHitTotal: 0,
   consumerHitRate: 0,
   lastSuccessAt: '',
@@ -868,6 +869,7 @@ const refreshProbeStats = async (silent = true) => {
   probeStats.filesRangeProbed = scheduler.files_range_probed || 0
   probeStats.filesMetaPersisted = scheduler.files_meta_persisted || 0
   probeStats.uniqueWarmedFiles = scheduler.unique_warmed_files || 0
+  probeStats.uniqueConsumerHits = scheduler.unique_consumer_hits || 0
   probeStats.consumerHitTotal = scheduler.consumer_hit_total || 0
   probeStats.consumerHitRate = scheduler.consumer_hit_rate || 0
   probeStats.lastSuccessAt = scheduler.last_success_at || ''
