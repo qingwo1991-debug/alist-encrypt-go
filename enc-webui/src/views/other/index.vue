@@ -101,13 +101,13 @@
                 <div class="ff-chart-title">
                   首帧耗时 <span class="ff-chart-sub">header_latency_ms · p50 {{ p50Latency }}ms · p95 {{ p95Latency }}ms</span>
                 </div>
-                <canvas ref="latencyCanvas" class="ff-canvas" width="560" height="120"></canvas>
+                <canvas ref="latencyCanvas" class="ff-canvas" width="560" height="120" />
               </div>
               <div class="ff-chart-card">
                 <div class="ff-chart-title">
                   下行速率 <span class="ff-chart-sub">MiB/s · 峰值 {{ peakMbps }}MiB/s</span>
                 </div>
-                <canvas ref="mbpsCanvas" class="ff-canvas" width="560" height="120"></canvas>
+                <canvas ref="mbpsCanvas" class="ff-canvas" width="560" height="120" />
               </div>
             </div>
             <el-table :data="playbacks" size="small" max-height="360" empty-text="暂无播放记录">
