@@ -99,3 +99,58 @@ func TestLocalStoreV2MetaLookupBuild(t *testing.T) {
 	}
 	_ = store
 }
+
+// TestLookupLocalV2MetaStaleSizeRejected 验证一致性护栏：当持久化的
+// ciphertext_size 与当前请求解析出的密文大小不一致（文件被替换/变更）时，
+// lookupLocalV2Meta 拒绝复用旧 meta，避免拿过期加密元数据去解密新文件。
+func TestLookupLocalV2MetaStaleSizeRejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("CGO sqlite in short mode")
+	}
+	dir := t.TempDir()
+	store, err := newLocalStore(dir)
+	if err != nil {
+		t.Fatalf("newLocalStore failed: %v", err)
+	}
+	defer store.Close()
+
+	server, err := NewProxyServer(&ProxyConfig{
+		AlistHost:                       "localhost",
+		AlistPort:                       5244,
+		ProxyPort:                       5245,
+		ProviderCatalogEnabled:          false,
+		ProviderCatalogTTLMinutes:       1,
+		ProviderCatalogBootstrapOnStart: false,
+	})
+	if err != nil {
+		t.Fatalf("NewProxyServer: %v", err)
+	}
+	defer server.stopRangeProbeLoop()
+	defer server.stopCacheCleanup()
+	server.localStore = store
+
+	providerURL := "https://hydtest.example.com/redirect/opendata?download&fid=1"
+	originalPath := "/dav/enc/stale-meta.mp4"
+
+	// 先落一条 ciphertext_size=1060 的 V2 meta。
+	server.recordLocalV2Meta(providerURL, originalURL, ContentMeta{
+		Version:        ContentVersionV2,
+		HeaderLen:      32,
+		PlainSize:      1028,
+		CiphertextSize: 1060,
+		NonceField:     []byte("0123456789abcdef"),
+	})
+	if err := store.Flush(true); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	// 同 path 密文大小变为 2000 → 文件被替换，旧 meta 必须被拒绝。
+	if meta, ok := server.lookupLocalV2Meta(providerURL, originalURL, 2000); ok {
+		t.Fatalf("expected stale meta rejected on size mismatch, got meta=%+v", meta)
+	}
+
+	// 同 path 密文大小一致（1060）→ 命中复用。
+	if _, ok := server.lookupLocalV2Meta(providerURL, originalURL, 1060); !ok {
+		t.Fatalf("expected meta hit when ciphertext size matches")
+	}
+}

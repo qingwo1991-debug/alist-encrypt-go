@@ -127,17 +127,27 @@ func (p *ProxyServer) recordLocalV2Meta(providerURL, originalURL string, meta Co
 	if !ok {
 		return
 	}
+	// 规范化 ciphertext_size：有效密文总长 = 明文 + 头。若探测回给的
+	// CiphertextSize 不合理（< 明文），按结构推导，保证与播放时的 fileSize
+	// 具有可比性（一致性护栏依赖这一点）。
+	cipherSize := meta.CiphertextSize
+	if cipherSize <= meta.PlainSize {
+		cipherSize = meta.PlainSize + meta.HeaderLen
+	}
 	encryptedPath := originalURL
-	p.localStore.AddSizeV2Meta(key, providerHost, originalPath, encryptedPath, meta.PlainSize, meta.CiphertextSize, meta.Version, meta.HeaderLen, meta.NonceField, time.Now())
+	p.localStore.AddSizeV2Meta(key, providerHost, originalPath, encryptedPath, meta.PlainSize, cipherSize, meta.Version, meta.HeaderLen, meta.NonceField, time.Now())
 	if meta.PlainSize > 0 {
 		p.localStore.AddSize(key, providerHost, originalPath, meta.PlainSize, time.Now())
 	}
 }
 
 // lookupLocalV2Meta 从本地 SQLite 读取一条持久化的 V2 加密元数据。
-// 命中且 ContentVersion>0 时返回 meta；否则返回 (false)。
+// 命中且 ContentVersion>0 时返回 meta；否则返回 false。
+// currentCipherSize 为当前请求解析出的密文总大小：若 DB 已确认的
+// ciphertext_size 与之不符（文件被替换/变更），视为过期，拒绝复用旧 meta，
+// 改由本次真实 INSPECT 结果在成功后覆盖。绝不拿过期 meta 去解密新文件。
 // 在 inspectEncryptedContent 之前调用，避免对已探测过（含重启前）的文件重复打上游。
-func (p *ProxyServer) lookupLocalV2Meta(providerURL, originalURL string) (ContentMeta, bool) {
+func (p *ProxyServer) lookupLocalV2Meta(providerURL, originalURL string, currentCipherSize int64) (ContentMeta, bool) {
 	if p == nil || p.localStore == nil {
 		return ContentMeta{}, false
 	}
@@ -146,6 +156,12 @@ func (p *ProxyServer) lookupLocalV2Meta(providerURL, originalURL string) (Conten
 		return ContentMeta{}, false
 	}
 	if rec.ContentVersion <= 0 || rec.Size <= 0 {
+		return ContentMeta{}, false
+	}
+	// 一致性护栏：文件被替换成不同密文大小时，拒绝旧 meta 并丢弃本次复用。
+	if currentCipherSize > 0 && rec.CiphertextSize > 0 && rec.CiphertextSize != currentCipherSize {
+		log.Debugf("[v2-cache] ignore stale local sqlite meta: dbCipher=%d currentCipher=%d path=%q",
+			rec.CiphertextSize, currentCipherSize, safeURLForLog(originalURL))
 		return ContentMeta{}, false
 	}
 	meta := ContentMeta{
@@ -162,8 +178,12 @@ func (p *ProxyServer) lookupLocalV2Meta(providerURL, originalURL string) (Conten
 	if meta.HeaderLen <= 0 || len(meta.NonceField) < 16 {
 		return ContentMeta{}, false
 	}
+	if meta.CiphertextSize <= 0 {
+		// 未落盘真实 ciphertext 时先用当前解析值兜底。
+		meta.CiphertextSize = currentCipherSize
+	}
 	if meta.CiphertextSize <= meta.PlainSize {
-		// 未落盘 ciphertext 时用 plainSize+headerLen 兜底，仍可判定版本。
+		// 二次兜底：V2=明文+header，用最常遇的长度结构。
 		meta.CiphertextSize = meta.PlainSize + meta.HeaderLen
 	}
 	return meta, true

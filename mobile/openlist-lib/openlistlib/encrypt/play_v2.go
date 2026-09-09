@@ -1016,7 +1016,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		// constant across sessions. Snapshot it on first real INSPECT and reuse it
 		// here -- including after an app restart -- to skip redundant upstream probes.
 		if !cachedMetaLoaded {
-			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL); ok {
+			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL, fileSize); ok {
 				meta = dbMeta
 				cachedMetaLoaded = true
 				log.Debugf("[v2-cache] loaded content meta from local sqlite: version=%d headerLen=%d plainSize=%d cipherSize=%d src=%s",
