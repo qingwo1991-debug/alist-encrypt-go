@@ -1011,6 +1011,46 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			}
 		}
 
+		// --- Check local SQLite for previously persisted V2 metadata ---
+		// The V2 header (headerLen/nonce/cipher sizes) of an unchanged file is
+		// constant across sessions. Snapshot it on first real INSPECT and reuse it
+		// here -- including after an app restart -- to skip redundant upstream probes.
+		if !cachedMetaLoaded {
+			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL); ok {
+				meta = dbMeta
+				cachedMetaLoaded = true
+				log.Debugf("[v2-cache] loaded content meta from local sqlite: version=%d headerLen=%d plainSize=%d cipherSize=%d src=%s",
+					meta.Version, meta.HeaderLen, meta.PlainSize, meta.CiphertextSize, safeURLForLog(info.RedirectURL))
+				if displayPath != "" {
+					cacheInfo := &FileInfo{
+						Name:           path.Base(displayPath),
+						Size:           meta.PlainSize,
+						CiphertextSize: meta.CiphertextSize,
+						ContentVersion: meta.Version,
+						HeaderLen:      meta.HeaderLen,
+						NonceField:     cloneNonceField(meta.NonceField),
+						IsDir:          false,
+						Path:           displayPath,
+						RawURL:         info.RedirectURL,
+					}
+					for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
+						infoCopy := &FileInfo{
+							Name:           cacheInfo.Name,
+							Size:           cacheInfo.Size,
+							CiphertextSize: cacheInfo.CiphertextSize,
+							ContentVersion: cacheInfo.ContentVersion,
+							HeaderLen:      cacheInfo.HeaderLen,
+							NonceField:     cloneNonceField(cacheInfo.NonceField),
+							IsDir:          false,
+							Path:           cachePath,
+							RawURL:         cacheInfo.RawURL,
+						}
+						p.storeFileCache(cachePath, infoCopy)
+					}
+				}
+			}
+		}
+
 		if !cachedMetaLoaded {
 			log.Debugf("[v2-diag] inspecting: encType=%q fileSize=%d redirectURL=%s encProbePath=%q",
 				info.PasswdInfo.EncType, fileSize, safeURLForLog(info.RedirectURL), encProbePath)
@@ -1064,6 +1104,13 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 				}
 				log.Debugf("[v2-cache] cached inspection result: path=%s version=%d plainSize=%d cipherSize=%d",
 					displayPath, meta.Version, meta.PlainSize, meta.CiphertextSize)
+			}
+			// Persist inspection result to local SQLite so a later session
+			// (including after app restart) can skip the upstream probe entirely.
+			if meta.Version > 0 && meta.PlainSize > 0 {
+				p.recordLocalV2Meta(info.RedirectURL, info.OriginalURL, meta)
+				log.Debugf("[v2-cache] persisted content meta to local sqlite: version=%d plainSize=%d cipherSize=%d",
+					meta.Version, meta.PlainSize, meta.CiphertextSize)
 			}
 			if redirectKey != "" && meta.Version > 0 {
 				updated := cloneRedirectInfo(info)

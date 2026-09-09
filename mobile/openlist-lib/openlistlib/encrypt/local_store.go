@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,6 +30,9 @@ type storeRecordKind int
 const (
 	recordKindSize storeRecordKind = iota
 	recordKindStrategy
+	// recordKindSizeV2 把一次真实 INSPECT 得到的 V2 加密元数据（不只 size）落库，
+	// 供重启后直接复用，避免每次冷启动重新探测上游。
+	recordKindSizeV2
 )
 
 type storeRecord struct {
@@ -39,7 +43,13 @@ type storeRecord struct {
 	networkType  string
 	strategy     StreamStrategy
 	size         int64
-	accessedAt   time.Time
+	// V2 加密元数据（仅 recordKindSizeV2 使用）
+	ciphertextSize int64
+	contentVersion int
+	headerLen      int64
+	nonceField     []byte
+	encryptedPath  string
+	accessedAt     time.Time
 }
 
 type localStore struct {
@@ -52,21 +62,21 @@ type localStore struct {
 }
 
 type LocalSizeRecord struct {
-	Key          string `json:"key"`
-	ProviderHost string `json:"provider_host"`
-	OriginalPath string `json:"original_path"`
-	EncryptedPath string `json:"encrypted_path,omitempty"`
-	Name         string `json:"name,omitempty"`
-	Size         int64  `json:"size"`
-	CiphertextSize int64 `json:"ciphertext_size,omitempty"`
-	ContentVersion int   `json:"content_version,omitempty"`
-	HeaderLen    int64  `json:"header_len,omitempty"`
-	NonceField   []byte `json:"nonce_field,omitempty"`
-	RawURL       string `json:"raw_url,omitempty"`
-	Sign         string `json:"sign,omitempty"`
-	UpstreamFetchedAt int64 `json:"upstream_fetched_at,omitempty"`
-	LastAccessed int64  `json:"last_accessed"`
-	UpdatedAt    int64  `json:"updated_at"`
+	Key               string `json:"key"`
+	ProviderHost      string `json:"provider_host"`
+	OriginalPath      string `json:"original_path"`
+	EncryptedPath     string `json:"encrypted_path,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Size              int64  `json:"size"`
+	CiphertextSize    int64  `json:"ciphertext_size,omitempty"`
+	ContentVersion    int    `json:"content_version,omitempty"`
+	HeaderLen         int64  `json:"header_len,omitempty"`
+	NonceField        []byte `json:"nonce_field,omitempty"`
+	RawURL            string `json:"raw_url,omitempty"`
+	Sign              string `json:"sign,omitempty"`
+	UpstreamFetchedAt int64  `json:"upstream_fetched_at,omitempty"`
+	LastAccessed      int64  `json:"last_accessed"`
+	UpdatedAt         int64  `json:"updated_at"`
 }
 
 type LocalStrategyRecord struct {
@@ -477,6 +487,32 @@ func (s *localStore) AddSize(key, providerHost, originalPath string, size int64,
 	})
 }
 
+// AddSizeV2Meta 记录一次真实 INSPECT 的 V2 加密元数据到本地 SQLite。
+// plainSize 为解密后的明文大小；ciphertextSize/version/headerLen/nonceField
+// 为 V2 头探测确认的元数据。落库后 play_v2 在下次（含重启后）播放同一
+// 文件时可直接复用，跳过上游探测。
+func (s *localStore) AddSizeV2Meta(key, providerHost, originalPath, encryptedPath string, plainSize, ciphertextSize int64, version int, headerLen int64, nonceField []byte, accessedAt time.Time) {
+	if s == nil || key == "" || plainSize <= 0 || providerHost == "" || originalPath == "" {
+		return
+	}
+	if GetNetworkState() == NetworkStateOffline {
+		return
+	}
+	s.enqueue(storeRecord{
+		kind:           recordKindSizeV2,
+		key:            key,
+		providerHost:   providerHost,
+		originalPath:   originalPath,
+		encryptedPath:  encryptedPath,
+		size:           plainSize,
+		ciphertextSize: ciphertextSize,
+		contentVersion: version,
+		headerLen:      headerLen,
+		nonceField:     append([]byte(nil), nonceField...),
+		accessedAt:     accessedAt,
+	})
+}
+
 func (s *localStore) AddStrategy(key, providerHost, originalPath, networkType string, strategy StreamStrategy, accessedAt time.Time) {
 	if s == nil || key == "" || providerHost == "" || originalPath == "" || networkType == "" || strategy == "" {
 		return
@@ -632,8 +668,24 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 	for _, record := range batch {
 		ts := record.accessedAt.Unix()
 		switch record.kind {
-		case recordKindSize:
-			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, "", "", record.size, 0, 0, 0, nil, "", "", 0, ts, ts); err != nil {
+		case recordKindSize, recordKindSizeV2:
+			// recordKindSizeV2 带 V2 加密元数据落库（跳过重启后重新探测）；
+			// recordKindSize 填零占位，保持两者共用同一插入语句。
+			name := ""
+			encryptedPath := ""
+			ciphertextSize, contentVersion, headerLen, nonceField := int64(0), 0, int64(0), []byte(nil)
+			if record.kind == recordKindSizeV2 {
+				name = path.Base(record.originalPath)
+				encryptedPath = record.encryptedPath
+				ciphertextSize = record.ciphertextSize
+				contentVersion = record.contentVersion
+				headerLen = record.headerLen
+				nonceField = record.nonceField
+			}
+			if _, err := insertSize.Exec(
+				record.key, record.providerHost, record.originalPath, encryptedPath, name,
+				record.size, ciphertextSize, contentVersion, headerLen, nonceField, "", "", 0, ts, ts,
+			); err != nil {
 				return err
 			}
 		case recordKindStrategy:
@@ -1284,8 +1336,8 @@ type PlaybackStatsRecord struct {
 type DeletionStatsRecord struct {
 	ID                string  `json:"id"`
 	Path              string  `json:"path"`
-	DeletedAt         int64   `json:"deleted_at"` // Unix 秒
-	LastPlayAt        int64   `json:"last_play_at"` // Unix 秒，0=无播放
+	DeletedAt         int64   `json:"deleted_at"`           // Unix 秒
+	LastPlayAt        int64   `json:"last_play_at"`         // Unix 秒，0=无播放
 	SinceLastPlaySecs float64 `json:"since_last_play_secs"` // -1=无播放
 }
 
@@ -1347,8 +1399,8 @@ func (s *localStore) pruneStatsIfNeeded() error {
 		return nil
 	}
 	for _, table := range []string{"playback_stats", "deletion_stats"} {
-		if _, err := s.db.Exec(`DELETE FROM ` + table + ` WHERE id IN (
-            SELECT id FROM ` + table + ` ORDER BY id DESC LIMIT -1 OFFSET ?)`, maxPlaybackStatsRows); err != nil {
+		if _, err := s.db.Exec(`DELETE FROM `+table+` WHERE id IN (
+            SELECT id FROM `+table+` ORDER BY id DESC LIMIT -1 OFFSET ?)`, maxPlaybackStatsRows); err != nil {
 			return err
 		}
 	}

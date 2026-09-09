@@ -112,6 +112,63 @@ func (p *ProxyServer) recordLocalObservation(providerURL, originalURL string, si
 	}
 }
 
+// recordLocalV2Meta 把一次真实 INSPECT 的 V2 加密元数据持久化到本地 SQLite。
+// 之后同一文件（含 App 重启后）播放时可直接复用，跳过对上游的重复探测。
+// key 沿用 recordLocalObservation 的同一套（providerURL=upstream, originalURL=display path），
+// 保证 inspect 结果与 size/strategy 观察共用一条 local_media_size 记录。
+func (p *ProxyServer) recordLocalV2Meta(providerURL, originalURL string, meta ContentMeta) {
+	if p == nil || p.localStore == nil {
+		return
+	}
+	if meta.Version <= 0 || meta.PlainSize <= 0 {
+		return
+	}
+	key, providerHost, originalPath, ok := p.localKeyFromURLs(providerURL, originalURL)
+	if !ok {
+		return
+	}
+	encryptedPath := originalURL
+	p.localStore.AddSizeV2Meta(key, providerHost, originalPath, encryptedPath, meta.PlainSize, meta.CiphertextSize, meta.Version, meta.HeaderLen, meta.NonceField, time.Now())
+	if meta.PlainSize > 0 {
+		p.localStore.AddSize(key, providerHost, originalPath, meta.PlainSize, time.Now())
+	}
+}
+
+// lookupLocalV2Meta 从本地 SQLite 读取一条持久化的 V2 加密元数据。
+// 命中且 ContentVersion>0 时返回 meta；否则返回 (false)。
+// 在 inspectEncryptedContent 之前调用，避免对已探测过（含重启前）的文件重复打上游。
+func (p *ProxyServer) lookupLocalV2Meta(providerURL, originalURL string) (ContentMeta, bool) {
+	if p == nil || p.localStore == nil {
+		return ContentMeta{}, false
+	}
+	rec, ok := p.lookupLocalFileMeta(providerURL, originalURL)
+	if !ok || rec == nil {
+		return ContentMeta{}, false
+	}
+	if rec.ContentVersion <= 0 || rec.Size <= 0 {
+		return ContentMeta{}, false
+	}
+	meta := ContentMeta{
+		Version:        rec.ContentVersion,
+		HeaderLen:      rec.HeaderLen,
+		PlainSize:      rec.Size,
+		CiphertextSize: rec.CiphertextSize,
+		NonceField:     append([]byte(nil), rec.NonceField...),
+	}
+	if meta.Version != ContentVersionV2 {
+		// 只信任 V2 完整元数据；V1 结论不持久化（有赖 URL 精确匹配，风险高于收益）。
+		return ContentMeta{}, false
+	}
+	if meta.HeaderLen <= 0 || len(meta.NonceField) < 16 {
+		return ContentMeta{}, false
+	}
+	if meta.CiphertextSize <= meta.PlainSize {
+		// 未落盘 ciphertext 时用 plainSize+headerLen 兜底，仍可判定版本。
+		meta.CiphertextSize = meta.PlainSize + meta.HeaderLen
+	}
+	return meta, true
+}
+
 // recordPlaybackStats 记录一次真实播放（有字节写出）到本地统计。
 // displayPath 为明文展示路径；provider 为归一化 provider host。
 // durationSecs 为该次流式写出的墙钟耗时（近似播放时长）：首播=拉流耗时，
