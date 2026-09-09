@@ -1185,7 +1185,7 @@ func (ps *ProbeScheduler) InvalidateWarm(displayPath, reason string) {
 }
 
 func (ps *ProbeScheduler) consumerHitRate() float64 {
-	files := ps.uniqueWarmedFileCount()
+	files := ps.uniqueWarmFileCount()
 	if files == 0 {
 		return 0
 	}
