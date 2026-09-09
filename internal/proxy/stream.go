@@ -97,6 +97,8 @@ type StreamOutcome struct {
 	BytesWritten    int64
 	ExpectedBytes   int64
 	WallDuration    time.Duration // 流式写出墙钟时长（统计播放时长近似）
+	HeaderLatency   time.Duration // 请求发起→响应头就绪（首帧延迟近似）
+	BytesPerSecond  float64       // BytesWritten / WallDuration，avg 下行速率
 	ResponseStarted bool
 	StatusCode      int
 	ContentType     string

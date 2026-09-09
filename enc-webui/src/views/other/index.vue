@@ -96,11 +96,31 @@
 
         <el-tabs v-model="statsTab" class="pb-tabs">
           <el-tab-pane label="播放记录" name="playback">
+            <div class="ff-chart-row">
+              <div class="ff-chart-card">
+                <div class="ff-chart-title">
+                  首帧耗时 <span class="ff-chart-sub">header_latency_ms · p50 {{ p50Latency }}ms · p95 {{ p95Latency }}ms</span>
+                </div>
+                <canvas ref="latencyCanvas" class="ff-canvas" width="560" height="120" />
+              </div>
+              <div class="ff-chart-card">
+                <div class="ff-chart-title">
+                  下行速率 <span class="ff-chart-sub">MiB/s · 峰值 {{ peakMbps }}MiB/s</span>
+                </div>
+                <canvas ref="mbpsCanvas" class="ff-canvas" width="560" height="120" />
+              </div>
+            </div>
             <el-table :data="playbacks" size="small" max-height="360" empty-text="暂无播放记录">
               <el-table-column prop="path" label="路径" min-width="200" show-overflow-tooltip />
               <el-table-column prop="provider" label="源" min-width="120" show-overflow-tooltip />
               <el-table-column label="时长" width="90">
                 <template #default="{ row }">{{ fmtDuration(row.duration_secs) }}</template>
+              </el-table-column>
+              <el-table-column label="首帧ms" width="80" align="right">
+                <template #default="{ row }">{{ row.header_latency_ms ? Math.round(row.header_latency_ms) : '-' }}</template>
+              </el-table-column>
+              <el-table-column label="MiB/s" width="80" align="right">
+                <template #default="{ row }">{{ row.mbps ? row.mbps.toFixed(1) : '-' }}</template>
               </el-table-column>
               <el-table-column prop="seek_count" label="seek" width="70" align="center" />
               <el-table-column label="字节" width="110" align="right">
@@ -129,7 +149,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { clearPlaybackStatsReq, getBuildInfoReq, getPlaybackStatsReq, getStatsReq } from '@/api/user'
 
@@ -148,6 +168,80 @@ const statsTab = ref('playback')
 const playbacks = ref([])
 const deletions = ref([])
 
+// 首帧/速率曲线（canvas 自绘，零外部依赖）
+const latencyCanvas = ref(null)
+const mbpsCanvas = ref(null)
+
+// 取有首帧记录的播放事件，按时间升序
+const latencySeries = computed(() => {
+  const rows = (playbacks.value || []).filter(r => r.header_latency_ms > 0)
+  rows.sort((a, b) => new Date(a.played_at) - new Date(b.played_at))
+  return rows.map(r => ({ t: new Date(r.played_at), v: r.header_latency_ms })).slice(-200)
+})
+const mbpsSeries = computed(() => {
+  const rows = (playbacks.value || []).filter(r => r.mbps > 0)
+  rows.sort((a, b) => new Date(a.played_at) - new Date(b.played_at))
+  return rows.map(r => ({ t: new Date(r.played_at), v: r.mbps })).slice(-200)
+})
+// p50/p95 of first-frame latency
+const p50Latency = computed(() => percentile(latencySeries.value.map(s => s.v), 0.5))
+const p95Latency = computed(() => percentile(latencySeries.value.map(s => s.v), 0.95))
+const peakMbps = computed(() => {
+  const vs = mbpsSeries.value.map(s => s.v)
+  return vs.length ? Math.max(...vs).toFixed(1) : '-'
+})
+
+const percentile = (arr, q) => {
+  if (!arr.length) return '-'
+  const sorted = [...arr].sort((a, b) => a - b)
+  const idx = Math.min(sorted.length - 1, Math.round(q * (sorted.length - 1)))
+  return Math.round(sorted[idx])
+}
+
+const drawSeries = (canvas, series, opts) => {
+  if (!canvas || !series.length) return
+  const ctx = canvas.getContext('2d')
+  const W = canvas.width, H = canvas.height
+  const padL = 44, padR = 8, padT = 8, padB = 16
+  ctx.clearRect(0, 0, W, H)
+  // 网格
+  ctx.strokeStyle = 'rgba(128,128,128,0.18)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (H - padT - padB) * i / 4
+    ctx.moveTo(padL, y); ctx.lineTo(W - padR, y)
+  }
+  ctx.stroke()
+  // 值域
+  let maxV = 0
+  for (const s of series) if (s.v > maxV) maxV = s.v
+  if (maxV <= 0) return
+  // 时间轴
+  const t0 = series[0].t.getTime(), t1 = series[series.length - 1].t.getTime()
+  const span = Math.max(t1 - t0, 1)
+  const x = s => padL + (s.t.getTime() - t0) / span * (W - padL - padR)
+  const y = v => padT + (H - padT - padB) * (1 - v / maxV)
+
+  // 折线
+  ctx.strokeStyle = opts.color || '#409eff'
+  ctx.lineWidth = 1.5
+  ctx.beginPath()
+  series.forEach((s, i) => {
+    const px = x(s), py = y(s.v)
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
+  })
+  ctx.stroke()
+  // 刻度标签
+  ctx.fillStyle = 'rgba(150,150,150,0.9)'
+  ctx.font = '10px sans-serif'
+  ctx.fillText('0', 2, H - 4)
+  ctx.fillText(String(Math.round(maxV)), 2, padT + 4)
+  // y label
+  ctx.fillText(t0.toTimeString().slice(0, 5), padL, H - 3)
+  ctx.fillText(t1.toTimeString().slice(0, 5), W - padR - 44, H - 3)
+}
+
 const loadPlaybackStats = async () => {
   try {
     const res = await getPlaybackStatsReq({ reqLoading: false })
@@ -160,6 +254,13 @@ const loadPlaybackStats = async () => {
 }
 
 const exportingStats = ref(false)
+
+// 播放数据变化后重绘首帧/速率曲线（nextTick 保证 canvas 已挂载）
+watch([latencySeries, mbpsSeries], async () => {
+  await nextTick()
+  drawSeries(latencyCanvas.value, latencySeries.value, { color: '#409eff' })
+  drawSeries(mbpsCanvas.value, mbpsSeries.value, { color: '#67c23a' })
+})
 
 // 清空全部播放/删除统计（重新积累）。带确认。
 const clearStats = async () => {
@@ -426,6 +527,37 @@ onUnmounted(() => {
 
 .pb-tabs {
   margin-top: 4px;
+}
+
+.ff-chart-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ff-chart-card {
+  flex: 1 1 320px;
+  max-width: 560px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--el-bg-color);
+}
+.ff-chart-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  margin-bottom: 6px;
+}
+.ff-chart-sub {
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
+  margin-left: 6px;
+}
+.ff-canvas {
+  display: block;
+  width: 100%;
+  height: 120px;
 }
 
 .pb-actions {

@@ -505,6 +505,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	}
 
 	if req.Method == http.MethodHead {
+		result.HeaderLatency = time.Since(streamStart)
 		w.WriteHeader(statusCode)
 		result.ResponseStarted = true
 		if strategy == StreamStrategyRange && activeRange != nil && result.Err == nil {
@@ -584,6 +585,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
 		readerToStream = newDecryptedCacheReader(readerToStream, s.blockCache, baseKey, sniffOffset)
 	}
+	// 首帧可观测性：写出响应头之前记录上游+破解准备总耗时。播放器感知的
+	// "首帧前卡顿" = request → 第一个响应字节，这里精确覆盖到 WriteHeader 前。
+	result.HeaderLatency = time.Since(streamStart)
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true
 
@@ -592,6 +596,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	written, err := io.CopyBuffer(w, readerToStream, *buf)
 	result.BytesWritten = written
 	result.WallDuration = time.Since(streamStart)
+	if result.WallDuration > 0 && written > 0 {
+		result.BytesPerSecond = float64(written) / result.WallDuration.Seconds()
+	}
 	if err == nil && result.ExpectedBytes > 0 && written < result.ExpectedBytes {
 		err = io.ErrUnexpectedEOF
 		result.FailureReason = "upstream_truncated"
