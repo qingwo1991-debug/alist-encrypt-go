@@ -188,6 +188,14 @@ export const getStatsReq = (extraConfig = {}) => {
   })
 }
 
+export const getBuildInfoReq = (extraConfig = {}) => {
+  return axiosReq({
+    url: '/enc-api/getBuildInfo',
+    method: 'post',
+    ...extraConfig
+  })
+}
+
 export const getPlaybackStatsReq = (extraConfig = {}) => {
   return axiosReq({
     url: '/enc-api/getPlaybackStats',

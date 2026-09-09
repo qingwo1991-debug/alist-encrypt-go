@@ -50,6 +50,7 @@
     "filterAsyncRoutesByRoles": true,
     "freshRouter": true,
     "getAlistConfigReq": true,
+    "getBuildInfoReq": true,
     "getCurrentInstance": true,
     "getCurrentScope": true,
     "getCurrentWatcher": true,
