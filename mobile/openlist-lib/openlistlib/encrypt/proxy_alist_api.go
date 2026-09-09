@@ -517,10 +517,25 @@ func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"code":      200,
-		"playbacks": plays,
-		"deletions": dels,
+		"code":        200,
+		"playbacks":   plays,
+		"deletions":   dels,
+		"probe_stats": p.probeStatsSnapshot(),
 	})
+}
+
+// probeStatsSnapshot 返回进程内探测观测计数（供统计导出）。
+func (p *ProxyServer) probeStatsSnapshot() map[string]uint64 {
+	if p == nil {
+		return map[string]uint64{
+			"v2_attempts": 0, "v2_success": 0, "dual_probe_attempts": dualProbeAttempts.Load(),
+		}
+	}
+	return map[string]uint64{
+		"v2_attempts":         atomic.LoadUint64(&p.probeV2Attempts),
+		"v2_success":          atomic.LoadUint64(&p.probeV2Success),
+		"dual_probe_attempts": dualProbeAttempts.Load(),
+	}
 }
 
 // handleLocalImport imports local SQLite data from a JSON payload.

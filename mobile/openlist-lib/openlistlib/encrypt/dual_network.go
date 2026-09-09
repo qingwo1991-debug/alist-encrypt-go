@@ -10,9 +10,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// dualProbeAttempts 双网络 RTT 主动探测发起次数（观测用，进程内累计）。
+var dualProbeAttempts atomic.Uint64
 
 // dual_network.go — WiFi + SIM 双网络延迟自适应切换（移动端，Android 为主）。
 //
@@ -388,6 +392,8 @@ func probeDualNetworkAsync(provider, targetHost string, req *http.Request, probe
 	if probePath.mark == dualNetworkMarkNone {
 		return
 	}
+	// 观测：一次双网络 RTT 主动探测（已通过节流/风控检查，将真实发起请求）。
+	dualProbeAttempts.Add(1)
 
 	// 探测只对真实目标 host 的根路径做极小 HEAD/Range，绝不对端口/路径枚举。
 	scheme := "http"
@@ -583,10 +589,10 @@ func randJitterN(n int) int {
 func GetEncryptDualNetworkStatusJson() string {
 	enabled, wifiMark, cellMark := dualNetworkSnapshot()
 	type netInfo struct {
-		Fwmark  uint32 `json:"fwmark"`
-		RttMs   int64  `json:"rtt_ms"`
-		Active  bool   `json:"active"`
-		Bound   bool   `json:"bound"`
+		Fwmark uint32 `json:"fwmark"`
+		RttMs  int64  `json:"rtt_ms"`
+		Active bool   `json:"active"`
+		Bound  bool   `json:"bound"`
 	}
 	out := struct {
 		Enabled   bool     `json:"enabled"`

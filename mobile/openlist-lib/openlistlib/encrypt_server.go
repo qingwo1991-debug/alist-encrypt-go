@@ -492,6 +492,12 @@ func ExportEncryptStatsJson(password string) string {
 	payload := map[string]interface{}{
 		"playbacks": plays,
 		"deletions": dels,
+		"probe_stats": func() map[string]uint64 {
+			if server == nil {
+				return map[string]uint64{"v2_attempts": 0, "v2_success": 0, "dual_probe_attempts": dualProbeAttempts.Load()}
+			}
+			return server.probeStatsSnapshot()
+		}(),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

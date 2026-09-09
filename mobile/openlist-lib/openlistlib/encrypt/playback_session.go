@@ -36,15 +36,17 @@ const playbackSessionMaxLifetime = 2 * time.Hour
 const seekRangeHintBytes = 1 << 20
 
 type playbackSession struct {
-	path         string
-	provider     string
-	contentType  string
-	startAt      time.Time
-	lastAt       time.Time
-	bytesServed  int64
-	totalBytes   int64
-	durationSecs float64
-	seekCount    int
+	path            string
+	provider        string
+	contentType     string
+	startAt         time.Time
+	lastAt          time.Time
+	bytesServed     int64
+	totalBytes      int64
+	durationSecs    float64
+	seekCount       int
+	headerLatencyMs float64 // 会话首个请求的响应头延迟（首帧可观测）
+	peakMbps        float64 // 会话内峰值下行速率（MiB/s）
 }
 
 // playbackSessionTracker 按路径聚合播放会话，并负责最终落库。
@@ -80,6 +82,8 @@ func (t *playbackSessionTracker) record(
 	durationSecs float64,
 	completed bool,
 	rangeStart int64,
+	headerLatencyMs float64,
+	mbps float64,
 ) {
 	if t == nil || t.store == nil || strings.TrimSpace(path) == "" || bytesServed <= 0 {
 		return
@@ -112,6 +116,12 @@ func (t *playbackSessionTracker) record(
 	sess.bytesServed += bytesServed
 	sess.durationSecs += durationSecs
 	sess.seekCount += seekCount
+	if headerLatencyMs > 0 && sess.headerLatencyMs == 0 {
+		sess.headerLatencyMs = headerLatencyMs
+	}
+	if mbps > sess.peakMbps {
+		sess.peakMbps = mbps
+	}
 	if completed {
 		sess.contentType = contentType
 	}
@@ -129,16 +139,18 @@ func (t *playbackSessionTracker) flushLocked(sess *playbackSession) {
 	}
 	playedAt := sess.startAt.Unix()
 	rec := PlaybackStatsRecord{
-		ID:           strconv.FormatInt(sess.startAt.UnixNano(), 10) + "-" + sess.path,
-		Path:         sess.path,
-		Provider:     sess.provider,
-		BytesServed:  sess.bytesServed,
-		TotalBytes:   sess.totalBytes,
-		DurationSecs: sess.durationSecs,
-		PlayedAt:     playedAt,
-		Completed:    true,
-		ContentType:  sess.contentType,
-		SeekCount:    sess.seekCount,
+		ID:              strconv.FormatInt(sess.startAt.UnixNano(), 10) + "-" + sess.path,
+		Path:            sess.path,
+		Provider:        sess.provider,
+		BytesServed:     sess.bytesServed,
+		TotalBytes:      sess.totalBytes,
+		DurationSecs:    sess.durationSecs,
+		PlayedAt:        playedAt,
+		Completed:       true,
+		ContentType:     sess.contentType,
+		SeekCount:       sess.seekCount,
+		HeaderLatencyMs: sess.headerLatencyMs,
+		Mbps:            sess.peakMbps,
 	}
 	if err := t.store.AppendPlayback(rec); err != nil {
 		log.Errorf("[%s] failed to flush playback session: %v", internal.TagCache, err)

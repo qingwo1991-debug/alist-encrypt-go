@@ -33,10 +33,10 @@ func newTestSessionTracker() (*playbackSessionTracker, *testSessionStore) {
 func TestPlaybackSessionMergesSeekRequests(t *testing.T) {
 	tr, st := newTestSessionTracker()
 	// 首帧：0 位置，2MB（连续播放段，不计 seek）
-	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0)
+	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0, 0, 0)
 	// 两次 seek：位置 > 0，量小（定位型预取）
-	tr.record("/movies/a.mp4", "cdn", "video/mp4", 256<<10, 10<<20, 1.0, true, 30<<20)
-	tr.record("/movies/a.mp4", "cdn", "video/mp4", 256<<10, 10<<20, 1.0, true, 70<<20)
+	tr.record("/movies/a.mp4", "cdn", "video/mp4", 256<<10, 10<<20, 1.0, true, 30<<20, 0, 0)
+	tr.record("/movies/a.mp4", "cdn", "video/mp4", 256<<10, 10<<20, 1.0, true, 70<<20, 0, 0)
 	// 时间推进到窗口外，flush 落库
 	tr.flushStale(tr.nowFn().Add(playbackSessionWindow + time.Second))
 
@@ -60,8 +60,8 @@ func TestPlaybackSessionMergesSeekRequests(t *testing.T) {
 
 func TestPlaybackSessionSplitsOnPathChange(t *testing.T) {
 	tr, st := newTestSessionTracker()
-	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0)
-	tr.record("/movies/b.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0)
+	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0, 0, 0)
+	tr.record("/movies/b.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0, 0, 0)
 	tr.flushStale(tr.nowFn().Add(playbackSessionWindow + time.Second))
 	if len(st.records) != 2 {
 		t.Fatalf("expected 2 records for 2 paths, got %d", len(st.records))
@@ -70,12 +70,12 @@ func TestPlaybackSessionSplitsOnPathChange(t *testing.T) {
 
 func TestPlaybackSessionSplitsOnTimeout(t *testing.T) {
 	tr, st := newTestSessionTracker()
-	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0)
+	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0, 0, 0)
 	// 模拟暂停后继续：超过窗口
 	tr.nowFn()
 	tr.nowFn()
 	tr.nowFn() // +3s
-	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0)
+	tr.record("/movies/a.mp4", "cdn", "video/mp4", 2<<20, 10<<20, 3.0, true, 0, 0, 0)
 	tr.flushStale(tr.nowFn().Add(playbackSessionWindow + time.Second))
 	// 每次 +1s，第二次 record 距第一次 4s < 30s，仍是同会话。
 	if len(st.records) != 1 {
@@ -86,7 +86,7 @@ func TestPlaybackSessionSplitsOnTimeout(t *testing.T) {
 func TestPlaybackSessionCompletedSingleRequest(t *testing.T) {
 	tr, st := newTestSessionTracker()
 	// 首播即完整：单请求 completed=true。不立即落库，等待窗口 flush。
-	tr.record("/movies/c.mp4", "cdn", "video/mp4", 5<<20, 5<<20, 4.0, true, 0)
+	tr.record("/movies/c.mp4", "cdn", "video/mp4", 5<<20, 5<<20, 4.0, true, 0, 0, 0)
 	if len(st.records) != 0 {
 		t.Fatalf("expected no record before flush, got %d", len(st.records))
 	}
@@ -112,5 +112,27 @@ func TestSeekLikeRequestHeuristic(t *testing.T) {
 		if got := isSeekLikeRequest(c.start, c.bytes); got != c.want {
 			t.Errorf("isSeekLikeRequest(%d,%d) = %v, want %v", c.start, c.bytes, got, c.want)
 		}
+	}
+}
+
+func TestPlaybackSessionKeepsFirstHeaderLatencyAndPeakMbps(t *testing.T) {
+	tr, st := newTestSessionTracker()
+	// 首帧：header 1200ms（卡顿），峰值速率低（0.5 MiB/s，慢 CDN）
+	tr.record("/movies/slow.mp4", "cdn", "video/mp4", 512<<10, 20<<20, 4.0, true, 0, 1200, 0.5)
+	// seek：header 快（180ms），峰值高（12 MiB/s）——不应覆盖首帧 latency，但应抬高峰值
+	tr.record("/movies/slow.mp4", "cdn", "video/mp4", 256<<10, 20<<20, 1.0, true, 30<<20, 180, 12)
+	// 第二次 seek 更慢——峰值已定
+	tr.record("/movies/slow.mp4", "cdn", "video/mp4", 256<<10, 20<<20, 1.0, true, 70<<20, 250, 8)
+	tr.flushStale(tr.nowFn().Add(playbackSessionWindow + time.Second))
+
+	if len(st.records) != 1 {
+		t.Fatalf("expected 1 merged record, got %d", len(st.records))
+	}
+	rec := st.records[0]
+	if rec.HeaderLatencyMs != 1200 {
+		t.Errorf("header_latency_ms = %f, want 1200 (first non-zero)", rec.HeaderLatencyMs)
+	}
+	if rec.Mbps != 12 {
+		t.Errorf("mbps = %f, want 12 (peak across session)", rec.Mbps)
 	}
 }

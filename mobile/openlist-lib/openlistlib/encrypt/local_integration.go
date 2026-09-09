@@ -239,10 +239,12 @@ func (p *ProxyServer) clearPlaybackMetaCaches(originalURL string) {
 // durationSecs 为该次流式写出的墙钟耗时（近似播放时长）：首播=拉流耗时，
 // seek=seek 间隔。比恒 0 更有信息量，供导出给 AI 分析。
 // rangeStart 为本次请求的 Range 起始位置（无 Range 为 0），用于 seek 计数。
+// headerLatencyMs 为本次请求"发起→响应头就绪"耗时（毫秒，0=未测量），
+// mbps 为本次请求的平均下行速率（MiB/s，0=未测量）。
 //
 // 内部先喂给会话聚合器：同一路径活跃窗口内的多条请求合并为一条落库，
 // 避免导出时一次播放产生几十条 seek 噪声。
-func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string, durationSecs float64, rangeStart int64) {
+func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string, durationSecs float64, rangeStart int64, headerLatencyMs, mbps float64) {
 	if p == nil || p.localStore == nil || bytesServed <= 0 {
 		return
 	}
@@ -253,7 +255,7 @@ func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesSer
 		durationSecs = 0
 	}
 	p.ensurePlaybackSessionTracker().record(
-		displayPath, provider, contentType, bytesServed, totalBytes, durationSecs, completed, rangeStart,
+		displayPath, provider, contentType, bytesServed, totalBytes, durationSecs, completed, rangeStart, headerLatencyMs, mbps,
 	)
 }
 
@@ -305,4 +307,13 @@ func (p *ProxyServer) recordDeletionStats(displayPath string) {
 	if err := p.localStore.AppendDeletion(displayPath); err != nil {
 		log.Debugf("[%s] failed to record deletion stats: %v", internal.TagCache, err)
 	}
+}
+
+// bytesPerSecondToMbps 把 bytes/秒换算成 MiB/秒，用于播放下行速率可观测。
+// bps<=0 返回 0（未测量/无数据）。
+func bytesPerSecondToMbps(bps float64) float64 {
+	if bps <= 0 {
+		return 0
+	}
+	return bps / (1024 * 1024)
 }
