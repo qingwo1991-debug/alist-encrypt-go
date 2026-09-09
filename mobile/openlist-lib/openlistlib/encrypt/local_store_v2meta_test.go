@@ -133,7 +133,7 @@ func TestLookupLocalV2MetaStaleSizeRejected(t *testing.T) {
 	originalPath := "/dav/enc/stale-meta.mp4"
 
 	// 先落一条 ciphertext_size=1060 的 V2 meta。
-	server.recordLocalV2Meta(providerURL, originalURL, ContentMeta{
+	server.recordLocalV2Meta(providerURL, originalPath, ContentMeta{
 		Version:        ContentVersionV2,
 		HeaderLen:      32,
 		PlainSize:      1028,
