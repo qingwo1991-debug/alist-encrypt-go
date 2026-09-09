@@ -405,6 +405,7 @@ func (ps *ProbeScheduler) Stats() map[string]interface{} {
 		// 同一文件被多轮 PROPFIND/dir_sync 重复触发会反复 +1，远大于真实文件数，
 		// 必须配 unique_warmed_files 一起看才不会被误导。
 		"unique_warmed_files":       ps.uniqueWarmFileCount(),
+		"unique_consumer_hits":      ps.uniqueConsumerHitCount(),
 		"consumer_hit_total":        atomic.LoadUint64(&ps.consumerHitTotal),
 		"consumer_hit_rate":         ps.consumerHitRate(),
 		"last_success_at":           formatProbeTimestamp(atomic.LoadInt64(&ps.lastSuccessAtUnixNano)),
@@ -1184,12 +1185,33 @@ func (ps *ProbeScheduler) InvalidateWarm(displayPath, reason string) {
 }
 
 func (ps *ProbeScheduler) consumerHitRate() float64 {
-	successes := atomic.LoadUint64(&ps.filesSucceededTotal)
-	if successes == 0 {
+	files := ps.uniqueWarmedFileCount()
+	if files == 0 {
 		return 0
 	}
-	hits := atomic.LoadUint64(&ps.consumerHitTotal)
-	return float64(hits) / float64(successes)
+	hits := ps.uniqueConsumerHitCount()
+	return float64(hits) / float64(files)
+}
+
+// uniqueConsumerHitCount reports the number of distinct files that were ever
+// consumed (played) after a successful warm, keyed by displayPath. Like
+// uniqueWarmFileCount, this is the de-duplicated counterpart to the raw
+// consumer_hit_total event counter: the same file hitting again within the
+// dedupe window or across rounds only counts once here.
+func (ps *ProbeScheduler) uniqueConsumerHitCount() uint64 {
+	if ps == nil {
+		return 0
+	}
+	ps.ensureRecordState()
+	ps.recordMu.Lock()
+	defer ps.recordMu.Unlock()
+	var count uint64
+	for _, warm := range ps.successfulWarm {
+		if warm.ConsumerHitCount > 0 {
+			count++
+		}
+	}
+	return count
 }
 
 func (ps *ProbeScheduler) stalenessThreshold() time.Duration {
