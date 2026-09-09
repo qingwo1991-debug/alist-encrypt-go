@@ -203,7 +203,9 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
     final p50 = _percentile(vs, 0.5);
     final p95 = _percentile(vs, 0.95);
     if (p50 == null) return '暂无首帧数据';
-    return 'p50 ${p50.toStringAsFixed(0)}ms · p95 ${p95.toStringAsFixed(0)}ms';
+    final p50s = p50.toStringAsFixed(0);
+    final p95s = p95?.toStringAsFixed(0) ?? '-';
+    return 'p50 ${p50s}ms · p95 ${p95s}ms';
   }
 
   String get _mbpsSummary {
@@ -404,7 +406,7 @@ class _QualityChartPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (series.isEmpty) {
       final tp = TextPainter(
-        text: TextSpan(text: '无数据', style: TextStyle(color: Colors.grey)),
+        text: const TextSpan(text: '无数据', style: TextStyle(color: Colors.grey)),
         textDirection: TextDirection.ltr,
       )..layout();
       tp.paint(canvas, Offset(size.width / 2 - tp.width / 2, size.height / 2 - tp.height / 2));
@@ -418,7 +420,7 @@ class _QualityChartPainter extends CustomPainter {
 
     // 网格
     final gridPaint = Paint()
-      ..color = Colors.grey.withOpacity(0.15)
+      ..color = Colors.grey.withValues(alpha: 0.15)
       ..strokeWidth = 1;
     for (var i = 0; i <= 4; i++) {
       final y = size.height * i / 4;
