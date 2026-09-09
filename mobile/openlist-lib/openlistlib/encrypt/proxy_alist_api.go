@@ -520,9 +520,6 @@ func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) 
 		"code":        200,
 		"playbacks":   plays,
 		"deletions":   dels,
-		"code":        200,
-		"playbacks":   plays,
-		"deletions":   dels,
 		"probe_stats": p.ProbeStatsSnapshot(),
 	})
 }
