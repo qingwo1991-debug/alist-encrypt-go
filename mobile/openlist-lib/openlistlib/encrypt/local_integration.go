@@ -135,10 +135,11 @@ func (p *ProxyServer) recordLocalV2Meta(providerURL, originalURL string, meta Co
 		cipherSize = meta.PlainSize + meta.HeaderLen
 	}
 	encryptedPath := originalURL
+	// 注意：只走 AddSizeV2Meta（它已把明文 size 一并写入同一行）。
+	// 不要额外 AddSize —— 两者共用同一条 upsert，AddSize 会用 0 覆盖
+	// content_version/ciphertext_size/header_len/nonce_field，导致重读时
+	// ContentVersion==0、lookup 恒 miss。
 	p.localStore.AddSizeV2Meta(key, providerHost, originalPath, encryptedPath, meta.PlainSize, cipherSize, meta.Version, meta.HeaderLen, meta.NonceField, time.Now())
-	if meta.PlainSize > 0 {
-		p.localStore.AddSize(key, providerHost, originalPath, meta.PlainSize, time.Now())
-	}
 }
 
 // lookupLocalV2Meta 从本地 SQLite 读取一条持久化的 V2 加密元数据。
