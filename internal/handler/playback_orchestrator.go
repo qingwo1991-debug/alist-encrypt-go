@@ -194,15 +194,17 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, result.ExpectedBytes)
 			if req.StatsRecorder != nil {
 				req.StatsRecorder.RecordPlayback(PlaybackEvent{
-					Path:         req.FileItem.DisplayPath,
-					Provider:     req.ProviderKey,
-					BytesServed:  result.BytesWritten,
-					TotalBytes:   size,
-					DurationSecs: result.WallDuration.Seconds(),
-					PlayedAt:     time.Now(),
-					Completed:    result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
-					ContentType:  result.ContentType,
-					RangeStart:   rangeStartFromHeader(r.Header.Get("Range")),
+					Path:            req.FileItem.DisplayPath,
+					Provider:        req.ProviderKey,
+					BytesServed:     result.BytesWritten,
+					TotalBytes:      size,
+					DurationSecs:    result.WallDuration.Seconds(),
+					PlayedAt:        time.Now(),
+					Completed:       result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
+					ContentType:     result.ContentType,
+					RangeStart:      rangeStartFromHeader(r.Header.Get("Range")),
+					HeaderLatencyMs: float64(result.HeaderLatency.Milliseconds()),
+					Mbps:            bytesPerSecToMbps(result.BytesPerSecond),
 				})
 			}
 			return true, "", nil
