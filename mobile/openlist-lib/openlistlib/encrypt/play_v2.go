@@ -977,6 +977,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	}
 	meta := LegacyContentMeta(encType, fileSize)
 	trustedRedirectMeta := false
+	// v2MetaFromSQLite 标记本次解密是否直接复用了 SQLite 持久化的 V2 元数据。
+	// 只有当它被真实解码时出现结构性失败（解密校验失败/流截断）才根据结果失效
+	// 该缓存 —— 结果论失效：能解密就对，失败就丢掉让下一次重探。
+	v2MetaFromSQLite := false
 	if cachedMeta, ok := redirectInfoContentMeta(info); ok {
 		meta = cachedMeta
 		trustedRedirectMeta = true
@@ -1007,6 +1011,47 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 					break
 				} else if cached.ContentVersion == ContentVersionV1 {
 					log.Debugf("[v2-cache] ignoring path-only V1 cache for encrypted playback path=%s (will inspect)", cacheKey)
+				}
+			}
+		}
+
+		// --- Check local SQLite for previously persisted V2 metadata ---
+		// The V2 header (headerLen/nonce/cipher sizes) of an unchanged file is
+		// constant across sessions. Snapshot it on first real INSPECT and reuse it
+		// here -- including after an app restart -- to skip redundant upstream probes.
+		if !cachedMetaLoaded {
+			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL, fileSize); ok {
+				meta = dbMeta
+				cachedMetaLoaded = true
+				v2MetaFromSQLite = true
+				log.Debugf("[v2-cache] loaded content meta from local sqlite: version=%d headerLen=%d plainSize=%d cipherSize=%d src=%s",
+					meta.Version, meta.HeaderLen, meta.PlainSize, meta.CiphertextSize, safeURLForLog(info.RedirectURL))
+				if displayPath != "" {
+					cacheInfo := &FileInfo{
+						Name:           path.Base(displayPath),
+						Size:           meta.PlainSize,
+						CiphertextSize: meta.CiphertextSize,
+						ContentVersion: meta.Version,
+						HeaderLen:      meta.HeaderLen,
+						NonceField:     cloneNonceField(meta.NonceField),
+						IsDir:          false,
+						Path:           displayPath,
+						RawURL:         info.RedirectURL,
+					}
+					for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
+						infoCopy := &FileInfo{
+							Name:           cacheInfo.Name,
+							Size:           cacheInfo.Size,
+							CiphertextSize: cacheInfo.CiphertextSize,
+							ContentVersion: cacheInfo.ContentVersion,
+							HeaderLen:      cacheInfo.HeaderLen,
+							NonceField:     cloneNonceField(cacheInfo.NonceField),
+							IsDir:          false,
+							Path:           cachePath,
+							RawURL:         cacheInfo.RawURL,
+						}
+						p.storeFileCache(cachePath, infoCopy)
+					}
 				}
 			}
 		}
@@ -1064,6 +1109,13 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 				}
 				log.Debugf("[v2-cache] cached inspection result: path=%s version=%d plainSize=%d cipherSize=%d",
 					displayPath, meta.Version, meta.PlainSize, meta.CiphertextSize)
+			}
+			// Persist inspection result to local SQLite so a later session
+			// (including after app restart) can skip the upstream probe entirely.
+			if meta.Version > 0 && meta.PlainSize > 0 {
+				p.recordLocalV2Meta(info.RedirectURL, info.OriginalURL, meta)
+				log.Debugf("[v2-cache] persisted content meta to local sqlite: version=%d plainSize=%d cipherSize=%d",
+					meta.Version, meta.PlainSize, meta.CiphertextSize)
 			}
 			if redirectKey != "" && meta.Version > 0 {
 				updated := cloneRedirectInfo(info)
@@ -1423,6 +1475,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		encryptor, err = NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, fileSize)
 	}
 	if err != nil {
+		if v2MetaFromSQLite {
+			p.invalidateLocalV2Meta(info.RedirectURL, info.OriginalURL)
+		}
 		return &StreamOutcome{Err: err, FailureReason: "decrypt_validation_failed", Retryable: false}
 	}
 
@@ -1555,6 +1610,11 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			err = fmt.Errorf("decrypted stream truncated: wrote %d of %d bytes: %w", written, expectedLength, io.ErrUnexpectedEOF)
 			log.Warnf("V2 redirect stream truncated: url=%s strategy=%s written=%d expected=%d ctxErr=%v",
 				safeURLForLog(info.RedirectURL), strategy, written, expectedLength, ctxErr)
+			// 结果论失效：解密结果长度与预期不符（文件被替换/元数据过期），
+			// 若本次复用了 SQLite 持久化元数据则按结果丢弃，让下一次请求重探。
+			if v2MetaFromSQLite {
+				p.invalidateLocalV2Meta(info.RedirectURL, info.OriginalURL)
+			}
 		}
 		return &StreamOutcome{Err: err, FailureReason: "stream_truncated", Retryable: true, ResponseStarted: true}
 	}

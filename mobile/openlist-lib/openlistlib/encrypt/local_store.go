@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,6 +30,9 @@ type storeRecordKind int
 const (
 	recordKindSize storeRecordKind = iota
 	recordKindStrategy
+	// recordKindSizeV2 把一次真实 INSPECT 得到的 V2 加密元数据（不只 size）落库，
+	// 供重启后直接复用，避免每次冷启动重新探测上游。
+	recordKindSizeV2
 	recordKindFullMeta
 )
 
@@ -55,8 +59,14 @@ type storeRecord struct {
 	networkType  string
 	strategy     StreamStrategy
 	size         int64
-	accessedAt   time.Time
-	prewarm      *prewarmMeta
+	// V2 加密元数据（仅 recordKindSizeV2 使用）
+	ciphertextSize int64
+	contentVersion int
+	headerLen      int64
+	nonceField     []byte
+	encryptedPath  string
+	accessedAt     time.Time
+	prewarm        *prewarmMeta
 }
 
 type localStore struct {
@@ -494,6 +504,32 @@ func (s *localStore) AddSize(key, providerHost, originalPath string, size int64,
 	})
 }
 
+// AddSizeV2Meta 记录一次真实 INSPECT 的 V2 加密元数据到本地 SQLite。
+// plainSize 为解密后的明文大小；ciphertextSize/version/headerLen/nonceField
+// 为 V2 头探测确认的元数据。落库后 play_v2 在下次（含重启后）播放同一
+// 文件时可直接复用，跳过上游探测。
+func (s *localStore) AddSizeV2Meta(key, providerHost, originalPath, encryptedPath string, plainSize, ciphertextSize int64, version int, headerLen int64, nonceField []byte, accessedAt time.Time) {
+	if s == nil || key == "" || plainSize <= 0 || providerHost == "" || originalPath == "" {
+		return
+	}
+	if GetNetworkState() == NetworkStateOffline {
+		return
+	}
+	s.enqueue(storeRecord{
+		kind:           recordKindSizeV2,
+		key:            key,
+		providerHost:   providerHost,
+		originalPath:   originalPath,
+		encryptedPath:  encryptedPath,
+		size:           plainSize,
+		ciphertextSize: ciphertextSize,
+		contentVersion: version,
+		headerLen:      headerLen,
+		nonceField:     append([]byte(nil), nonceField...),
+		accessedAt:     accessedAt,
+	})
+}
+
 // AddFullMeta 记录带完整元数据的文件观测（名称、加密路径、密文尺寸、头长度、
 // 随机数等）。与 AddSize 走同一张 local_media_size 表，靠 key 冲突后逐列覆盖
 // 已有信息。供目录列表预热/探测等"已知更多元数据"的写入路径使用。
@@ -673,8 +709,24 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 	for _, record := range batch {
 		ts := record.accessedAt.Unix()
 		switch record.kind {
-		case recordKindSize:
-			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, "", "", record.size, 0, 0, 0, nil, "", "", 0, ts, ts); err != nil {
+		case recordKindSize, recordKindSizeV2:
+			// recordKindSizeV2 带 V2 加密元数据落库（跳过重启后重新探测）；
+			// recordKindSize 填零占位，保持两者共用同一插入语句。
+			name := ""
+			encryptedPath := ""
+			ciphertextSize, contentVersion, headerLen, nonceField := int64(0), 0, int64(0), []byte(nil)
+			if record.kind == recordKindSizeV2 {
+				name = path.Base(record.originalPath)
+				encryptedPath = record.encryptedPath
+				ciphertextSize = record.ciphertextSize
+				contentVersion = record.contentVersion
+				headerLen = record.headerLen
+				nonceField = record.nonceField
+			}
+			if _, err := insertSize.Exec(
+				record.key, record.providerHost, record.originalPath, encryptedPath, name,
+				record.size, ciphertextSize, contentVersion, headerLen, nonceField, "", "", 0, ts, ts,
+			); err != nil {
 				return err
 			}
 		case recordKindStrategy:
@@ -940,6 +992,18 @@ func (s *localStore) DeleteRangeCompat(key string) error {
 		return nil
 	}
 	_, err := s.db.Exec("DELETE FROM local_range_compat WHERE key = ?", key)
+	return err
+}
+
+// DeleteSize removes a persistent size/meta row for a key.
+// Used to invalidate stale V2 metadata after a decrypt/probe failure so the
+// next request re-inspects upstream (result-based invalidation), rather than
+// reusing bad metadata for an unchanged path.
+func (s *localStore) DeleteSize(key string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	_, err := s.db.Exec("DELETE FROM local_media_size WHERE key = ?", key)
 	return err
 }
 
