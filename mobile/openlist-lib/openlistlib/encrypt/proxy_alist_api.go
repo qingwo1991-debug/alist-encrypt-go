@@ -520,12 +520,12 @@ func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) 
 		"code":        200,
 		"playbacks":   plays,
 		"deletions":   dels,
-		"probe_stats": p.probeStatsSnapshot(),
+		"probe_stats": p.ProbeStatsSnapshot(),
 	})
 }
 
-// probeStatsSnapshot 返回进程内探测观测计数（供统计导出）。
-func (p *ProxyServer) probeStatsSnapshot() map[string]uint64 {
+// ProbeStatsSnapshot 返回进程内探测观测计数（供统计导出和 gomobile 调用）。
+func (p *ProxyServer) ProbeStatsSnapshot() map[string]uint64 {
 	if p == nil {
 		return map[string]uint64{
 			"v2_attempts": 0, "v2_success": 0, "dual_probe_attempts": dualProbeAttempts.Load(),
