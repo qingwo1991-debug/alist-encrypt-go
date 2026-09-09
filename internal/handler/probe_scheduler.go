@@ -382,23 +382,29 @@ func (ps *ProbeScheduler) Stats() map[string]interface{} {
 		queueCap = cap(ps.queue)
 	}
 	return map[string]interface{}{
-		"enabled":                   ps.enabled,
-		"workers":                   ps.workers,
-		"provider_limit":            ps.providerLimit,
-		"queue_len":                 queueLen,
-		"queue_cap":                 queueCap,
-		"enqueued_total":            atomic.LoadUint64(&ps.enqueuedTotal),
-		"dropped_total":             atomic.LoadUint64(&ps.droppedTotal),
-		"cooldown_skips":            atomic.LoadUint64(&ps.cooldownSkips),
-		"running_count":             atomic.LoadUint64(&ps.runningCount),
-		"files_discovered_total":    atomic.LoadUint64(&ps.filesDiscoveredTotal),
-		"files_queued_total":        atomic.LoadUint64(&ps.filesQueuedTotal),
-		"files_succeeded_total":     atomic.LoadUint64(&ps.filesSucceededTotal),
-		"files_failed_total":        atomic.LoadUint64(&ps.filesFailedTotal),
-		"files_skipped_total":       atomic.LoadUint64(&ps.filesSkippedTotal),
-		"files_raw_url_fetched":     atomic.LoadUint64(&ps.filesRawURLFetched),
-		"files_range_probed":        atomic.LoadUint64(&ps.filesRangeProbed),
-		"files_meta_persisted":      atomic.LoadUint64(&ps.filesMetaPersisted),
+		"enabled":                ps.enabled,
+		"workers":                ps.workers,
+		"provider_limit":         ps.providerLimit,
+		"queue_len":              queueLen,
+		"queue_cap":              queueCap,
+		"enqueued_total":         atomic.LoadUint64(&ps.enqueuedTotal),
+		"dropped_total":          atomic.LoadUint64(&ps.droppedTotal),
+		"cooldown_skips":         atomic.LoadUint64(&ps.cooldownSkips),
+		"running_count":          atomic.LoadUint64(&ps.runningCount),
+		"files_discovered_total": atomic.LoadUint64(&ps.filesDiscoveredTotal),
+		"files_queued_total":     atomic.LoadUint64(&ps.filesQueuedTotal),
+		"files_succeeded_total":  atomic.LoadUint64(&ps.filesSucceededTotal),
+		"files_failed_total":     atomic.LoadUint64(&ps.filesFailedTotal),
+		"files_skipped_total":    atomic.LoadUint64(&ps.filesSkippedTotal),
+		"files_raw_url_fetched":  atomic.LoadUint64(&ps.filesRawURLFetched),
+		"files_range_probed":     atomic.LoadUint64(&ps.filesRangeProbed),
+		"files_meta_persisted":   atomic.LoadUint64(&ps.filesMetaPersisted),
+		// unique_warmed_files 是去重口径：同一个真实文件无论被轮询/
+		// 重探多少次，只计一次（key=displayPath 的 successfulWarm map 大小）。
+		// 面板上 files_discovered_total/queued/succeeded 等都是“累计操作次数”，
+		// 同一文件被多轮 PROPFIND/dir_sync 重复触发会反复 +1，远大于真实文件数，
+		// 必须配 unique_warmed_files 一起看才不会被误导。
+		"unique_warmed_files":       ps.uniqueWarmFileCount(),
 		"consumer_hit_total":        atomic.LoadUint64(&ps.consumerHitTotal),
 		"consumer_hit_rate":         ps.consumerHitRate(),
 		"last_success_at":           formatProbeTimestamp(atomic.LoadInt64(&ps.lastSuccessAtUnixNano)),
@@ -884,6 +890,22 @@ func (ps *ProbeScheduler) snapshotWarmStateCounts() map[string]uint64 {
 		}
 	}
 	return out
+}
+
+// uniqueWarmFileCount reports the number of distinct files that have ever
+// reached a successful warm state (key = displayPath), regardless of how many
+// probe attempts/rounds were recorded for each. This is the de-duplicated
+// counterpart to the raw attempt counters (files_discovered_total & co.),
+// which count events and inflate when the same file is re-enqueued across
+// PROPFIND/dir_sync rounds.
+func (ps *ProbeScheduler) uniqueWarmFileCount() uint64 {
+	if ps == nil {
+		return 0
+	}
+	ps.ensureRecordState()
+	ps.recordMu.Lock()
+	defer ps.recordMu.Unlock()
+	return uint64(len(ps.successfulWarm))
 }
 
 func (ps *ProbeScheduler) snapshotWarmStates() []ProbeWarmSnapshot {
