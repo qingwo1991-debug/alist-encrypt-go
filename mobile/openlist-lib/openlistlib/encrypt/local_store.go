@@ -33,7 +33,23 @@ const (
 	// recordKindSizeV2 把一次真实 INSPECT 得到的 V2 加密元数据（不只 size）落库，
 	// 供重启后直接复用，避免每次冷启动重新探测上游。
 	recordKindSizeV2
+	recordKindFullMeta
 )
+
+// prewarmMeta is the optional full metadata payload attached to a
+// recordKindFullMeta record. Only the fields with a usable value are written;
+// zero/empty fields keep the previous row values via the ON CONFLICT upsert.
+type prewarmMeta struct {
+	encryptedPath     string
+	name              string
+	ciphertextSize    int64
+	contentVersion    int
+	headerLen         int64
+	nonceField        []byte
+	rawURL            string
+	sign              string
+	upstreamFetchedAt int64
+}
 
 type storeRecord struct {
 	kind         storeRecordKind
@@ -50,6 +66,7 @@ type storeRecord struct {
 	nonceField     []byte
 	encryptedPath  string
 	accessedAt     time.Time
+	prewarm        *prewarmMeta
 }
 
 type localStore struct {
@@ -513,6 +530,30 @@ func (s *localStore) AddSizeV2Meta(key, providerHost, originalPath, encryptedPat
 	})
 }
 
+// AddFullMeta 记录带完整元数据的文件观测（名称、加密路径、密文尺寸、头长度、
+// 随机数等）。与 AddSize 走同一张 local_media_size 表，靠 key 冲突后逐列覆盖
+// 已有信息。供目录列表预热/探测等"已知更多元数据"的写入路径使用。
+func (s *localStore) AddFullMeta(key, providerHost, originalPath string, size int64, meta *prewarmMeta, accessedAt time.Time) {
+	if s == nil || key == "" || providerHost == "" || originalPath == "" || size < 0 {
+		return
+	}
+	if GetNetworkState() == NetworkStateOffline {
+		return
+	}
+	if meta == nil {
+		meta = &prewarmMeta{}
+	}
+	s.enqueue(storeRecord{
+		kind:         recordKindFullMeta,
+		key:          key,
+		providerHost: providerHost,
+		originalPath: originalPath,
+		size:         size,
+		accessedAt:   accessedAt,
+		prewarm:      meta,
+	})
+}
+
 func (s *localStore) AddStrategy(key, providerHost, originalPath, networkType string, strategy StreamStrategy, accessedAt time.Time) {
 	if s == nil || key == "" || providerHost == "" || originalPath == "" || networkType == "" || strategy == "" {
 		return
@@ -690,6 +731,27 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 			}
 		case recordKindStrategy:
 			if _, err := insertStrategy.Exec(record.key, record.networkType, record.strategy, record.providerHost, record.originalPath, ts, ts); err != nil {
+				return err
+			}
+		case recordKindFullMeta:
+			pm := record.prewarm
+			var encryptedPath, name, rawURL, sign string
+			var ciphertextSize, headerLen int64
+			var contentVersion int
+			var nonce []byte
+			var upstreamFetchedAt int64
+			if pm != nil {
+				encryptedPath = pm.encryptedPath
+				name = pm.name
+				ciphertextSize = pm.ciphertextSize
+				contentVersion = pm.contentVersion
+				headerLen = pm.headerLen
+				nonce = cloneNonceField(pm.nonceField)
+				rawURL = pm.rawURL
+				sign = pm.sign
+				upstreamFetchedAt = pm.upstreamFetchedAt
+			}
+			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, encryptedPath, name, record.size, ciphertextSize, contentVersion, headerLen, nonce, rawURL, sign, upstreamFetchedAt, ts, ts); err != nil {
 				return err
 			}
 		}
