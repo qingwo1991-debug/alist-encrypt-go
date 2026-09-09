@@ -189,6 +189,50 @@ func (p *ProxyServer) lookupLocalV2Meta(providerURL, originalURL string, current
 	return meta, true
 }
 
+// invalidateLocalV2Meta 使某条持久化的 V2 元数据失效：删除 SQLite 行并清空
+// 内存 fileCache/redirectCache 中与该文件相关的条目，迫使下一次播放重新
+// 走真实 INSPECT 覆盖。这是"以结果论"失效的落地点 —— 当使用持久化元数据
+// 解密后发生结构性失败（流截断/解密校验失败）时调用，宁可下次重探一次
+// 上游，也不让过期元数据持续解错文件。
+func (p *ProxyServer) invalidateLocalV2Meta(providerURL, originalURL string) {
+	if p == nil {
+		return
+	}
+	if p.localStore != nil {
+		key, _, _, ok := p.localKeyFromURLs(providerURL, originalURL)
+		if ok {
+			if err := p.localStore.DeleteSize(key); err != nil {
+				log.Warnf("[v2-cache] invalidate delete size failed key=%q err=%v", safeURLForLog(originalURL), err)
+			}
+		}
+	}
+	// 内存态也要清：同一路径的 fileCache 变体（redirectCache 是短 TTL 的
+	// 临时缓存，条目带随机 redirect key、自然过期，无需精确逐条删除）。
+	p.clearPlaybackMetaCaches(originalURL)
+	log.Infof("[v2-cache] invalidated local V2 meta: path=%s", safeURLForLog(originalURL))
+}
+
+// clearPlaybackMetaCaches 删除某路径在内存 fileCache 中所有缓存的 V2 元数据
+// 变体（displayPath 的多个前缀变体由 record/cache 回填），保证下一次请求
+// 不再从内存态读到旧 meta。
+func (p *ProxyServer) clearPlaybackMetaCaches(originalURL string) {
+	if p == nil {
+		return
+	}
+	displayPath := originalURL
+	if displayPath != "" {
+		if u, err := url.Parse(displayPath); err == nil && u.Path != "" {
+			displayPath = u.Path
+		}
+		p.ensureRuntimeCaches()
+		for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
+			if p.fileCache != nil {
+				p.fileCache.Delete(cachePath)
+			}
+		}
+	}
+}
+
 // recordPlaybackStats 记录一次真实播放（有字节写出）到本地统计。
 // displayPath 为明文展示路径；provider 为归一化 provider host。
 // durationSecs 为该次流式写出的墙钟耗时（近似播放时长）：首播=拉流耗时，

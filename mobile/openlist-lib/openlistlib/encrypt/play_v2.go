@@ -977,6 +977,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	}
 	meta := LegacyContentMeta(encType, fileSize)
 	trustedRedirectMeta := false
+	// v2MetaFromSQLite 标记本次解密是否直接复用了 SQLite 持久化的 V2 元数据。
+	// 只有当它被真实解码时出现结构性失败（解密校验失败/流截断）才根据结果失效
+	// 该缓存 —— 结果论失效：能解密就对，失败就丢掉让下一次重探。
+	v2MetaFromSQLite := false
 	if cachedMeta, ok := redirectInfoContentMeta(info); ok {
 		meta = cachedMeta
 		trustedRedirectMeta = true
@@ -1019,6 +1023,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL, fileSize); ok {
 				meta = dbMeta
 				cachedMetaLoaded = true
+				v2MetaFromSQLite = true
 				log.Debugf("[v2-cache] loaded content meta from local sqlite: version=%d headerLen=%d plainSize=%d cipherSize=%d src=%s",
 					meta.Version, meta.HeaderLen, meta.PlainSize, meta.CiphertextSize, safeURLForLog(info.RedirectURL))
 				if displayPath != "" {
@@ -1470,6 +1475,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		encryptor, err = NewFlowEncryptor(info.PasswdInfo.Password, info.PasswdInfo.EncType, fileSize)
 	}
 	if err != nil {
+		if v2MetaFromSQLite {
+			p.invalidateLocalV2Meta(info.RedirectURL, info.OriginalURL)
+		}
 		return &StreamOutcome{Err: err, FailureReason: "decrypt_validation_failed", Retryable: false}
 	}
 
@@ -1602,6 +1610,11 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			err = fmt.Errorf("decrypted stream truncated: wrote %d of %d bytes: %w", written, expectedLength, io.ErrUnexpectedEOF)
 			log.Warnf("V2 redirect stream truncated: url=%s strategy=%s written=%d expected=%d ctxErr=%v",
 				safeURLForLog(info.RedirectURL), strategy, written, expectedLength, ctxErr)
+			// 结果论失效：解密结果长度与预期不符（文件被替换/元数据过期），
+			// 若本次复用了 SQLite 持久化元数据则按结果丢弃，让下一次请求重探。
+			if v2MetaFromSQLite {
+				p.invalidateLocalV2Meta(info.RedirectURL, info.OriginalURL)
+			}
 		}
 		return &StreamOutcome{Err: err, FailureReason: "stream_truncated", Retryable: true, ResponseStarted: true}
 	}

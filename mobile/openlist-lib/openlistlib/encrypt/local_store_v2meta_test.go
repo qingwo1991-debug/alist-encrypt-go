@@ -145,12 +145,23 @@ func TestLookupLocalV2MetaStaleSizeRejected(t *testing.T) {
 	}
 
 	// 同 path 密文大小变为 2000 → 文件被替换，旧 meta 必须被拒绝。
-	if meta, ok := server.lookupLocalV2Meta(providerURL, originalURL, 2000); ok {
+	if meta, ok := server.lookupLocalV2Meta(providerURL, originalPath, 2000); ok {
 		t.Fatalf("expected stale meta rejected on size mismatch, got meta=%+v", meta)
 	}
 
 	// 同 path 密文大小一致（1060）→ 命中复用。
-	if _, ok := server.lookupLocalV2Meta(providerURL, originalURL, 1060); !ok {
+	if _, ok := server.lookupLocalV2Meta(providerURL, originalPath, 1060); !ok {
 		t.Fatalf("expected meta hit when ciphertext size matches")
+	}
+
+	// 结果失效：使持久化 meta 失效后，即使大小一致也应 miss（下次真探）。
+	server.invalidateLocalV2Meta(providerURL, originalPath)
+	if _, ok := server.lookupLocalV2Meta(providerURL, originalPath, 1060); ok {
+		t.Fatalf("expected meta miss after invalidateLocalV2Meta")
+	}
+	if dbKey, _, _, ok := server.localKeyFromURLs(providerURL, originalPath); !ok {
+		t.Fatalf("localKeyFromURLs failed")
+	} else if _, ok := store.GetFileMeta(dbKey); ok {
+		t.Fatalf("expected DB row deleted after invalidateLocalV2Meta")
 	}
 }

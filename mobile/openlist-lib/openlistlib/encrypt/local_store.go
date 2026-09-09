@@ -933,6 +933,18 @@ func (s *localStore) DeleteRangeCompat(key string) error {
 	return err
 }
 
+// DeleteSize removes a persistent size/meta row for a key.
+// Used to invalidate stale V2 metadata after a decrypt/probe failure so the
+// next request re-inspects upstream (result-based invalidation), rather than
+// reusing bad metadata for an unchanged path.
+func (s *localStore) DeleteSize(key string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	_, err := s.db.Exec("DELETE FROM local_media_size WHERE key = ?", key)
+	return err
+}
+
 func (s *localStore) LoadRangeProbeTargets() (map[string]rangeProbeTarget, error) {
 	if s == nil || s.db == nil {
 		return map[string]rangeProbeTarget{}, nil
