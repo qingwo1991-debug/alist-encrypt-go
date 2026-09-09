@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -78,6 +79,8 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 		log.Infof("[v2-inspect] skipped: p=%v encPath=%v enable=%v target=%q", p != nil, encPath != nil, encPath != nil && encPath.Enable, safeURLForLog(target))
 		return meta, false
 	}
+	// 观测：一次 V2 元数据探测流程（Range 头请求）。无论成败都计数。
+	atomic.AddUint64(&p.probeV2Attempts, 1)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -184,6 +187,7 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 		if parsed, ok, err := ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
 			log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
 				safeURLForLog(currentURL), parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
+			atomic.AddUint64(&p.probeV2Success, 1)
 			return parsed, true
 		} else {
 			log.Infof("[v2-inspect] header not detected: target=%s encType=%q prefixLen=%d status=%d contentRange=%q ok=%v parseErr=%v first6=%x",
@@ -192,6 +196,7 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 				return meta, false
 			}
 		}
+		atomic.AddUint64(&p.probeV2Success, 1)
 		return meta, true
 	}
 	return meta, false

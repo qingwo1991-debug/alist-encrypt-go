@@ -25,6 +25,7 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
   String? _error;
   List<dynamic> _playbacks = [];
   List<dynamic> _deletions = [];
+  Map<String, dynamic> _probeStats = {};
 
   @override
   void initState() {
@@ -116,10 +117,12 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
           : <String, dynamic>{};
       final plays = root['playbacks'] as List<dynamic>? ?? [];
       final dels = root['deletions'] as List<dynamic>? ?? [];
+      final probeStats = root['probe_stats'] as Map<String, dynamic>? ?? {};
       if (mounted) {
         setState(() {
           _playbacks = plays;
           _deletions = dels;
+          _probeStats = probeStats;
           _exporting = false;
         });
         log('播放统计导出：播放 ${plays.length} 条，删除 ${dels.length} 条');
@@ -164,6 +167,58 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
     final d = DateTime.fromMillisecondsSinceEpoch(t * 1000);
     String p(int v) => v.toString().padLeft(2, '0');
     return '${d.year}-${p(d.month)}-${p(d.day)} ${p(d.hour)}:${p(d.minute)}';
+  }
+
+  // 首帧/速率可观测：从已导出的播放记录算摘要 + 序列。
+  List<Map<String, dynamic>> get _latencySeries {
+    final rows = <Map<String, dynamic>>[];
+    for (final p in _playbacks) {
+      final lat = (p['header_latency_ms'] as num?)?.toDouble() ?? 0;
+      if (lat > 0) rows.add({'t': p, 'v': lat});
+    }
+    rows.sort((a, b) => ((a['t']['played_at'] ?? 0) as num)
+        .compareTo(((b['t']['played_at'] ?? 0) as num)));
+    return rows.length > 200 ? rows.sublist(rows.length - 200) : rows;
+  }
+
+  List<Map<String, dynamic>> get _mbpsSeries {
+    final list = <Map<String, dynamic>>[];
+    for (final p in _playbacks) {
+      final mb = (p['mbps'] as num?)?.toDouble() ?? 0;
+      if (mb > 0) list.add({'t': p, 'v': mb});
+    }
+    list.sort((a, b) => ((a['t']['played_at'] ?? 0) as num)
+        .compareTo(((b['t']['played_at'] ?? 0) as num)));
+    return list.length > 200 ? list.sublist(list.length - 200) : list;
+  }
+
+  double? _percentile(List<double> sorted, double q) {
+    if (sorted.isEmpty) return null;
+    final idx = (q * (sorted.length - 1)).round().clamp(0, sorted.length - 1);
+    return sorted[idx];
+  }
+
+  String get _latencySummary {
+    final vs = _latencySeries.map((e) => e['v'] as double).toList()..sort();
+    final p50 = _percentile(vs, 0.5);
+    final p95 = _percentile(vs, 0.95);
+    if (p50 == null) return '暂无首帧数据';
+    return 'p50 ${p50.toStringAsFixed(0)}ms · p95 ${p95.toStringAsFixed(0)}ms';
+  }
+
+  String get _mbpsSummary {
+    final vs = _mbpsSeries.map((e) => e['v'] as double).toList();
+    if (vs.isEmpty) return '暂无速率数据';
+    return '峰值 ${vs.reduce((a, b) => a > b ? a : b).toStringAsFixed(1)} MiB/s';
+  }
+
+  String _fmtObs(Map<String, dynamic> p) {
+    final lat = (p['header_latency_ms'] as num?)?.toDouble() ?? 0;
+    final mb = (p['mbps'] as num?)?.toDouble() ?? 0;
+    final buf = StringBuffer();
+    if (lat > 0) buf.write(' · 首帧${lat.toStringAsFixed(0)}ms');
+    if (mb > 0) buf.write(' · ${mb.toStringAsFixed(1)}MiB/s');
+    return buf.toString();
   }
 
   @override
@@ -228,6 +283,64 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
                     ),
                   ),
                 if (_playbacks.isNotEmpty || _deletions.isNotEmpty) ...[
+                  // 探测次数卡：V2 元数据探测 + 双网络 RTT 探测
+                  if (_probeStats.isNotEmpty)
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('探测次数', style: theme.textTheme.titleMedium),
+                            const SizedBox(height: 8),
+                            Text(
+                              'V2 头探测 ${_probeStats['v2_attempts'] ?? 0} 次'
+                              '（成功 ${_probeStats['v2_success'] ?? 0}） · '
+                              '双网络 RTT 探测 ${_probeStats['dual_probe_attempts'] ?? 0} 次',
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+                  // 首帧/速率可观测卡片（canvas 自绘，零新依赖）
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text('首帧耗时 · $_latencySummary',
+                              style: theme.textTheme.titleMedium),
+                          const SizedBox(height: 6),
+                          SizedBox(
+                            height: 96,
+                            child: CustomPaint(
+                              painter: _QualityChartPainter(
+                                  series: _latencySeries,
+                                  color: const Color(0xFF409EFF),
+                                  label: 'ms'),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Text('下行速率 · $_mbpsSummary',
+                              style: theme.textTheme.titleMedium),
+                          const SizedBox(height: 6),
+                          SizedBox(
+                            height: 96,
+                            child: CustomPaint(
+                              painter: _QualityChartPainter(
+                                  series: _mbpsSeries,
+                                  color: const Color(0xFF67C23A),
+                                  label: 'MiB/s'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
                   Text('播放记录（${_playbacks.length}）',
                       style: theme.textTheme.titleMedium),
                   const SizedBox(height: 8),
@@ -241,7 +354,8 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
                           ),
                           subtitle: Text(
                             '${p['provider'] ?? '-'} · ${_fmtDuration(p['duration_secs'])} · '
-                            'seek ${p['seek_count'] ?? 0} · ${_fmtBytes(p['bytes_served'])}',
+                            'seek ${p['seek_count'] ?? 0} · ${_fmtBytes(p['bytes_served'])}'
+                            '${_fmtObs(p)}',
                           ),
                           trailing: Text(
                             _fmtTime(p['played_at']),
@@ -270,5 +384,79 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
               ],
             ),
     );
+  }
+}
+
+/// 播放质量折线图 painter（canvas 自绘，零外部依赖）。
+/// series 元素: {'t': 播放记录 map(取 played_at), 'v': 数值}。
+class _QualityChartPainter extends CustomPainter {
+  _QualityChartPainter({
+    required this.series,
+    required this.color,
+    required this.label,
+  });
+
+  final List<Map<String, dynamic>> series;
+  final Color color;
+  final String label;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (series.isEmpty) {
+      final tp = TextPainter(
+        text: TextSpan(text: '无数据', style: TextStyle(color: Colors.grey)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(size.width / 2 - tp.width / 2, size.height / 2 - tp.height / 2));
+      return;
+    }
+    final maxV = series.map((e) => e['v'] as double).reduce((a, b) => a > b ? a : b);
+    if (maxV <= 0) return;
+    final t0 = (series.first['t']['played_at'] as num).toInt();
+    final t1 = (series.last['t']['played_at'] as num).toInt();
+    final span = (t1 - t0) <= 0 ? 1 : (t1 - t0);
+
+    // 网格
+    final gridPaint = Paint()
+      ..color = Colors.grey.withOpacity(0.15)
+      ..strokeWidth = 1;
+    for (var i = 0; i <= 4; i++) {
+      final y = size.height * i / 4;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+
+    // 折线
+    final linePaint = Paint()
+      ..color = color
+      ..strokeWidth = 1.6
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final points = <Offset>[];
+    for (final e in series) {
+      final t = (e['t']['played_at'] as num).toInt();
+      final x = (t - t0) / span * size.width;
+      final y = size.height * (1 - (e['v'] as double) / maxV);
+      points.add(Offset(x, y.clamp(0, size.height).toDouble()));
+    }
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final p in points.skip(1)) {
+      path.lineTo(p.dx, p.dy);
+    }
+    canvas.drawPath(path, linePaint);
+
+    // 最大标签
+    final tp = TextPainter(
+      text: TextSpan(
+        text: '${maxV.toStringAsFixed(1)} $label',
+        style: const TextStyle(color: Colors.grey, fontSize: 11),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(4, 2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _QualityChartPainter oldDelegate) {
+    return oldDelegate.series != series || oldDelegate.color != color;
   }
 }

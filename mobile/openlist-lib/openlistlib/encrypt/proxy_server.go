@@ -108,6 +108,9 @@ type ProxyServer struct {
 	probeHTTPStats      upstreamHTTPStats
 	streamHTTPStats     upstreamHTTPStats
 	playFirstCount      uint64
+	probeV2Attempts     uint64 // V2 元数据 inspect（Range 头探测）发起次数
+	probeV2Success      uint64 // V2 inspect 成功确认次数
+	probeDualAttempts   uint64 // 双网络 RTT 主动探测发起次数
 	strategySelector    *StrategySelector
 	uploadMetaMu        sync.Mutex
 	uploadMeta          map[string]uploadMetaEntry

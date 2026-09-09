@@ -1585,6 +1585,8 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	if cache := p.decryptedBlockCache; cache != nil {
 		streamSource = newDecryptedCacheReader(decryptReader, cache, p.decryptedCacheBaseKey(info, meta), streamStart)
 	}
+	// 响应头就绪时刻：首帧可观测（播放器感知的"首帧前卡顿"≈这里减去请求发起）。
+	headersReadyAt := time.Now()
 	w.WriteHeader(statusCode)
 
 	written, err := copyWithBuffer(w, streamSource)
@@ -1627,7 +1629,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		if provider == "" {
 			provider = ProviderKey(info.RedirectURL, "")
 		}
-		o.proxy.recordPlaybackStats(displayPath, provider, written, fileSize, written == expectedLength, "", time.Since(streamWallStart).Seconds(), startPos)
+		o.proxy.recordPlaybackStats(displayPath, provider, written, fileSize, written == expectedLength, "", time.Since(streamWallStart).Seconds(), startPos, float64(headersReadyAt.Sub(streamWallStart).Milliseconds()), bytesPerSecondToMbps(float64(written)/time.Since(streamWallStart).Seconds()))
 	}
 
 	return &StreamOutcome{StatusCode: statusCode}
@@ -1794,7 +1796,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 						provider = ProviderKey(info.RedirectURL, "")
 					}
 					// 缓存命中写出几乎瞬时，时长按 0 记：seek 语义由会话聚合的 seekCount 表达。
-					o.proxy.recordPlaybackStats(displayPath, provider, int64(len(data)), fileSize, true, "", 0, start)
+					o.proxy.recordPlaybackStats(displayPath, provider, int64(len(data)), fileSize, true, "", 0, start, 0, 0)
 				}
 				return
 			}
