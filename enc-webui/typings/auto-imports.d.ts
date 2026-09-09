@@ -39,6 +39,7 @@ declare global {
   const filterAsyncRoutesByRoles: typeof import('../src/hooks/use-permission.js').filterAsyncRoutesByRoles
   const freshRouter: typeof import('../src/hooks/use-permission.js').freshRouter
   const getAlistConfigReq: typeof import('../src/api/user.js').getAlistConfigReq
+  const getBuildInfoReq: typeof import('../src/api/user.js').getBuildInfoReq
   const getCurrentInstance: typeof import('vue').getCurrentInstance
   const getCurrentScope: typeof import('vue').getCurrentScope
   const getCurrentWatcher: typeof import('vue').getCurrentWatcher

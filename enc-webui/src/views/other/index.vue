@@ -131,7 +131,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { clearPlaybackStatsReq, getPlaybackStatsReq, getStatsReq } from '@/api/user'
+import { clearPlaybackStatsReq, getBuildInfoReq, getPlaybackStatsReq, getStatsReq } from '@/api/user'
 
 const buildInfo = reactive({})
 const runtime = reactive({
@@ -264,12 +264,16 @@ const fmtTime = (ts) => {
 const loadAll = async () => {
   refreshing.value = true
   try {
-    const res = await getStatsReq({ reqLoading: false })
-    const data = res?.data || {}
+    const [statsRes, buildRes] = await Promise.all([
+      getStatsReq({ reqLoading: false }),
+      getBuildInfoReq({ reqLoading: false })
+    ])
+    const data = statsRes?.data || {}
     runtime.uptime = data.uptime || ''
     runtime.sched = data.probe_scheduler || {}
     runtime.stream = data.stream || {}
     runtime.cache = data.cache || {}
+    Object.assign(buildInfo, buildRes?.data || {})
   } catch {
     /* silent */
   } finally {
