@@ -15,19 +15,19 @@ import (
 )
 
 type Store struct {
-	db                *sql.DB
-	flushInterval     time.Duration
-	cleanupInterval   time.Duration
-	cleanupDays       int
-	dirSnapCleanupDay int
-	disableCleanup    bool
-	strategyBuffer    *strategyBuffer
-	fileMetaBuffer    *fileMetaBuffer
-	rangeCompatBuffer *rangeCompatBuffer
-	cancelLoops       context.CancelFunc // cancels background flush/cleanup goroutines
-	loopWG            sync.WaitGroup
-	closeOnce         sync.Once
-	closeErr          error
+	db                 *sql.DB
+	flushInterval      time.Duration
+	cleanupInterval    time.Duration
+	cleanupDays        int
+	dirSnapCleanupDays int
+	disableCleanup     bool
+	strategyBuffer     *strategyBuffer
+	fileMetaBuffer     *fileMetaBuffer
+	rangeCompatBuffer  *rangeCompatBuffer
+	cancelLoops        context.CancelFunc // cancels background flush/cleanup goroutines
+	loopWG             sync.WaitGroup
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 var openDB = sql.Open
