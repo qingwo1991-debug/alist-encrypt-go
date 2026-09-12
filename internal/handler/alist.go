@@ -749,6 +749,29 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Cross-session reuse: a rotated/new auth scope that misses its own
+		// snapshot can still serve another of this same directory's fresh
+		// request_fill snapshots (same contents, different session hash),
+		// avoiding a ~1.5s rebuild per new token. Only request_fill rows are
+		// eligible — background scan snapshots may carry a privileged scan
+		// account and must not be served from this public endpoint.
+		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 {
+			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
+				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
+					h.serveSnapshot(w, snap, "snapshot-shared")
+					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
+						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
+					}
+					return
+				} else {
+					log.Warn().
+						Str("path", dirPath).
+						Str("cache_mode", "snapshot-shared").
+						Str("reason", reason).
+						Msg("Rejecting shared dir snapshot")
+				}
+			}
+		}
 		// Background scan snapshots are populated with the configured scan account,
 		// which may have broader permissions than the current caller. They are used
 		// for preheating and the authenticated dir-sync views only; serving one from
@@ -1527,13 +1550,13 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 			for i, name := range reqData.Names {
 				srcDisplayPath := path.Join(reqData.SrcDir, name)
 				dstDisplayPath := path.Join(reqData.DstDir, name)
-					// MOVE/COPY 覆盖 = 目标文件被删除。目标此前在缓存里（被列出/
-					// 播放过）才记：避免把"新建到不存在的路径"误记为删除。
-					if h.statsRecorder != nil {
-						if _, destExisted := h.fileDAO.Get(url.QueryEscape(dstDisplayPath)); destExisted {
-							h.statsRecorder.RecordDeletion(dstDisplayPath)
-						}
+				// MOVE/COPY 覆盖 = 目标文件被删除。目标此前在缓存里（被列出/
+				// 播放过）才记：避免把"新建到不存在的路径"误记为删除。
+				if h.statsRecorder != nil {
+					if _, destExisted := h.fileDAO.Get(url.QueryEscape(dstDisplayPath)); destExisted {
+						h.statsRecorder.RecordDeletion(dstDisplayPath)
 					}
+				}
 
 				// For move operations, delete the source cache entry
 				if isMove {

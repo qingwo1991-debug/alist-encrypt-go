@@ -15,7 +15,25 @@ func (s *Store) GetDirSnapshot(ctx context.Context, scopeKey string) (*DirSnapsh
 	if s == nil {
 		return nil, false, nil
 	}
-	row := s.db.QueryRowContext(ctx, "SELECT key_hash, scope_key, provider_host, display_path, auth_scope_hash, rule_version, item_count, stale, sync_state, last_sync_at, last_success_at, next_refresh_at, last_error, source_mode, payload_json, updated_at, last_accessed, is_active FROM "+TableName("dir_snapshot")+" WHERE key_hash=? AND is_active=1", DirSnapshotKeyHash(scopeKey))
+	return s.getAnySnapshotWhere(ctx, "key_hash=? AND is_active=1", DirSnapshotKeyHash(scopeKey))
+}
+
+// GetRequestFilledDirSnapshotByDisplay returns the most recently synced
+// request_fill snapshot for a display path regardless of auth scope. Callers
+// use it to serve a warm cache to a different/rotated session of the same
+// directory, avoiding a full rebuild per new token. Only source_mode
+// 'request_fill' rows are eligible (they carry the caller's own view, unlike
+// background scan snapshots which may use a privileged scan account).
+func (s *Store) GetRequestFilledDirSnapshotByDisplay(ctx context.Context, displayPath string) (*DirSnapshotRecord, bool, error) {
+	if s == nil {
+		return nil, false, nil
+	}
+	return s.getAnySnapshotWhere(ctx, "display_path=? AND is_active=1 AND source_mode='request_fill' AND item_count>0 ORDER BY last_sync_at DESC, updated_at DESC LIMIT 1", displayPath)
+}
+
+func (s *Store) getAnySnapshotWhere(ctx context.Context, where string, args ...interface{}) (*DirSnapshotRecord, bool, error) {
+	query := "SELECT key_hash, scope_key, provider_host, display_path, auth_scope_hash, rule_version, item_count, stale, sync_state, last_sync_at, last_success_at, next_refresh_at, last_error, source_mode, payload_json, updated_at, last_accessed, is_active FROM " + TableName("dir_snapshot") + " WHERE " + where
+	row := s.db.QueryRowContext(ctx, query, args...)
 	var rec DirSnapshotRecord
 	var stale, active int
 	var lastSyncAt, lastSuccessAt, nextRefreshAt sql.NullTime
