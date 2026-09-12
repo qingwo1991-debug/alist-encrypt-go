@@ -15,18 +15,19 @@ import (
 )
 
 type Store struct {
-	db                *sql.DB
-	flushInterval     time.Duration
-	cleanupInterval   time.Duration
-	cleanupDays       int
-	disableCleanup    bool
-	strategyBuffer    *strategyBuffer
-	fileMetaBuffer    *fileMetaBuffer
-	rangeCompatBuffer *rangeCompatBuffer
-	cancelLoops       context.CancelFunc // cancels background flush/cleanup goroutines
-	loopWG            sync.WaitGroup
-	closeOnce         sync.Once
-	closeErr          error
+	db                 *sql.DB
+	flushInterval      time.Duration
+	cleanupInterval    time.Duration
+	cleanupDays        int
+	dirSnapCleanupDays int
+	disableCleanup     bool
+	strategyBuffer     *strategyBuffer
+	fileMetaBuffer     *fileMetaBuffer
+	rangeCompatBuffer  *rangeCompatBuffer
+	cancelLoops        context.CancelFunc // cancels background flush/cleanup goroutines
+	loopWG             sync.WaitGroup
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 var openDB = sql.Open
@@ -92,16 +93,24 @@ func NewStore(cfg *config.Config) (*Store, error) {
 	if cleanupDays <= 0 {
 		cleanupDays = 30
 	}
+	dirSnapCleanupDays := cfg.Database.DirSnapshotCleanupDays
+	if dirSnapCleanupDays <= 0 {
+		// 未单独配置时,目录快照沿用通用清理窗口。
+		// 目录快照的 payload 是完整目录列表,体积通常远大于其它元数据表,
+		// 建议显式配置一个较短的保留天数以控制磁盘占用。
+		dirSnapCleanupDays = cleanupDays
+	}
 
 	store := &Store{
-		db:                db,
-		flushInterval:     flushInterval,
-		cleanupInterval:   cleanupInterval,
-		cleanupDays:       cleanupDays,
-		disableCleanup:    cfg.Database.DisableCleanup,
-		strategyBuffer:    newStrategyBuffer(),
-		fileMetaBuffer:    newFileMetaBuffer(),
-		rangeCompatBuffer: newRangeCompatBuffer(),
+		db:                 db,
+		flushInterval:      flushInterval,
+		cleanupInterval:    cleanupInterval,
+		cleanupDays:        cleanupDays,
+		dirSnapCleanupDays: dirSnapCleanupDays,
+		disableCleanup:     cfg.Database.DisableCleanup,
+		strategyBuffer:     newStrategyBuffer(),
+		fileMetaBuffer:     newFileMetaBuffer(),
+		rangeCompatBuffer:  newRangeCompatBuffer(),
 	}
 
 	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -236,7 +245,17 @@ func (s *Store) cleanup(ctx context.Context) error {
 	if err := s.markRangeCompatExpired(ctx, cutoff); err != nil {
 		return err
 	}
-	log.Debug().Time("cutoff", cutoff).Msg("MySQL cleanup complete")
+	// 目录快照是纯缓存:命中后由请求侧按需重建,删除旧行不影响功能与播放链路。
+	// 它的 payload 为完整目录列表,必须物理 DELETE 才能回收磁盘(软删不释放空间)。
+	snapCutoff := time.Now().Add(-time.Duration(s.dirSnapCleanupDays) * 24 * time.Hour)
+	if err := s.deleteExpiredDirSnapshots(ctx, snapCutoff); err != nil {
+		return err
+	}
+	// 按目录收敛:同目录不同会话会产生大量几乎相同的大体积副本,收敛为 scan + 最新一份。
+	if err := s.dedupeDirSnapshots(ctx); err != nil {
+		return err
+	}
+	log.Debug().Time("cutoff", cutoff).Time("snap_cutoff", snapCutoff).Msg("MySQL cleanup complete")
 	return nil
 }
 
