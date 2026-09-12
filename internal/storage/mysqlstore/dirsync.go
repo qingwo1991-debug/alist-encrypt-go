@@ -15,7 +15,7 @@ func (s *Store) GetDirSnapshot(ctx context.Context, scopeKey string) (*DirSnapsh
 	if s == nil {
 		return nil, false, nil
 	}
-	return s.getDirSnapshotWhere(ctx, "key_hash=? AND is_active=1", DirSnapshotKeyHash(scopeKey))
+	return s.getAnySnapshotWhere(ctx, "key_hash=? AND is_active=1", DirSnapshotKeyHash(scopeKey))
 }
 
 // GetRequestFilledDirSnapshotByDisplay returns the most recently synced
