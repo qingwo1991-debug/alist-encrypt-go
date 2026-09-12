@@ -245,3 +245,49 @@ func (s *Store) UpsertDirSyncStatus(ctx context.Context, rec DirSyncStatusRecord
 	)
 	return err
 }
+
+// deleteExpiredDirSnapshots 物理删除早于 cutoff 未再同步的目录快照。
+// dir_snapshot 是纯缓存(命中后按需重建),这里必须用 DELETE 才能真正回收磁盘,
+// 与 file_meta/strategy 等仅软删(is_active=0)的元数据表不同。
+func (s *Store) deleteExpiredDirSnapshots(ctx context.Context, cutoff time.Time) error {
+	if s == nil {
+		return nil
+	}
+	query := fmt.Sprintf("DELETE FROM %s WHERE last_sync_at IS NULL OR last_sync_at < ?", TableName("dir_snapshot"))
+	if _, err := s.db.ExecContext(ctx, query, cutoff); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dedupeDirSnapshots 将目录快照收敛为每个目录最多两条:
+// scan/background_scan 一条 + 最近一次普通请求快照一条。
+// 同一个目录会因不同会话/用户(scope_key 带 auth_scope_hash)产生大量内容几乎相同的副本,
+// 这是磁盘膨胀的大头(单人使用时同目录可达上百份)。收敛后:
+//   - scan/background_scan 行始终保留(scan 账号权限/内容可能与普通用户不同);
+//   - 每个目录保留 last_sync_at 最新的一条普通请求快照(用户实际打开目录命中的内容);
+//   - 同目录其余旧会话副本物理删除(命中时按需重建,不影响功能/播放)。
+//
+// 分区键包含 source_mode 折叠,避免把 scan 的"缩略/预览列表"误当成普通请求副本删除。
+func (s *Store) dedupeDirSnapshots(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	query := fmt.Sprintf(`DELETE FROM %[1]s WHERE key_hash IN (
+  SELECT key_hash FROM (
+    SELECT key_hash,
+           ROW_NUMBER() OVER (
+             PARTITION BY provider_host, display_path,
+               CASE WHEN source_mode IN ('scan','background_scan') THEN 0 ELSE 1 END
+             ORDER BY last_sync_at DESC
+           ) AS rn
+    FROM %[1]s
+    WHERE is_active = 1
+  ) ranked
+  WHERE rn > 1
+)`, TableName("dir_snapshot"))
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	return nil
+}

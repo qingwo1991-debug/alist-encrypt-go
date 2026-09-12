@@ -179,6 +179,10 @@ type DBConfig struct {
 	CleanupDays            int    `json:"cleanup_days"`
 	CleanupIntervalHours   int    `json:"cleanup_interval_hours"`
 	DisableCleanup         bool   `json:"disable_cleanup"`
+	// DirSnapshotCleanupDays 控制目录快照表(alist_encrypt_dir_snapshot)的物理清理天数。
+	// 目录快照占用的 payload_json 是完整目录列表,可能非常庞大,旧快照仅重新访问时才需要重建,
+	// 因此单独支持一个更短的保留窗口;为 0 时回退到 CleanupDays(default 30)。
+	DirSnapshotCleanupDays int `json:"dir_snapshot_cleanup_days"`
 }
 
 // Config represents the main configuration (compatible with Node.js version)
@@ -444,11 +448,12 @@ func DefaultConfig() *Config {
 			CleanupDays:            30,
 			CleanupIntervalHours:   24,
 			DisableCleanup:         false,
+			DirSnapshotCleanupDays: 30,
 		},
-		DataDir:        "./data",
-		JWTSecret:      "",
-		JWTExpire:      48,
-		StatsPassword:  "",
+		DataDir:       "./data",
+		JWTSecret:     "",
+		JWTExpire:     48,
+		StatsPassword: "",
 	}
 }
 
@@ -792,6 +797,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v, ok := getEnvBool("DB_DISABLE_CLEANUP"); ok {
 		c.Database.DisableCleanup = v
+	}
+	if v, ok := getEnvInt("DB_DIR_SNAPSHOT_CLEANUP_DAYS"); ok {
+		c.Database.DirSnapshotCleanupDays = v
 	}
 
 	if v, ok := getEnvBool("PROBE_ENABLE"); ok {
