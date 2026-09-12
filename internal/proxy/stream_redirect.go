@@ -108,8 +108,13 @@ func (s *StreamProxy) followRedirectDecrypt(w http.ResponseWriter, req *http.Req
 
 		nextResp, err := s.client.Do(newReq)
 		if err != nil {
-			cbGate.RecordFailure()
 			reason, retryable := classifyStreamError(err)
+			// Media players cancel the in-flight request when seeking. Treat that
+			// as client-side behavior, not an upstream failure, so it does not trip
+			// the per-host circuit breaker (which would break all HTTP playback).
+			if reason != "client_disconnect" {
+				cbGate.RecordFailure()
+			}
 			return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to follow redirect", err), FailureReason: reason, Retryable: retryable}
 		}
 

@@ -104,8 +104,14 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 		return nil
 	})
 	if doErr != nil {
-		cbGate.RecordFailure()
 		reason, retryable := classifyStreamError(doErr)
+		// Seeking cancels the in-flight request; classifyStreamError labels it
+		// client_disconnect. That is a client-side event, not an upstream
+		// failure, so it must not trip the per-host circuit breaker (otherwise
+		// a seek-heavy player trips the breaker and breaks all HTTP playback).
+		if reason != "client_disconnect" {
+			cbGate.RecordFailure()
+		}
 		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", doErr), FailureReason: reason, Retryable: retryable}
 	}
 	if isRedirectStatus(resp.StatusCode) {
@@ -177,8 +183,11 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	s.StripForeignHeaders(req)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		cbGate.RecordFailure()
 		reason, retryable := classifyStreamError(err)
+		// See first-Fetch guard: player seek cancellation must not trip the breaker.
+		if reason != "client_disconnect" {
+			cbGate.RecordFailure()
+		}
 		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", err), FailureReason: reason, Retryable: retryable}
 	}
 	if isRedirectStatus(resp.StatusCode) {

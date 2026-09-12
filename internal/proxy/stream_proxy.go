@@ -60,7 +60,11 @@ func (s *StreamProxy) ProxyRequest(w http.ResponseWriter, r *http.Request, targe
 		resp, doErr = s.client.Do(req)
 	}
 	if doErr != nil {
-		cbGate.RecordFailure()
+		// Client-side cancels (seek, navigation) must not trip the per-host
+		// breaker; only real upstream failures count toward the threshold.
+		if reason, _ := classifyStreamError(doErr); reason != "client_disconnect" {
+			cbGate.RecordFailure()
+		}
 		return errors.NewProxyErrorWithCause("failed to proxy request", doErr)
 	}
 	defer resp.Body.Close()
