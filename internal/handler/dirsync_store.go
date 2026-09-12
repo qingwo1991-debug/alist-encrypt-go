@@ -59,6 +59,7 @@ type DirSyncStatus struct {
 
 type DirSyncStore interface {
 	GetSnapshot(ctx context.Context, scopeKey string) (*DirListSnapshot, bool, error)
+	GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath string) (*DirListSnapshot, bool, error)
 	UpsertSnapshot(ctx context.Context, snap DirListSnapshot) error
 	CountSnapshots(ctx context.Context) (total, fresh, stale, syncing int64, err error)
 	GetStatus(ctx context.Context, name string) (*DirSyncStatus, bool, error)
@@ -67,6 +68,13 @@ type DirSyncStore interface {
 
 type BoltDirSyncStore struct {
 	store *storage.Store
+}
+
+// GetRequestFilledSnapshotByDisplay supports cross-session warm-cache reuse.
+// The bolt backend stores snapshots keyed by scope key only, so it cannot
+// enumerate by display path; return no result and let the live path rebuild.
+func (s *BoltDirSyncStore) GetRequestFilledSnapshotByDisplay(_ context.Context, _ string) (*DirListSnapshot, bool, error) {
+	return nil, false, nil
 }
 
 func NewBoltDirSyncStore(store *storage.Store) *BoltDirSyncStore {
@@ -167,6 +175,18 @@ func (s *MySQLDirSyncStore) GetSnapshot(ctx context.Context, scopeKey string) (*
 	if err != nil || !ok || rec == nil {
 		return nil, ok, err
 	}
+	return dirSnapshotRecordToSnapshot(rec), true, nil
+}
+
+func (s *MySQLDirSyncStore) GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath string) (*DirListSnapshot, bool, error) {
+	rec, ok, err := s.store.GetRequestFilledDirSnapshotByDisplay(ctx, displayPath)
+	if err != nil || !ok || rec == nil {
+		return nil, ok, err
+	}
+	return dirSnapshotRecordToSnapshot(rec), true, nil
+}
+
+func dirSnapshotRecordToSnapshot(rec *mysqlstore.DirSnapshotRecord) *DirListSnapshot {
 	return &DirListSnapshot{
 		ScopeKey:      rec.ScopeKey,
 		ProviderHost:  rec.ProviderHost,
@@ -184,7 +204,7 @@ func (s *MySQLDirSyncStore) GetSnapshot(ctx context.Context, scopeKey string) (*
 		PayloadJSON:   []byte(rec.PayloadJSON),
 		UpdatedAt:     rec.UpdatedAt,
 		LastAccessed:  rec.LastAccessed,
-	}, true, nil
+	}
 }
 
 func (s *MySQLDirSyncStore) UpsertSnapshot(ctx context.Context, snap DirListSnapshot) error {
