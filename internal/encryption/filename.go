@@ -15,7 +15,16 @@ import (
 )
 
 const (
-	// OrigPrefix marks files that failed decryption
+	// OrigPrefix marks files whose encrypted *filename* could not be decoded
+	// back to a plaintext display name (e.g. CRC-6 mismatch / invalid name).
+	//
+	// Important: this is a DISPLAY-LAYER marker only. It does NOT mean the file
+	// content failed to decrypt. Files imported from another instance (copied
+	// as-is) often carry a filename derived under a different password/encType,
+	// so DecodeName fails even though the V2 ciphertext body decrypts fine.
+	// The decrypt-playback pipeline keys on content headers, so such files are
+	// still served as decrypted plaintext on all entry points (/d, /p, /dav,
+	// redirect?decode=1); only the friendly display name is unavailable.
 	OrigPrefix = "orig_"
 	// Base64 source characters (URL-safe, no padding '=')
 	sourceChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~+"
