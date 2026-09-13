@@ -285,3 +285,42 @@ func BenchmarkPathCache_ConcurrentReadWrite(b *testing.B) {
 		}
 	})
 }
+
+// TestPathCache_StaleBareEncEntryStopsShieldingFreshMeta is a regression test
+// for the "clicked every time still slow" root cause: an initial Set with a
+// bare EncryptedPath (== display path, e.g. before the real encrypted name is
+// known) leaves a stale byEncPath mirror under the display key. A later Set
+// with the true encrypted path wrote ContentVersion via byDispPath, but
+// Get(displayPath) preferred the stale byEncPath mirror (ContentVersion=0),
+// so fs/get never reused the freshly persisted V1/V2 meta and re-probed on
+// every click. Set must drop that mirror when a real encrypted path is known.
+func TestPathCache_StaleBareMirrorDoesNotShieldFreshMeta(t *testing.T) {
+	cache := NewPathCache(4, 100)
+	display := "/legacy/video.mp4"
+	realEnc := "/legacy/video_enc.bin"
+
+	// Stage 1: fetchRawURL caches with EncryptedPath unset => bare mirror.
+	cache.Set(&PathEntry{
+		EncryptedPath:  display,
+		DisplayPath:    display,
+		Size:           4096,
+		ContentVersion: 0,
+	}, time.Hour)
+
+	// Stage 2: Inspector persists confirmed V1 meta with the real enc path.
+	cache.Set(&PathEntry{
+		EncryptedPath:  realEnc,
+		DisplayPath:    display,
+		Size:           4096,
+		HeaderLen:      0,
+		ContentVersion: 1,
+	}, time.Hour)
+
+	got, ok := cache.Get(display)
+	if !ok {
+		t.Fatal("expected Get(displayPath) to succeed")
+	}
+	if got.ContentVersion != 1 {
+		t.Fatalf("Get(displayPath).ContentVersion=%d, want 1 (stale by-enc mirror must not shield fresh meta)", got.ContentVersion)
+	}
+}

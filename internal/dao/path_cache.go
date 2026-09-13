@@ -110,6 +110,14 @@ func (c *PathCache) Set(entry *PathEntry, ttl time.Duration) {
 	if entry.DisplayPath != "" && entry.DisplayPath != entry.EncryptedPath {
 		dispShard := c.getShard(entry.DisplayPath)
 		dispShard.mu.Lock()
+		// A file that was initially cached with a bare EncryptedPath (no real
+		// encrypted name known yet) is present under its own display path in
+		// byEncPath. Once this entry gains a distinct encrypted path, drop that
+		// stale mirror so Get(displayPath) cannot resolve an old ContentVersion
+		// (e.g. ContentVersion=0) ahead of the fresher display-path entry.
+		if stale, ok := dispShard.byEncPath[entry.DisplayPath]; ok && stale != nil && stale != entry {
+			delete(dispShard.byEncPath, entry.DisplayPath)
+		}
 		dispShard.byDispPath[entry.DisplayPath] = entry
 		dispShard.mu.Unlock()
 	}

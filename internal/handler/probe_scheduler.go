@@ -343,7 +343,7 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 	}
 
 	key := probeCooldownKey(file)
-	reservedAt, skipStatus := ps.reserveProbe(key, ps.warmNeedsRefresh(file.DisplayPath))
+	reservedAt, skipStatus := ps.reserveProbe(key, ps.warmNeedsRefresh(file.DisplayPath) || ps.needsContentMeta(file))
 	if skipStatus != "" {
 		if skipStatus == probeStatusSkippedCD {
 			atomic.AddUint64(&ps.cooldownSkips, 1)
@@ -573,8 +573,14 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 			if item.file.PasswdInfo != nil && ps.stream != nil {
-				meta := ps.stream.InspectEncryptedContent(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
-				if meta.IsV2() && meta.PlainSize > 0 {
+				inspected := ps.stream.InspectEncryptedContentResult(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
+				meta := inspected.Meta
+				// Persist confirmed content meta for BOTH V1 (legacy) and V2.
+				// V1 meta (HeaderLen=0, PlainSize=CiphertextSize) is deterministic
+				// from its size and never needs an upstream probe again; V2 needs
+				// the header probe done here. Requiring Confirmed guards against
+				// caching a truncated/failed probe as a confirmed legacy file.
+				if inspected.Confirmed && meta.PlainSize > 0 {
 					cached := &dao.FileInfo{
 						Path:              item.file.DisplayPath,
 						EncryptedPath:     item.file.EncryptedPath,
@@ -727,6 +733,24 @@ func probeCooldownKey(file FileItem) string {
 		displayPath = strings.TrimSpace(file.EncryptedPath)
 	}
 	return provider + "::" + displayPath
+}
+
+func (ps *ProbeScheduler) needsContentMeta(file FileItem) bool {
+	if ps == nil || ps.fileDAO == nil || strings.TrimSpace(file.DisplayPath) == "" {
+		return false
+	}
+	info, ok := ps.fileDAO.Get(file.DisplayPath)
+	if !ok || info == nil {
+		// Nothing cached yet; the fresh probe path already covers this.
+		return false
+	}
+	// Have a cached entry with a previously-obtained raw URL but no confirmed
+	// content metadata yet (legacy V1 files skipped by the old IsV2-only
+	// persister, or a ContentVersion that was never filled). Bypass cooldown so
+	// the next listing re-probes and persists the meta, letting fs/get reuse it
+	// instead of re-probing on every click. Files whose raw fetch itself keeps
+	// failing keep their ordinary cooldown to avoid retry storms.
+	return info.ContentVersion <= 0 && strings.TrimSpace(info.RawURL) != ""
 }
 
 func (ps *ProbeScheduler) hasSuccessfulWarm(displayPath string) bool {

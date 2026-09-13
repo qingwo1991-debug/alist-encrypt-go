@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -602,5 +603,97 @@ func TestProbeSchedulerInvalidationReleasesCooldown(t *testing.T) {
 	ps.InvalidateWarm(file.DisplayPath, "upstream_4xx")
 	if ps.isCoolingDown(probeCooldownKey(file)) {
 		t.Fatal("invalidated warm state must not retain its cooldown")
+	}
+}
+
+// TestProbeSchedulerPersistsV1LegacyContentMeta is the regression test for the
+// "clicked every time still slow" bug: V1 (legacy, no header) files were never
+// persisted by the built-in probe, so contentMetaOrProbe saw ContentVersion==0
+// and re-probed the upstream header on every fs/get. A confirmed V1 file must
+// leave a cache entry with ContentVersion==ContentVersionV1 so the fs/get path
+// can reuse it without another network probe.
+func TestProbeSchedulerPersistsV1LegacyContentMeta(t *testing.T) {
+	cfg := config.DefaultConfig()
+	// Raw target: a legacy V1 file (no V2 magic prefix, plain bytes).
+	plainSrv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-31/4096")
+		w.WriteHeader(http.StatusPartialContent)
+		// 32 bytes of plain data; ParseContentHeader finds no V2 magic => legacy V1.
+		_, _ = w.Write([]byte("legacy-plain-content-not-encrypted-yet!!"))
+	}))
+	defer plainSrv.Close()
+
+	alistSrv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get", "/api/fs/link":
+			raw := plainSrv.URL + "/enc/video.bin"
+			body := fmt.Sprintf(`{"code":200,"data":{"raw_url":%q,"size":4096}}`, raw)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":404}`))
+		}
+	}))
+	defer alistSrv.Close()
+
+	alistURL, err := url.Parse(alistSrv.URL)
+	if err != nil {
+		t.Fatalf("parse alist URL: %v", err)
+	}
+	host := alistURL.Hostname()
+	port := 80
+	if p, perr := strconv.Atoi(alistURL.Port()); perr == nil {
+		port = p
+	}
+	cfg.AlistServer.ServerHost = host
+	cfg.AlistServer.ServerPort = port
+
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fileDAO := dao.NewFileDAO(store)
+
+	passwdInfo := &config.PasswdInfo{
+		Password: "testpass", EncType: "aesctr", Enable: true, EncName: true, EncSuffix: ".bin",
+	}
+
+	sp := proxy.NewStreamProxy(cfg)
+	ps := &ProbeScheduler{
+		cfg:           cfg,
+		fileDAO:       fileDAO,
+		stream:        sp,
+		enabled:       true,
+		queue:         make(chan probeItem, 8),
+		seen:          make(map[string]time.Time),
+		cooldown:      24 * time.Hour,
+		resolver:      NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		providerLimit: 1,
+		providerSem:   make(map[string]chan struct{}),
+	}
+	ps.rawURLFetcher = nil // force built-in raw_url inspector path
+
+	file := FileItem{
+		DisplayPath:      "/legacy/video.mp4",
+		EncryptedPath:    "/legacy/video_enc.bin",
+		TargetURL:        alistSrv.URL + "/d/legacy/video_enc.bin",
+		FileName:         "video.mp4",
+		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, "/legacy/video.mp4"),
+		PasswdInfo:       passwdInfo,
+	}
+	auth := make(http.Header)
+	ps.runItem(probeItem{file: file, authHeaders: auth, source: probeSourceFSList, queuedAt: time.Now()})
+
+	info, ok := fileDAO.Get("/legacy/video.mp4")
+	if !ok {
+		t.Fatalf("expected cache entry for /legacy/video.mp4")
+	}
+	if info.ContentVersion != 1 {
+		t.Fatalf("ContentVersion=%d, want 1 (V1 legacy meta must be persisted)", info.ContentVersion)
+	}
+	if info.HeaderLen != 0 {
+		t.Fatalf("HeaderLen=%d, want 0 for legacy V1", info.HeaderLen)
 	}
 }
