@@ -903,7 +903,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				if size, ok := data["size"].(float64); ok {
 					ciphertextSize = int64(size)
 				}
-				meta := h.inspectContentMetaWithFallback(r, rawURL, filePath, ciphertextSize, passwdInfo)
+				meta := h.contentMetaOrProbe(r, rawURL, originalPath, filePath, ciphertextSize, passwdInfo)
 				fileSize := ciphertextSize
 				if meta.IsV2() && meta.PlainSize > 0 {
 					fileSize = meta.PlainSize
@@ -1116,6 +1116,32 @@ func cloneFSMetaResponse(src *fsMetaUpstreamResponse) *fsMetaUpstreamResponse {
 		Body:        append([]byte(nil), src.Body...),
 		FailureFast: src.FailureFast,
 	}
+}
+
+// contentMetaOrProbe returns the content metadata for an encrypted file.
+// When the fileDAO already holds a previously probed ContentMeta (from an
+// earlier fs/get or playback) whose ciphertext size still matches the current
+// listing, that stable content metadata is reused directly — no upstream
+// header probe on every fs/get (fires only on cache miss or size change).
+// displayPath is the FileInfo cache key (how fs/get persists the record);
+// encryptedPath is used to build the fallback probe candidate URLs.
+func (h *AlistHandler) contentMetaOrProbe(r *http.Request, rawURL, displayPath, encryptedPath string, ciphertextSize int64, passwdInfo *config.PasswdInfo) encryption.ContentMeta {
+	if h != nil && h.fileDAO != nil && passwdInfo != nil {
+		if info, ok := h.fileDAO.Get(displayPath); ok && info != nil && info.ContentVersion > 0 {
+			if (info.ContentVersion != encryption.ContentVersionV2 || len(info.NonceField) == 16) &&
+				(ciphertextSize <= 0 || info.CiphertextSize <= 0 || info.CiphertextSize == ciphertextSize) {
+				return encryption.ContentMeta{
+					EncType:        encryption.EncType(passwdInfo.EncType),
+					Version:        info.ContentVersion,
+					HeaderLen:      info.HeaderLen,
+					PlainSize:      info.Size,
+					CiphertextSize: info.CiphertextSize,
+					NonceField:     append([]byte(nil), info.NonceField...),
+				}
+			}
+		}
+	}
+	return h.inspectContentMetaWithFallback(r, rawURL, encryptedPath, ciphertextSize, passwdInfo)
 }
 
 func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, encryptedPath string, ciphertextSize int64, passwdInfo *config.PasswdInfo) encryption.ContentMeta {
