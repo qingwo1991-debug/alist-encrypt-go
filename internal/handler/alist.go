@@ -56,6 +56,9 @@ type AlistHandler struct {
 	fsMetaRefreshBypass    uint64
 	fsMetaFailureFastHits  uint64
 	fsMetaFailureStores    uint64
+
+	rootMountsMu  sync.RWMutex
+	rootMountsSet map[string]struct{}
 }
 
 type fsMetaCacheEntry struct {
@@ -733,7 +736,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 {
-			if isSuccessfulListPayload(snap.PayloadJSON) && !snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot")
 					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
@@ -749,7 +752,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						Str("reason", reason).
 						Msg("Rejecting invalid dir snapshot")
 				}
-			} else if snapOK && snap != nil && snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+			} else if snapOK && snap != nil && h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				log.Error().
 					Str("path", dirPath).
 					Str("scope_key", scopeKey).
@@ -764,7 +767,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		// avoiding a ~1.5s rebuild per new token. Only request_fill rows are
 		// eligible — background scan snapshots may carry a privileged scan
 		// account and must not be served from this public endpoint.
-		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && !snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot-shared")

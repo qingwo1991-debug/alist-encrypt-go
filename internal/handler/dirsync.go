@@ -277,14 +277,76 @@ func isSuccessfulListPayload(payload []byte) bool {
 	return payloadResponseCode(payload) == 200
 }
 
+// knownRootMounts returns the set of top-level drive mount directory names
+// (e.g. "移动云盘156", "omv", "豆包云"). They are derived from the configured
+// encryption path whitelist's first path segment, plus any directory names
+// observed in a successful "/" listing learned at runtime. The set is used to
+// distinguish a genuine all-directory payload (e.g. a cover-index dir whose
+// every item is a subdirectory) from a root-listing masquerade, whose item
+// names are exactly these drive mount names.
+func (h *AlistHandler) knownRootMounts() map[string]struct{} {
+	out := make(map[string]struct{})
+	if h != nil && h.cfg != nil {
+		for _, p := range h.collectEncryptedSearchRoots() {
+			seg := strings.Trim(p, "/")
+			if seg == "" {
+				continue
+			}
+			first := seg
+			if i := strings.IndexByte(seg, '/'); i > 0 {
+				first = seg[:i]
+			}
+			out[first] = struct{}{}
+		}
+	}
+	if h != nil {
+		h.rootMountsMu.RLock()
+		for k := range h.rootMountsSet {
+			out[k] = struct{}{}
+		}
+		h.rootMountsMu.RUnlock()
+	}
+	return out
+}
+
+// rememberRootMounts records drive mount directory names observed in a root
+// listing so later probes classify root-listings correctly.
+func (h *AlistHandler) rememberRootMounts(payload []byte) {
+	if h == nil || len(payload) == 0 {
+		return
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return
+	}
+	data, _ := body["data"].(map[string]interface{})
+	content, _ := data["content"].([]interface{})
+	h.rootMountsMu.Lock()
+	if h.rootMountsSet == nil {
+		h.rootMountsSet = make(map[string]struct{})
+	}
+	for _, item := range content {
+		fd, _ := item.(map[string]interface{})
+		if fd == nil {
+			continue
+		}
+		if isDir, _ := fd["is_dir"].(bool); !isDir {
+			continue
+		}
+		if name, _ := fd["name"].(string); name != "" {
+			h.rootMountsSet[name] = struct{}{}
+		}
+	}
+	h.rootMountsMu.Unlock()
+}
+
 // snapshotPayloadRootPoisoned reports whether a list payload for a non-root
 // directory is actually a root-listing masquerade: every entry is a directory
-// and none is a file. Real encrypted dirs in this deployment hold files, so an
-// all-directory payload for a scoped dir is the signature of the upstream
-// returning the drive-root view (e.g. on a transient token 401/empty path).
-// Such payloads must never be persisted or served from the snapshot cache.
-func snapshotPayloadRootPoisoned(dirPath string, payload []byte) bool {
-	if dirPath == "" || dirPath == "/" || len(payload) == 0 {
+// (no files at all) and every entry name matches a known top-level drive
+// mount. Real directories that legitimately contain only subdirectories keep
+// caching because their child names are content names, not drive mounts.
+func (h *AlistHandler) snapshotPayloadRootPoisoned(dirPath string, payload []byte) bool {
+	if dirPath == "" || dirPath == "/" || dirPath == "//" || len(payload) == 0 {
 		return false
 	}
 	var body map[string]interface{}
@@ -298,6 +360,7 @@ func snapshotPayloadRootPoisoned(dirPath string, payload []byte) bool {
 	}
 	dirs := 0
 	files := 0
+	var names []string
 	for _, item := range content {
 		fd, _ := item.(map[string]interface{})
 		if fd == nil {
@@ -308,9 +371,34 @@ func snapshotPayloadRootPoisoned(dirPath string, payload []byte) bool {
 		} else {
 			files++
 		}
+		if name, _ := fd["name"].(string); name != "" {
+			names = append(names, name)
+		}
 	}
-	// All directories, zero files ⇒ almost certainly the root/drive listing.
-	return dirs > 0 && files == 0
+	// A payload that contains any file is never a root listing (drives are dirs).
+	if files > 0 {
+		return false
+	}
+	// All directories: only suspicious when the names overlap heavily with the
+	// known root mounts, i.e. this really is the drive-root view.
+	if dirs == 0 || dirs != len(content) {
+		return false
+	}
+	roots := h.knownRootMounts()
+	if len(roots) == 0 {
+		// No prior knowledge: fall back to the strict all-directory signature
+		// for snapshot-scoped dirs (they are expected to hold files).
+		return dirs >= 3
+	}
+	overlap := 0
+	for _, n := range names {
+		if _, ok := roots[n]; ok {
+			overlap++
+		}
+	}
+	// Root listing is poisoned only if a large fraction of its dirs are known
+	// top-level mounts.
+	return overlap >= len(names) && dirs >= 3
 }
 
 func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string) {
@@ -331,7 +419,7 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 	if sourceMode != dirSyncModeScan && !h.snapshotScopeEnabled(dirPath) {
 		return
 	}
-	if snapshotPayloadRootPoisoned(dirPath, payload) {
+	if h.snapshotPayloadRootPoisoned(dirPath, payload) {
 		log.Error().
 			Str("mode", sourceMode).
 			Str("dir_path", dirPath).
@@ -427,7 +515,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 		return resp.StatusCode, nil, respBody, 0, nil
 	}
 
-	if snapshotPayloadRootPoisoned(dirPath, respBody) {
+	if h.snapshotPayloadRootPoisoned(dirPath, respBody) {
 		var reqData struct {
 			Path string `json:"path"`
 		}
@@ -446,6 +534,12 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 		if data, ok := respData["data"].(map[string]interface{}); ok {
 			if content, ok := data["content"].([]interface{}); ok {
 				itemCount = len(content)
+				if dirPath == "/" {
+					// Learn top-level mount names so root-listing masquerades for
+					// deeper dirs can be recognized without mislabeling genuine
+					// all-directory subdirs.
+					h.rememberRootMounts(respBody)
+				}
 				coverNameMap := make(map[string]string)
 				var omitNames []string
 
