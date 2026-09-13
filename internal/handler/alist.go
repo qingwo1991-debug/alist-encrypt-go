@@ -735,6 +735,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 			if isSuccessfulListPayload(snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot")
+					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
 					}
@@ -759,6 +760,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot-shared")
+					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
 					}
@@ -1130,6 +1132,14 @@ func (h *AlistHandler) contentMetaOrProbe(r *http.Request, rawURL, displayPath, 
 		if info, ok := h.fileDAO.Get(displayPath); ok && info != nil && info.ContentVersion > 0 {
 			if (info.ContentVersion != encryption.ContentVersionV2 || len(info.NonceField) == 16) &&
 				(ciphertextSize <= 0 || info.CiphertextSize <= 0 || info.CiphertextSize == ciphertextSize) {
+				log.Info().
+					Str("category", "fsget").
+					Str("path", displayPath).
+					Int("content_version", info.ContentVersion).
+					Int64("header_len", info.HeaderLen).
+					Int64("cached_size", info.CiphertextSize).
+					Int64("listing_size", ciphertextSize).
+					Msg("fs/get content meta cache hit")
 				return encryption.ContentMeta{
 					EncType:        encryption.EncType(passwdInfo.EncType),
 					Version:        info.ContentVersion,
@@ -1141,6 +1151,7 @@ func (h *AlistHandler) contentMetaOrProbe(r *http.Request, rawURL, displayPath, 
 			}
 		}
 	}
+	trace.Logf(r.Context(), "get", "fs/get content meta MISS display=%s cipher=%d", displayPath, ciphertextSize)
 	return h.inspectContentMetaWithFallback(r, rawURL, encryptedPath, ciphertextSize, passwdInfo)
 }
 
