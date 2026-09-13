@@ -45,7 +45,9 @@ func writeDavEscaped(b *bytes.Buffer, s string) {
 
 // writeSnapshotResponse writes one DAV <response> block (href + propstat) for a
 // single item. isDir selects resourcetype; size is only emitted for non-dirs.
-func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size int64) {
+// lastModified (RFC3339 or RFC1123 string) is emitted as getlastmodified so
+// clients can sort by time; an empty value omits the property.
+func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size int64, lastModified string) {
 	b.WriteString(`<D:response>`)
 	b.WriteString(`<D:href>`)
 	writeDavEscaped(b, href)
@@ -55,6 +57,11 @@ func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size 
 	b.WriteString(`<D:displayname>`)
 	writeDavEscaped(b, name)
 	b.WriteString(`</D:displayname>`)
+	if lastModified != "" {
+		b.WriteString(`<D:getlastmodified>`)
+		writeDavEscaped(b, lastModified)
+		b.WriteString(`</D:getlastmodified>`)
+	}
 	if !isDir {
 		b.WriteString(`<D:getcontentlength>`)
 		b.WriteString(strconv.FormatInt(size, 10))
@@ -161,7 +168,7 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte)
 	if rootName == "" || rootName == "." || rootName == "/" {
 		rootName = "/"
 	}
-	writeSnapshotResponse(&b, davHref(dirPath)+"/", rootName, true, 0)
+	writeSnapshotResponse(&b, davHref(dirPath)+"/", rootName, true, 0, "")
 
 	// Children.
 	for _, item := range resp.Data.Content {
@@ -176,10 +183,32 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte)
 		}
 		childPath, _ := item["path"].(string)
 		href := itemDAVHref(dirPath, childPath, name, isDir)
-		writeSnapshotResponse(&b, href, name, isDir, size)
+		writeSnapshotResponse(&b, href, name, isDir, size, itemLastModified(item))
 	}
 	b.WriteString(`</D:multistatus>`)
 	return b.Bytes()
+}
+
+// itemLastModified extracts the item's modified (fallback created) timestamp in
+// RFC1123 form for getlastmodified so WebDAV clients can sort by time. Accepts
+// RFC3339 (HTTP fs/list payloads) and RFC1123 HTTP-date (WebDAV-sourced).
+func itemLastModified(item map[string]interface{}) string {
+	for _, key := range []string{"modified", "created"} {
+		raw, ok := item[key].(string)
+		if !ok || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if tm, err := time.Parse(time.RFC3339, raw); err == nil {
+			return tm.UTC().Format(http.TimeFormat)
+		}
+		if tm, err := time.Parse(time.RFC1123, raw); err == nil {
+			return tm.UTC().Format(http.TimeFormat)
+		}
+		if tm, err := time.Parse(time.RFC1123Z, raw); err == nil {
+			return tm.UTC().Format(http.TimeFormat)
+		}
+	}
+	return ""
 }
 
 // persistWebDAVSnapshot writes a live WebDAV directory listing into the shared
@@ -207,10 +236,11 @@ func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, e
 			continue // self response
 		}
 		content = append(content, map[string]interface{}{
-			"name":   e.Name,
-			"path":   childPath,
-			"size":   float64(e.Size),
-			"is_dir": e.IsDir,
+			"name":     e.Name,
+			"path":     childPath,
+			"size":     float64(e.Size),
+			"is_dir":   e.IsDir,
+			"modified": e.Modified,
 		})
 	}
 	if len(content) == 0 {

@@ -28,6 +28,10 @@ const (
 	dirSyncModeReq    = "request_fill"
 	dirSyncModeScan   = "background_scan"
 	dirSyncScopeScan  = "scan"
+	// dirSyncSnapshotMaxPerPage is used when a snapshot is fetched for cache
+	// persistence: a single full page is requested so the stored payload holds
+	// the entire directory, not just the caller's page window.
+	dirSyncSnapshotMaxPerPage = 5000
 )
 
 func (h *AlistHandler) ensureDirSyncLoop() {
@@ -386,9 +390,10 @@ func (h *AlistHandler) snapshotPayloadRootPoisoned(dirPath string, payload []byt
 	}
 	roots := h.knownRootMounts()
 	if len(roots) == 0 {
-		// No prior knowledge: fall back to the strict all-directory signature
-		// for snapshot-scoped dirs (they are expected to hold files).
-		return dirs >= 3
+		// Without any known top-level mounts we cannot tell a drive-root
+		// masquerade from a genuine all-directory folder, so never mislabel
+		// a real directory — allow it (the live full listing still wins).
+		return false
 	}
 	overlap := 0
 	for _, n := range names {
@@ -396,12 +401,16 @@ func (h *AlistHandler) snapshotPayloadRootPoisoned(dirPath string, payload []byt
 			overlap++
 		}
 	}
-	// Root listing is poisoned only if a large fraction of its dirs are known
-	// top-level mounts.
-	return overlap >= len(names) && dirs >= 3
+	// Root listing is poisoned when the large majority of its entries are known
+	// top-level mounts (≥60% and at least 6). Config-uncovered drives can still
+	// appear in the real mount set, so require a heavy majority, not all.
+	if overlap < 6 || overlap*5 < len(names)*3 {
+		return false
+	}
+	return dirs >= 3
 }
 
-func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string) {
+func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string, page, perPage int) {
 	if snap == nil {
 		RespondHTTPErrorWithStatus(w, "snapshot not found", http.StatusNotFound)
 		return
@@ -409,7 +418,71 @@ func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapsho
 	now := time.Now()
 	stale := snap.Stale || (!snap.NextRefreshAt.IsZero() && now.After(snap.NextRefreshAt))
 	syncing := snap.SyncState == "syncing"
-	RespondRaw(w, http.StatusOK, "application/json", h.markSnapshotServingMode(snap.PayloadJSON, stale, syncing, cacheMode, snap))
+	respond := h.markSnapshotServingMode(snap.PayloadJSON, stale, syncing, cacheMode, snap)
+	if page > 0 && perPage > 0 {
+		if sliced, ok := paginateSnapshotJSON(respond, page, perPage); ok {
+			respond = sliced
+		}
+	}
+	RespondRaw(w, http.StatusOK, "application/json", respond)
+}
+
+// listPaginationFromBody extracts the page/per_page window a client requested.
+// Defaults match the upstream Alist contract (page=1, per_page=0 meaning all,
+// and the Web UI sending per_page=N per page view).
+func listPaginationFromBody(reqBody map[string]interface{}) (int, int) {
+	page, perPage := 1, 0
+	if v, ok := reqBody["page"].(float64); ok {
+		page = int(v)
+		if page < 1 {
+			page = 1
+		}
+	}
+	if v, ok := reqBody["per_page"].(float64); ok {
+		perPage = int(v)
+	}
+	return page, perPage
+}
+
+// paginateSnapshotJSON trims a snapshot list payload to the requested window
+// so a served snapshot keeps the same pagination contract as a live listing.
+// Returns the original payload when pagination cannot be applied.
+func paginateSnapshotJSON(payload []byte, page, perPage int) ([]byte, bool) {
+	if page <= 0 || perPage <= 0 {
+		return payload, false
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return payload, false
+	}
+	data, ok := doc["data"].(map[string]interface{})
+	if !ok {
+		return payload, false
+	}
+	content, ok := data["content"].([]interface{})
+	if !ok {
+		return payload, false
+	}
+	total := len(content)
+	start := (page - 1) * perPage
+	if start >= total {
+		content = []interface{}{}
+	} else {
+		end := start + perPage
+		if end > total {
+			end = total
+		}
+		content = content[start:end]
+	}
+	data["content"] = content
+	if _, ok := data["total"].(float64); !ok {
+		data["total"] = float64(total)
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return payload, false
+	}
+	return encoded, true
 }
 
 func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, authHash string, payload []byte, itemCount int, sourceMode string, lastErr string) {
@@ -448,6 +521,28 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 		LastAccessed:  now,
 	}
 	_ = h.dirSyncStore.UpsertSnapshot(ctx, snap)
+}
+
+// fullListRequestBody rewrites a caller-supplied /api/fs/list body so the
+// snapshot fetch pulls the full directory listing in a single page instead of
+// echoing the caller's pagination (e.g. per_page:5 from the Web UI), which
+// would otherwise persist a truncated snapshot. page=1 and a large per_page
+// capture the whole folder in one upstream round-trip.
+func fullListRequestBody(body []byte) []byte {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body
+	}
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	req["page"] = 1
+	req["per_page"] = dirSyncSnapshotMaxPerPage
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return encoded
 }
 
 func (h *AlistHandler) updateSnapshotSyncing(ctx context.Context, scopeKey string, syncing bool, lastErr string) {
@@ -697,9 +792,10 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 	h.updateSnapshotSyncing(ctx, scopeKey, true, "")
 	h.startDirSyncWork(func(ctx context.Context) {
 		_, err, _ := h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
-			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(body))
+			upstreamBody := fullListRequestBody(body)
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(upstreamBody))
 			req.Header = headers.Clone()
-			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, body, dirPath, true)
+			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, upstreamBody, dirPath, true)
 			if liveErr != nil {
 				h.updateSnapshotSyncing(ctx, scopeKey, false, liveErr.Error())
 				return nil, liveErr
@@ -721,7 +817,40 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 	})
 }
 
+// learnRootMountsOnce fetches the drive root listing once (using the scan
+// account) so the top-level mount names are known. Without the full mount set
+// a drive-root masquerade that includes unmounted/config-uncovered drives
+// (e.g. "老婆的", "谷歌云盘1991") would slip past the poison classifier.
+func (h *AlistHandler) learnRootMountsOnce(ctx context.Context) {
+	h.rootMountsOnce.Do(func() {
+		if h == nil || h.cfg == nil {
+			return
+		}
+		headers := h.scanAuthHeaders()
+		if len(headers) == 0 {
+			return
+		}
+		reqBody, _ := json.Marshal(map[string]interface{}{
+			"path":     "/",
+			"page":     1,
+			"per_page": dirSyncSnapshotMaxPerPage,
+			"refresh":  false,
+		})
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(reqBody))
+		req.Header = headers.Clone()
+		req.Header.Set("Content-Type", "application/json")
+		status, _, payload, _, err := h.liveFsListResponse(req, reqBody, "/", true)
+		if err != nil || status < 200 || status >= 300 || !isSuccessfulListPayload(payload) {
+			log.Warn().Int("status", status).Err(err).Msg("Failed to learn root mounts")
+			return
+		}
+		h.rememberRootMounts(payload)
+		log.Info().Msg("Learned top-level drive mounts from '/")
+	})
+}
+
 func (h *AlistHandler) runDirSyncScheduler(ctx context.Context) {
+	h.learnRootMountsOnce(ctx)
 	h.runDirSyncScan(ctx, "bootstrap_scan")
 	ticker := time.NewTicker(dirSyncScanEvery)
 	defer ticker.Stop()
@@ -815,7 +944,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		reqBody, _ := json.Marshal(map[string]interface{}{
 			"path":     node.path,
 			"page":     1,
-			"per_page": 1000,
+			"per_page": dirSyncSnapshotMaxPerPage,
 			"refresh":  false,
 		})
 		scanCtx := withProbeSource(ctx, probeSourceDirSync)

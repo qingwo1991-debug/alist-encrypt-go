@@ -40,7 +40,10 @@ func (s *Store) GetRequestFilledDirSnapshotByDisplay(ctx context.Context, displa
 	if s == nil {
 		return nil, false, nil
 	}
-	return s.getAnySnapshotWhere(ctx, "display_path=? AND is_active=1 AND source_mode='request_fill' AND item_count>0 ORDER BY last_sync_at DESC, updated_at DESC LIMIT 1", displayPath)
+	// Prefer the fullest recent snapshot for the display path: a page-windowed
+	// request_fill row (smallest item_count) must never mask the full directory
+	// that a concurrent full listing persisted. Ties still favor the newest.
+	return s.getAnySnapshotWhere(ctx, "display_path=? AND is_active=1 AND source_mode='request_fill' AND item_count>0 ORDER BY item_count DESC, last_sync_at DESC, updated_at DESC LIMIT 1", displayPath)
 }
 
 func (s *Store) getAnySnapshotWhere(ctx context.Context, where string, args ...interface{}) (*DirSnapshotRecord, bool, error) {
