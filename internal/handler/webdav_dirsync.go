@@ -47,6 +47,14 @@ func writeDavEscaped(b *bytes.Buffer, s string) {
 // single item. isDir selects resourcetype; size is only emitted for non-dirs.
 // lastModified (RFC3339 or RFC1123 string) is emitted as getlastmodified so
 // clients can sort by time; an empty value omits the property.
+//
+// Scope of properties produced here (intentional trade-off vs a live upstream
+// PROPFIND allprop): we output displayname, getlastmodified, getcontentlength
+// (files) and resourcetype only. We DO NOT output getcontenttype/getetag/
+// creationdate/supportedlock/lockscope/locktype that openalist returns,
+// because the underlying HTTP fs/list snapshot has no MIME/etag/lock data and
+// we chose snapshot speed over property completeness (see property policy).
+// Clients that strictly require those properties should be served live.
 func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size int64, lastModified string) {
 	b.WriteString(`<D:response>`)
 	b.WriteString(`<D:href>`)
