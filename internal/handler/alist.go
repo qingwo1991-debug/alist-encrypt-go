@@ -731,8 +731,9 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	authHash := authScopeHash(h.requestAuthHeaders(r))
 	scopeKey := buildDirScopeKey(dirPath, authHash)
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
-		if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
-			if isSuccessfulListPayload(snap.PayloadJSON) {
+		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
+		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 {
+			if isSuccessfulListPayload(snap.PayloadJSON) && !snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot")
 					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
@@ -748,6 +749,13 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						Str("reason", reason).
 						Msg("Rejecting invalid dir snapshot")
 				}
+			} else if snapOK && snap != nil && snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+				log.Error().
+					Str("path", dirPath).
+					Str("scope_key", scopeKey).
+					Int("item_count", snap.ItemCount).
+					Msg("Deleting root-poisoned dir snapshot (will fall back to live)")
+				h.dirSyncStore.DeleteSnapshot(r.Context(), scopeKey)
 			}
 		}
 		// Cross-session reuse: a rotated/new auth scope that misses its own
@@ -756,7 +764,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		// avoiding a ~1.5s rebuild per new token. Only request_fill rows are
 		// eligible — background scan snapshots may carry a privileged scan
 		// account and must not be served from this public endpoint.
-		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 {
+		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && !snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot-shared")

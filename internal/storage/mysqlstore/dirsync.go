@@ -11,6 +11,18 @@ func DirSnapshotKeyHash(scopeKey string) string {
 	return KeyHash("dirsync", scopeKey)
 }
 
+func (s *Store) DeleteDirSnapshot(ctx context.Context, scopeKey string) error {
+	if s == nil {
+		return nil
+	}
+	if scopeKey == "" {
+		return nil
+	}
+	query := `DELETE FROM ` + TableName("dir_snapshot") + ` WHERE scope_key = ?`
+	_, err := s.db.ExecContext(ctx, query, scopeKey)
+	return err
+}
+
 func (s *Store) GetDirSnapshot(ctx context.Context, scopeKey string) (*DirSnapshotRecord, bool, error) {
 	if s == nil {
 		return nil, false, nil

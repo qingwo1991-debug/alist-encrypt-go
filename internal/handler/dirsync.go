@@ -277,6 +277,42 @@ func isSuccessfulListPayload(payload []byte) bool {
 	return payloadResponseCode(payload) == 200
 }
 
+// snapshotPayloadRootPoisoned reports whether a list payload for a non-root
+// directory is actually a root-listing masquerade: every entry is a directory
+// and none is a file. Real encrypted dirs in this deployment hold files, so an
+// all-directory payload for a scoped dir is the signature of the upstream
+// returning the drive-root view (e.g. on a transient token 401/empty path).
+// Such payloads must never be persisted or served from the snapshot cache.
+func snapshotPayloadRootPoisoned(dirPath string, payload []byte) bool {
+	if dirPath == "" || dirPath == "/" || len(payload) == 0 {
+		return false
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return false
+	}
+	data, _ := body["data"].(map[string]interface{})
+	content, _ := data["content"].([]interface{})
+	if len(content) == 0 {
+		return false
+	}
+	dirs := 0
+	files := 0
+	for _, item := range content {
+		fd, _ := item.(map[string]interface{})
+		if fd == nil {
+			return false
+		}
+		if isDir, _ := fd["is_dir"].(bool); isDir {
+			dirs++
+		} else {
+			files++
+		}
+	}
+	// All directories, zero files ⇒ almost certainly the root/drive listing.
+	return dirs > 0 && files == 0
+}
+
 func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string) {
 	if snap == nil {
 		RespondHTTPErrorWithStatus(w, "snapshot not found", http.StatusNotFound)
@@ -293,6 +329,15 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 		return
 	}
 	if sourceMode != dirSyncModeScan && !h.snapshotScopeEnabled(dirPath) {
+		return
+	}
+	if snapshotPayloadRootPoisoned(dirPath, payload) {
+		log.Error().
+			Str("mode", sourceMode).
+			Str("dir_path", dirPath).
+			Int("item_count", itemCount).
+			Str("scope", scopeKey).
+			Msg("Rejecting root-poisoned snapshot payload; refusing to persist")
 		return
 	}
 	now := time.Now()
@@ -380,6 +425,20 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 	var respData map[string]interface{}
 	if err := json.Unmarshal(respBody, &respData); err != nil {
 		return resp.StatusCode, nil, respBody, 0, nil
+	}
+
+	if snapshotPayloadRootPoisoned(dirPath, respBody) {
+		var reqData struct {
+			Path string `json:"path"`
+		}
+		_ = json.Unmarshal(body, &reqData)
+		log.Warn().
+			Str("dir_path", dirPath).
+			Str("req_body_path", reqData.Path).
+			Str("upstream", targetURL).
+			Int("status", resp.StatusCode).
+			Int("resp_len", len(respBody)).
+			Msg("LIVE_RETURNED_ROOT_POISON")
 	}
 
 	itemCount := 0
