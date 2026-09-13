@@ -89,7 +89,11 @@ func (c *FileNameConverter) ToRealName(pathText string) string {
 	return ConvertRealNameWithSuffix(c.Password, c.EncType, pathText, c.EncSuffix)
 }
 
-// IsOriginalFile checks if a filename is marked as original (failed decryption)
+// IsOriginalFile reports whether the filename carries the orig_ display marker,
+// i.e. its encrypted filename failed to decode to a plaintext name. This
+// DISPLAY-LAYER marker does not imply content decryption failed: the ciphertext
+// body is still served decrypted on all playback entry points; only the
+// friendly name (and thus name->path mapping heuristics) is unavailable.
 func IsOriginalFile(fileName string) bool {
 	return strings.HasPrefix(fileName, OrigPrefix)
 }
