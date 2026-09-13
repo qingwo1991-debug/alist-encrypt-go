@@ -27,23 +27,23 @@ import (
 
 // Server represents the HTTP/2 server
 type Server struct {
-	cfg            *config.Config
-	store          *storage.Store
-	mysqlStore     *mysqlstore.Store
-	engine         *gin.Engine
-	httpServer     *http.Server
-	httpsServer    *http.Server
-	unixServer     *http.Server
-	streamProxy    *proxy.StreamProxy
-	userDAO        *dao.UserDAO
-	fileDAO        *dao.FileDAO
-	passwdDAO         *dao.PasswdDAO
-	proxyHandler      *handler.ProxyHandler
-	alistHandler      *handler.AlistHandler
-	webdavHandler     *handler.WebDAVHandler
-	probeScheduler    *handler.ProbeScheduler
-	probeCancel       context.CancelFunc
-	probeWG           sync.WaitGroup
+	cfg                *config.Config
+	store              *storage.Store
+	mysqlStore         *mysqlstore.Store
+	engine             *gin.Engine
+	httpServer         *http.Server
+	httpsServer        *http.Server
+	unixServer         *http.Server
+	streamProxy        *proxy.StreamProxy
+	userDAO            *dao.UserDAO
+	fileDAO            *dao.FileDAO
+	passwdDAO          *dao.PasswdDAO
+	proxyHandler       *handler.ProxyHandler
+	alistHandler       *handler.AlistHandler
+	webdavHandler      *handler.WebDAVHandler
+	probeScheduler     *handler.ProbeScheduler
+	probeCancel        context.CancelFunc
+	probeWG            sync.WaitGroup
 	statsExportHandler *handler.StatsExportHandler
 }
 
@@ -166,6 +166,9 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	alistHandler.StartDirSyncLoop()
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
+	// WebDAV shares the same dir-sync snapshot store as the HTTP fs/list path so
+	// directory listings on whitelisted encrypted paths read the cache too.
+	webdavHandler.SetDirSyncStore(dirSyncStore)
 	// 播放/删除统计：BoltDB stats bucket + 记录器接入三个 handler。
 	statsStore := handler.NewStatsStore(s.store)
 	statsRecorder := handler.NewBoltStatsRecorder(statsStore)

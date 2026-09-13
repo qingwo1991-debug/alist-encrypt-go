@@ -60,6 +60,20 @@ func (h *AlistHandler) scanConfigured() bool {
 		strings.TrimSpace(alist.ScanPassword) != ""
 }
 
+// snapshotScopeEnabled reports whether the given directory is eligible for
+// snapshot read/write caching. Only directories matched by the user's configured
+// encryption path whitelist (via MatchDir, which honors * / [..] patterns and
+// even "/") are cached; every other path is served live with no snapshot.
+// This keeps the cache strictly bounded to the paths the admin opted into, and
+// makes a "poisoned" root listing under a subdirectory scope impossible — a
+// root that the admin configured is a legitimate snapshot of its own.
+func (h *AlistHandler) snapshotScopeEnabled(dirPath string) bool {
+	if h == nil || h.passwdDAO == nil {
+		return false
+	}
+	return h.passwdDAO.MatchDir(dirPath)
+}
+
 func (h *AlistHandler) requestAuthHeaders(r *http.Request) http.Header {
 	headers := make(http.Header)
 	if r == nil {
@@ -276,6 +290,9 @@ func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapsho
 
 func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, authHash string, payload []byte, itemCount int, sourceMode string, lastErr string) {
 	if h == nil || h.dirSyncStore == nil {
+		return
+	}
+	if sourceMode != dirSyncModeScan && !h.snapshotScopeEnabled(dirPath) {
 		return
 	}
 	now := time.Now()

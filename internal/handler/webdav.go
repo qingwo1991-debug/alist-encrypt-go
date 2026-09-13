@@ -47,6 +47,14 @@ type WebDAVHandler struct {
 	firstFrameFallbacks   uint64
 	warmupEnqueueCount    uint64
 	statsRecorder         StatsRecorder
+	dirSyncStore          DirSyncStore
+}
+
+// SetDirSyncStore injects the shared dir-sync snapshot store so directory
+// PROPFIND listings can be served from the same snapshot the HTTP fs/list path
+// reads and writes (whitelisted encrypted paths only, see snapshotScopeEnabled).
+func (h *WebDAVHandler) SetDirSyncStore(store DirSyncStore) {
+	h.dirSyncStore = store
 }
 
 const propfindPersistentWriteThreshold = 128
@@ -757,6 +765,21 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
+	// Read cache fast path: whitelisted encrypted directories serve their
+	// listing straight from the shared dir-sync snapshot — no upstream round
+	// trip at all (极速). Only directory requests are eligible.
+	if isDirRequest {
+		if body, ok := h.serveSnapshotListing(r, requestPath); ok {
+			trace.Logf(r.Context(), "propfind", "Snapshot cache hit: %s bytes=%d", requestPath, len(body))
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.Header().Set("X-Alist-Encrypt-Cache", "dir-snapshot")
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = w.Write(body)
+			return
+		}
+	}
+
 	proxyReq, err := httputil.NewRequest("PROPFIND", targetURL).
 		WithContext(r.Context()).
 		WithBody(body).
@@ -828,6 +851,17 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		// and adjust V2 getcontentlength. Replaces the previous two-pass
 		// decryptPropfindResponse + adjustPropfindContentLengthForV2.
 		respBody = h.rewritePropfindBody(respBody, passwdInfo)
+
+		// Populate the shared dir-sync snapshot on a whitelisted directory
+		// listing miss so subsequent HTTP fs/list and WebDAV reads hit the
+		// fast path (极速). Re-parse the rewritten body: hrefs and display
+		// names here are already the decrypted display form the client sees.
+		if isDirRequest && h.dirSyncStore != nil {
+			if davEntries := h.parsePropfindEntries(respBody); len(davEntries) > 0 {
+				h.persistWebDAVSnapshot(r, requestPath, davEntries)
+				trace.Logf(r.Context(), "propfind", "Snapshot populated: %s entries=%d", requestPath, len(davEntries))
+			}
+		}
 	}
 	decryptCost := time.Since(decryptStart)
 	trace.Logf(r.Context(), "propfind", "Timings upstream=%s parse=%s decrypt=%s entries=%d bytes=%d",

@@ -730,7 +730,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	h.ensureDirSyncLoop()
 	authHash := authScopeHash(h.requestAuthHeaders(r))
 	scopeKey := buildDirScopeKey(dirPath, authHash)
-	if h.dirSyncStore != nil {
+	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		if snap, ok, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey); ok && snap != nil && len(snap.PayloadJSON) > 0 {
 			if isSuccessfulListPayload(snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
@@ -784,7 +784,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
-	if h.dirSyncStore != nil && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) {
+	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) {
 		h.persistSnapshot(r.Context(), dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
 	}
 	RespondRaw(w, statusCode, "application/json", payload)
