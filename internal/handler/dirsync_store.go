@@ -61,6 +61,7 @@ type DirSyncStore interface {
 	GetSnapshot(ctx context.Context, scopeKey string) (*DirListSnapshot, bool, error)
 	GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath string) (*DirListSnapshot, bool, error)
 	UpsertSnapshot(ctx context.Context, snap DirListSnapshot) error
+	DeleteSnapshot(ctx context.Context, scopeKey string) error
 	CountSnapshots(ctx context.Context) (total, fresh, stale, syncing int64, err error)
 	GetStatus(ctx context.Context, name string) (*DirSyncStatus, bool, error)
 	UpsertStatus(ctx context.Context, status DirSyncStatus) error
@@ -103,6 +104,13 @@ func (s *BoltDirSyncStore) UpsertSnapshot(_ context.Context, snap DirListSnapsho
 		return nil
 	}
 	return s.store.SetJSON(storage.BucketDirSync, dirSyncBucketSnapshotPrefix+snap.ScopeKey, snap)
+}
+
+func (s *BoltDirSyncStore) DeleteSnapshot(_ context.Context, scopeKey string) error {
+	if s == nil || s.store == nil || scopeKey == "" {
+		return nil
+	}
+	return s.store.Delete(storage.BucketDirSync, dirSyncBucketSnapshotPrefix+scopeKey)
 }
 
 func (s *BoltDirSyncStore) CountSnapshots(_ context.Context) (total, fresh, stale, syncing int64, err error) {
@@ -184,6 +192,13 @@ func (s *MySQLDirSyncStore) GetRequestFilledSnapshotByDisplay(ctx context.Contex
 		return nil, ok, err
 	}
 	return dirSnapshotRecordToSnapshot(rec), true, nil
+}
+
+func (s *MySQLDirSyncStore) DeleteSnapshot(ctx context.Context, scopeKey string) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.DeleteDirSnapshot(ctx, scopeKey)
 }
 
 func dirSnapshotRecordToSnapshot(rec *mysqlstore.DirSnapshotRecord) *DirListSnapshot {
