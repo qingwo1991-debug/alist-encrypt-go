@@ -971,10 +971,11 @@ func (h *WebDAVHandler) handlePassthrough(w http.ResponseWriter, r *http.Request
 }
 
 type propfindEntry struct {
-	Path  string
-	Name  string
-	Size  int64
-	IsDir bool
+	Path     string
+	Name     string
+	Size     int64
+	IsDir    bool
+	Modified string // RFC1123 HTTP-date from getlastmodified (optional)
 }
 
 func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
@@ -986,6 +987,7 @@ func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 				Prop struct {
 					DisplayName   string `xml:"displayname"`
 					ContentLength int64  `xml:"getcontentlength"`
+					LastModified  string `xml:"getlastmodified"`
 					ResourceType  struct {
 						Collection *struct{} `xml:"collection"`
 						Value      string    `xml:",chardata"`
@@ -1034,12 +1036,20 @@ func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 		if !isDir && strings.HasSuffix(filePath, "/") {
 			isDir = true
 		}
+		lastModified := ""
+		for _, propStat := range resp.PropStat {
+			if lm := strings.TrimSpace(propStat.Prop.LastModified); lm != "" {
+				lastModified = lm
+				break
+			}
+		}
 
 		entries = append(entries, propfindEntry{
-			Path:  filePath,
-			Name:  displayName,
-			Size:  contentLength,
-			IsDir: isDir,
+			Path:     filePath,
+			Name:     displayName,
+			Size:     contentLength,
+			IsDir:    isDir,
+			Modified: lastModified,
 		})
 	}
 	return entries

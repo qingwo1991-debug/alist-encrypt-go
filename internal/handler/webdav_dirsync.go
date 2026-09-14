@@ -45,7 +45,12 @@ func writeDavEscaped(b *bytes.Buffer, s string) {
 
 // writeSnapshotResponse writes one DAV <response> block (href + propstat) for a
 // single item. isDir selects resourcetype; size is only emitted for non-dirs.
-func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size int64) {
+// lastModified (RFC3339 or RFC1123 string) is emitted as getlastmodified so
+// clients can sort by time; an empty value omits the property. Creation date
+// (RFC3339), content type (MIME) and etag are emitted when derivable from the
+// snapshot payload so the served listing stays close to a live PROPFIND
+// allprop; supportedlock is a static protocol declaration (matches upstream).
+func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size int64, lastModified, contentType, etag, creationDate string) {
 	b.WriteString(`<D:response>`)
 	b.WriteString(`<D:href>`)
 	writeDavEscaped(b, href)
@@ -55,16 +60,39 @@ func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size 
 	b.WriteString(`<D:displayname>`)
 	writeDavEscaped(b, name)
 	b.WriteString(`</D:displayname>`)
+	if lastModified != "" {
+		b.WriteString(`<D:getlastmodified>`)
+		writeDavEscaped(b, lastModified)
+		b.WriteString(`</D:getlastmodified>`)
+	}
+	if creationDate != "" {
+		b.WriteString(`<D:creationdate>`)
+		writeDavEscaped(b, creationDate)
+		b.WriteString(`</D:creationdate>`)
+	}
 	if !isDir {
 		b.WriteString(`<D:getcontentlength>`)
 		b.WriteString(strconv.FormatInt(size, 10))
 		b.WriteString(`</D:getcontentlength>`)
+	}
+	if contentType != "" {
+		b.WriteString(`<D:getcontenttype>`)
+		writeDavEscaped(b, contentType)
+		b.WriteString(`</D:getcontenttype>`)
+	}
+	if etag != "" {
+		b.WriteString(`<D:getetag>`)
+		writeDavEscaped(b, etag)
+		b.WriteString(`</D:getetag>`)
 	}
 	b.WriteString(`<D:resourcetype>`)
 	if isDir {
 		b.WriteString(`<D:collection/>`)
 	}
 	b.WriteString(`</D:resourcetype>`)
+	b.WriteString(`<D:supportedlock>`)
+	b.WriteString(`<D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry><D:lockentry><D:lockscope><D:shared/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry>`)
+	b.WriteString(`</D:supportedlock>`)
 	b.WriteString(`</D:prop>`)
 	b.WriteString(`<D:status>HTTP/1.1 200 OK</D:status>`)
 	b.WriteString(`</D:propstat>`)
@@ -161,7 +189,7 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte)
 	if rootName == "" || rootName == "." || rootName == "/" {
 		rootName = "/"
 	}
-	writeSnapshotResponse(&b, davHref(dirPath)+"/", rootName, true, 0)
+	writeSnapshotResponse(&b, davHref(dirPath)+"/", rootName, true, 0, "", "", "", "")
 
 	// Children.
 	for _, item := range resp.Data.Content {
@@ -176,10 +204,109 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte)
 		}
 		childPath, _ := item["path"].(string)
 		href := itemDAVHref(dirPath, childPath, name, isDir)
-		writeSnapshotResponse(&b, href, name, isDir, size)
+		writeSnapshotResponse(&b, href, name, isDir, size, itemLastModified(item), itemContentType(item), itemETag(item), itemCreationDate(item))
 	}
 	b.WriteString(`</D:multistatus>`)
 	return b.Bytes()
+}
+
+// itemLastModified extracts the item's modified (fallback created) timestamp in
+// RFC1123 form for getlastmodified so WebDAV clients can sort by time. Accepts
+// RFC3339 (HTTP fs/list payloads) and RFC1123 HTTP-date (WebDAV-sourced).
+func itemLastModified(item map[string]interface{}) string {
+	for _, key := range []string{"modified", "created"} {
+		raw, ok := item[key].(string)
+		if !ok || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if tm, err := time.Parse(time.RFC3339, raw); err == nil {
+			return tm.UTC().Format(http.TimeFormat)
+		}
+		if tm, err := time.Parse(time.RFC1123, raw); err == nil {
+			return tm.UTC().Format(http.TimeFormat)
+		}
+		if tm, err := time.Parse(time.RFC1123Z, raw); err == nil {
+			return tm.UTC().Format(http.TimeFormat)
+		}
+	}
+	return ""
+}
+
+// itemCreationDate returns the item's created timestamp in RFC3339 (ISO 8601)
+// for the WebDAV creationdate property, or "" when absent/unparseable.
+func itemCreationDate(item map[string]interface{}) string {
+	for _, key := range []string{"created", "modified"} {
+		raw, ok := item[key].(string)
+		if !ok || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if tm, err := time.Parse(time.RFC3339, raw); err == nil {
+			return tm.UTC().Format(time.RFC3339)
+		}
+		if tm, err := time.Parse(time.RFC1123, raw); err == nil {
+			return tm.UTC().Format(time.RFC3339)
+		}
+		if tm, err := time.Parse(time.RFC1123Z, raw); err == nil {
+			return tm.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+// itemETag derives a stable etag from the item's size and modified time (the
+// snapshot has no upstream etag; size+modified is a good change fingerprint
+// that stays constant while the file is unchanged).
+func itemETag(item map[string]interface{}) string {
+	size := int64(0)
+	if s, ok := item["size"].(float64); ok {
+		size = int64(s)
+	}
+	for _, key := range []string{"modified", "created"} {
+		raw, ok := item[key].(string)
+		if !ok || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if tm, err := time.Parse(time.RFC3339, raw); err == nil {
+			return strconv.FormatInt(tm.Unix(), 10) + "-" + strconv.FormatInt(size, 10)
+		}
+	}
+	return ""
+}
+
+// itemContentType maps a snapshot item to a WebDAV MIME type. The fs/list
+// snapshot only carries a numeric type enum (1=dir, 2=file), not the real MIME,
+// so we fall back to inferring the type from the filename extension for the
+// common media/subtitle/document families that WebDAV clients display icons for.
+// Unknown extensions get a generic application/octet-stream.
+func itemContentType(item map[string]interface{}) string {
+	if isDir, _ := item["is_dir"].(bool); isDir {
+		return "httpd/unix-directory"
+	}
+	name, _ := item["name"].(string)
+	ext := strings.ToLower(strings.TrimPrefix(path.Ext(name), "."))
+	switch ext {
+	case "mp4", "mkv", "avi", "mov", "m4v", "wmv", "flv", "webm", "mpg", "mpeg", "ts", "m2ts", "3gp", "ogv":
+		return "video/" + strings.TrimPrefix(ext, "video/")
+	case "mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus":
+		return "audio/" + ext
+	case "jpg", "jpeg", "png", "gif", "bmp", "webp", "svg":
+		switch ext {
+		case "jpg":
+			return "image/jpeg"
+		default:
+			return "image/" + ext
+		}
+	case "srt", "ass", "ssa", "vtt":
+		return "application/x-subrip"
+	case "zip", "rar", "7z", "tar", "gz", "bz2", "xz":
+		return "application/x-compressed"
+	case "pdf":
+		return "application/pdf"
+	case "nfo", "txt", "log":
+		return "text/plain"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // persistWebDAVSnapshot writes a live WebDAV directory listing into the shared
@@ -207,10 +334,11 @@ func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, e
 			continue // self response
 		}
 		content = append(content, map[string]interface{}{
-			"name":   e.Name,
-			"path":   childPath,
-			"size":   float64(e.Size),
-			"is_dir": e.IsDir,
+			"name":     e.Name,
+			"path":     childPath,
+			"size":     float64(e.Size),
+			"is_dir":   e.IsDir,
+			"modified": e.Modified,
 		})
 	}
 	if len(content) == 0 {

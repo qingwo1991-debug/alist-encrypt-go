@@ -56,6 +56,10 @@ type AlistHandler struct {
 	fsMetaRefreshBypass    uint64
 	fsMetaFailureFastHits  uint64
 	fsMetaFailureStores    uint64
+
+	rootMountsMu   sync.RWMutex
+	rootMountsSet  map[string]struct{}
+	rootMountsOnce sync.Once
 }
 
 type fsMetaCacheEntry struct {
@@ -726,6 +730,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dirPath, _ := reqData["path"].(string)
+	page, perPage := listPaginationFromBody(reqData)
 	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
 	h.ensureDirSyncLoop()
 	authHash := authScopeHash(h.requestAuthHeaders(r))
@@ -733,9 +738,9 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 {
-			if isSuccessfulListPayload(snap.PayloadJSON) && !snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
-					h.serveSnapshot(w, snap, "snapshot")
+					h.serveSnapshot(w, snap, "snapshot", page, perPage)
 					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
@@ -749,7 +754,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 						Str("reason", reason).
 						Msg("Rejecting invalid dir snapshot")
 				}
-			} else if snapOK && snap != nil && snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+			} else if snapOK && snap != nil && h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				log.Error().
 					Str("path", dirPath).
 					Str("scope_key", scopeKey).
@@ -764,10 +769,10 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		// avoiding a ~1.5s rebuild per new token. Only request_fill rows are
 		// eligible — background scan snapshots may carry a privileged scan
 		// account and must not be served from this public endpoint.
-		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && !snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
-					h.serveSnapshot(w, snap, "snapshot-shared")
+					h.serveSnapshot(w, snap, "snapshot-shared", page, perPage)
 					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
@@ -788,14 +793,19 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		// this public Alist-compatible endpoint would bypass upstream authorization.
 	}
 
-	statusCode, _, payload, itemCount, err := h.liveFsListResponse(r, body, dirPath, true)
+	statusCode, _, payload, _, err := h.liveFsListResponse(r, body, dirPath, true)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to proxy fs/list")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) {
-		h.persistSnapshot(r.Context(), dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
+		// Do NOT persist the caller's (possibly page-windowed) listing as the
+		// snapshot — that would store a truncated view (e.g. per_page:5) that
+		// later overrides the full scan snapshot. Instead queue an async full
+		// listing that persists the complete directory; the live response goes
+		// straight to the caller.
+		h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
 	}
 	RespondRaw(w, statusCode, "application/json", payload)
 }
