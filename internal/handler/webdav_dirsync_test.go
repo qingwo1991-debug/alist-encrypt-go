@@ -202,3 +202,42 @@ func TestBuildSnapshotMultistatusRoot(t *testing.T) {
 		t.Fatalf("expected child href, got:\n%s", string(body))
 	}
 }
+
+func TestBuildSnapshotMultistatusProps(t *testing.T) {
+	h, _, _ := newWebDAVSnapshotTestHandler(t)
+	payload := `{"code":200,"data":{"content":[
+		{"name":"movie.mp4","size":1234567,"is_dir":false,"created":"2026-09-14T08:00:00+08:00","modified":"2026-09-14T08:00:00+08:00","type":2,"path":"/156联通云盘/encrypt/movie.mp4"},
+		{"name":"cover","size":0,"is_dir":true,"created":"2026-09-14T01:02:03+08:00","modified":"2026-09-14T01:02:03+08:00","type":1,"path":"/156联通云盘/encrypt/cover"}
+	]}}`
+	body := h.buildSnapshotMultistatus("/156联通云盘/encrypt", []byte(payload))
+	s := string(body)
+	if len(s) == 0 {
+		t.Fatal("expected multistatus")
+	}
+	// File entries must carry all four previously-missing props.
+	for _, want := range []string{
+		"<D:creationdate>", "<D:getetag>", "<D:getcontenttype>", "<D:supportedlock>",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("snapshot multistatus missing %q in:\n%s", want, s)
+		}
+	}
+	// Extension-derived MIME for the mp4 child (dirs are httpd/unix-directory).
+	if !strings.Contains(s, "<D:getcontenttype>video/mp4</D:getcontenttype>") {
+		t.Fatalf("expected video/mp4 content type for movie.mp4:\n%s", s)
+	}
+	if !strings.Contains(s, "<D:getcontenttype>httpd/unix-directory</D:getcontenttype>") {
+		t.Fatalf("expected httpd/unix-directory for the dir:\n%s", s)
+	}
+	// Stable etag derived from size+modified (RFC3339 → Unix): movie.mp4 was
+	// 2026-09-14T08:00:00+08:00 = UTC 2026-09-14T00:00:00 = Unix 1789344000,
+	// size 1234567.
+	wantEtag := "<D:getetag>1789344000-1234567</D:getetag>"
+	if !strings.Contains(s, wantEtag) {
+		t.Fatalf("expected etag %s in:\n%s", wantEtag, s)
+	}
+	// Creation date keeps ISO8601 utc form of the file's created.
+	if !strings.Contains(s, "<D:creationdate>2026-09-14T00:00:00Z</D:creationdate>") {
+		t.Fatalf("expected creationdate for movie.mp4:\n%s", s)
+	}
+}
