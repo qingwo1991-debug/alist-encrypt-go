@@ -339,3 +339,94 @@ func probeCandidateWithAuth(cfg *config.Config, candidate string, authVariants [
 	}
 	return result
 }
+
+// probeCandidateCandidates runs content-inspection probes over a set of
+// candidate URLs. The PRIMARY candidate (index 0 — usually the raw/alist URL
+// from fs/link) is probed first: if its inspection Confirmed, no fallback is
+// touched — preserving the exact one-round-trip success path of the previous
+// serial loop and avoiding extra upstream load on /dav and /d.
+//
+// When the primary does NOT confirm, the remaining fallback candidates are
+// probed CONCURRENTLY (bounded by maxProbeParallelCandidates) and the first
+// confirmed result wins. This collapses the old serial rawURL → /dav → /d
+// chain — up to 3 serial upstream round trips on a stale or wrong URL — into
+// a single parallel wave, bounding cold first-frame and seek probe latency
+// without ever increasing the common-case traffic.
+//
+// The probe callback must be safe for concurrent use. probeCandidateWithAuth
+// is reentrant (its only shared state, the JWT cache, is mutex-guarded). The
+// supplied inspect closure captures its own candidate URL/header pair, so it
+// is safe to call from multiple goroutines as long as the underlying
+// StreamProxy inspection is concurrency-safe for distinct candidate URLs.
+//
+// Returns the PROBED candidate URL alongside the result so callers can keep
+// their existing "detected via fallback" logs without adverse serialization.
+// When nothing confirms, the primary result (and its candidate) are returned.
+func probeCandidateCandidates(
+	cfg *config.Config,
+	candidates []string,
+	authVariants []http.Header,
+	inspector func(candidateURL string, headers http.Header) proxy.ContentInspectionResult,
+) (proxy.ContentInspectionResult, string) {
+	if inspector == nil || len(candidates) == 0 {
+		return proxy.ContentInspectionResult{}, ""
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+	if len(unique) > maxProbeParallelCandidates {
+		unique = unique[:maxProbeParallelCandidates]
+	}
+
+	// Stage 1: probe the primary candidate. When it confirms, this is the only
+	// upstream probe — identical to the old serial path's common success case.
+	primary := unique[0]
+	primaryResult := probeCandidateWithAuth(cfg, primary, authVariants,
+		func(headers http.Header) proxy.ContentInspectionResult { return inspector(primary, headers) })
+	if primaryResult.Confirmed {
+		return primaryResult, primary
+	}
+	if len(unique) == 1 {
+		return primaryResult, primary
+	}
+
+	// Stage 2: primary failed — probe all remaining fallbacks concurrently and
+	// take the first confirmed result.
+	type probeOutcome struct {
+		result    proxy.ContentInspectionResult
+		candidate string
+	}
+	fallbacks := unique[1:]
+	results := make(chan probeOutcome, len(fallbacks))
+	for _, candidate := range fallbacks {
+		candidate := candidate
+		go func() {
+			res := probeCandidateWithAuth(cfg, candidate, authVariants,
+				func(headers http.Header) proxy.ContentInspectionResult { return inspector(candidate, headers) })
+			results <- probeOutcome{result: res, candidate: candidate}
+		}()
+	}
+	for i := 0; i < len(fallbacks); i++ {
+		outcome := <-results
+		if outcome.result.Confirmed {
+			return outcome.result, outcome.candidate
+		}
+	}
+	// No fallback confirmed: return the primary result.
+	return primaryResult, primary
+}
+
+// maxProbeParallelCandidates bounds the number of concurrent content-inspection
+// probes issued for one file lookup during the fallback stage.
+// 3 = the primary rawURL plus the /dav and /d candidates.
+const maxProbeParallelCandidates = 3

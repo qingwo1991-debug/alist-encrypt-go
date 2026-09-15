@@ -129,10 +129,15 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 	}
 
+	// 2.2 hot-path short-circuit: prefer cached sizes (hot cache, meta store,
+	// fileDAO) via ResolveSingle and only fall through to a fresh upstream
+	// HEAD/Range when nothing is known yet. The previously-used
+	// ResolveSingleFresh always bypassed caches, adding an upstream round trip
+	// to first-frame even when a recently resolved size already exists.
 	if fileSize == 0 && req.SizeResolver != nil {
-		fresh := req.SizeResolver.ResolveSingleFresh(r.Context(), req.FileItem, authHeaders)
-		if fresh.Error == nil && fresh.Size > 0 {
-			fileSize = fresh.Size
+		resolved := req.SizeResolver.ResolveSingle(r.Context(), req.FileItem, authHeaders)
+		if resolved.Error == nil && resolved.Size > 0 {
+			fileSize = resolved.Size
 		}
 	}
 
@@ -570,53 +575,46 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 		}
 	}
 	authVariants := buildProbeAuthVariants(req.Config, authHeaders)
-	seen := make(map[string]struct{}, len(candidateURLs))
-	for _, candidateURL := range candidateURLs {
-		candidateURL = strings.TrimSpace(candidateURL)
-		if candidateURL == "" {
-			continue
-		}
-		if _, ok := seen[candidateURL]; ok {
-			continue
-		}
-		seen[candidateURL] = struct{}{}
-		result := probeCandidateWithAuth(req.Config, candidateURL, authVariants, func(headers http.Header) proxy.ContentInspectionResult {
-			return req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
-		})
-		meta := result.Meta
-		if meta.EncType == "" {
-			meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
-		}
-		if result.Confirmed {
-			if meta.IsV2() && meta.PlainSize > 0 {
-				log.Info().
-					Str("category", "playback").
-					Str("consumer_scenario", req.ConsumerScenario).
-					Str("path", req.Path).
-					Str("target_url", candidateURL).
-					Int64("ciphertext_size", meta.CiphertextSize).
-					Int64("plaintext_size", meta.PlainSize).
-					Int64("header_len", meta.HeaderLen).
-					Msg("Inspected V2 playback content meta")
-			} else {
-				log.Debug().
-					Str("category", "playback").
-					Str("consumer_scenario", req.ConsumerScenario).
-					Str("path", req.Path).
-					Str("target_url", candidateURL).
-					Int64("ciphertext_size", meta.CiphertextSize).
-					Msg("Confirmed V1 playback content meta")
-			}
-			return meta, true
-		}
-		log.Info().
-			Str("category", "playback").
-			Str("consumer_scenario", req.ConsumerScenario).
-			Str("path", req.Path).
-			Str("target_url", candidateURL).
-			Int64("fallback_size", fallbackSize).
-			Msg("Playback content meta inspection did not detect V2")
+	// Fire all fallback candidates in parallel and take the first confirmed
+	// result. This caps cold-path probe latency at ~one upstream round trip
+	// instead of the serial rawURL → /dav → /d chain (2-3s on stale URLs),
+	// which is the dominant first-frame / seek latency for unprobed files.
+	result, confirmedCandidate := probeCandidateCandidates(req.Config, candidateURLs, authVariants, func(candidateURL string, headers http.Header) proxy.ContentInspectionResult {
+		return req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
+	})
+	meta := result.Meta
+	if meta.EncType == "" {
+		meta.EncType = encryption.EncType(req.PasswdInfo.EncType)
 	}
+	if result.Confirmed {
+		if meta.IsV2() && meta.PlainSize > 0 {
+			log.Info().
+				Str("category", "playback").
+				Str("consumer_scenario", req.ConsumerScenario).
+				Str("path", req.Path).
+				Str("target_url", confirmedCandidate).
+				Int64("ciphertext_size", meta.CiphertextSize).
+				Int64("plaintext_size", meta.PlainSize).
+				Int64("header_len", meta.HeaderLen).
+				Msg("Inspected V2 playback content meta")
+		} else {
+			log.Debug().
+				Str("category", "playback").
+				Str("consumer_scenario", req.ConsumerScenario).
+				Str("path", req.Path).
+				Str("target_url", confirmedCandidate).
+				Int64("ciphertext_size", meta.CiphertextSize).
+				Msg("Confirmed V1 playback content meta")
+		}
+		return meta, true
+	}
+	log.Info().
+		Str("category", "playback").
+		Str("consumer_scenario", req.ConsumerScenario).
+		Str("path", req.Path).
+		Str("target_url", confirmedCandidate).
+		Int64("fallback_size", fallbackSize).
+		Msg("Playback content meta inspection did not detect V2")
 	return encryption.ContentMeta{}, false
 }
 
