@@ -3,6 +3,7 @@ import 'package:openlist_mobile/generated_api.dart';
 import 'package:openlist_mobile/pages/settings/playback_stats_page.dart';
 import 'package:openlist_mobile/pages/settings/preference_widgets.dart';
 import 'package:openlist_mobile/pages/settings/troubleshooting_page.dart';
+import 'package:openlist_mobile/pages/settings/warm_stats_page.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
 import 'package:openlist_mobile/utils/config_export.dart';
 import 'package:openlist_mobile/utils/language_controller.dart';
@@ -216,6 +217,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   );
                 }
               }
+            },
+          ),
+          BasicPreference(
+            title: '预热统计',
+            subtitle: '首帧折线图 · 预热明细 · 播放记录',
+            leading: const Icon(Icons.insights),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const WarmStatsPage(),
+                ),
+              );
             },
           ),
           BasicPreference(

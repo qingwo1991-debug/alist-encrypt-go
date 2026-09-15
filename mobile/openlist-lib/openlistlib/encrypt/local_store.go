@@ -345,6 +345,17 @@ func initLocalSchema(db *sql.DB) error {
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_deletion_stats_deleted_at ON deletion_stats(deleted_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_deletion_stats_path ON deletion_stats(path);`,
+		`CREATE TABLE IF NOT EXISTS warm_events (
+            id TEXT PRIMARY KEY,
+            target_path TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT ''
+        );`,
+		`CREATE INDEX IF NOT EXISTS idx_warm_events_finished_at ON warm_events(finished_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_warm_events_target_path ON warm_events(target_path);`,
 		`CREATE TABLE IF NOT EXISTS local_db_meta (
 	            key TEXT PRIMARY KEY,
 	            value TEXT NOT NULL,
@@ -1419,6 +1430,84 @@ type DeletionStatsRecord struct {
 	DeletedAt         int64   `json:"deleted_at"`           // Unix 秒
 	LastPlayAt        int64   `json:"last_play_at"`         // Unix 秒，0=无播放
 	SinceLastPlaySecs float64 `json:"since_last_play_secs"` // -1=无播放
+}
+
+// WarmEventStatus 一次启动预热的结果状态。
+const (
+	WarmEventOK      = "ok"
+	WarmEventFail    = "fail"
+	WarmEventTimeout = "timeout"
+)
+
+// WarmEventRecord 一次启动预热事件（每个加密根目录一条）。
+type WarmEventRecord struct {
+	ID         string `json:"id"`
+	TargetPath string `json:"target_path"`      // 预热目标目录（如 /xxx/encrypt）
+	StartedAt  int64  `json:"started_at"`       // Unix 秒
+	FinishedAt int64  `json:"finished_at"`      // Unix 秒
+	DurationMs int64  `json:"duration_ms"`      // 耗时毫秒
+	Status     string `json:"status"`           // ok | fail | timeout
+	Detail     string `json:"detail,omitempty"` // 失败原因摘要（非敏感）
+}
+
+const maxWarmEventRows = 2000
+
+// AddWarmEvent 追加一条启动预热事件（同步落库，量小）。
+func (s *localStore) AddWarmEvent(rec WarmEventRecord) error {
+	if s == nil || s.db == nil || strings.TrimSpace(rec.TargetPath) == "" {
+		return nil
+	}
+	if rec.StartedAt <= 0 {
+		rec.StartedAt = time.Now().Unix()
+	}
+	if rec.FinishedAt <= 0 {
+		rec.FinishedAt = rec.StartedAt
+	}
+	if rec.ID == "" {
+		rec.ID = fmt.Sprintf("%d-%s", rec.StartedAt, rec.TargetPath)
+	}
+	if _, err := s.db.Exec(`INSERT OR REPLACE INTO warm_events
+        (id, target_path, started_at, finished_at, duration_ms, status, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.TargetPath, rec.StartedAt, rec.FinishedAt, rec.DurationMs, rec.Status, rec.Detail); err != nil {
+		return err
+	}
+	return s.pruneWarmEventsIfNeeded()
+}
+
+// ListWarmEvents 按完成时间倒序返回预热事件。
+func (s *localStore) ListWarmEvents(limit int) ([]WarmEventRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`SELECT id, target_path, started_at, finished_at, duration_ms, status, detail
+        FROM warm_events ORDER BY finished_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var recs []WarmEventRecord
+	for rows.Next() {
+		var r WarmEventRecord
+		if err := rows.Scan(&r.ID, &r.TargetPath, &r.StartedAt, &r.FinishedAt, &r.DurationMs, &r.Status, &r.Detail); err != nil {
+			return nil, err
+		}
+		recs = append(recs, r)
+	}
+	return recs, rows.Err()
+}
+
+// pruneWarmEventsIfNeeded 预热事件过多时清理最旧的。
+func (s *localStore) pruneWarmEventsIfNeeded() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM warm_events WHERE id IN (
+        SELECT id FROM warm_events ORDER BY id DESC LIMIT -1 OFFSET ?)`, maxWarmEventRows)
+	return err
 }
 
 const maxPlaybackStatsRows = 200000

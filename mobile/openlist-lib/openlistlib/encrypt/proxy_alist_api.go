@@ -515,11 +515,21 @@ func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	var warmEvents []WarmEventRecord
+	if p.localStore != nil {
+		if we, werr := p.localStore.ListWarmEvents(limit); werr != nil {
+			http.Error(w, werr.Error(), http.StatusInternalServerError)
+			return
+		} else {
+			warmEvents = we
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"code":        200,
 		"playbacks":   plays,
 		"deletions":   dels,
+		"warm_events": warmEvents,
 		"probe_stats": p.ProbeStatsSnapshot(),
 	})
 }

@@ -3,6 +3,8 @@ package encrypt
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -33,6 +35,7 @@ const dirWarmPropfindBody = `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind
 // encrypt root prefix (e.g. /156联通云盘/encrypt) in the background, so the
 // WebDAV backend has already loaded the storage driver lists by the time a
 // real client asks. Failures are ignored: this is purely an optimization.
+// Each attempt is recorded into the local warm_events store for the stats UI.
 func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 	if p == nil || config == nil {
 		return
@@ -67,14 +70,28 @@ func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 			go func(root string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				warmOneRootDir(alistURL, root)
+				warmOneRootDir(p, alistURL, root)
 			}(root)
 		}
 		wg.Wait()
 	}()
 }
 
-func warmOneRootDir(alistURL, root string) {
+func warmOneRootDir(p *ProxyServer, alistURL, root string) {
+	startedAt := time.Now()
+	rec := WarmEventRecord{
+		TargetPath: root,
+		StartedAt:  startedAt.Unix(),
+		Status:     WarmEventOK,
+	}
+	defer func() {
+		rec.FinishedAt = time.Now().Unix()
+		rec.DurationMs = time.Since(startedAt).Milliseconds()
+		if p != nil && p.localStore != nil {
+			_ = p.localStore.AddWarmEvent(rec)
+		}
+	}()
+
 	davPath := "/dav/" + strings.TrimPrefix(root, "/")
 	if !strings.HasSuffix(davPath, "/") {
 		davPath += "/"
@@ -85,6 +102,8 @@ func warmOneRootDir(alistURL, root string) {
 
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", target, bytes.NewReader([]byte(dirWarmPropfindBody)))
 	if err != nil {
+		rec.Status = WarmEventFail
+		rec.Detail = err.Error()
 		return
 	}
 	req.Header.Set("Depth", "1")
@@ -92,9 +111,20 @@ func warmOneRootDir(alistURL, root string) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			rec.Status = WarmEventTimeout
+			rec.Detail = "timeout"
+		} else {
+			rec.Status = WarmEventFail
+			rec.Detail = err.Error()
+		}
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		rec.Status = WarmEventFail
+		rec.Detail = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
 	// Drain a bounded amount to let the backend fully stream the listing once;
 	// the bytes themselves are irrelevant.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, dirWarmMaxBody))
