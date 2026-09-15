@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
+	log "github.com/sirupsen/logrus"
 )
 
 // dirWarmConcurrency bounds how many root-directory PROPFINDs are issued in
@@ -21,6 +24,11 @@ import (
 const (
 	dirWarmConcurrency = 2
 	dirWarmTimeout     = 8 * time.Second
+	// alistReadyWaitTimeout bounds how long the preheat pass waits for the
+	// OpenList backend (usually 127.0.0.1:5244, spawned alongside the encrypt
+	// proxy at app launch) to accept connections. Without this wait the cold
+	// PROPFINDs land on a not-yet-listening port and the whole pass fails.
+	alistReadyWaitTimeout = 8 * time.Second
 	// Upper bound on how much of the warm response we bother reading. We only
 	// want the request to reach the backend and be answered; the body itself
 	// is discarded.
@@ -62,6 +70,10 @@ func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 
 	go func() {
 		alistURL := p.getAlistURL()
+		ready := waitForAlistReady(p, alistURL)
+		if !ready {
+			log.Warnf("[%s] Skipping preheat pass: Alist not ready within %v (%s)", internal.TagServer, alistReadyWaitTimeout, alistURL)
+		}
 		sem := make(chan struct{}, dirWarmConcurrency)
 		var wg sync.WaitGroup
 		for _, root := range roots {
@@ -70,7 +82,11 @@ func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 			go func(root string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				warmOneRootDir(p, alistURL, root)
+				if ready {
+					warmOneRootDir(p, alistURL, root)
+				} else {
+					recordWarmSkipped(p, root)
+				}
 			}(root)
 		}
 		wg.Wait()
@@ -128,4 +144,53 @@ func warmOneRootDir(p *ProxyServer, alistURL, root string) {
 	// Drain a bounded amount to let the backend fully stream the listing once;
 	// the bytes themselves are irrelevant.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, dirWarmMaxBody))
+}
+
+// waitForAlistReady polls the OpenList backend until it answers, so the
+// preheat PROPFINDs don't fire against a port that isn't listening yet
+// (OpenList and the encrypt proxy boot in parallel at app launch).
+func waitForAlistReady(p *ProxyServer, alistURL string) bool {
+	if p == nil || alistURL == "" {
+		return false
+	}
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+	deadline := time.Now().Add(alistReadyWaitTimeout)
+	for {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, alistURL+"/ping", nil)
+		if err != nil {
+			return false
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode < 500 {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// recordWarmSkipped writes a warm event marking the root as not attempted
+// because the backend never became ready (keeps the stats page honest).
+func recordWarmSkipped(p *ProxyServer, root string) {
+	if p == nil || root == "" {
+		return
+	}
+	now := time.Now().Unix()
+	rec := WarmEventRecord{
+		ID:         fmt.Sprintf("%d-%s", now, root),
+		TargetPath: root,
+		StartedAt:  now,
+		FinishedAt: now,
+		DurationMs: 0,
+		Status:     WarmEventFail,
+		Detail:     "backend not ready",
+	}
+	if p.localStore != nil {
+		_ = p.localStore.AddWarmEvent(rec)
+	}
 }
