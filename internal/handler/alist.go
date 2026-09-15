@@ -197,9 +197,16 @@ type decryptResult struct {
 const (
 	parallelDecryptThreshold = 5
 	maxParallelDecryptLimit  = 32
-	fsMetaHotCacheTTL        = 10 * time.Second
-	fsMetaFailureCacheTTL    = 2 * time.Second
-	maxFSMetaCacheEntries    = 512
+	// fsMeta hot-cache TTL. fs/link + fs/get responses are content metadata
+	// (name/size/link) that does not change on a per-second basis; a 10s TTL
+	// forced a fresh upstream read on almost every back-navigate or repeated
+	// click. 60s dramatically cuts upstream round trips and first-frame
+	// latency for revisited items, while refresh=true (client-forced) still
+	// bypasses the cache entirely. Since fs/get must reflect edits quickly, we
+	// keep a moderate TTL rather than minutes.
+	fsMetaHotCacheTTL     = 60 * time.Second
+	fsMetaFailureCacheTTL = 2 * time.Second
+	maxFSMetaCacheEntries = 512
 )
 
 var mediaTypeByExt = map[string]float64{
@@ -1261,27 +1268,23 @@ func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, e
 			)
 		}
 	}
-	seen := make(map[string]struct{}, len(candidates))
-	for index, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
+	result, confirmedCandidate := probeCandidateCandidates(h.cfg, candidates, authVariants, func(candidate string, headers http.Header) proxy.ContentInspectionResult {
+		return h.streamProxy.InspectEncryptedContentResult(r.Context(), candidate, headers, passwdInfo, ciphertextSize)
+	})
+	if result.Confirmed {
+		if result.Meta.IsV2() && result.Meta.PlainSize > 0 {
+			trace.Logf(r.Context(), "get", "Detected V%s content via probe target=%s plain=%d cipher=%d", contentVersionLabel(result.Meta), confirmedCandidate, result.Meta.PlainSize, result.Meta.CiphertextSize)
 		}
-		if _, ok := seen[candidate]; ok {
-			continue
-		}
-		seen[candidate] = struct{}{}
-		result := probeCandidateWithAuth(h.cfg, candidate, authVariants, func(headers http.Header) proxy.ContentInspectionResult {
-			return h.streamProxy.InspectEncryptedContentResult(r.Context(), candidate, headers, passwdInfo, ciphertextSize)
-		})
-		if result.Confirmed {
-			if index > 0 && result.Meta.IsV2() && result.Meta.PlainSize > 0 {
-				trace.Logf(r.Context(), "get", "Detected V2 content via fallback probe target=%s plain=%d cipher=%d", candidate, result.Meta.PlainSize, result.Meta.CiphertextSize)
-			}
-			return result.Meta
-		}
+		return result.Meta
 	}
 	return meta
+}
+
+func contentVersionLabel(meta encryption.ContentMeta) string {
+	if meta.IsV2() {
+		return "V2"
+	}
+	return "V1"
 }
 
 func (h *AlistHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {
