@@ -38,16 +38,26 @@ type AlistHandler struct {
 	dirSyncStart   sync.Once
 	dirSyncRunning atomic.Bool
 	dirSyncGroup   singleflight.Group
-	dirSyncCtx     context.Context
-	dirSyncCancel  context.CancelFunc
-	dirSyncMu      sync.Mutex
-	dirSyncStopped bool
-	dirSyncWG      sync.WaitGroup
-	dirSyncStop    sync.Once
-	fsMetaGroup    singleflight.Group
-	fsMetaMu       sync.Mutex
-	statsRecorder  StatsRecorder
-	fsMetaCache    map[string]fsMetaCacheEntry
+	// liveListGroup coalesces concurrent cold fs/list misses for the SAME
+	// directory (keyed by the dir path, auth-agnostic) into one shared full
+	// upstream listing, so an N-way thundering herd costs one upstream call.
+	liveListGroup singleflight.Group
+	// dirSyncRefreshSem bounds the number of concurrently-running request-driven
+	// async snapshot refreshes. A full listing is expensive (one full upstream
+	// fs/list + persist); without this cap, sustained cold/miss load spawns
+	// unbounded goroutines and DB writes. Refreshes are pure optimization, so
+	// when the cap is reached new ones are simply dropped.
+	dirSyncRefreshSem chan struct{}
+	dirSyncCtx        context.Context
+	dirSyncCancel     context.CancelFunc
+	dirSyncMu         sync.Mutex
+	dirSyncStopped    bool
+	dirSyncWG         sync.WaitGroup
+	dirSyncStop       sync.Once
+	fsMetaGroup       singleflight.Group
+	fsMetaMu          sync.Mutex
+	statsRecorder     StatsRecorder
+	fsMetaCache       map[string]fsMetaCacheEntry
 
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
@@ -70,6 +80,13 @@ type fsMetaCacheEntry struct {
 	FailureFast bool
 }
 
+// liveListFlight is the shared result of a coalesced full-dir upstream listing.
+type liveListFlight struct {
+	StatusCode int
+	Payload    []byte
+	ItemCount  int
+}
+
 type fsMetaUpstreamResponse struct {
 	StatusCode  int
 	Header      http.Header
@@ -87,16 +104,17 @@ type fsMetaFetchResult struct {
 func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
 	dirSyncCtx, dirSyncCancel := context.WithCancel(context.Background())
 	return &AlistHandler{
-		cfg:           cfg,
-		streamProxy:   streamProxy,
-		httpClient:    proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
-		fileDAO:       fileDAO,
-		passwdDAO:     passwdDAO,
-		proxyHandler:  proxyHandler,
-		metaStore:     metaStore,
-		probe:         probe,
-		dirSyncCtx:    dirSyncCtx,
-		dirSyncCancel: dirSyncCancel,
+		cfg:               cfg,
+		streamProxy:       streamProxy,
+		httpClient:        proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
+		fileDAO:           fileDAO,
+		passwdDAO:         passwdDAO,
+		proxyHandler:      proxyHandler,
+		metaStore:         metaStore,
+		probe:             probe,
+		dirSyncCtx:        dirSyncCtx,
+		dirSyncCancel:     dirSyncCancel,
+		dirSyncRefreshSem: make(chan struct{}, dirSyncRefreshMaxConcurrent),
 	}
 }
 
@@ -793,37 +811,78 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		// this public Alist-compatible endpoint would bypass upstream authorization.
 	}
 
-	statusCode, _, payload, _, err := h.liveFsListResponse(r, body, dirPath, true)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to proxy fs/list")
+	// Cold path (no local snapshot): coalesce concurrent misses for this same
+	// directory into ONE shared full upstream listing via singleflight keyed by
+	// the dir path (auth-agnostic, so different sessions/tokens share the fetch).
+	// The shared full payload is then paginated per caller so every client keeps
+	// its own page window contract. A full (per_page=5000) listing is persisted
+	// once by the flight leader; the async refresh goroutine is not needed for
+	// the cold path because the shared full payload IS stored immediately.
+	v, flightErr, _ := h.liveListGroup.Do(normalizeDirPath(dirPath), func() (interface{}, error) {
+		// Build a detached request so no single client disconnect can abort the
+		// shared flight (which would revive the thundering herd for the waiters).
+		flightCtx := h.dirSyncCtx
+		if flightCtx == nil {
+			flightCtx = context.Background()
+		}
+		fakeAuth := h.requestAuthHeaders(r)
+		detachReq, derr := http.NewRequestWithContext(flightCtx, http.MethodPost, "http://encrypt.local/api/fs/list", nil)
+		if derr != nil {
+			return nil, derr
+		}
+		for key, values := range fakeAuth {
+			for _, value := range values {
+				detachReq.Header.Add(key, value)
+			}
+		}
+		detachReq.Header.Set("Content-Type", "application/json")
+		fetch := func(reqBody []byte) (int, []byte, int, error) {
+			status, _, payload, count, err := h.liveFsListResponse(detachReq, reqBody, dirPath, true)
+			return status, payload, count, err
+		}
+		upstreamBody := fullListRequestBody(body)
+		statusCode, payload, itemCount, err := fetch(upstreamBody)
+		if err != nil {
+			return nil, err
+		}
+		// Upstream intermittently returns a drive-root masquerade (the 10
+		// top-level mounts) instead of the real encrypted directory — a
+		// transient cache bug in openalist. Retry once with refresh:true to
+		// force the upstream to fetch fresh data; never serve the poisoned view.
+		if h.snapshotScopeEnabled(dirPath) && h.snapshotPayloadRootPoisoned(dirPath, payload) {
+			refreshBody := withRefreshTrue(upstreamBody)
+			statusCode2, payload2, itemCount2, err2 := fetch(refreshBody)
+			if err2 == nil && statusCode2 >= 200 && statusCode2 < 300 && !h.snapshotPayloadRootPoisoned(dirPath, payload2) {
+				log.Info().Str("path", dirPath).Msg("Recovered from root-poison via refresh:true retry")
+				statusCode, payload, itemCount = statusCode2, payload2, itemCount2
+			} else {
+				log.Warn().Str("path", dirPath).Msg("Root-poison retry with refresh:true did not help; serving poisoned fallback")
+			}
+		}
+		// Persist the shared FULL listing immediately (single writer) as the
+		// request-fill snapshot. This replaces the old "queue async refresh"
+		// behavior on the cold path while keeping page-windowed callers from
+		// ever overwriting the full row (fullListRequestBody guarantees full).
+		// Use the handler's long-lived dir-sync context so the write outlives
+		// the (possibly cancelled) leading request that triggered the flight.
+		if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) && !h.snapshotPayloadRootPoisoned(dirPath, payload) {
+			h.persistSnapshot(flightCtx, dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
+		}
+		return &liveListFlight{StatusCode: statusCode, Payload: payload, ItemCount: itemCount}, nil
+	})
+	if flightErr != nil {
+		log.Error().Err(flightErr).Msg("Failed to proxy fs/list")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
-	// Upstream intermittently returns a drive-root masquerade (the 10 top-level
-	// mounts) instead of the real encrypted directory — a transient cache bug in
-	// openalist. When that happens, retry once with refresh:true to force the
-	// upstream to fetch fresh data; the user must never see the poisoned view.
-	if h.snapshotScopeEnabled(dirPath) && h.snapshotPayloadRootPoisoned(dirPath, payload) {
-		refreshBody := withRefreshTrue(body)
-		statusCode2, _, payload2, _, err2 := h.liveFsListResponse(r, refreshBody, dirPath, false)
-		if err2 == nil && statusCode2 >= 200 && statusCode2 < 300 && !h.snapshotPayloadRootPoisoned(dirPath, payload2) {
-			log.Info().Str("path", dirPath).Msg("Recovered from root-poison via refresh:true retry")
-			payload = payload2
-			statusCode = statusCode2
-			body = refreshBody
-		} else {
-			log.Warn().Str("path", dirPath).Msg("Root-poison retry with refresh:true did not help; serving poisoned fallback")
+	flight := v.(*liveListFlight)
+	respond := flight.Payload
+	if page > 0 && perPage > 0 {
+		if sliced, ok := paginateSnapshotJSON(respond, page, perPage); ok {
+			respond = sliced
 		}
 	}
-	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) && !h.snapshotPayloadRootPoisoned(dirPath, payload) {
-		// Do NOT persist the caller's (possibly page-windowed) listing as the
-		// snapshot — that would store a truncated view (e.g. per_page:5) that
-		// later overrides the full scan snapshot. Instead queue an async full
-		// listing that persists the complete directory; the live response goes
-		// straight to the caller.
-		h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
-	}
-	RespondRaw(w, statusCode, "application/json", payload)
+	RespondRaw(w, flight.StatusCode, "application/json", respond)
 }
 
 // HandleFsGet intercepts /api/fs/get to modify raw_url and handle filename encryption

@@ -62,6 +62,12 @@ type DirSyncStore interface {
 	GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath string) (*DirListSnapshot, bool, error)
 	UpsertSnapshot(ctx context.Context, snap DirListSnapshot) error
 	DeleteSnapshot(ctx context.Context, scopeKey string) error
+	// SetSnapshotSyncing atomically transitions a snapshot's sync_state so a
+	// stale read-modify-write can never flip a fresh row back to "syncing" or
+	// clobber a newer completion. syncing=true only applies when the row is
+	// currently "fresh" (cas on syncing); syncing=false completes only FROM a
+	// "syncing" row. Returns whether the transition was applied.
+	SetSnapshotSyncing(ctx context.Context, scopeKey string, syncing bool, lastErr string) (bool, error)
 	CountSnapshots(ctx context.Context) (total, fresh, stale, syncing int64, err error)
 	GetStatus(ctx context.Context, name string) (*DirSyncStatus, bool, error)
 	UpsertStatus(ctx context.Context, status DirSyncStatus) error
@@ -111,6 +117,55 @@ func (s *BoltDirSyncStore) DeleteSnapshot(_ context.Context, scopeKey string) er
 		return nil
 	}
 	return s.store.Delete(storage.BucketDirSync, dirSyncBucketSnapshotPrefix+scopeKey)
+}
+
+func (s *BoltDirSyncStore) SetSnapshotSyncing(_ context.Context, scopeKey string, syncing bool, lastErr string) (bool, error) {
+	if s == nil || s.store == nil {
+		return false, nil
+	}
+	key := dirSyncBucketSnapshotPrefix + scopeKey
+	changed := false
+	err := s.store.UpdateBucket(storage.BucketDirSync, func(tx *storage.BucketTx) error {
+		var snap DirListSnapshot
+		if err := tx.GetJSON(key, &snap); err != nil {
+			return err
+		}
+		if snap.ScopeKey == "" {
+			return nil
+		}
+		if syncing {
+			// Only mark syncing from a non-fresh row (stale/existing marker). A
+			// row that is already fresh means a completed refresh just landed;
+			// a lagging follower's marker must not downgrade it back to syncing
+			// (the "stuck syncing" race). Starting a refresh on a fresh row is a
+			// no-op — the data is current, nothing to mark.
+			if snap.SyncState == "fresh" {
+				return nil
+			}
+			snap.SyncState = "syncing"
+			snap.Stale = true
+		} else {
+			// Only complete a row that is currently syncing, so a late
+			// completion never overwrites a fresher state written meanwhile.
+			if snap.SyncState != "syncing" {
+				return nil
+			}
+			if lastErr != "" {
+				snap.LastError = lastErr
+				snap.Stale = true
+				snap.SyncState = "stale"
+				snap.NextRefreshAt = time.Now().Add(30 * time.Second)
+			} else {
+				snap.SyncState = "fresh"
+				snap.Stale = false
+			}
+		}
+		snap.UpdatedAt = time.Now()
+		snap.LastAccessed = snap.UpdatedAt
+		changed = true
+		return tx.SetJSON(key, &snap)
+	})
+	return changed, err
 }
 
 func (s *BoltDirSyncStore) CountSnapshots(_ context.Context) (total, fresh, stale, syncing int64, err error) {
@@ -242,6 +297,10 @@ func (s *MySQLDirSyncStore) UpsertSnapshot(ctx context.Context, snap DirListSnap
 		LastAccessed:  snap.LastAccessed,
 		Active:        true,
 	})
+}
+
+func (s *MySQLDirSyncStore) SetSnapshotSyncing(ctx context.Context, scopeKey string, syncing bool, lastErr string) (bool, error) {
+	return s.store.SetDirSnapshotSyncing(ctx, scopeKey, syncing, lastErr)
 }
 
 func (s *MySQLDirSyncStore) CountSnapshots(ctx context.Context) (total, fresh, stale, syncing int64, err error) {

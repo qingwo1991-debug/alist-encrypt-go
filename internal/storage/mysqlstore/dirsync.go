@@ -147,6 +147,45 @@ func (s *Store) UpsertDirSnapshot(ctx context.Context, rec DirSnapshotRecord) er
 	return err
 }
 
+// SetDirSnapshotSyncing atomically transitions a snapshot's sync state with a
+// single conditional UPDATE (no read-modify-write), so a lagging writer can
+// never flip a fresh row back to "syncing" or clobber a newer completion.
+// syncing=true applies only when the row is currently 'fresh'; syncing=false
+// completes only when the row is currently 'syncing'. Returns whether changed.
+func (s *Store) SetDirSnapshotSyncing(ctx context.Context, scopeKey string, syncing bool, lastErr string) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	now := time.Now()
+	table := TableName("dir_snapshot")
+	var res sql.Result
+	var err error
+	if syncing {
+		// Only mark syncing from a non-fresh row. A fresh row means a completed
+		// refresh just landed; downgrading it would recreate the "stuck syncing"
+		// race where a lagging follower's marker overwrites a fresh persist.
+		query := `UPDATE ` + table + ` SET
+		  sync_state='syncing', stale=1, updated_at=?, last_accessed=?
+		  WHERE key_hash=? AND is_active=1 AND sync_state<>'fresh'`
+		res, err = s.db.ExecContext(ctx, query, now, now, DirSnapshotKeyHash(scopeKey))
+	} else if lastErr != "" {
+		query := `UPDATE ` + table + ` SET
+			sync_state='stale', stale=1, last_error=?, next_refresh_at=?, updated_at=?, last_accessed=?
+		  WHERE key_hash=? AND is_active=1 AND sync_state='syncing'`
+		res, err = s.db.ExecContext(ctx, query, lastErr, now.Add(30*time.Second), now, now, DirSnapshotKeyHash(scopeKey))
+	} else {
+		query := `UPDATE ` + table + ` SET
+			sync_state='fresh', stale=0, updated_at=?, last_accessed=?
+		  WHERE key_hash=? AND is_active=1 AND sync_state='syncing'`
+		res, err = s.db.ExecContext(ctx, query, now, now, DirSnapshotKeyHash(scopeKey))
+	}
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *Store) CountDirSnapshots(ctx context.Context) (total, fresh, stale, syncing int64, err error) {
 	if s == nil {
 		return 0, 0, 0, 0, nil
