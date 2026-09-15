@@ -28,6 +28,18 @@
 - 按磁盘与网络情况控制分片并发，不建议一次拉满。
 - 优先观察 `/api/stats` 的 `stream.strategy_reason_counts`，避免错误放大。
 
+## 跨端分开考虑：`TUNING_PROFILE`
+
+Docker 是 24h 在线的服务，移动端与 exe 却不一定。两者对后台探活与预热的资源取向应不同——用**一个**环境变量按部署形态施加一致的基准调优，无需手调十几 key；显式设置的 `PROBE_*` / `RANGE_*` / `MAX_ACTIVE_STREAMS` 等仍优先（profile 只是基准）。
+
+- `TUNING_PROFILE=server`（默认/空）：24h 在线服务。保持出厂 aggressive 默认（积极后台预热、快速 Range 恢复）。
+- `TUNING_PROFILE=client`（`mobile` / `exe` 为别名）：偶尔联网的移动端/exe。更保守的 Range 恢复（`rangeSuccessToRecover=5`）、更轻的后台预热（并发 2、队列 250、更长冷却）、更小的解密块缓存（64MB）、更少并发流（8）。
+
+```bash
+# 移动端 / exe / 桌面终端
+TUNING_PROFILE=client ./alist-encrypt-go
+```
+
 ## 观测重点
 
 - `stream.strategy_reason_counts`: 策略降级原因聚合。

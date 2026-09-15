@@ -831,6 +831,13 @@ func (c *Config) applyEnvOverrides() {
 		c.Database = &DBConfig{}
 	}
 
+	// Deployment-shape profile first: a coarse-grained bundle that keeps the
+	// "分开考虑" contract — a 24h on-line Docker service and an occasionally
+	// connected mobile/exe client should not share the same aggressive probe
+	// and cache defaults. Individual PROBE_*/RANGE_*/... overrides below still
+	// win when both are set, so profiles are a base line, not a lock.
+	c.applyTuningProfile()
+
 	if dbType := os.Getenv("DB_TYPE"); dbType != "" {
 		c.Database.Type = dbType
 	}
@@ -908,6 +915,41 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v, ok := getEnvInt("STREAM_OVERLOAD_STATUS"); ok {
 		c.AlistServer.StreamOverloadStatus = v
+	}
+}
+
+// applyTuningProfile applies a coarse deployment-shape bundle keyed by the
+// TUNING_PROFILE env var, so a 24h on-line Docker service and an occasionally
+// connected mobile/exe client get consistent, shape-appropriate defaults
+// without hand-tuning a dozen keys. Explicit PROBE_*/RANGE_*/... env overrides
+// (applied after this) still take precedence over the bundle.
+//
+//   - "server" (default, empty): the always-on deployment — aggressive probe
+//     and cache defaults as shipped. TUNING_PROFILE=server is a no-op.
+//   - "client": occasionally connected terminal (mobile/exe). Range recovery
+//     is more conservative (a flapping link upside down), background preheat
+//     is lighter, and the decrypt block cache is smaller to match limited RAM.
+func (c *Config) applyTuningProfile() {
+	s := &c.AlistServer
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TUNING_PROFILE"))) {
+	case "client", "mobile", "exe":
+		s.RangeFailToDowngrade = 2
+		s.RangeSuccessToRecover = 5
+		s.RangeReprobeMinutes = 20
+		s.RangeProbeTimeoutSeconds = 8
+		s.ProbeConcurrency = 2
+		s.ProbeProviderConcurrency = 1
+		s.ProbeMinDelayMs = 1500
+		s.ProbeMaxDelayMs = 6000
+		s.ProbeCooldownMinutes = 720
+		s.ProbeQueueSize = 250
+		s.ProbeMinSizeBytes = 20 * 1024 * 1024
+		s.EnableBackgroundProbe = true
+		s.MaxActiveStreams = 8
+		s.DecryptedBlockCacheMb = 64
+		s.StreamOverloadStatus = 429
+	default:
+		// server / unset → keep current defaults, nothing to do here.
 	}
 }
 
