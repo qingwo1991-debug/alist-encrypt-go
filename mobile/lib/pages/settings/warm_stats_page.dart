@@ -47,7 +47,7 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
           await NativeBridge.encryptProxy.getEncryptConfigJson();
       final decoded = json.decode(configJson);
       final config = decoded is Map<String, dynamic>
-          ? decoded as Map<String, dynamic>
+          ? decoded
           : <String, dynamic>{};
       if (mounted) {
         setState(() {
@@ -195,6 +195,14 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
     final vs = _latencySeries.map((e) => e['v'] as double).toList()..sort();
     final p50 = _percentile(vs, 0.5);
     final p95 = _percentile(vs, 0.95);
+    if (p50 == null) return '暂无首帧数据';
+    if (p95 == null) return '${p50.toStringAsFixed(0)}ms';
+    return 'p50 ${p50.toStringAsFixed(0)}ms · p95 ${p95.toStringAsFixed(0)}ms';
+  }
+
+  String _latencyP50() {
+    final vs = _latencySeries.map((e) => e['v'] as double).toList()..sort();
+    final p50 = _percentile(vs, 0.5);
     if (p50 == null) return '暂无首帧数据';
     return '${p50.toStringAsFixed(0)}ms';
   }
@@ -369,7 +377,7 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
               child: _metricCard(
                 theme,
                 label: '首帧 p50',
-                value: _latencySeries.isEmpty ? '-' : _latencySummary(),
+                value: _latencySeries.isEmpty ? '-' : _latencyP50(),
                 icon: Icons.timeline,
                 color: const Color(0xFFF65E5E),
               ),
@@ -403,6 +411,10 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
             ),
           ],
         ),
+        if (_probeStats.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _probeCard(theme),
+        ],
         const SizedBox(height: 16),
         // 首帧折线图
         Card(
@@ -417,17 +429,18 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
                 Text('首帧耗时趋势', style: theme.textTheme.titleSmall),
                 const SizedBox(height: 4),
                 Text(
-                  'p50 ${_latencySummary()} · 共 ${_latencySeries.length} 次',
+                  '${_latencySummary()} · 共 ${_latencySeries.length} 次',
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.outline),
                 ),
-                const SizedBox(height: 10),
                 SizedBox(
                   height: 120,
-                  child: _AxisChart(
-                    series: _latencySeries,
-                    color: const Color(0xFFF65E5E),
-                    unit: 'ms',
+                  child: CustomPaint(
+                    painter: _AxisChart(
+                      series: _latencySeries,
+                      color: const Color(0xFFF65E5E),
+                      unit: 'ms',
+                    ),
                   ),
                 ),
                 const Divider(height: 20),
@@ -435,10 +448,12 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
                 const SizedBox(height: 10),
                 SizedBox(
                   height: 120,
-                  child: _AxisChart(
-                    series: _mbpsSeries,
-                    color: const Color(0xFFF4C90A),
-                    unit: 'MiB/s',
+                  child: CustomPaint(
+                    painter: _AxisChart(
+                      series: _mbpsSeries,
+                      color: const Color(0xFFF4C90A),
+                      unit: 'MiB/s',
+                    ),
                   ),
                 ),
               ],
@@ -446,6 +461,32 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _probeCard(ThemeData theme) {
+    final v2Attempts = (_probeStats['v2_attempts'] as num?)?.toInt() ?? 0;
+    final v2Success = (_probeStats['v2_success'] as num?)?.toInt() ?? 0;
+    final dual = (_probeStats['dual_probe_attempts'] as num?)?.toInt() ?? 0;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.explore, size: 20, color: theme.colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'V2 头探测 $v2Success/$v2Attempts · 双网络 RTT $dual 次',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
