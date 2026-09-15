@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -761,9 +762,55 @@ func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.H
 		reportedSize = expectedBytes
 	}
 	req.Probe.EnqueueWithSource(req.FileItem, authHeaders, reportedSize, probeSourceFirstFrame)
+	maybeEnqueueNextEpisodeWarmup(req, authHeaders)
 	if req.WarmupEnqueueCount != nil {
 		atomic.AddUint64(req.WarmupEnqueueCount, 1)
 	}
+}
+
+// maybeEnqueueNextEpisodeWarmup pre-warms the content metadata of the
+// numerically-next episode sibling when the currently playing file carries an
+// unambiguous episode number (第12集 / EP12 / S01E05 / "Show Name 12"). This is
+// the "连播" (continuous playback) accelerator: by the time the current episode
+// finishes, the next one's ContentMeta is already probed so auto-advance
+// reaches the first frame with zero cold-probe latency.
+//
+// It NEVER fabricates: the sibling is only enqueued when it already exists in
+// the local fileDAO cache (populated only by real upstream listings). A
+// guessed, non-existent sibling is therefore never turned into an upstream
+// metadata request.
+func maybeEnqueueNextEpisodeWarmup(req decryptPlaybackRequest, authHeaders http.Header) {
+	if req.Probe == nil || req.FileDAO == nil || req.Config == nil {
+		return
+	}
+	siblingPath := nextEpisodeSiblingDisplayPath(req.FileItem.DisplayPath)
+	if siblingPath == "" {
+		return
+	}
+	sibling, ok := req.FileDAO.Get(siblingPath)
+	if !ok || sibling == nil || sibling.IsDir || sibling.Size <= 0 {
+		return // not a locally-known, valid file — do nothing
+	}
+	// Resolve the encrypted path for the sibling. Prefer the mapping cached by
+	// the listing; fail closed when unavailable (encryption on) so we never
+	// send a plaintext name upstream.
+	encPath := sibling.EncryptedPath
+	if mapped, ok := req.FileDAO.GetEncPath(siblingPath); ok && mapped != "" {
+		encPath = mapped
+	}
+	if encPath == "" {
+		return
+	}
+	passwd := req.FileItem.PasswdInfo
+	item := FileItem{
+		DisplayPath:      siblingPath,
+		EncryptedPath:    encPath,
+		TargetURL:        httputil.BuildTargetURLStripped(req.Config.GetAlistURL(), "/d"+encPath),
+		FileName:         path.Base(siblingPath),
+		CompatStorageKey: buildRangeCompatStorageKey(passwd, siblingPath),
+		PasswdInfo:       passwd,
+	}
+	req.Probe.EnqueueWithSource(item, authHeaders, sibling.Size, probeSourceFirstFrame)
 }
 
 func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {

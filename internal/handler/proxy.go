@@ -22,6 +22,7 @@ import (
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
+	"golang.org/x/sync/singleflight"
 )
 
 // ProxyHandler handles proxy requests
@@ -39,6 +40,8 @@ type ProxyHandler struct {
 	sizeResolver          *FileSizeResolver
 	strategySel           *StrategySelector
 	probe                 *ProbeScheduler
+	rawURLRefreshGroup    singleflight.Group // dedupe proactive raw-URL refreshes
+	lastRawURLRefreshes   sync.Map           // displayPath|scope -> unix nano
 	finalPassthroughCount uint64
 	sizeConflictCount     uint64
 	strategyFallbackCount uint64
@@ -295,6 +298,13 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		CompatStorageKey: info.CompatKey,
 		PasswdInfo:       passwdInfo,
 	}
+	// 3.1: the cached URL we just resolved is valid NOW but if it is close to
+	// expiring we want the refresh to happen in the background so the next
+	// Range/seek request never blocks on an upstream fs/get. Never on the hot
+	// path — this is fire-and-forget.
+	if displayPath != "" && encryptedPath != "" {
+		h.maybeProactivelyRefreshRawURL(r, displayPath, encryptedPath)
+	}
 	executeDecryptPlayback(decryptPlaybackRequest{
 		ResponseWriter:        w,
 		Request:               r,
@@ -437,6 +447,86 @@ func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, key, displayPath
 	return &refreshed
 }
 
+// maybeProactivelyRefreshRawURL schedules a background refresh of the signed
+// raw URL when the cached one is STILL VALID right now but soon to expire (or
+// stale without a parseable expiry). It does NOT block the request: its whole
+// point is to move the refresh off the user's seek path (the "lazy raw-URL
+// freshness" fix). The caller should invoke it right after it resolves a fresh
+// cached URL, so the refresh races ahead of the next Range request.
+func (h *ProxyHandler) maybeProactivelyRefreshRawURL(r *http.Request, displayPath, realPath string) {
+	if h == nil || h.fileDAO == nil || h.cfg == nil || displayPath == "" {
+		return
+	}
+	cached, ok := h.fileDAO.Get(displayPath)
+	if !ok || cached == nil || strings.TrimSpace(cached.RawURL) == "" {
+		return
+	}
+	rawScope := rawURLAuthScope(r.Header)
+	if !cachedRawURLFresh(cached, h.upstreamStalenessThreshold(), rawScope) {
+		return // the sync hot path will refresh when actually stale
+	}
+	if !rawURLNeedsProactiveRefresh(cached, time.Now()) {
+		return
+	}
+	authHeaders := make(http.Header)
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		authHeaders.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		authHeaders.Set("Cookie", cookie)
+	}
+	dedupeKey := displayPath + "\x00" + rawScope
+	if lastNanos, ok := h.lastRawURLRefreshes.Load(dedupeKey); ok {
+		if elapsed := time.Since(time.Unix(0, lastNanos.(int64))); elapsed < proactiveRawRefreshCooldown {
+			return
+		}
+	}
+	h.lastRawURLRefreshes.Store(dedupeKey, time.Now().UnixNano())
+	h.rawURLRefreshGroup.Do(dedupeKey, func() (interface{}, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), proactiveRawURLFetchTimeout)
+		defer cancel()
+		_ = fetchRawURL(ctx, h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, 0)
+		return nil, nil
+	})
+}
+
+// rawURLNeedsProactiveRefresh decides whether a currently-servable cached raw
+// URL is worth refreshing in the background BEFORE the request path needs it.
+// Pure decision helper (unit-testable). Callers must have already verified the
+// URL is servable via cachedRawURLFresh.
+func rawURLNeedsProactiveRefresh(cached *dao.FileInfo, now time.Time) bool {
+	if cached == nil || strings.TrimSpace(cached.RawURL) == "" {
+		return false
+	}
+	if expiry, ok := rawURLExpiresAt(cached.RawURL); ok && !expiry.IsZero() {
+		if !now.Before(expiry) {
+			return false // already expired; the sync path handles it
+		}
+		return now.Add(proactiveRawURLRefreshWindow).After(expiry)
+	}
+	// Unparseable URL (e.g. Baidu where the signed link's own timestamp is not
+	// machine-readable): only proactively refresh genuinely old rows so we
+	// don't churn on every first frame. (Callers have already verified the row
+	// is servable, so staleness < stalenessThreshold here; the 20-min floor is
+	// the practical cadence.)
+	return cached.UpstreamStaleness() >= defaultProactiveStalenessWindow
+}
+
+const (
+	// proactiveRawURLRefreshWindow refreshes raw URLs in the background this
+	// far before their parsed expiry so a seek at T+expiry never blocks.
+	proactiveRawURLRefreshWindow = 5 * time.Minute
+	// defaultProactiveStalenessWindow is the staleness floor for URLs we
+	// cannot parse an expiry from (e.g. Baidu where the signed link's own
+	// timestamp is not machine-readable).
+	defaultProactiveStalenessWindow = 20 * time.Minute
+	// proactiveRawRefreshCooldown prevents hammerring a failing URL from the
+	// many parallel Range requests of a first frame.
+	proactiveRawRefreshCooldown = 20 * time.Second
+	// proactiveRawURLFetchTimeout bounds the background upstream fetch.
+	proactiveRawURLFetchTimeout = 8 * time.Second
+)
+
 func (h *ProxyHandler) convertRedirectDisplayPath(displayPath string, passwdInfo *config.PasswdInfo) string {
 	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 	realPath, _ := resolveEncryptedRealPath(h.fileDAO, passwdInfo, displayPath, allowLoose)
@@ -547,6 +637,11 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, h.upstreamStalenessThreshold(), rawURLScope) {
 		targetURL = cachedInfo.RawURL
 		trace.Logf(r.Context(), "download", "Using cached raw_url for target")
+		// 3.1: the URL we are about to serve is valid NOW but may be close to
+		// expiring. Warm the next one in the background so the subsequent
+		// Range request on this long stream never blocks on a sync upstream
+		// fetch. Fire-and-forget; never on the request hot path.
+		h.maybeProactivelyRefreshRawURL(r, displayPath, realPath)
 	}
 	if targetURL == "" {
 		// Build target URL with ENCRYPTED path.

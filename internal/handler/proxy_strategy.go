@@ -6,6 +6,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/dao"
@@ -95,16 +96,21 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 		return &dao.FileInfo{Path: displayPath, Size: size}, StrategyFileSizeCache
 	}
 
-	// Level 2.5: MySQL/meta resolver (if enabled)
+	// Level 2.5: MySQL/meta resolver + Level 3: HEAD request. Cold cache:
+	// instead of running these serial (up to 2-3 upstream RTTs on the
+	// first-frame path), run them CONCURRENTLY and take the first good result.
+	// Both are read-only upstream probes that independently backfill caches, so
+	// parallelizing is safe and the user sees whichever returns first. This
+	// matches the probeCandidateCandidates design used by the ContentMeta path.
 	if h.sizeResolver != nil {
-		trace.Logf(ctx, "fallback", "Cache miss, trying size resolver")
-		headURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), urlPrefix+realPath)
-		file := FileItem{
-			DisplayPath:   displayPath,
-			EncryptedPath: realPath,
-			TargetURL:     headURL,
-			FileName:      path.Base(displayPath),
+		trace.Logf(ctx, "fallback", "Cold cache: parallel resolver + HEAD")
+		type strategyHit struct {
+			size  int64
+			strat StrategyType
+			ok    bool
 		}
+		results := make(chan strategyHit, 2)
+		var wg sync.WaitGroup
 		authHeaders := make(http.Header)
 		if auth := r.Header.Get("Authorization"); auth != "" {
 			authHeaders.Set("Authorization", auth)
@@ -112,21 +118,53 @@ func (h *ProxyHandler) fallbackChainHTTP(displayPath, realPath, urlPrefix string
 		if cookie := r.Header.Get("Cookie"); cookie != "" {
 			authHeaders.Set("Cookie", cookie)
 		}
-
-		result := h.sizeResolver.ResolveSingle(ctx, file, authHeaders)
-		if result.Error == nil && result.Size > 0 {
-			h.fileDAO.SetFileSize(realPath, result.Size, 24*time.Hour)
-			trace.Logf(ctx, "fallback", "Size resolver succeeded, size=%d", result.Size)
-			return &dao.FileInfo{Path: displayPath, Size: result.Size}, strategyFromSizeSource(result.Source)
+		headURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), urlPrefix+realPath)
+		file := FileItem{
+			DisplayPath:   displayPath,
+			EncryptedPath: realPath,
+			TargetURL:     headURL,
+			FileName:      path.Base(displayPath),
 		}
+
+		if h.sizeResolver != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				result := h.sizeResolver.ResolveSingle(ctx, file, authHeaders)
+				if result.Error == nil && result.Size > 0 {
+					h.fileDAO.SetFileSize(realPath, result.Size, 24*time.Hour)
+					results <- strategyHit{size: result.Size, strat: strategyFromSizeSource(result.Source), ok: true}
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			size, err := h.executeHEADRequestHTTP(headURL, realPath, r)
+			if err == nil && size > 0 {
+				h.fileDAO.SetFileSize(realPath, size, 24*time.Hour)
+				results <- strategyHit{size: size, strat: StrategyHEADRequest, ok: true}
+			}
+		}()
+
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+		for hit := range results {
+			if hit.ok {
+				trace.Logf(ctx, "fallback", "Parallel strategy won via %s, size=%d", hit.strat, hit.size)
+				return &dao.FileInfo{Path: displayPath, Size: hit.size}, hit.strat
+			}
+		}
+		return &dao.FileInfo{Path: displayPath, Size: 0}, ""
 	}
 
-	// Level 3: HEAD request (slow, 10-50ms)
+	// Resolver disabled: run the HEAD request alone.
 	trace.Logf(ctx, "fallback", "Cache miss, trying HEAD request")
 	headURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), urlPrefix+realPath)
 	size, err := h.executeHEADRequestHTTP(headURL, realPath, r)
 	if err == nil && size > 0 {
-		// Cache for 24 hours
 		h.fileDAO.SetFileSize(realPath, size, 24*time.Hour)
 		trace.Logf(ctx, "fallback", "HEAD request succeeded, size=%d", size)
 		return &dao.FileInfo{Path: displayPath, Size: size}, StrategyHEADRequest
