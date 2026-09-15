@@ -471,23 +471,65 @@ func generateRandomSecret(n int) (string, error) {
 // Load loads configuration from file
 func Load() *Config {
 	cfgOnce.Do(func() {
-		cfg = loadConfigAt(filepath.Join(getWorkDir(), "conf", "config.json"))
+		cfg = loadConfigAt(filepath.Join(resolveBaseDir(), "conf", "config.json"))
 	})
 	return cfg
 }
 
 // LoadFresh loads configuration from disk without using the package singleton.
 func LoadFresh() *Config {
-	return loadConfigAt(filepath.Join(getWorkDir(), "conf", "config.json"))
+	return loadConfigAt(filepath.Join(resolveBaseDir(), "conf", "config.json"))
 }
 
 // LoadFromBaseDir loads a fresh configuration rooted at the given base directory.
 // It does not touch the package singleton and is suitable for embedded/mobile use.
 func LoadFromBaseDir(baseDir string) *Config {
 	if strings.TrimSpace(baseDir) == "" {
-		baseDir = getWorkDir()
+		baseDir = resolveBaseDir()
 	}
 	return loadConfigAt(filepath.Join(baseDir, "conf", "config.json"))
+}
+
+// resolveBaseDir determines the directory that hosts conf/ and data/ for
+// non-embedded runs. Portability matters here: a server binary is often
+// launched from a different working directory (cron, 桌面快捷方式, other
+// service manager), and a cwd-relative fallback would silently create a
+// fresh empty installation with no encryption rules.
+//
+// Priority:
+//  1. ALIST_ENCRYPT_BASE_DIR environment variable — the portable override,
+//     useful for Docker, systemd, and other explicit deployments.
+//  2. The directory of the running executable, when a conf/config.json is
+//     already present next to it — the auto-detected "portable" layout (a
+//     binary + conf/ + data/ side by side); matches how the official image is
+//     laid out (WORKDIR /app with conf/ and data/ beside the binary).
+//  3. The current working directory (legacy behavior).
+//
+// An absent branch never falls back to a cwd whose conf/ is missing: the
+// config loader itself creates a default config on first run, so the only
+// material difference is WHICH directory hosts the state — this keeps a
+// relocated daemon from owning a stray empty conf/ under a random cwd.
+func resolveBaseDir() string {
+	if d := strings.TrimSpace(os.Getenv("ALIST_ENCRYPT_BASE_DIR")); d != "" {
+		return d
+	}
+	if exePath, err := os.Executable(); err == nil {
+		if dir := baseDirFromExecutable(exePath); dir != "" {
+			return dir
+		}
+	}
+	return getWorkDir()
+}
+
+// baseDirFromExecutable returns the base directory hosting this executable's
+// conf/config.json, or "" when the executable is not laid out as a portable
+// bundle (e.g. installed into a system bin dir without adjacent state).
+func baseDirFromExecutable(exePath string) string {
+	exeDir := filepath.Dir(exePath)
+	if st, err := os.Stat(filepath.Join(exeDir, "conf", "config.json")); err == nil && !st.IsDir() {
+		return exeDir
+	}
+	return ""
 }
 
 func loadConfigAt(configPath string) *Config {
@@ -615,7 +657,7 @@ func (c *Config) Save() error {
 func (c *Config) saveLocked() error {
 	configPath := c.configPath
 	if configPath == "" {
-		configPath = filepath.Join(getWorkDir(), "conf", "config.json")
+		configPath = filepath.Join(resolveBaseDir(), "conf", "config.json")
 	}
 
 	// Create a snapshot for saving (without expanded paths)
