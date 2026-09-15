@@ -1,5 +1,9 @@
 export default {
   router: {
+    Overview: 'Overview',
+    Config: 'Config',
+    Tools: 'Tools',
+    'warm overview': 'Preheat Overview',
     Dashboard: '',
     'Setting Switch': '',
     'Error Log': '',

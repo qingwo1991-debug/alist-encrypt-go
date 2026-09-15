@@ -202,44 +202,99 @@ const drawSeries = (canvas, series, opts) => {
   if (!canvas || !series.length) return
   const ctx = canvas.getContext('2d')
   const W = canvas.width, H = canvas.height
-  const padL = 44, padR = 8, padT = 8, padB = 16
+  const padL = 52, padR = 12, padT = 12, padB = 20
   ctx.clearRect(0, 0, W, H)
-  // 网格
-  ctx.strokeStyle = 'rgba(128,128,128,0.18)'
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  for (let i = 0; i <= 4; i++) {
-    const y = padT + (H - padT - padB) * i / 4
-    ctx.moveTo(padL, y); ctx.lineTo(W - padR, y)
-  }
-  ctx.stroke()
+
   // 值域
   let maxV = 0
   for (const s of series) if (s.v > maxV) maxV = s.v
   if (maxV <= 0) return
+  // 取整到好看的上界（1/2/5 步长）
+  const niceCeil = (v) => {
+    if (v <= 0) return 1
+    const mag = 10**Math.floor(Math.log10(v))
+    const norm = v / mag
+    const nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10
+    return nice * mag
+  }
+  maxV = niceCeil(maxV)
+
   // 时间轴
   const t0 = series[0].t.getTime(), t1 = series[series.length - 1].t.getTime()
   const span = Math.max(t1 - t0, 1)
   const x = s => padL + (s.t.getTime() - t0) / span * (W - padL - padR)
   const y = v => padT + (H - padT - padB) * (1 - v / maxV)
 
+  // 网格 + Y 轴刻度（均分 4 段，5 条刻度线带数值标签）
+  const ticks = 4
+  ctx.strokeStyle = 'rgba(128,128,128,0.18)'
+  ctx.lineWidth = 1
+  ctx.font = '10px sans-serif'
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  for (let i = 0; i <= ticks; i++) {
+    const v = maxV * i / ticks
+    const yy = y(v)
+    ctx.beginPath()
+    ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy)
+    ctx.stroke()
+    ctx.fillStyle = 'rgba(150,150,150,0.9)'
+    ctx.fillText(opts.unit ? `${String(Math.round(v * 100) / 100)}${opts.unit}` : String(Math.round(v * 100) / 100), padL - 6, yy)
+  }
+
+  // X 轴时间刻度（最多 5 个，避免拥挤）
+  ctx.textBaseline = 'top'
+  ctx.textAlign = 'center'
+  const xTicks = 4
+  for (let i = 0; i <= xTicks; i++) {
+    const ts = new Date(t0 + span * i / xTicks)
+    const xx = padL + (W - padL - padR) * i / xTicks
+    ctx.fillStyle = 'rgba(150,150,150,0.9)'
+    ctx.fillText(`${ts.getHours()}:${String(ts.getMinutes()).padStart(2, '0')}`, xx, H - padB + 4)
+  }
+
   // 折线
   ctx.strokeStyle = opts.color || '#409eff'
   ctx.lineWidth = 1.5
+  ctx.lineJoin = 'round'
   ctx.beginPath()
   series.forEach((s, i) => {
     const px = x(s), py = y(s.v)
     if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py)
   })
   ctx.stroke()
-  // 刻度标签
-  ctx.fillStyle = 'rgba(150,150,150,0.9)'
-  ctx.font = '10px sans-serif'
-  ctx.fillText('0', 2, H - 4)
-  ctx.fillText(String(Math.round(maxV)), 2, padT + 4)
-  // y label
-  ctx.fillText(t0.toTimeString().slice(0, 5), padL, H - 3)
-  ctx.fillText(t1.toTimeString().slice(0, 5), W - padR - 44, H - 3)
+
+  // 数据点：圆点 + 数值标签（数据点上方小字号）
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'bottom'
+  const step = Math.max(1, Math.ceil(series.length / 60))
+  series.forEach((s, i) => {
+    if (i % step !== 0 && i !== series.length - 1) return
+    const px = x(s), py = y(s.v)
+    ctx.beginPath()
+    ctx.arc(px, py, 2.5, 0, Math.PI * 2)
+    ctx.fillStyle = opts.color || '#409eff'
+    ctx.fill()
+    // 数值标签：单位可选
+    const valText = opts.unit
+      ? `${Math.round(s.v * 100) / 100}${opts.unit}`
+      : String(Math.round(s.v))
+    ctx.font = '9px sans-serif'
+    ctx.fillStyle = opts.labelColor || 'rgba(90,90,90,0.95)'
+    ctx.fillText(valText, px, py - 5)
+  })
+
+  // Y 轴标题（单位）
+  if (opts.unit) {
+    ctx.save()
+    ctx.translate(12, padT + 2)
+    ctx.font = '10px sans-serif'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillStyle = 'rgba(150,150,150,0.9)'
+    ctx.fillText(opts.unit, 0, 0)
+    ctx.restore()
+  }
 }
 
 const loadPlaybackStats = async () => {
@@ -258,8 +313,8 @@ const exportingStats = ref(false)
 // 播放数据变化后重绘首帧/速率曲线（nextTick 保证 canvas 已挂载）
 watch([latencySeries, mbpsSeries], async () => {
   await nextTick()
-  drawSeries(latencyCanvas.value, latencySeries.value, { color: '#409eff' })
-  drawSeries(mbpsCanvas.value, mbpsSeries.value, { color: '#67c23a' })
+  drawSeries(latencyCanvas.value, latencySeries.value, { color: '#409eff', unit: 'ms', labelColor: 'rgba(64,158,255,0.95)' })
+  drawSeries(mbpsCanvas.value, mbpsSeries.value, { color: '#67c23a', unit: 'M', labelColor: 'rgba(103,194,58,0.95)' })
 })
 
 // 清空全部播放/删除统计（重新积累）。带确认。

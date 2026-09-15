@@ -1186,4 +1186,44 @@ onUnmounted(() => {
     padding: 18px;
   }
 }
+
+/* 移动端表单适配：label 上置 + 固定宽度输入框自适应，防止横向溢出 */
+@media (max-width: 768px) {
+  .setting-form {
+    :deep(.el-form-item) {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+    }
+    :deep(.el-form-item__label) {
+      justify-content: flex-start;
+      width: auto !important;
+      line-height: 1.4;
+      margin-bottom: 6px;
+      padding-right: 0;
+    }
+    :deep(.el-form-item__content) {
+      margin-left: 0 !important;
+      width: 100%;
+    }
+    :deep(.el-form-item__content > div) {
+      width: 100%;
+    }
+    :deep(.el-input),
+    :deep(.el-select),
+    :deep(.el-textarea) {
+      max-width: 100% !important;
+      width: 100%;
+    }
+  }
+
+  .section-body {
+    :deep(.el-input),
+    :deep(.el-select),
+    :deep(.el-textarea) {
+      max-width: 100% !important;
+      width: 100%;
+    }
+  }
+}
 </style>

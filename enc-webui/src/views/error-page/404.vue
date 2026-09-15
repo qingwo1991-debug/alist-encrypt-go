@@ -5,7 +5,7 @@
       <div class="page-title">页面未找到</div>
       <div class="page-subtitle">请求的地址不存在，或该入口已经被移除。请返回首页继续操作。</div>
       <div class="page-actions">
-        <router-link to="/dashboard">
+        <router-link to="/overview/dashboard">
           <el-button type="primary">回到首页</el-button>
         </router-link>
       </div>
