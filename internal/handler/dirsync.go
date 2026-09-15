@@ -32,6 +32,11 @@ const (
 	// persistence: a single full page is requested so the stored payload holds
 	// the entire directory, not just the caller's page window.
 	dirSyncSnapshotMaxPerPage = 5000
+	// dirSyncRefreshMaxConcurrent caps request-driven async snapshot refreshes
+	// running at once. Refreshes are pure optimization (they pre-warm cache);
+	// under sustained miss load dropping the excess is safe and prevents
+	// unbounded goroutine/DB-write growth.
+	dirSyncRefreshMaxConcurrent = 8
 )
 
 func (h *AlistHandler) ensureDirSyncLoop() {
@@ -502,6 +507,23 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 		return
 	}
 	now := time.Now()
+	// Last-writer-wins on a shared scope key is unsafe under concurrency: a
+	// stale page-windowed listing (small item_count) can arrive after a full
+	// scan snapshot for the same directory and overwrite it. Guard by refusing
+	// to downgrade a strictly-newer-and-fuller row. Only request-driven
+	// persists are gated — scan writes may be smaller/fresher by design.
+	existing, exists, _ := h.dirSyncStore.GetSnapshot(ctx, scopeKey)
+	if exists && existing != nil && existing.ItemCount > itemCount &&
+		existing.UpdatedAt.After(now.Add(-30*time.Second)) &&
+		sourceMode == dirSyncModeReq {
+		log.Debug().
+			Str("dir_path", dirPath).
+			Str("scope", scopeKey).
+			Int("existing_count", existing.ItemCount).
+			Int("new_count", itemCount).
+			Msg("Skipping snapshot persist: refusing to downgrade a fuller recent snapshot")
+		return
+	}
 	snap := DirListSnapshot{
 		ScopeKey:      scopeKey,
 		ProviderHost:  h.cfg.GetAlistURL(),
@@ -569,27 +591,9 @@ func (h *AlistHandler) updateSnapshotSyncing(ctx context.Context, scopeKey strin
 	if h == nil || h.dirSyncStore == nil {
 		return
 	}
-	snap, ok, err := h.dirSyncStore.GetSnapshot(ctx, scopeKey)
-	if err != nil || !ok || snap == nil {
-		return
+	if _, err := h.dirSyncStore.SetSnapshotSyncing(ctx, scopeKey, syncing, lastErr); err != nil {
+		log.Warn().Err(err).Str("scope", scopeKey).Bool("syncing", syncing).Msg("Failed to transition snapshot sync state")
 	}
-	if syncing {
-		snap.SyncState = "syncing"
-		snap.Stale = true
-	} else {
-		if lastErr != "" {
-			snap.LastError = lastErr
-			snap.Stale = true
-			snap.SyncState = "stale"
-			snap.NextRefreshAt = time.Now().Add(30 * time.Second)
-		} else {
-			snap.SyncState = "fresh"
-			snap.Stale = false
-		}
-	}
-	snap.UpdatedAt = time.Now()
-	snap.LastAccessed = snap.UpdatedAt
-	_ = h.dirSyncStore.UpsertSnapshot(ctx, *snap)
 }
 
 func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath string, enableProbe bool) (int, map[string]interface{}, []byte, int, error) {
@@ -805,12 +809,26 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 		return
 	}
 	h.ensureDirSyncLoop()
+	// Bound the number of concurrently running request-driven refreshes. A
+	// refresh is a pure optimization (pre-warming the snapshot cache); if the cap
+	// is already reached, dropping this one is safe — the next request or the
+	// periodic scan will repopulate the row, and we'd rather shed load than
+	// spawn an unbounded number of full upstream fetches. The semaphore is
+	// acquired INSIDE the goroutine and held for its whole lifetime so the cap
+	// bounds actual concurrent work, not just scheduling.
 	ctx := h.dirSyncCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	h.updateSnapshotSyncing(ctx, scopeKey, true, "")
 	h.startDirSyncWork(func(ctx context.Context) {
+		select {
+		case h.dirSyncRefreshSem <- struct{}{}:
+			defer func() { <-h.dirSyncRefreshSem }()
+		default:
+			log.Debug().Str("path", dirPath).Msg("Dir-sync refresh cap reached; dropping refresh")
+			return
+		}
+		h.updateSnapshotSyncing(ctx, scopeKey, true, "")
 		_, err, _ := h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
 			upstreamBody := fullListRequestBody(body)
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(upstreamBody))
@@ -933,9 +951,28 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		seen[root] = struct{}{}
 	}
 
+	// Persisting the full status row on every scanned node is O(dirs) DB writes
+	// per scan cycle (fresh dirs included). Throttle flush to at most once per
+	// second or per 256 nodes; the final flush below always persists.
+	var statusDirty bool
+	lastStatusFlush := time.Now()
+	flushStatus := func(force bool) {
+		if !statusDirty {
+			return
+		}
+		if !force && time.Since(lastStatusFlush) < time.Second && status.DirsScanned%64 != 0 {
+			return
+		}
+		status.UpdatedAt = time.Now()
+		_ = h.dirSyncStore.UpsertStatus(ctx, status)
+		lastStatusFlush = time.Now()
+		statusDirty = false
+	}
+
 	for len(queue) > 0 {
 		select {
 		case <-ctx.Done():
+			flushStatus(true)
 			return
 		default:
 		}
@@ -947,6 +984,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		if snap, ok, _ := h.dirSyncStore.GetSnapshot(ctx, scopeKey); ok && snap != nil && !snap.NextRefreshAt.IsZero() && time.Now().Before(snap.NextRefreshAt) {
 			status.DirsSkipped++
 			status.DirsScanned++
+			statusDirty = true
 			if node.depth < maxDepth {
 				for _, child := range h.extractDirChildrenFromPayload(node.path, snap.PayloadJSON) {
 					if _, exists := seen[child]; exists {
@@ -956,8 +994,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 					queue = append(queue, scanNode{path: child, depth: node.depth + 1})
 				}
 			}
-			status.UpdatedAt = time.Now()
-			_ = h.dirSyncStore.UpsertStatus(ctx, status)
+			flushStatus(false)
 			continue
 		}
 
@@ -973,6 +1010,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		req.Header.Set("Content-Type", "application/json")
 		respStatus, respData, payload, itemCount, err := h.liveFsListResponse(req, reqBody, node.path, true)
 		status.DirsScanned++
+		statusDirty = true
 		if err != nil || respStatus < 200 || respStatus >= 300 || !isSuccessfulListPayload(payload) {
 			status.DirsFailed++
 			if err != nil {
@@ -980,8 +1018,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 			} else if code := payloadResponseCode(payload); code != 0 {
 				status.LastError = "upstream list returned code " + strconv.Itoa(code)
 			}
-			status.UpdatedAt = time.Now()
-			_ = h.dirSyncStore.UpsertStatus(ctx, status)
+			flushStatus(true)
 			continue
 		}
 		status.DirsSucceeded++
@@ -997,8 +1034,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 				queue = append(queue, scanNode{path: child, depth: node.depth + 1})
 			}
 		}
-		status.UpdatedAt = time.Now()
-		_ = h.dirSyncStore.UpsertStatus(ctx, status)
+		flushStatus(false)
 	}
 	status.Status = "done"
 	status.FinishedAt = time.Now()

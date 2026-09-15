@@ -53,7 +53,16 @@ Thumbs.db
 
 # Local Codex build scratch
 .gocache/
+.gopath/
+.gotmp/
+.tmp_dbg_bin
 .tmp-stream-test/
 /outputs/
 __pycache__/
 *.pyc
+
+# Local debug probe scratch (transient tools, not part of the project)
+tools/fsig-probe/
+tools/fsigi-lite/
+tools/redraw/
+*.db
