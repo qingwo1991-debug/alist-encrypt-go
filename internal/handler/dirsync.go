@@ -545,6 +545,26 @@ func fullListRequestBody(body []byte) []byte {
 	return encoded
 }
 
+// withRefreshTrue returns a copy of body with refresh set to true, forcing the
+// upstream to bypass its own cache. Used to recover from transient root-poison
+// responses where openalist returns a drive-root masquerade instead of the real
+// directory listing.
+func withRefreshTrue(body []byte) []byte {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body
+	}
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	req["refresh"] = true
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
 func (h *AlistHandler) updateSnapshotSyncing(ctx context.Context, scopeKey string, syncing bool, lastErr string) {
 	if h == nil || h.dirSyncStore == nil {
 		return

@@ -286,7 +286,7 @@ func itemContentType(item map[string]interface{}) string {
 	ext := strings.ToLower(strings.TrimPrefix(path.Ext(name), "."))
 	switch ext {
 	case "mp4", "mkv", "avi", "mov", "m4v", "wmv", "flv", "webm", "mpg", "mpeg", "ts", "m2ts", "3gp", "ogv":
-		return "video/" + strings.TrimPrefix(ext, "video/")
+		return "video/" + ext
 	case "mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus":
 		return "audio/" + ext
 	case "jpg", "jpeg", "png", "gif", "bmp", "webp", "svg":

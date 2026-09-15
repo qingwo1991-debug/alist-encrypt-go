@@ -799,7 +799,23 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
 	}
-	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) {
+	// Upstream intermittently returns a drive-root masquerade (the 10 top-level
+	// mounts) instead of the real encrypted directory — a transient cache bug in
+	// openalist. When that happens, retry once with refresh:true to force the
+	// upstream to fetch fresh data; the user must never see the poisoned view.
+	if h.snapshotScopeEnabled(dirPath) && h.snapshotPayloadRootPoisoned(dirPath, payload) {
+		refreshBody := withRefreshTrue(body)
+		statusCode2, _, payload2, _, err2 := h.liveFsListResponse(r, refreshBody, dirPath, false)
+		if err2 == nil && statusCode2 >= 200 && statusCode2 < 300 && !h.snapshotPayloadRootPoisoned(dirPath, payload2) {
+			log.Info().Str("path", dirPath).Msg("Recovered from root-poison via refresh:true retry")
+			payload = payload2
+			statusCode = statusCode2
+			body = refreshBody
+		} else {
+			log.Warn().Str("path", dirPath).Msg("Root-poison retry with refresh:true did not help; serving poisoned fallback")
+		}
+	}
+	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) && !h.snapshotPayloadRootPoisoned(dirPath, payload) {
 		// Do NOT persist the caller's (possibly page-windowed) listing as the
 		// snapshot — that would store a truncated view (e.g. per_page:5) that
 		// later overrides the full scan snapshot. Instead queue an async full
