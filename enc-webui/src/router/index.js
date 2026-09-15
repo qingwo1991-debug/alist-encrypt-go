@@ -30,88 +30,81 @@ export const constantRoutes = [
     component: () => import('@/views/error-page/401.vue'),
     hidden: true
   },
+
+  // ── 总览组 ──────────────────────────────
   {
-    path: '/',
+    path: '/overview',
     component: Layout,
-    redirect: '/dashboard',
+    redirect: '/overview/dashboard',
+    meta: { title: 'Overview', icon: 'monitor' },
     children: [
       {
         path: 'dashboard',
         name: 'Dashboard',
         component: () => import('@/views/dashboard/index.vue'),
         meta: { title: 'Dashboard', elSvgIcon: 'Fold', affix: true }
+      },
+      {
+        path: 'warm',
+        name: 'warm-overview',
+        component: () => import('@/views/warm-overview/index.vue'),
+        meta: { title: 'warm overview', icon: 'sunrise' }
+      },
+      {
+        path: 'stats',
+        name: 'other',
+        component: () => import('@/views/other/index.vue'),
+        meta: { title: 'Stats', icon: 'chart' }
       }
     ]
   },
+
+  // ── 配置组 ──────────────────────────────
   {
-    path: '/setting-alist',
+    path: '/config',
     component: Layout,
+    redirect: '/config/alist',
+    meta: { title: 'Config', icon: 'setting' },
     children: [
       {
-        path: 'index',
-        component: () => import('@/views/setting-alist/index.vue'),
+        path: 'alist',
         name: 'alist',
+        component: () => import('@/views/setting-alist/index.vue'),
         meta: { title: 'Setting alist', icon: 'form' }
-      }
-    ]
-  },
-  {
-    path: '/setting-webdav',
-    component: Layout,
-    children: [
+      },
       {
-        path: 'index',
-        component: () => import('@/views/setting-webdav/index.vue'),
+        path: 'webdav',
         name: 'webdav',
+        component: () => import('@/views/setting-webdav/index.vue'),
         meta: { title: 'Setting webdav', icon: 'link' }
-      }
-    ]
-  },
-  {
-    path: '/encrypt-local',
-    component: Layout,
-    children: [
+      },
       {
-        path: 'index',
-        component: () => import('@/views/encrypt-local/index.vue'),
+        path: 'encrypt-local',
         name: 'encrypt-local',
+        component: () => import('@/views/encrypt-local/index.vue'),
         meta: { title: 'encrypt local', icon: 'lock' }
-      }
-    ]
-  },
-  {
-    path: '/encrypt-online',
-    component: Layout,
-    children: [
+      },
       {
-        path: 'index',
-        component: () => import('@/views/encrypt-online/index.vue'),
+        path: 'encrypt-online',
         name: 'encrypt-online',
+        component: () => import('@/views/encrypt-online/index.vue'),
         meta: { title: 'encrypt online', icon: 'eye' }
       }
     ]
   },
+
+  // ── 工具组 ──────────────────────────────
   {
-    path: '/file-transfer',
+    path: '/tools',
     component: Layout,
+    redirect: '/tools/file-transfer',
+    meta: { title: 'Tools', icon: 'operation' },
     children: [
       {
-        path: 'index',
-        component: () => import('@/views/folder-convert/index.vue'),
+        path: 'file-transfer',
         name: 'file transfer',
+        component: () => import('@/views/folder-convert/index.vue'),
         meta: { title: 'file transfer', icon: 'table' }
-      }
-    ]
-  },
-  {
-    path: '/other',
-    component: Layout,
-    children: [
-      {
-        path: 'index',
-        component: () => import('@/views/other/index.vue'),
-        name: 'other',
-        meta: { title: 'Stats', icon: 'chart' }
       }
     ]
   },

@@ -10,6 +10,7 @@
         :default-active="activeMenu"
         :collapse-transition="false"
         mode="vertical"
+        @select="handleSelect"
       >
         <sidebar-item v-for="route in allRoutes" :key="route.path" :item="route" :base-path="route.path" />
       </el-menu>
@@ -26,6 +27,7 @@ import SidebarItem from './SidebarItem.vue'
 import { useBasicStore } from '@/store/basic'
 const { settings, allRoutes, sidebar } = storeToRefs(useBasicStore())
 const routeInstance = useRoute()
+const emit = defineEmits(['navigate'])
 const activeMenu = computed(() => {
   const { meta, path } = routeInstance
   // if set path, the sidebar will highlight the path you set
@@ -34,6 +36,11 @@ const activeMenu = computed(() => {
   }
   return path
 })
+
+// 菜单选中（桌面无副作用；移动端抽屉里选中后通知父级关闭抽屉）
+const handleSelect = () => {
+  emit('navigate')
+}
 </script>
 <style lang="scss">
 //fix open the item style issue

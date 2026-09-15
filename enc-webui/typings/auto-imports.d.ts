@@ -56,6 +56,7 @@ declare global {
   const inject: typeof import('vue').inject
   const isExternal: typeof import('../src/hooks/use-layout.js').isExternal
   const isJWTExpired: typeof import('../src/utils/auth-token.js').isJWTExpired
+  const isMobileState: typeof import('../src/hooks/use-layout.js').isMobileState
   const isProxy: typeof import('vue').isProxy
   const isReactive: typeof import('vue').isReactive
   const isReadonly: typeof import('vue').isReadonly
@@ -103,6 +104,7 @@ declare global {
   const saveProxyRoutingConfigReq: typeof import('../src/api/user.js').saveProxyRoutingConfigReq
   const saveSchemeConfigReq: typeof import('../src/api/user.js').saveSchemeConfigReq
   const saveWebdavConfigReq: typeof import('../src/api/user.js').saveWebdavConfigReq
+  const setIsMobile: typeof import('../src/hooks/use-layout.js').setIsMobile
   const shallowReactive: typeof import('vue').shallowReactive
   const shallowReadonly: typeof import('vue').shallowReadonly
   const shallowRef: typeof import('vue').shallowRef

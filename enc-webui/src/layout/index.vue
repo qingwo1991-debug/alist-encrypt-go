@@ -2,24 +2,39 @@
   <div :class="classObj" class="layout-wrapper">
     <div class="layout-wrapper__glow layout-wrapper__glow--left" />
     <div class="layout-wrapper__glow layout-wrapper__glow--right" />
-    <!--left side-->
-    <Sidebar v-if="settings.showLeftMenu" class="sidebar-container" />
+
+    <!-- 移动端：抽屉侧栏（汉堡打开 / 点遮罩或选菜单关闭） -->
+    <el-drawer
+      v-if="isMobile && settings.showLeftMenu"
+      v-model="drawerVisible"
+      direction="ltr"
+      size="260px"
+      :with-header="false"
+      class="mobile-sidebar-drawer"
+      @closed="onDrawerClosed"
+    >
+      <Sidebar class="drawer-sidebar" @navigate="closeDrawer" />
+    </el-drawer>
+
+    <!-- 桌面端：固定侧栏 -->
+    <Sidebar v-if="!isMobile && settings.showLeftMenu" class="sidebar-container" />
+
     <!--right container-->
     <div class="main-container">
-      <Navbar v-if="settings.showTopNavbar" />
+      <Navbar v-if="settings.showTopNavbar" @toggle-mobile-menu="openDrawer" />
       <TagsView v-if="settings.showTagsView" />
       <AppMain />
     </div>
   </div>
 </template>
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import Sidebar from './sidebar/index.vue'
 import AppMain from './app-main/index.vue'
 import Navbar from './app-main/Navbar.vue'
 import TagsView from './app-main/TagsView.vue'
 import { useBasicStore } from '@/store/basic'
-import { resizeHandler } from '@/hooks/use-layout'
+import { isMobileState, resizeHandler } from '@/hooks/use-layout'
 const { sidebar, settings } = useBasicStore()
 const classObj = computed(() => {
   return {
@@ -27,6 +42,26 @@ const classObj = computed(() => {
     hideSidebar: !settings.showLeftMenu
   }
 })
+const isMobile = isMobileState
+const drawerVisible = ref(false)
+
+const openDrawer = () => {
+  drawerVisible.value = true
+}
+const closeDrawer = () => {
+  drawerVisible.value = false
+}
+const onDrawerClosed = () => {
+  sidebar.opened = false
+}
+
+// 移动端进入时自动关闭侧栏（兼容旧逻辑）
+watch(isMobile, (mobile) => {
+  if (mobile) {
+    sidebar.opened = false
+  }
+})
+
 resizeHandler()
 </script>
 
@@ -97,6 +132,17 @@ resizeHandler()
   }
   .main-container {
     margin-left: 0;
+  }
+}
+
+/* 移动端抽屉内侧栏铺满 */
+.mobile-sidebar-drawer {
+  :deep(.el-drawer__body) {
+    padding: 0;
+  }
+  :deep(.drawer-sidebar),
+  :deep(#Sidebar) {
+    height: 100%;
   }
 }
 </style>

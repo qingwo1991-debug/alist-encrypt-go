@@ -6,7 +6,7 @@
       <div class="page-subtitle">当前账号没有访问该页面的权限。你可以返回上一页，或回到首页重新选择入口。</div>
       <div class="page-actions">
         <el-button @click="back">返回上一页</el-button>
-        <router-link to="/dashboard">
+        <router-link to="/overview/dashboard">
           <el-button type="primary">回到首页</el-button>
         </router-link>
       </div>
@@ -19,7 +19,7 @@ const route = useRoute()
 const router = useRouter()
 const back = () => {
   if (route.query.noGoBack) {
-    router.push({ path: '/dashboard' })
+    router.push({ path: '/overview/dashboard' })
   } else {
     router.go(-1)
   }

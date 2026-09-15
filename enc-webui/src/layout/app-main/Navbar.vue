@@ -2,7 +2,7 @@
   <div class="navbar reset-el-dropdown">
     <div class="navbar__left">
       <!--  切换sidebar按钮  -->
-      <hamburger v-if="settings.showHamburger" :is-active="sidebar.opened" class="hamburger-container" @toggle-click="toggleSideBar" />
+      <hamburger v-if="settings.showHamburger" :is-active="sidebar.opened" class="hamburger-container" @toggle-click="onHamburgerClick" />
       <!--  面包屑导航  -->
       <breadcrumb class="breadcrumb-container" />
     </div>
@@ -47,12 +47,22 @@ import { resetState } from '@/hooks/use-permission'
 import { elMessage } from '@/hooks/use-element'
 import { useBasicStore } from '@/store/basic'
 import { langTitle } from '@/hooks/use-common'
+import { isMobileState } from '@/hooks/use-layout'
 
 const basicStore = useBasicStore()
 const { settings, sidebar, setToggleSideBar, userInfo } = basicStore
 const avatarInitial = computed(() => (userInfo.username || 'A').slice(0, 1).toUpperCase())
+const emit = defineEmits(['toggle-mobile-menu'])
 const toggleSideBar = () => {
   setToggleSideBar()
+}
+// 汉堡：移动端打开抽屉；桌面保持折叠/展开侧栏
+const onHamburgerClick = () => {
+  if (isMobileState.value) {
+    emit('toggle-mobile-menu')
+    return
+  }
+  toggleSideBar()
 }
 //退出登录
 const router = useRouter()
