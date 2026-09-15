@@ -129,6 +129,34 @@ services:
 
 把密码放入未提交的 `.env` 或 secret 管理系统。即使启用 MySQL，也不能删除 `data/alist-encrypt.db`。
 
+### 直接运行（非 Docker：Linux / macOS / Windows / 移动端）
+
+服务也能作为普通二进制运行（systemd、终端、快捷方式都适用）。二进制 + `conf/` + `data/` 放在同一个目录即可，这就是“便携目录”布局：
+
+```text
+alist-encrypt-go       # 可执行文件（或 .exe）
+conf/config.json       # 配置（首次启动自动生成）
+data/                  # 状态（BoltDB 等，自动创建）
+```
+
+当可执行文件同级存在 `conf/config.json` 时，代理会自动以**该目录**为基准读写配置与数据——从任意工作目录启动都不会误建一套空配置。需要显式指定其它目录时，设置环境变量：
+
+```bash
+ALIST_ENCRYPT_BASE_DIR=/srv/alist-encrypt ./alist-encrypt-go
+```
+
+示例（systemd）：
+
+```ini
+[Service]
+ExecStart=/opt/alist-encrypt/alist-encrypt-go
+Environment=ALIST_ENCRYPT_BASE_DIR=/opt/alist-encrypt
+WorkingDirectory=/opt/alist-encrypt
+Restart=always
+```
+
+`conf` 与 `data` 是唯一的持久化目录，务必限制权限并纳入备份。
+
 ## 加密格式与安全边界
 
 新上传和 `encrypt-tool` 默认生成 V2。V2 有 32 字节头，包含格式标识、随机 nonce 和明文大小；密文 Range 会自动补偿头长度。V1 没有文件头，仅用于兼容旧文件。
