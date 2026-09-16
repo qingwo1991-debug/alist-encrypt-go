@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">OpenList Encrypt</string>
+    <string name="app_name">Alist-Encrypt-Go</string>
 
     <string name="open_source_license">Open Source License</string>
     <string name="back">Back</string>
