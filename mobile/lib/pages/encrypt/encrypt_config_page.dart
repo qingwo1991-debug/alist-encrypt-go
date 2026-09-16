@@ -43,9 +43,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   final _streamBufferKbController = TextEditingController(text: '512');
   final _webdavNegativeCacheTtlController = TextEditingController(text: '10');
 
-  // 播放统计导出密码（独立于管理密码）
-  final _statsPasswordController = TextEditingController();
-
   // H2C 开关（HTTP/2 Cleartext）
   bool _enableH2C = false;
 
@@ -136,7 +133,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _webdavNegativeCacheTtlController.text =
               (config['webdavNegativeCacheTtlMinutes'] ?? 10).toString();
           _enableH2C = config['enableH2C'] ?? false;
-          _statsPasswordController.text = config['statsPassword'] ?? '';
           _enableDbExportSync = config['enableDbExportSync'] ?? false;
           _dbExportBaseUrlController.text = config['dbExportBaseUrl'] ?? '';
           _dbExportSyncIntervalController.text =
@@ -355,7 +351,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           'streamBufferKb': int.tryParse(_streamBufferKbController.text) ?? 512,
           'webdavNegativeCacheTtlMinutes':
               int.tryParse(_webdavNegativeCacheTtlController.text) ?? 10,
-          'statsPassword': _statsPasswordController.text.trim(),
         }
       },
       options: Options(contentType: 'application/json'),
@@ -367,27 +362,11 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
 
   Future<void> _exportPlaybackStats() async {
     final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
-    final password = _statsPasswordController.text.trim();
-    if (password.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('请先设置统计导出密码并保存')),
-        );
-      }
-      return;
-    }
     try {
       final dio = Dio();
       final resp = await dio.get(
         'http://127.0.0.1:$proxyPort/api/encrypt/exportStats',
-        queryParameters: {'password': password},
       );
-      if (resp.statusCode == 401) {
-        throw Exception('统计密码错误');
-      }
-      if (resp.statusCode == 404) {
-        throw Exception('统计功能未开启（未设置密码）');
-      }
       final root = resp.data is Map<String, dynamic>
           ? resp.data as Map<String, dynamic>
           : const <String, dynamic>{};
@@ -403,7 +382,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('导出失败: $e')),
+          SnackBar(content: Text('导出失败（代理未运行？）: $e')),
         );
       }
     }
@@ -1245,16 +1224,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            TextFormField(
-                              controller: _statsPasswordController,
-                              obscureText: true,
-                              decoration: const InputDecoration(
-                                labelText: '统计导出密码（独立）',
-                                hintText: '留空 = 统计接口关闭',
-                                helperText: '导出统计时需输入此密码；与加密/管理密码相互独立',
-                              ),
-                            ),
-                            const SizedBox(height: 8),
                             Row(
                               children: [
                                 Expanded(
@@ -1265,6 +1234,17 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                   ),
                                 ),
                               ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              '导出播放/删除统计（本机数据，无需密码）',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .outline),
                             ),
                           ],
                         ),

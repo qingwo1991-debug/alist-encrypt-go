@@ -1,14 +1,12 @@
-import 'dart:convert';
 import 'dart:developer';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:openlist_mobile/contant/native_bridge.dart';
 
 /// 预热统计页：独立统计面板。
 ///
-/// 首帧耗时折线图 + 预热明细 + 播放/删除记录，一次拉取本地代理的
-/// `/api/encrypt/exportStats`（独立统计密码鉴权，与加密/管理密码独立）。
+/// 首帧耗时折线图 + 预热明细 + 播放/删除记录，自动拉取本地代理的
+/// `/api/encrypt/exportStats`（仅接受本机回环访问，无需密码）。
 class WarmStatsPage extends StatefulWidget {
   const WarmStatsPage({super.key});
 
@@ -17,7 +15,6 @@ class WarmStatsPage extends StatefulWidget {
 }
 
 class _WarmStatsPageState extends State<WarmStatsPage> {
-  final _passwordController = TextEditingController();
   static const _proxyPort = 5344;
 
   bool _loading = true;
@@ -32,73 +29,10 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
   @override
   void initState() {
     super.initState();
-    _loadPassword();
-  }
-
-  @override
-  void dispose() {
-    _passwordController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _loadPassword() async {
-    try {
-      final configJson =
-          await NativeBridge.encryptProxy.getEncryptConfigJson();
-      final decoded = json.decode(configJson);
-      final config = decoded is Map<String, dynamic>
-          ? decoded
-          : <String, dynamic>{};
-      if (mounted) {
-        setState(() {
-          _passwordController.text = config['statsPassword']?.toString() ?? '';
-          _loading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = '读取配置失败: $e';
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _savePassword() async {
-    final password = _passwordController.text.trim();
-    try {
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 3),
-        receiveTimeout: const Duration(seconds: 5),
-      ));
-      await dio.post(
-        'http://127.0.0.1:$_proxyPort/api/encrypt/v2/config',
-        data: {
-          'version': 2,
-          'config': {'statsPassword': password},
-        },
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('统计密码已保存')));
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('保存失败（代理未运行？）')));
-      }
-    }
+    _exportStats();
   }
 
   Future<void> _exportStats() async {
-    final password = _passwordController.text.trim();
-    if (password.isEmpty) {
-      _toast('请先设置统计密码并保存');
-      return;
-    }
     setState(() {
       _exporting = true;
       _error = null;
@@ -110,43 +44,30 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
       ));
       final resp = await dio.get(
         'http://127.0.0.1:$_proxyPort/api/encrypt/exportStats',
-        queryParameters: {'password': password},
       );
-      if (resp.statusCode == 401) throw Exception('统计密码错误');
-      if (resp.statusCode == 404) throw Exception('统计功能未开启（未设置密码）');
       final root = resp.data is Map<String, dynamic>
           ? resp.data as Map<String, dynamic>
           : <String, dynamic>{};
       if (mounted) {
         setState(() {
+          _loading = false;
           _playbacks = root['playbacks'] as List<dynamic>? ?? [];
           _deletions = root['deletions'] as List<dynamic>? ?? [];
           _warmEvents = root['warm_events'] as List<dynamic>? ?? [];
           _probeStats = root['probe_stats'] as Map<String, dynamic>? ?? {};
           _exporting = false;
         });
-        log('预热统计导出：播放 ${_playbacks.length}，预热 ${_warmEvents.length}');
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(SnackBar(
-              content:
-                  Text('已载入：播放 ${_playbacks.length} · 预热 ${_warmEvents.length}')));
+        log('预热统计载入：播放 ${_playbacks.length}，预热 ${_warmEvents.length}');
       }
     } catch (e) {
       if (mounted) {
         setState(() {
+          _loading = false;
           _exporting = false;
-          _error = '导出失败: $e';
+          _error = '加载失败（代理未运行？）: $e';
         });
       }
     }
-  }
-
-  void _toast(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(msg)));
   }
 
   // ── 摘要数据 ─────────────────────────────
@@ -251,8 +172,27 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  _buildCredentialCard(theme),
-                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Icon(Icons.storage_outlined,
+                          size: 16, color: theme.colorScheme.outline),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '本地统计 · 下拉可刷新',
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(color: theme.colorScheme.outline),
+                        ),
+                      ),
+                      TextButton.icon(
+                        icon: const Icon(Icons.refresh, size: 16),
+                        label: _exporting
+                            ? const Text('刷新中…')
+                            : const Text('刷新'),
+                        onPressed: _exporting ? null : _exportStats,
+                      ),
+                    ],
+                  ),
                   if (_error != null) _buildErrorCard(theme),
                   if (_playbacks.isNotEmpty ||
                       _warmEvents.isNotEmpty ||
@@ -276,62 +216,6 @@ class _WarmStatsPageState extends State<WarmStatsPage> {
 
   Future<void> _exportStatsCheck() async {
     await _exportStats();
-  }
-
-  Widget _buildCredentialCard(ThemeData theme) {
-    return Card(
-      elevation: 0,
-      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.shield_outlined, size: 20, color: theme.colorScheme.primary),
-                const SizedBox(width: 8),
-                Text('统计密码', style: theme.textTheme.titleSmall),
-                Text('（独立于加密/管理密码）',
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.colorScheme.outline)),
-              ],
-            ),
-            const SizedBox(height: 10),
-            TextFormField(
-              controller: _passwordController,
-              obscureText: true,
-              decoration: const InputDecoration(
-                isDense: true,
-                border: OutlineInputBorder(),
-                hintText: '留空 = 统计接口关闭',
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    icon: const Icon(Icons.lock_outline, size: 18),
-                    label: const Text('保存密码'),
-                    onPressed: _savePassword,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    icon: const Icon(Icons.refresh, size: 18),
-                    label: _exporting ? const Text('载入中...') : const Text('载入数据'),
-                    onPressed: _exporting ? null : _exportStats,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _buildErrorCard(ThemeData theme) {
