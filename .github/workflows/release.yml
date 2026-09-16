@@ -411,6 +411,10 @@ jobs:
 
       - name: Build mobile Go binding from reviewed repository source
         working-directory: mobile/openlist-lib/scripts
+        env:
+          # 用本项目 release 版本号（version job 输出）覆盖 OpenList 前端显示
+          # 的版本文案，左上角不再是上游 v4.2.x，而是本项目版本。
+          OPENLIST_VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           bash ./init_gomobile.sh

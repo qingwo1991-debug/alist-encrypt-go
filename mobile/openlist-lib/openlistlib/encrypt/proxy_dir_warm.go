@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
 )
@@ -124,6 +126,15 @@ func warmOneRootDir(p *ProxyServer, alistURL, root string) {
 	}
 	req.Header.Set("Depth", "1")
 	req.Header.Set("Content-Type", "application/xml")
+
+	// OpenList 的 /dav 端点在 WebDAVAuth 中要求认证：Bearer 令牌（对应
+	// 设置项 conf.Token）或 Basic 用户。预热请求无法携带登录态，这里直接
+	// 读同进程内 OpenList 的 WebDAV token 作为 Bearer，避免 PROPFIND 被
+	// 401 拒绝。token 为空（如 OpenList 尚未初始化）时仍尝试裸请求，
+	// 交由后端按其 guest 策略处理。
+	if token := strings.TrimSpace(setting.GetStr(conf.Token)); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

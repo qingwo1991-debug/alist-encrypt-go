@@ -70,6 +70,12 @@ func initSettings() {
 				continue
 			}
 		}
+		if item.Key == conf.SiteTitle && stored != nil && stored.Value == "OpenList" {
+			// 旧库仍持有上游默认 "OpenList"：随新默认迁移到本项目品牌。
+			// 仅当客户从未自定义过站点名（天然为上游默认值）时覆盖，
+			// 不强制覆盖用户手工设置的站点名。
+			stored = nil
+		}
 		if item.Key != conf.VERSION && stored != nil &&
 			(len(migrationValue) == 0 || stored.Value != migrationValue) {
 			item.Value = stored.Value
@@ -106,7 +112,7 @@ func InitialSettings() []model.SettingItem {
 		{Key: conf.VERSION, Value: siteVersion, Type: conf.TypeString, Group: model.SITE, Flag: model.READONLY},
 		//{Key: conf.ApiUrl, Value: "", Type: conf.TypeString, Group: model.SITE},
 		//{Key: conf.BasePath, Value: "", Type: conf.TypeString, Group: model.SITE},
-		{Key: conf.SiteTitle, Value: "OpenList", Type: conf.TypeString, Group: model.SITE},
+		{Key: conf.SiteTitle, Value: "Alist-Encrypt-Go", Type: conf.TypeString, Group: model.SITE},
 		{Key: conf.Announcement, Value: "Welcome to the OpenList project!\nFor the latest updates, to contribute code, or to submit suggestions and issues, please visit our [project repository](https://github.com/OpenListTeam/OpenList).", Type: conf.TypeText, Group: model.SITE},
 		{Key: "pagination_type", Value: "all", Type: conf.TypeSelect, Options: "all,pagination,load_more,auto_load_more", Group: model.SITE},
 		{Key: "default_page_size", Value: "30", Type: conf.TypeNumber, Group: model.SITE},
