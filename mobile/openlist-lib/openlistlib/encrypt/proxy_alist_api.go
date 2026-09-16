@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -18,6 +19,21 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	log "github.com/sirupsen/logrus"
 )
+
+// isLoopbackClient 判断请求是否来自本机回环地址。RemoteAddr 形如
+// "127.0.0.1:5344" 或 "[::1]:5344"；非标准格式（如代理场景）保守放行以
+// 避免误伤 App 本机访问。
+func isLoopbackClient(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		// 取不到 host:port 时当作本机处理（要求来源为回环或空）。
+		return true
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost" || host == ""
+}
 
 // 流式传输优化常量
 
@@ -477,24 +493,18 @@ func (p *ProxyServer) handleLocalExport(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleExportStats 导出播放/删除统计。用独立统计密码鉴权（query ?password= 或
-// X-Stats-Password 头）。未配置 StatsPassword 时返回 404（功能关闭）。
+// handleExportStats 导出播放/删除/预热统计。
+//
+// 鉴权说明：接口只放行本机（127.0.0.1 / ::1）访问，非回环来源一律 403。
+// 此前需用独立的 StatsPassword，但 APK 端读不到配置明文、体验差且无实际
+// 防护价值；保持一个最小本机来源检查即可，避免局域网内其它设备枚举数据。
 func (p *ProxyServer) handleExportStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	cfg := p.configSnapshot()
-	if cfg == nil || strings.TrimSpace(cfg.StatsPassword) == "" {
-		http.Error(w, "stats disabled", http.StatusNotFound)
-		return
-	}
-	given := r.URL.Query().Get("password")
-	if given == "" {
-		given = r.Header.Get("X-Stats-Password")
-	}
-	if given != cfg.StatsPassword {
-		http.Error(w, "invalid stats password", http.StatusUnauthorized)
+	if !isLoopbackClient(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	limit := 0
