@@ -378,7 +378,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     // 密码保存成功（非空且 DB_EXPORT 步未失败）后立即反映"已保存"状态。
     if (_dbExportPasswordController.text.trim().isNotEmpty &&
         !failures.any((f) => f.startsWith('DB_EXPORT 同步'))) {
-      _dbExportPasswordSet = true;
+      setState(() => _dbExportPasswordSet = true);
     }
     if (failures.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1161,23 +1161,17 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       ListTile(
                         contentPadding: EdgeInsets.zero,
                         title: const Text('主动探测 / 数据同步状态'),
-                        subtitle: Text(
-                          _dbExportBaseUrlController.text.trim().isEmpty
-                              ? '先配置 Go 服务 API 地址后查看'
-                              : '查看总量、进度、最近更新时间和下次计划时间',
-                        ),
+                        subtitle: const Text('查看本机 DB_EXPORT 同步的总量、进度和最近轮次'),
                         trailing: const Icon(Icons.chevron_right),
-                        onTap: _dbExportBaseUrlController.text.trim().isEmpty
-                            ? null
-                            : () {
-                                Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => DirSyncStatusPage(
-                                      proxyPort: int.tryParse(_proxyPortController.text) ?? 5344,
-                                    ),
-                                  ),
-                                );
-                              },
+                        onTap: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => DirSyncStatusPage(
+                                proxyPort: int.tryParse(_proxyPortController.text) ?? 5344,
+                              ),
+                            ),
+                          );
+                        },
                       ),
                     
                       ],
