@@ -36,3 +36,28 @@ func TestConfigSaveFailurePreservesMemory(t *testing.T) {
 		})
 	}
 }
+
+func TestSetDBExportSyncConfigPasswordSemantics(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "encrypt_config.json")
+	m := NewConfigManager(configPath)
+	if err := m.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	// First save with a password persists it.
+	if err := m.SetDBExportSyncConfig(true, "http://example.com:8080", 300, true, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetConfig().DBExportPassword != "secret" {
+		t.Fatal("password not persisted")
+	}
+
+	// Saving again with an empty password keeps the stored secret (UI never
+	// echoes it back, so blank must not clear it).
+	if err := m.SetDBExportSyncConfig(true, "http://example.com:8080", 300, true, "admin", ""); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetConfig().DBExportPassword != "secret" {
+		t.Fatal("empty password cleared stored secret")
+	}
+}

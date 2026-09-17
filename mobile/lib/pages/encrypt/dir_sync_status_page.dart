@@ -1,16 +1,17 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'dart:ui';
-import '../../utils/dir_sync_remote_session.dart';
 
+/// 展示本机代理的 DB_EXPORT 同步状态（本地导入的元数据量、轮次记录）。
+///
+/// 远端服务器的登录/手动触发扫描已移除：那是冗余入口，扫描由远端
+/// Go 服务器自己的计划任务驱动，与其 Web UI 一致，App 无需持有会话。
 class DirSyncStatusPage extends StatefulWidget {
   const DirSyncStatusPage({
     super.key,
-    required this.baseUrl,
     required this.proxyPort,
   });
 
-  final String baseUrl;
   final int proxyPort;
 
   @override
@@ -24,166 +25,60 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
     sendTimeout: const Duration(seconds: 8),
   ));
 
-  DirSyncRemoteSession? _remote;
-  bool _authBusy = false;
   bool _loading = false;
-  bool _running = false;
   String? _error;
-  Map<String, dynamic> _remoteOverview = const {};
   Map<String, dynamic> _localOverview = const {};
 
-  String get _baseUrl => widget.baseUrl.replaceFirst(RegExp(r'/+$'), '');
   String get _localBaseUrl => 'http://127.0.0.1:${widget.proxyPort}';
 
   @override
   void initState() {
     super.initState();
-    _createRemote();
     _load();
-  }
-
-  void _createRemote() {
-    try {
-      _remote = _baseUrl.isEmpty ? null : DirSyncRemoteSession(_baseUrl);
-    } on FormatException catch (e) {
-      _error = e.message;
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant DirSyncStatusPage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.baseUrl != widget.baseUrl) {
-      _remote?.dispose();
-      _remote = null;
-      _remoteOverview = const {};
-      _createRemote();
-    }
   }
 
   @override
   void dispose() {
-    _remote?.dispose();
     _dio.close(force: true);
     super.dispose();
   }
 
-  Future<void> _login() async {
-    final remote = _remote;
-    if (remote == null || _authBusy || _loading || _running) return;
-    setState(() => _authBusy = true);
-    final username = TextEditingController();
-    final password = TextEditingController();
-    try {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('登录远端 Go 服务器'),
-          content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              SelectableText(remote.origin.toString()),
-              const Text('使用此服务器的登录账号（不是 DB_EXPORT 配置）。JWT 仅在本页面内存保留，离开页面即清除。'),
-              if (remote.origin.scheme == 'http')
-                const Text('警告：HTTP 会明文传输账号和令牌，仅在可信网络使用。建议配置 HTTPS。', style: TextStyle(color: Colors.red)),
-              TextField(controller: username, decoration: const InputDecoration(labelText: '账号'), autocorrect: false, enableSuggestions: false),
-              TextField(controller: password, decoration: const InputDecoration(labelText: '密码'), obscureText: true, autocorrect: false, enableSuggestions: false),
-            ]),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('取消')),
-            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('登录此服务器')),
-          ],
-        ),
-      );
-      if (confirmed != true || !mounted || !identical(remote, _remote)) return;
-      await remote.login(username.text.trim(), password.text);
-      if (!mounted || !identical(remote, _remote)) return;
-      await _load();
-    } catch (e) {
-      if (mounted && identical(remote, _remote)) setState(() => _error = e.toString());
-    } finally {
-      // The route transition may still be using its fields. Clear immediately,
-      // then dispose after the next frame rather than during their last build.
-      username.clear();
-      password.clear();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        username.dispose();
-        password.dispose();
-      });
-      if (mounted) setState(() => _authBusy = false);
-    }
-  }
-
   Future<void> _load() async {
     if (!mounted || _loading) return;
-    final remote = _remote;
     setState(() {
       _loading = true;
-      if (remote != null || _baseUrl.isEmpty) _error = null;
+      _error = null;
     });
     try {
-      try {
-        final localResp = await _dio.get('$_localBaseUrl/api/encrypt/sync/overview');
-        final root = localResp.data;
-        final data = root is Map ? root['data'] : null;
-        if (mounted) setState(() => _localOverview = data is Map<String, dynamic> ? data : const {});
-      } catch (_) {
-        if (mounted) setState(() => _error = '本机同步状态获取失败，请检查代理是否运行');
-      }
-      // Remote login is explicit. Never reuse the DB_EXPORT account or token,
-      // and keep local status usable when remote auth/network is unavailable.
-      if (!mounted || !identical(remote, _remote)) return;
-      if (remote?.isAuthenticated == true) {
-        final data = await remote!.overview();
-        if (mounted && identical(remote, _remote)) {
-          setState(() => _remoteOverview = data);
-        }
-      }
-    } catch (e) {
-      if (mounted && identical(remote, _remote)) {
+      final localResp =
+          await _dio.get('$_localBaseUrl/api/encrypt/sync/overview');
+      final root = localResp.data;
+      final data = root is Map ? root['data'] : null;
+      if (mounted) {
         setState(() {
-          _remoteOverview = const {};
-          _error = e.toString();
+          _localOverview = data is Map<String, dynamic>
+              ? data
+              : const <String, dynamic>{};
         });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = '本机同步状态获取失败，请检查代理是否运行');
       }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _runSync() async {
-    final remote = _remote;
-    if (!mounted || _running || _loading || _authBusy || remote?.isAuthenticated != true) return;
-    setState(() {
-      _running = true;
-      _error = null;
-    });
-    try {
-      await remote!.run();
-      if (mounted && identical(remote, _remote)) await _load();
-    } catch (e) {
-      if (mounted && identical(remote, _remote)) setState(() {
-        if (!remote!.isAuthenticated) _remoteOverview = const {};
-        _error = e.toString();
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _running = false);
-      }
-    }
-  }
-
-  Map<String, dynamic> get _job =>
-      _remoteOverview['current_job'] is Map<String, dynamic> ? _remoteOverview['current_job'] as Map<String, dynamic> : const <String, dynamic>{};
-
-  Map<String, dynamic> get _snapshots =>
-      _remoteOverview['snapshot_stats'] is Map<String, dynamic> ? _remoteOverview['snapshot_stats'] as Map<String, dynamic> : const <String, dynamic>{};
-
   Map<String, dynamic> get _localCounts =>
-      _localOverview['local_counts'] is Map<String, dynamic> ? _localOverview['local_counts'] as Map<String, dynamic> : const <String, dynamic>{};
+      _localOverview['local_counts'] is Map<String, dynamic>
+          ? _localOverview['local_counts'] as Map<String, dynamic>
+          : const <String, dynamic>{};
 
   List<dynamic> get _recentCycles =>
-      _localOverview['recent_cycles'] is List<dynamic> ? _localOverview['recent_cycles'] as List<dynamic> : const <dynamic>[];
+      _localOverview['recent_cycles'] is List<dynamic>
+          ? _localOverview['recent_cycles'] as List<dynamic>
+          : const <dynamic>[];
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +88,7 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
         actions: [
           IconButton(
             tooltip: '刷新',
-            onPressed: (_loading || _running || _authBusy) ? null : _load,
+            onPressed: _loading ? null : _load,
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -207,140 +102,10 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
                 children: [
                   _buildLocalSyncCard(context),
                   const SizedBox(height: 12),
-                  if (_remote != null)
-                    Card(child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        SelectableText('远端：${_remote!.origin}'),
-                        Text(_remote!.isAuthenticated ? '已登录（仅本页面有效）' : '查看远端状态和运行同步需要登录此 Go 服务器'),
-                        TextButton(
-                          onPressed: (_authBusy || _loading || _running) ? null : () {
-                            if (_remote!.isAuthenticated) {
-                              setState(() {
-                                _remote!.logout();
-                                _remoteOverview = const {};
-                              });
-                            } else {
-                              _login();
-                            }
-                          },
-                          child: Text(_authBusy ? '正在登录…' : (_remote!.isAuthenticated ? '退出远端登录' : '登录远端服务器')),
-                        ),
-                      ]),
-                    )),
-                  if (_remote?.isAuthenticated == true) ...[
-                  _buildHeaderCard(context),
-                  const SizedBox(height: 12),
-                  _buildMetricGrid(context),
-                  const SizedBox(height: 12),
-                  _buildSnapshotGrid(context),
-                  const SizedBox(height: 12),
-                  _buildTimelineCard(context),
-                  ],
-                  const SizedBox(height: 12),
                   _buildErrorCard(context),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: (_running || _loading || _authBusy || _remote?.isAuthenticated != true || !(_remoteOverview['scan_configured'] == true)) ? null : _runSync,
-                    icon: _running
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.play_arrow),
-                    label: Text(_running ? '正在触发同步' : '立即同步'),
-                  ),
                   const SizedBox(height: 24),
                 ],
               ),
-      ),
-    );
-  }
-
-  Widget _buildHeaderCard(BuildContext context) {
-    final theme = Theme.of(context);
-    if (_baseUrl.isEmpty) {
-      return Card(
-        elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: const Padding(
-          padding: EdgeInsets.all(16),
-          child: Text('未配置 Go 服务 API 地址，当前仅展示本机 DB_EXPORT 同步状态。'),
-        ),
-      );
-    }
-    final status = (_job['status'] ?? 'idle').toString();
-    final progress = (_job['progress_percent'] as num?)?.toDouble() ?? 0;
-    final scanConfigured = _remoteOverview['scan_configured'] == true;
-    Color tone;
-    switch (status) {
-      case 'running':
-        tone = Colors.blue;
-        break;
-      case 'done':
-        tone = Colors.green;
-        break;
-      case 'failed':
-        tone = Colors.red;
-        break;
-      default:
-        tone = Colors.orange;
-    }
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: tone.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    status.toUpperCase(),
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: tone,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                const Spacer(),
-                Text(
-                  scanConfigured ? '已配置扫描账号' : '未配置扫描账号',
-                  style: theme.textTheme.bodySmall,
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Text(
-              '主动探测 / 目录同步',
-              style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '模式：${(_remoteOverview['mode'] ?? '-').toString()}',
-              style: theme.textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 16),
-            LinearProgressIndicator(
-              value: progress <= 0 ? null : (progress / 100).clamp(0, 1),
-              minHeight: 10,
-              borderRadius: BorderRadius.circular(999),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '进度 ${progress.toStringAsFixed(0)}%',
-              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -425,34 +190,6 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
     );
   }
 
-  Widget _buildMetricGrid(BuildContext context) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: [
-        _metricCard(context, '总目录', '${_job['total_dirs_estimate'] ?? 0}'),
-        _metricCard(context, '已发现', '${_job['total_dirs_discovered'] ?? 0}'),
-        _metricCard(context, '已探测', '${_job['dirs_scanned'] ?? 0}'),
-        _metricCard(context, '成功', '${_job['dirs_succeeded'] ?? 0}'),
-        _metricCard(context, '失败', '${_job['dirs_failed'] ?? 0}'),
-        _metricCard(context, '跳过', '${_job['dirs_skipped'] ?? 0}'),
-      ],
-    );
-  }
-
-  Widget _buildSnapshotGrid(BuildContext context) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: [
-        _metricCard(context, '快照总数', '${_snapshots['total_snapshots'] ?? 0}'),
-        _metricCard(context, '新鲜快照', '${_snapshots['fresh_snapshots'] ?? 0}'),
-        _metricCard(context, '陈旧快照', '${_snapshots['stale_snapshots'] ?? 0}'),
-        _metricCard(context, '同步中', '${_snapshots['syncing_snapshots'] ?? 0}'),
-      ],
-    );
-  }
-
   Widget _metricCard(BuildContext context, String label, String value) {
     final theme = Theme.of(context);
     final width = (MediaQuery.of(context).size.width - 52) / 2;
@@ -479,28 +216,6 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
     );
   }
 
-  Widget _buildTimelineCard(BuildContext context) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('时间信息', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-            const SizedBox(height: 12),
-            _timeRow('开始时间', (_job['started_at'] ?? '').toString()),
-            _timeRow('最近更新时间', (_job['updated_at'] ?? '').toString()),
-            _timeRow('完成时间', (_job['finished_at'] ?? '').toString()),
-            _timeRow('上次成功', (_job['last_success_at'] ?? '').toString()),
-            _timeRow('下次计划时间', (_job['next_run_at'] ?? '').toString()),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _timeRow(String label, String value) {
     final display = value.trim().isEmpty ? '-' : value;
     return Padding(
@@ -522,9 +237,8 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
   }
 
   Widget _buildErrorCard(BuildContext context) {
-    final errorText = (_error?.trim().isNotEmpty == true)
-        ? _error!.trim()
-        : (_job['last_error'] ?? '').toString().trim();
+    final errorText =
+        (_error?.trim().isNotEmpty == true) ? _error!.trim() : '';
     return Card(
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),

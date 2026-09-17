@@ -56,6 +56,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   bool _dbExportAuthEnabled = false;
   final _dbExportUsernameController = TextEditingController(text: 'admin');
   final _dbExportPasswordController = TextEditingController();
+  // 服务端不回传密码明文，仅提供 dbExportPasswordSet 标记；用它提示用户
+  // 密码已保存，避免看起来像"没有保存按钮"。
+  bool _dbExportPasswordSet = false;
   
   // 加密路径列表
   List<EncryptPathConfig> _encryptPaths = [];
@@ -153,6 +156,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _dbExportAuthEnabled = config['dbExportAuthEnabled'] ?? false;
           _dbExportUsernameController.text = config['dbExportUsername'] ?? 'admin';
           _dbExportPasswordController.text = config['dbExportPassword'] ?? '';
+          _dbExportPasswordSet = config['dbExportPasswordSet'] == true;
           
           // 解析加密路径列表
           final paths = config['encryptPaths'] as List<dynamic>?;
@@ -371,6 +375,11 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     await step('高级配置', _saveAdvancedConfigViaApi);
 
     if (!mounted) return;
+    // 密码保存成功（非空且 DB_EXPORT 步未失败）后立即反映"已保存"状态。
+    if (_dbExportPasswordController.text.trim().isNotEmpty &&
+        !failures.any((f) => f.startsWith('DB_EXPORT 同步'))) {
+      _dbExportPasswordSet = true;
+    }
     if (failures.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(S.current.saved)),
@@ -1137,6 +1146,17 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                           controller: _dbExportPasswordController,
                           labelText: '密码（留空保持不变）',
                         ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _dbExportPasswordSet
+                              ? '已保存（出于安全不回显明文，留空保存不会清空）'
+                              : '尚未保存密码，点击右上角保存后生效',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: _dbExportPasswordSet
+                                ? Theme.of(context).colorScheme.onSurfaceVariant
+                                : Theme.of(context).colorScheme.error,
+                          ),
+                        ),
                       ],
                       ListTile(
                         contentPadding: EdgeInsets.zero,
@@ -1153,7 +1173,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                                 Navigator.of(context).push(
                                   MaterialPageRoute(
                                     builder: (_) => DirSyncStatusPage(
-                                      baseUrl: _dbExportBaseUrlController.text.trim(),
                                       proxyPort: int.tryParse(_proxyPortController.text) ?? 5344,
                                     ),
                                   ),
