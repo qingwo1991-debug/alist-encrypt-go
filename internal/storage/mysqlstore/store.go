@@ -144,6 +144,13 @@ func closeDBAfterInitError(db *sql.DB, initErr error) error {
 	return initErr
 }
 
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("mysql store not initialized")
+	}
+	return s.db.PingContext(ctx)
+}
+
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil

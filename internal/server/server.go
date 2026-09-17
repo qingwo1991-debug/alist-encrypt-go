@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -252,6 +254,19 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		r.GET("/api/encrypt/exportStats", ginWrap(s.statsExportHandler.ExportStats))
 	}
 
+	// /debug/* - optional troubleshooting endpoints (recent logs + runtime
+	// status). Only registered when cfg.Debug.Enabled is true; an optional
+	// X-Debug-Token / Bearer token from cfg.Debug.Token is enforced when set.
+	if s.cfg.DebugEnabled() {
+		debugHandler := handler.NewDebugHandler(s.cfg, s.mysqlStore)
+		debugGroup := r.Group("/debug")
+		if token := s.cfg.DebugToken(); token != "" {
+			debugGroup.Use(debugTokenMiddleware(token))
+		}
+		debugGroup.GET("/status", debugHandler.ServeStatus)
+		debugGroup.GET("/logs", debugHandler.ServeLogs)
+	}
+
 	// /dav/* - WebDAV proxy (supports all WebDAV methods: PROPFIND, MKCOL, etc.)
 	davGroup := r.Group("/dav")
 	{
@@ -381,6 +396,25 @@ func migrateStrategyStore(cfg *config.Config, store handler.StrategyStore) error
 func ginWrap(h http.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h(c.Writer, c.Request)
+	}
+}
+
+// debugTokenMiddleware enforces the configured /debug bearer token when one is
+// set (X-Debug-Token header, or a standard Authorization: Bearer header).
+func debugTokenMiddleware(token string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		provided := strings.TrimSpace(c.GetHeader("X-Debug-Token"))
+		if provided == "" {
+			auth := strings.TrimSpace(c.GetHeader("Authorization"))
+			if len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
+				provided = strings.TrimSpace(auth[7:])
+			}
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid debug token"})
+			return
+		}
+		c.Next()
 	}
 }
 
