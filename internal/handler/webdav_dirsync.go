@@ -22,6 +22,26 @@ func (h *WebDAVHandler) snapshotScopeEnabled(dirPath string) bool {
 	return h != nil && h.passwdDAO != nil && h.passwdDAO.MatchDir(dirPath)
 }
 
+// snapshotFreshEnough reports whether a cached directory snapshot may still be
+// re-emitted as a listing. The persist path stamps NextRefreshAt = write time +
+// TTL (dirSyncRequestTTL for request_fill, dirSyncScanTTL for background_scan);
+// after that window the snapshot is treated as expired regardless of whether a
+// background scan has refreshed it (staleness beats serving). A Stale marker or
+// a missing refresh window likewise forces the caller to fall through to the
+// live upstream so the listing always converges on reality.
+func snapshotFreshEnough(snap *DirListSnapshot, now time.Time) bool {
+	if snap == nil {
+		return false
+	}
+	if snap.Stale {
+		return false
+	}
+	if snap.NextRefreshAt.IsZero() {
+		return !snap.UpdatedAt.IsZero() && now.Sub(snap.UpdatedAt) <= dirSyncRequestTTL
+	}
+	return now.Before(snap.NextRefreshAt)
+}
+
 // davScopeDir normalizes a WebDAV request path to the directory scope used by
 // the shared snapshot store: leading "/", no trailing "/", empty -> "/".
 func davScopeDir(davPath string) string {
@@ -147,6 +167,20 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 		snap, ok = s, found
 	}
 	if !ok || snap == nil || len(snap.PayloadJSON) == 0 {
+		return nil, false
+	}
+	// Freshness guard: a snapshot may only be served while its scheduled
+	// refresh window is still open. An expired or marked-stale snapshot must
+	// never be re-emitted — doing so lets a long-lived skeleton row (e.g. an
+	// early 3-item request_fill) mask an actually full directory, which is
+	// exactly the "listing does not match reality" failure. Falling through to
+	// the live upstream repopulates the snapshot (persistWebDAVSnapshot) so the
+	// next request self-heals to the full/current listing.
+	if !snapshotFreshEnough(snap, time.Now()) {
+		trace.Logf(r.Context(), "propfind", "Snapshot cache expired %s: stale=%v updated=%s next=%s",
+			davPath, snap.Stale,
+			snap.UpdatedAt.Format(time.RFC3339),
+			snap.NextRefreshAt.Format(time.RFC3339))
 		return nil, false
 	}
 	// Only fresh 200-list payloads are cacheable; a non-success payload must
