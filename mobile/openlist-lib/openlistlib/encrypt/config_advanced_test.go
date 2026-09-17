@@ -143,3 +143,48 @@ func TestConfigManagerSaveUses0600Permissions(t *testing.T) {
 		t.Fatalf("perm=%#o, want %#o", got, 0o600)
 	}
 }
+
+func TestProxyListenLocalOnly_PersistedAndNoOverwrite(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "encrypt_config.json")
+	manager := NewConfigManager(configPath)
+	if err := manager.Load(); err != nil {
+		t.Fatalf("Load default config failed: %v", err)
+	}
+
+	// 默认：监听所有网卡（局域网可访问）。
+	if manager.GetConfig().ProxyListenLocalOnly {
+		t.Fatalf("default must listen on all interfaces (localOnly=false)")
+	}
+
+	// 通过专用 setter 打开，且能持久化。
+	if err := manager.SetProxyListenLocalOnly(true); err != nil {
+		t.Fatalf("SetProxyListenLocalOnly failed: %v", err)
+	}
+	reloaded := NewConfigManager(configPath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reload config failed: %v", err)
+	}
+	if !reloaded.GetConfig().ProxyListenLocalOnly {
+		t.Fatalf("expected localOnly=true after reload")
+	}
+
+	// 通过 advanced JSON 打开，且不带该字段时不覆盖现有值。
+	man2 := NewConfigManager(configPath)
+	if err := man2.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if err := man2.SetAdvancedConfigFromJSON(`{"playFirstFallback": true}`); err != nil {
+		t.Fatalf("SetAdvancedConfigFromJSON (no localOnly key) failed: %v", err)
+	}
+	if !man2.GetConfig().ProxyListenLocalOnly {
+		t.Fatalf("advanced JSON without proxyListenLocalOnly must not overwrite it")
+	}
+
+	// 关闭（回到全网卡监听）。
+	if err := man2.SetAdvancedConfigFromJSON(`{"proxyListenLocalOnly": false}`); err != nil {
+		t.Fatalf("SetAdvancedConfigFromJSON (localOnly=false) failed: %v", err)
+	}
+	if man2.GetConfig().ProxyListenLocalOnly {
+		t.Fatalf("expected localOnly=false after explicit reset")
+	}
+}

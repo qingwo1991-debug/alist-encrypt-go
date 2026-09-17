@@ -590,8 +590,13 @@ func (p *ProxyServer) Start() error {
 	// 根路径：直接代理到 OpenList (Alist)
 	mux.HandleFunc("/", p.handleRoot)
 
+	bindAddr := fmt.Sprintf(":%d", p.config.ProxyPort)
+	if p.config.ProxyListenLocalOnly {
+		// 仅本机模式：只监听回环，局域网/其他设备不可访问代理端口。
+		bindAddr = fmt.Sprintf("127.0.0.1:%d", p.config.ProxyPort)
+	}
 	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", p.config.ProxyPort),
+		Addr:              bindAddr,
 		Handler:           internal.TraceMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second, // 防慢连接 header 攻击
 		ReadTimeout:       0,                // 上传/流式场景允许长时间读 body
@@ -610,7 +615,7 @@ func (p *ProxyServer) Start() error {
 	prewarmConfiguredV2KeysAsync(p.config)
 	warmEncryptedRootDirsAsync(p, p.config)
 	go func() {
-		log.Infof("[%s] Encrypt proxy server starting on port %d", internal.TagServer, proxyPort)
+		log.Infof("[%s] Encrypt proxy server starting on port %d (listen=%s)", internal.TagServer, proxyPort, bindAddr)
 		err := server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Errorf("[%s] Proxy server error: %v", internal.TagServer, err)

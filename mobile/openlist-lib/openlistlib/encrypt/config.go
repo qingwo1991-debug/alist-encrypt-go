@@ -401,6 +401,16 @@ func (m *ConfigManager) SetEnableH2C(enable bool) error {
 	return m.saveConfigLocked()
 }
 
+// SetProxyListenLocalOnly 设置代理是否仅监听本机回环（默认全网卡）。
+// true 时代理只监听 127.0.0.1，局域网/其他设备无法访问代理端口。
+func (m *ConfigManager) SetProxyListenLocalOnly(localOnly bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	m.config.ProxyListenLocalOnly = localOnly
+	return m.saveConfigLocked()
+}
+
 // SetNetworkPolicy 设置网络策略参数
 func (m *ConfigManager) SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds int, enableLocalBypass bool) error {
 	m.mutex.Lock()
@@ -465,6 +475,7 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 		StreamBufferKB                *int   `json:"streamBufferKb"`
 		StreamEngineVersion           *int   `json:"streamEngineVersion"`
 		WebDAVNegativeCacheTTLMinutes *int   `json:"webdavNegativeCacheTtlMinutes"`
+		ProxyListenLocalOnly          *bool  `json:"proxyListenLocalOnly"`
 	}
 	var payload advancedConfigPayload
 	if err := json.Unmarshal([]byte(configJSON), &payload); err != nil {
@@ -531,6 +542,9 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 		} else {
 			m.config.WebDAVNegativeCacheTTLMinutes = *payload.WebDAVNegativeCacheTTLMinutes
 		}
+	}
+	if payload.ProxyListenLocalOnly != nil {
+		m.config.ProxyListenLocalOnly = *payload.ProxyListenLocalOnly
 	}
 
 	return m.saveConfigLocked()
