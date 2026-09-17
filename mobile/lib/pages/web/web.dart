@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:developer';
+import 'package:openlist_mobile/utils/readiness_loop.dart';
 import 'dart:io';
 
 import 'package:openlist_mobile/contant/native_bridge.dart';
@@ -39,7 +41,10 @@ class WebScreenState extends State<WebScreen> {
   bool _serverReady = false;
   String _startupStatus = '';
   String _loadError = '';
-  int _retryCount = 0;
+  late final ReadinessLoop _readiness;
+  HttpClient? _probeClient;
+  bool _backCheckPending = false;
+  final Stopwatch _startupElapsed = Stopwatch();
 
   onClickNavigationBar() {
     log("onClickNavigationBar");
@@ -48,6 +53,7 @@ class WebScreenState extends State<WebScreen> {
 
   Future<bool> _probeServerReady() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    _probeClient = client;
     final probes = <Uri>[
       Uri.parse('$_url/ping'),
       Uri.parse(_url),
@@ -55,9 +61,11 @@ class WebScreenState extends State<WebScreen> {
     try {
       for (final probe in probes) {
         try {
-          final request = await client.getUrl(probe);
-          final response = await request.close();
-          await response.drain<void>();
+          if (!mounted) return false;
+          final request = await client.getUrl(probe).timeout(const Duration(seconds: 2));
+          request.followRedirects = false;
+          final response = await request.close().timeout(const Duration(seconds: 2));
+          await response.drain<void>().timeout(const Duration(seconds: 2));
           if (response.statusCode >= 200 && response.statusCode < 500) {
             return true;
           }
@@ -66,71 +74,102 @@ class WebScreenState extends State<WebScreen> {
       return false;
     } finally {
       client.close(force: true);
+      if (identical(_probeClient, client)) _probeClient = null;
     }
   }
 
-  Future<void> _waitForServer() async {
-    _retryCount = 0;
-    while (!_serverReady && mounted) {
-      final running = await Android().isRunning();
-      if (running) {
-        _startupStatus = '服务已启动，正在加载页面资源...';
-        if (mounted) setState(() {});
-        final ready = await _probeServerReady();
-        if (ready) {
-          if (mounted) {
-            setState(() {
-              _serverReady = true;
-              _startupStatus = '';
-              _loadError = '';
-            });
-            _webViewController?.loadUrl(
-              urlRequest: URLRequest(url: WebUri(_url)),
-            );
-          }
-          return;
-        }
-      } else {
-        _retryCount++;
-        final delay = (_retryCount < 10) ? 2000 : 5000;
-        if (_retryCount <= 3) {
-          _startupStatus = '正在启动 OpenList 服务...';
-        } else if (_retryCount <= 30) {
-          _startupStatus = '服务初始化中（${_retryCount}s）...';
-        } else {
-          _startupStatus =
-              '服务启动较慢（${(_retryCount * 2 / 60).toStringAsFixed(1)}分钟），请耐心等待...';
-        }
-        if (mounted) setState(() {});
-        await Future.delayed(Duration(milliseconds: delay));
-        continue;
+  void _setStartupStatus(String value) {
+    if (mounted && _startupStatus != value) setState(() => _startupStatus = value);
+  }
+
+  Future<bool> _checkServerReady() async {
+    final running = await Android().isRunning();
+    if (!mounted) return false;
+    if (running) {
+      _setStartupStatus('服务已启动，正在加载页面资源...');
+      return _probeServerReady();
+    }
+    _setStartupStatus('服务初始化中（${_startupElapsed.elapsed.inSeconds}s）...');
+    return false;
+  }
+
+  void _waitForServer() {
+    if (!mounted || _serverReady) return;
+    if (!_startupElapsed.isRunning) _startupElapsed.start();
+    _readiness.start();
+  }
+
+  Future<void> _initializeServer() async {
+    try {
+      final port = await Android().getOpenListHttpPort();
+      if (!mounted) return;
+      final nextUrl = 'http://127.0.0.1:$port';
+      if (_url != nextUrl) setState(() => _url = nextUrl);
+    } catch (_) {
+      _setStartupStatus('无法读取端口，正在重试连接服务...');
+    }
+    _waitForServer();
+  }
+
+  Future<void> _updateCanGoBack(InAppWebViewController controller) async {
+    if (!mounted || _backCheckPending) return;
+    _backCheckPending = true;
+    try {
+      final value = await controller.canGoBack();
+      if (mounted && identical(controller, _webViewController) && value != _canGoBack) {
+        setState(() => _canGoBack = value);
       }
-      await Future.delayed(const Duration(seconds: 1));
+    } catch (_) {
+      // Native WebView may have been destroyed while checking history.
+    } finally {
+      _backCheckPending = false;
+    }
+  }
+
+  void _resetProgress() {
+    if (mounted && (_progress != 0 || _loadError.isNotEmpty)) {
+      setState(() {
+        _progress = 0;
+        _loadError = '';
+      });
+    }
+  }
+
+  Future<void> _loadReadyPage() async {
+    try {
+      await _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(_url)));
+    } catch (_) {
+      if (mounted) setState(() => _loadError = '页面加载失败，请重试');
     }
   }
 
   @override
   void initState() {
-    Android().getOpenListHttpPort().then((port) async {
-      final nextUrl = "http://127.0.0.1:$port";
-      if (!mounted) return;
-      setState(() {
-        _url = nextUrl;
-      });
-      if (_webViewController != null && _serverReady) {
-        await _webViewController!.loadUrl(
-          urlRequest: URLRequest(url: WebUri(nextUrl)),
-        );
-      }
-    });
-
-    _waitForServer();
     super.initState();
+    _readiness = ReadinessLoop(
+      check: _checkServerReady,
+      onReady: () {
+        if (!mounted) return;
+        _startupElapsed.stop();
+        setState(() {
+          _serverReady = true;
+          _startupStatus = '';
+          _loadError = '';
+        });
+        unawaited(_loadReadyPage());
+      },
+      onError: (_) => _setStartupStatus('服务状态读取失败，正在重试...'),
+    );
+    unawaited(_initializeServer());
   }
 
   @override
   void dispose() {
+    _readiness.dispose();
+    _probeClient?.close(force: true);
+    _startupElapsed.stop();
     _webViewController?.dispose();
+    _webViewController = null;
     super.dispose();
   }
 
@@ -182,10 +221,7 @@ class WebScreenState extends State<WebScreen> {
                     },
                     onLoadStart: (InAppWebViewController controller, Uri? url) {
                       log("onLoadStart $url");
-                      setState(() {
-                        _progress = 0;
-                        _loadError = '';
-                      });
+                      _resetProgress();
                     },
                     shouldOverrideUrlLoading:
                         (controller, navigationAction) async {
@@ -206,6 +242,7 @@ class WebScreenState extends State<WebScreen> {
                         final silentMode = await NativeBridge
                             .appConfig
                             .isSilentJumpAppEnabled();
+                        if (!mounted) return NavigationActionPolicy.CANCEL;
                         if (silentMode) {
                           NativeCommon().startActivityFromUri(uri.toString());
                         } else {
@@ -228,14 +265,18 @@ class WebScreenState extends State<WebScreen> {
                       return NavigationActionPolicy.ALLOW;
                     },
                     onReceivedError: (controller, request, error) async {
-                      if (mounted) {
-                        setState(() {
-                          _loadError =
-                              '页面加载失败: ${error.type} ${error.description}'
-                                  .trim();
-                        });
-                      }
-                      if (!await Android().isRunning()) {
+                      if (!mounted || request.isForMainFrame == false) return;
+                      final message = '页面加载失败: ${error.type} ${error.description}'.trim();
+                      if (_loadError != message) setState(() => _loadError = message);
+                      try {
+                        final running = await Android().isRunning();
+                        if (!mounted) return;
+                        if (!running) {
+                          _serverReady = false;
+                          _waitForServer();
+                        }
+                      } catch (_) {
+                        if (!mounted) return;
                         _serverReady = false;
                         _waitForServer();
                       }
@@ -330,24 +371,19 @@ class WebScreenState extends State<WebScreen> {
                     },
                     onLoadStop:
                         (InAppWebViewController controller, Uri? url) async {
-                      setState(() {
-                        _progress = 0;
-                        _loadError = '';
-                      });
+                      _resetProgress();
                     },
                     onProgressChanged:
                         (InAppWebViewController controller, int progress) {
-                      setState(() {
-                        _progress = progress / 100;
-                        if (_progress == 1) _progress = 0;
-                      });
-                      controller.canGoBack().then((value) => setState(() {
-                            _canGoBack = value;
-                          }));
+                      if (!mounted) return;
+                      final value = progress >= 100 ? 0.0 : progress / 100;
+                      if (_progress != value) setState(() => _progress = value);
                     },
                     onUpdateVisitedHistory: (InAppWebViewController controller,
                         WebUri? url, bool? isReload) {
-                      _url = url.toString();
+                      // History may point off-origin; readiness always probes
+                      // the local server, never the last visited page.
+                      unawaited(_updateCanGoBack(controller));
                     },
                   ),
                   if (_loadError.isNotEmpty)
