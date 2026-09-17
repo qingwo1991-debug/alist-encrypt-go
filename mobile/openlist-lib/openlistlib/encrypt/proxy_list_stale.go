@@ -47,6 +47,7 @@ func (p *ProxyServer) serveStaleWebDAVList(w http.ResponseWriter, ctx context.Co
 
 	// 与“新鲜命中”分支保持一致的正文写法：统一先设 Content-Type，再写状态码，
 	// 加密目录回填 fileCache（本书依赖 fileCache 判断文件是否存在）。
+	clearMetadataRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/xml; charset=utf-8")
 	w.Header().Set("X-List-Stale", "1")
 	w.WriteHeader(status)
@@ -172,7 +173,7 @@ func (p *ProxyServer) refreshWebDAVListOnce(parentCtx context.Context, targetDir
 	if runtime.config == nil || runtime.httpClient == nil {
 		return
 	}
-	resp, err := runtime.httpClient.Do(req)
+	resp, err := doMetadataRequest(runtime.httpClient, req)
 	if err != nil {
 		return
 	}

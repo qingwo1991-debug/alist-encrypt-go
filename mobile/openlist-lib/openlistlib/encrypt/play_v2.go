@@ -352,6 +352,10 @@ func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHea
 	if p == nil {
 		return "", 0
 	}
+	resolveStarted := time.Now()
+	defer func() {
+		p.debugf("play", "metadata resolve elapsed_ms=%d", time.Since(resolveStarted).Milliseconds())
+	}()
 	apiPath := encryptedDAVPath(encryptedPath)
 	apiPath = strings.TrimPrefix(apiPath, "/dav")
 	if apiPath == "" {
@@ -375,7 +379,7 @@ func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHea
 	if client == nil {
 		return "", 0
 	}
-	resp, err := client.Do(req)
+	resp, err := doMetadataRequest(client, req)
 	if err != nil {
 		return "", 0
 	}
@@ -1589,7 +1593,8 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	headersReadyAt := time.Now()
 	w.WriteHeader(statusCode)
 
-	written, err := copyWithBuffer(w, streamSource)
+	firstByteWriter := &firstByteTimingWriter{dst: w, proxy: p, started: streamWallStart, hasRange: hasRange}
+	written, err := copyWithBuffer(firstByteWriter, streamSource)
 	if err != nil {
 		ctxErr := r.Context().Err()
 		isClientDisconnect := ctxErr != nil || strings.Contains(strings.ToLower(err.Error()), "broken pipe") || strings.Contains(strings.ToLower(err.Error()), "connection reset by peer")

@@ -513,7 +513,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t release_files < <(find release-artifacts -type f \( -name "*.exe" -o -name "alist-encrypt-go-*" \) | sort)
+          mapfile -t release_files < <(find release-artifacts -type f \( -name "*.exe" -o -name "alist-encrypt-go-*" -o -name "encrypt-tool-*" \) | sort)
           if [ "${#release_files[@]}" -eq 0 ]; then
             echo "No release files found"
             exit 1

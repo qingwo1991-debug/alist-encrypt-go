@@ -3,6 +3,7 @@ package openlistlib
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -241,34 +242,35 @@ func (m *EncryptProxyManager) SetProxyListenLocalOnly(localOnly bool) error {
 		m.updateProxyServerConfig()
 		return nil
 	}
-	m.restartProxyIfRunning()
+	if err := m.restartProxyIfRunning(); err != nil {
+		return err
+	}
 	log.Infof("[%s] Encrypt proxy listen mode changed: localOnly=%v", internal.TagServer, localOnly)
 	return nil
 }
 
 // restartProxyIfRunning 在代理运行中时执行安全重启，用当前配置重建并
 // 重新绑定监听。调用方需持有 EncryptProxyManager.mutex。
-func (m *EncryptProxyManager) restartProxyIfRunning() {
+func (m *EncryptProxyManager) restartProxyIfRunning() error {
 	if m.proxyServer == nil || !m.proxyServer.IsRunning() {
-		m.updateProxyServerConfig()
-		return
+		return nil
 	}
-	if stopErr := m.proxyServer.Stop(); stopErr != nil {
-		log.Errorf("[%s] Proxy stop failed during restart: %v", internal.TagServer, stopErr)
-		return
+	if err := m.proxyServer.Stop(); err != nil {
+		return fmt.Errorf("configuration saved, but stopping proxy failed: %w", err)
 	}
-	newCfg := m.configManager.GetConfig()
-	server, newErr := encrypt.NewProxyServer(newCfg)
-	if newErr != nil {
-		log.Errorf("[%s] Recreate proxy failed during restart: %v", internal.TagServer, newErr)
-		return
+	// Keep the requested configuration on failure. Never silently restore an
+	// old wildcard listener after the user requested local-only access.
+	m.proxyServer = nil
+	server, err := encrypt.NewProxyServer(m.configManager.GetConfig())
+	if err != nil {
+		return fmt.Errorf("configuration saved, proxy stopped: %w", err)
 	}
-	if startErr := server.Start(); startErr != nil {
-		log.Errorf("[%s] Proxy start failed during restart: %v", internal.TagServer, startErr)
-		return
+	if err := server.Start(); err != nil {
+		return fmt.Errorf("configuration saved, proxy restart failed: %w", err)
 	}
 	m.proxyServer = server
 	log.Infof("[%s] Encrypt proxy restarted", internal.TagServer)
+	return nil
 }
 
 // GetProxyListenLocalOnly 获取代理是否仅监听本机回环（供 gomobile 调用）。
@@ -335,11 +337,7 @@ func (m *EncryptProxyManager) SetAdvancedConfigJSON(configJSON string) error {
 		}
 		if oldLocalOnly != newLocalOnly {
 			// 监听模式变化需要重绑监听。
-			m.restartProxyIfRunning()
-			if m.proxyServer != nil {
-				log.Infof("[%s] Encrypt proxy listen mode changed via advanced config: localOnly=%v", internal.TagServer, newLocalOnly)
-			}
-			return nil
+			return m.restartProxyIfRunning()
 		}
 		m.updateProxyServerConfig()
 	}

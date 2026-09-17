@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'dart:ui';
+import '../../utils/dir_sync_remote_session.dart';
 
 class DirSyncStatusPage extends StatefulWidget {
   const DirSyncStatusPage({
@@ -23,7 +24,9 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
     sendTimeout: const Duration(seconds: 8),
   ));
 
-  bool _loading = true;
+  DirSyncRemoteSession? _remote;
+  bool _authBusy = false;
+  bool _loading = false;
   bool _running = false;
   String? _error;
   Map<String, dynamic> _remoteOverview = const {};
@@ -35,52 +38,132 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
   @override
   void initState() {
     super.initState();
+    _createRemote();
     _load();
   }
 
+  void _createRemote() {
+    try {
+      _remote = _baseUrl.isEmpty ? null : DirSyncRemoteSession(_baseUrl);
+    } on FormatException catch (e) {
+      _error = e.message;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant DirSyncStatusPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.baseUrl != widget.baseUrl) {
+      _remote?.dispose();
+      _remote = null;
+      _remoteOverview = const {};
+      _createRemote();
+    }
+  }
+
+  @override
+  void dispose() {
+    _remote?.dispose();
+    _dio.close(force: true);
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    final remote = _remote;
+    if (remote == null || _authBusy || _loading || _running) return;
+    setState(() => _authBusy = true);
+    final username = TextEditingController();
+    final password = TextEditingController();
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('登录远端 Go 服务器'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              SelectableText(remote.origin.toString()),
+              const Text('使用此服务器的登录账号（不是 DB_EXPORT 配置）。JWT 仅在本页面内存保留，离开页面即清除。'),
+              if (remote.origin.scheme == 'http')
+                const Text('警告：HTTP 会明文传输账号和令牌，仅在可信网络使用。建议配置 HTTPS。', style: TextStyle(color: Colors.red)),
+              TextField(controller: username, decoration: const InputDecoration(labelText: '账号'), autocorrect: false, enableSuggestions: false),
+              TextField(controller: password, decoration: const InputDecoration(labelText: '密码'), obscureText: true, autocorrect: false, enableSuggestions: false),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('登录此服务器')),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted || !identical(remote, _remote)) return;
+      await remote.login(username.text.trim(), password.text);
+      if (!mounted || !identical(remote, _remote)) return;
+      await _load();
+    } catch (e) {
+      if (mounted && identical(remote, _remote)) setState(() => _error = e.toString());
+    } finally {
+      // The route transition may still be using its fields. Clear immediately,
+      // then dispose after the next frame rather than during their last build.
+      username.clear();
+      password.clear();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        username.dispose();
+        password.dispose();
+      });
+      if (mounted) setState(() => _authBusy = false);
+    }
+  }
+
   Future<void> _load() async {
+    if (!mounted || _loading) return;
+    final remote = _remote;
     setState(() {
       _loading = true;
-      _error = null;
+      if (remote != null || _baseUrl.isEmpty) _error = null;
     });
     try {
-      final localResp = await _dio.get('$_localBaseUrl/api/encrypt/sync/overview');
-      final localRoot = localResp.data is Map<String, dynamic> ? localResp.data as Map<String, dynamic> : const <String, dynamic>{};
-      final localData = localRoot['data'] is Map<String, dynamic> ? localRoot['data'] as Map<String, dynamic> : const <String, dynamic>{};
-      Map<String, dynamic> remoteData = const <String, dynamic>{};
-      if (_baseUrl.isNotEmpty) {
-        final remoteResp = await _dio.get('$_baseUrl/api/encrypt/dir-sync/overview');
-        final remoteRoot = remoteResp.data is Map<String, dynamic> ? remoteResp.data as Map<String, dynamic> : const <String, dynamic>{};
-        remoteData = remoteRoot['data'] is Map<String, dynamic> ? remoteRoot['data'] as Map<String, dynamic> : const <String, dynamic>{};
+      try {
+        final localResp = await _dio.get('$_localBaseUrl/api/encrypt/sync/overview');
+        final root = localResp.data;
+        final data = root is Map ? root['data'] : null;
+        if (mounted) setState(() => _localOverview = data is Map<String, dynamic> ? data : const {});
+      } catch (_) {
+        if (mounted) setState(() => _error = '本机同步状态获取失败，请检查代理是否运行');
       }
-      setState(() {
-        _localOverview = localData;
-        _remoteOverview = remoteData;
-      });
+      // Remote login is explicit. Never reuse the DB_EXPORT account or token,
+      // and keep local status usable when remote auth/network is unavailable.
+      if (!mounted || !identical(remote, _remote)) return;
+      if (remote?.isAuthenticated == true) {
+        final data = await remote!.overview();
+        if (mounted && identical(remote, _remote)) {
+          setState(() => _remoteOverview = data);
+        }
+      }
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-      });
+      if (mounted && identical(remote, _remote)) {
+        setState(() {
+          _remoteOverview = const {};
+          _error = e.toString();
+        });
+      }
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<void> _runSync() async {
-    if (_baseUrl.isEmpty) {
-      return;
-    }
+    final remote = _remote;
+    if (!mounted || _running || _loading || _authBusy || remote?.isAuthenticated != true) return;
     setState(() {
       _running = true;
       _error = null;
     });
     try {
-      await _dio.post('$_baseUrl/api/encrypt/dir-sync/run');
-      await _load();
+      await remote!.run();
+      if (mounted && identical(remote, _remote)) await _load();
     } catch (e) {
-      setState(() {
+      if (mounted && identical(remote, _remote)) setState(() {
+        if (!remote!.isAuthenticated) _remoteOverview = const {};
         _error = e.toString();
       });
     } finally {
@@ -110,7 +193,7 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
         actions: [
           IconButton(
             tooltip: '刷新',
-            onPressed: _loading ? null : _load,
+            onPressed: (_loading || _running || _authBusy) ? null : _load,
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -124,6 +207,28 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
                 children: [
                   _buildLocalSyncCard(context),
                   const SizedBox(height: 12),
+                  if (_remote != null)
+                    Card(child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        SelectableText('远端：${_remote!.origin}'),
+                        Text(_remote!.isAuthenticated ? '已登录（仅本页面有效）' : '查看远端状态和运行同步需要登录此 Go 服务器'),
+                        TextButton(
+                          onPressed: (_authBusy || _loading || _running) ? null : () {
+                            if (_remote!.isAuthenticated) {
+                              setState(() {
+                                _remote!.logout();
+                                _remoteOverview = const {};
+                              });
+                            } else {
+                              _login();
+                            }
+                          },
+                          child: Text(_authBusy ? '正在登录…' : (_remote!.isAuthenticated ? '退出远端登录' : '登录远端服务器')),
+                        ),
+                      ]),
+                    )),
+                  if (_remote?.isAuthenticated == true) ...[
                   _buildHeaderCard(context),
                   const SizedBox(height: 12),
                   _buildMetricGrid(context),
@@ -131,11 +236,12 @@ class _DirSyncStatusPageState extends State<DirSyncStatusPage> {
                   _buildSnapshotGrid(context),
                   const SizedBox(height: 12),
                   _buildTimelineCard(context),
+                  ],
                   const SizedBox(height: 12),
                   _buildErrorCard(context),
                   const SizedBox(height: 12),
                   FilledButton.icon(
-                    onPressed: (_running || _baseUrl.isEmpty || !(_remoteOverview['scan_configured'] == true)) ? null : _runSync,
+                    onPressed: (_running || _loading || _authBusy || _remote?.isAuthenticated != true || !(_remoteOverview['scan_configured'] == true)) ? null : _runSync,
                     icon: _running
                         ? const SizedBox(
                             width: 16,

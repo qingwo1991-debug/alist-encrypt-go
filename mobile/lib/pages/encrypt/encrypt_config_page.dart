@@ -63,7 +63,11 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   bool _isLoading = true;
   bool _proxyRunning = false;
   bool _isInitialized = false;
+  bool _busy = false;
   List<Map<String, dynamic>> _configDocs = [];
+  bool _switchBusy = false;
+  bool _switchApplying = false;
+  String? _switchError;
 
   @override
   void initState() {
@@ -72,15 +76,17 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _initAndLoadConfig() async {
+    if (_busy) return;
+    _busy = true;
     setState(() => _isLoading = true);
     try {
-      // 初始化加密代理
+      // 初始化加密代理（仅一次；重试刷新不再重复 init）
       if (!_isInitialized) {
         final dataDir = await NativeBridge.appConfig.getDataDir();
         await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
         _isInitialized = true;
       }
-      
+
       await _checkProxyStatus();
       await _loadConfig();
       if (_proxyRunning) {
@@ -90,11 +96,14 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     } catch (e) {
       debugPrint('Failed to init encrypt proxy: $e');
       // 如果初始化失败，使用默认值
-      setState(() {
-        _encryptPaths = [];
-      });
+      if (mounted) {
+        setState(() {
+          _encryptPaths = [];
+        });
+      }
     } finally {
-      setState(() => _isLoading = false);
+      _busy = false;
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -234,12 +243,61 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           ready = false;
         }
       }
-      setState(() => _proxyRunning = running && ready);
+      if (mounted) setState(() => _proxyRunning = running && ready);
     } catch (e) {
       debugPrint('Failed to check proxy status: $e');
     }
   }
 
+  /// Toggles that change how the proxy listens require a backend restart.
+  /// Persist first; on restart failure keep the saved (safer) value and show
+  /// the real running state instead of falsely claiming it is applied.
+  Future<void> _setListenConfig({
+    required bool newValue,
+    required Future<void> Function() persist,
+    required String successMessage,
+  }) async {
+    if (_switchBusy) return;
+    _switchBusy = true;
+    setState(() {
+      _switchError = null;
+      _switchApplying = true;
+    });
+    try {
+      await persist();
+      final wasRunning = _proxyRunning;
+      await _checkProxyStatus();
+      if (wasRunning && !_proxyRunning) {
+        if (mounted) {
+          setState(() {
+            _switchError = '已保存，但代理重启失败，当前处于停止状态。请排查后在需要时手动启动。';
+          });
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(successMessage), duration: const Duration(seconds: 2)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        // Reload persisted config + actual running status so the UI reflects
+        // reality instead of the requested-but-failed value.
+        await _loadConfig();
+        await _checkProxyStatus();
+        if (mounted) {
+          setState(() {
+            _switchError = '保存失败：$e';
+          });
+        }
+      }
+    } finally {
+      _switchBusy = false;
+      if (mounted) setState(() => _switchApplying = false);
+    }
+  }
+
+  /// Saves each section independently and reports exactly which parts failed,
+  /// instead of a blanket "保存失败" after some sections already persisted.
   Future<void> _saveConfig() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -267,53 +325,67 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     if (parsedSyncInterval != null && parsedSyncInterval > 0) {
       syncInterval = parsedSyncInterval;
     }
-    
-    try {
-      // 保存 Alist 主机配置
-      await NativeBridge.encryptProxy.setEncryptAlistHost(
-        _alistHostController.text,
-        int.parse(_alistPortController.text),
-        _alistHttps,
-      );
-      
-      // 保存代理端口
-      await NativeBridge.encryptProxy.setEncryptProxyPort(
-        int.parse(_proxyPortController.text),
-      );
 
-      // 保存 DB_EXPORT 同步配置
-      await NativeBridge.encryptProxy.setEncryptDbExportSyncConfig(
-        _enableDbExportSync,
-        _dbExportBaseUrlController.text.trim(),
-        syncInterval,
-        _dbExportAuthEnabled,
-        _dbExportUsernameController.text.trim(),
-        _dbExportPasswordController.text,
-      );
+    final failures = <String>[];
+    Future<void> step(String label, Future<void> Function() action) async {
+      try {
+        await action();
+      } catch (e) {
+        debugPrint('Save failed [$label]: $e');
+        failures.add('$label: $e');
+      }
+    }
 
-      // 保存网络策略
-      await NativeBridge.encryptProxy.setEncryptNetworkPolicy(
-        int.tryParse(_upstreamTimeoutController.text) ?? 60,
-        int.tryParse(_probeTimeoutController.text) ?? 5,
-        int.tryParse(_probeBudgetController.text) ?? 5,
-        int.tryParse(_upstreamBackoffController.text) ?? 20,
-        _enableLocalBypass,
+    // 保存 Alist 主机配置
+    await step('Alist 服务器', () => NativeBridge.encryptProxy.setEncryptAlistHost(
+      _alistHostController.text,
+      int.parse(_alistPortController.text),
+      _alistHttps,
+    ));
+
+    // 保存代理端口
+    await step('代理端口', () => NativeBridge.encryptProxy.setEncryptProxyPort(
+      int.parse(_proxyPortController.text),
+    ));
+
+    // 保存 DB_EXPORT 同步配置（不改鉴权方案，仅透传现有字段）
+    await step('DB_EXPORT 同步', () => NativeBridge.encryptProxy.setEncryptDbExportSyncConfig(
+      _enableDbExportSync,
+      _dbExportBaseUrlController.text.trim(),
+      syncInterval,
+      _dbExportAuthEnabled,
+      _dbExportUsernameController.text.trim(),
+      _dbExportPasswordController.text,
+    ));
+
+    // 保存网络策略
+    await step('网络策略', () => NativeBridge.encryptProxy.setEncryptNetworkPolicy(
+      int.tryParse(_upstreamTimeoutController.text) ?? 60,
+      int.tryParse(_probeTimeoutController.text) ?? 5,
+      int.tryParse(_probeBudgetController.text) ?? 5,
+      int.tryParse(_upstreamBackoffController.text) ?? 20,
+      _enableLocalBypass,
+    ));
+
+    // 保存解密和缓存高级配置 (通过 HTTP API 保存)
+    await step('高级配置', _saveAdvancedConfigViaApi);
+
+    if (!mounted) return;
+    if (failures.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(S.current.saved)),
       );
-      
-      // 保存解密和缓存高级配置 (通过 HTTP API 保存)
-      await _saveAdvancedConfigViaApi();
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(S.current.saved)),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存失败: $e')),
-        );
-      }
+    } else if (failures.length == 5) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('保存失败，所有配置均未生效：${failures.first}')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('部分保存失败（其余已生效）：${failures.join('；')}'),
+          duration: const Duration(seconds: 5),
+        ),
+      );
     }
   }
 
@@ -393,22 +465,32 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _toggleProxy() async {
+    if (_switchApplying) return;
+    setState(() => _switchApplying = true);
     try {
       if (_proxyRunning) {
         await NativeBridge.encryptProxy.stopEncryptProxy();
       } else {
         await NativeBridge.encryptProxy.startEncryptProxy();
       }
-      
+
       // 延迟检查状态
       await Future.delayed(const Duration(milliseconds: 500));
       await _checkProxyStatus();
+      if (mounted && !_proxyRunning) {
+        setState(() => _switchError = '代理未在运行（启动失败或已被系统停止）');
+      } else if (mounted && _switchError != null) {
+        setState(() => _switchError = null);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('操作失败: $e')),
         );
       }
+    } finally {
+      _switchBusy = false;
+      if (mounted) setState(() => _switchApplying = false);
     }
   }
 
@@ -909,36 +991,70 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       SwitchListTile(
                         title: const Text('使用 HTTPS'),
                         value: _alistHttps,
-                        onChanged: (value) => setState(() => _alistHttps = value),
+                        onChanged: _switchApplying ? null : (value) async {
+                          final previous = _alistHttps;
+                          setState(() => _alistHttps = value);
+                          try {
+                            await NativeBridge.encryptProxy.setEncryptAlistHost(
+                              _alistHostController.text,
+                              int.tryParse(_alistPortController.text) ?? 5244,
+                              value,
+                            );
+                          } catch (e) {
+                            debugPrint('Failed to set HTTPS: $e');
+                            if (mounted) {
+                              setState(() => _alistHttps = previous);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('保存失败，已恢复原状态: $e')),
+                              );
+                            }
+                          }
+                        },
                       ),
                       SwitchListTile(
                         title: const Text('启用 H2C (HTTP/2 明文)'),
-                        subtitle: const Text('需要后端 OpenList 也开启 enable_h2c'),
+                        subtitle: const Text('需要后端 OpenList 也开启 enable_h2c；切换后代理会自动重启生效'),
                         value: _enableH2C,
-                        onChanged: (value) async {
+                        onChanged: _switchApplying ? null : (value) {
                           setState(() => _enableH2C = value);
-                          try {
-                            await NativeBridge.encryptProxy.setEncryptEnableH2C(value);
-                          } catch (e) {
-                            debugPrint('Failed to set H2C: $e');
-                          }
+                          _setListenConfig(
+                            newValue: value,
+                            persist: () => NativeBridge.encryptProxy.setEncryptEnableH2C(value),
+                            successMessage: 'H2C 已保存并生效',
+                          );
                         },
                       ),
                       SwitchListTile(
                         title: const Text('仅本机访问（关闭局域网）'),
-                        subtitle: const Text('开启后代理只监听本机回环，局域网/其他设备无法访问 5344'),
+                        subtitle: const Text('开启后代理只监听本机回环，局域网/其他设备无法访问 5344；切换会重启代理'),
                         value: _listenLocalOnly,
-                        onChanged: (value) async {
+                        onChanged: _switchApplying ? null : (value) {
                           setState(() => _listenLocalOnly = value);
-                          try {
-                            await NativeBridge.encryptProxy
-                                .setEncryptAdvancedConfigJson(
-                                    '{"proxyListenLocalOnly":$value}');
-                          } catch (e) {
-                            debugPrint('Failed to set listen local only: $e');
-                          }
+                          _setListenConfig(
+                            newValue: value,
+                            persist: () => NativeBridge.encryptProxy
+                                .setEncryptAdvancedConfigJson('{"proxyListenLocalOnly":$value}'),
+                            successMessage: '仅本机访问已保存并生效',
+                          );
                         },
                       ),
+                      if (_switchApplying)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 4),
+                          child: Row(children: [
+                            SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                            SizedBox(width: 8),
+                            Text('正在应用，代理可能短暂重启...', style: TextStyle(fontSize: 12)),
+                          ]),
+                        ),
+                      if (_switchError != null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Text(
+                            _switchError!,
+                            style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12),
+                          ),
+                        ),
                       ],
                     ),
 

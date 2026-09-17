@@ -136,7 +136,7 @@ func warmOneRootDir(p *ProxyServer, alistURL, root string) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doMetadataRequest(http.DefaultClient, req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			rec.Status = WarmEventTimeout

@@ -6,8 +6,10 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"path"
 	"strconv"
@@ -176,7 +178,7 @@ func (h *AlistHandler) markSnapshotServingMode(payload []byte, stale bool, synci
 			body["next_refresh_at"] = snap.NextRefreshAt.Format(time.RFC3339)
 		}
 		if snap.LastError != "" {
-			body["degraded_reason"] = snap.LastError
+			body["degraded_reason"] = publicDirSyncError(snap.LastError)
 		}
 	}
 	encoded, err := json.Marshal(body)
@@ -592,7 +594,7 @@ func (h *AlistHandler) updateSnapshotSyncing(ctx context.Context, scopeKey strin
 		return
 	}
 	if _, err := h.dirSyncStore.SetSnapshotSyncing(ctx, scopeKey, syncing, lastErr); err != nil {
-		log.Warn().Err(err).Str("scope", scopeKey).Bool("syncing", syncing).Msg("Failed to transition snapshot sync state")
+		logDirSyncFailure("snapshot_state", scopeKey, 0, 0, err)
 	}
 }
 
@@ -642,7 +644,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 		log.Warn().
 			Str("dir_path", dirPath).
 			Str("req_body_path", reqData.Path).
-			Str("upstream", targetURL).
+			Str("endpoint", "/api/fs/list").
 			Int("status", resp.StatusCode).
 			Int("resp_len", len(respBody)).
 			Msg("LIVE_RETURNED_ROOT_POISON")
@@ -829,13 +831,14 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			return
 		}
 		h.updateSnapshotSyncing(ctx, scopeKey, true, "")
-		_, err, _ := h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
+		_, _, _ = h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
 			upstreamBody := fullListRequestBody(body)
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(upstreamBody))
 			req.Header = headers.Clone()
 			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, upstreamBody, dirPath, true)
 			if liveErr != nil {
-				h.updateSnapshotSyncing(ctx, scopeKey, false, liveErr.Error())
+				logDirSyncFailure("snapshot_refresh", dirPath, status, 0, liveErr)
+				h.updateSnapshotSyncing(ctx, scopeKey, false, publicDirSyncError(liveErr.Error()))
 				return nil, liveErr
 			}
 			if status >= 200 && status < 300 && isSuccessfulListPayload(payload) {
@@ -846,12 +849,10 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			if code := payloadResponseCode(payload); code != 0 {
 				errText = "upstream list returned code " + strconv.Itoa(code)
 			}
+			logDirSyncFailure("snapshot_refresh", dirPath, status, payloadResponseCode(payload), nil)
 			h.updateSnapshotSyncing(ctx, scopeKey, false, errText)
 			return nil, nil
 		})
-		if err != nil {
-			log.Warn().Err(err).Str("path", dirPath).Msg("dir snapshot refresh failed")
-		}
 	})
 }
 
@@ -879,7 +880,7 @@ func (h *AlistHandler) learnRootMountsOnce(ctx context.Context) {
 		req.Header.Set("Content-Type", "application/json")
 		status, _, payload, _, err := h.liveFsListResponse(req, reqBody, "/", true)
 		if err != nil || status < 200 || status >= 300 || !isSuccessfulListPayload(payload) {
-			log.Warn().Int("status", status).Err(err).Msg("Failed to learn root mounts")
+			logDirSyncFailure("learn_root_mounts", "/", status, payloadResponseCode(payload), err)
 			return
 		}
 		h.rememberRootMounts(payload)
@@ -1013,9 +1014,9 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		statusDirty = true
 		if err != nil || respStatus < 200 || respStatus >= 300 || !isSuccessfulListPayload(payload) {
 			status.DirsFailed++
-			if err != nil {
-				status.LastError = err.Error()
-			} else if code := payloadResponseCode(payload); code != 0 {
+			logDirSyncFailure("scan", node.path, respStatus, payloadResponseCode(payload), err)
+			status.LastError = "upstream list refresh failed"
+			if code := payloadResponseCode(payload); code != 0 {
 				status.LastError = "upstream list returned code " + strconv.Itoa(code)
 			}
 			flushStatus(true)
@@ -1076,6 +1077,40 @@ func (h *AlistHandler) extractDirChildrenFromResponse(parentPath string, resp ma
 	return out
 }
 
+// publicDirSyncError deliberately never returns persisted diagnostic text. Older
+// rows may contain upstream URLs, response messages, or other sensitive details.
+func publicDirSyncError(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return "Directory synchronization failed; check server logs"
+}
+
+// Keep operational context internally without logging arbitrary error strings:
+// URL errors and upstream messages may embed passwords, tokens, or cookies.
+func logDirSyncFailure(stage, dirPath string, status, code int, err error) {
+	kind := "upstream_response"
+	if err != nil {
+		kind = "internal"
+		var networkErr net.Error
+		switch {
+		case errors.Is(err, context.Canceled):
+			kind = "canceled"
+		case errors.Is(err, context.DeadlineExceeded):
+			kind = "deadline_exceeded"
+		case errors.As(err, &networkErr):
+			kind = "network"
+			if networkErr.Timeout() {
+				kind = "network_timeout"
+			}
+		}
+	}
+	log.Warn().Str("stage", stage).Str("path", dirPath).
+		Int("http_status", status).Int("upstream_code", code).
+		Str("error_kind", kind).Str("error_type", fmt.Sprintf("%T", err)).
+		Msg("Directory synchronization failed")
+}
+
 func (h *AlistHandler) HandleDirSyncOverview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		RespondHTTPErrorWithStatus(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1128,7 +1163,7 @@ func (h *AlistHandler) HandleDirSyncOverview(w http.ResponseWriter, r *http.Requ
 			"finished_at":           formatRFC3339(status.FinishedAt),
 			"next_run_at":           formatRFC3339(status.NextRunAt),
 			"last_success_at":       formatRFC3339(status.LastSuccessAt),
-			"last_error":            status.LastError,
+			"last_error":            publicDirSyncError(status.LastError),
 		},
 		"snapshot_stats": map[string]interface{}{
 			"total_snapshots":   total,
@@ -1174,7 +1209,7 @@ body{margin:0;background:#f5f7fb;color:#1d2433;font-family:-apple-system,BlinkMa
 button{border:0;background:#1f6feb;color:#fff;border-radius:999px;padding:10px 16px;font-weight:600;cursor:pointer}
 </style></head>
 <body><div class="wrap">
-<div class="hero"><div class="title">主动探测 / 目录同步状态</div><div class="sub">同一套数据同时供后台管理与移动端查看</div><div style="margin-top:14px"><button id="refresh">刷新</button></div></div>
+<div class="hero"><div class="title">主动探测 / 目录同步状态</div><div class="sub">同一套数据同时供后台管理与移动端查看</div><div style="margin-top:14px"><button id="refresh">刷新</button> <a href="/public/index.html#/login">登录管理后台</a></div><div id="notice" role="status"></div></div>
 <div class="grid">
 <div class="card"><div class="k">状态</div><div class="v" id="status">-</div></div>
 <div class="card"><div class="k">进度</div><div class="v" id="progress">0%</div></div>
@@ -1192,7 +1227,10 @@ button{border:0;background:#1f6feb;color:#fff;border-radius:999px;padding:10px 1
 </div>
 </div>
 <script>
-async function load(){const res=await fetch('/api/encrypt/dir-sync/overview',{cache:'no-store'});const root=await res.json();const d=root.data||{};const j=d.current_job||{};const s=d.snapshot_stats||{};
+function loginToken(){try{return JSON.parse(localStorage.getItem('basic')||'{}').token||'';}catch{return '';}}
+function showError(message){document.getElementById('notice').textContent=message;for(const id of ['status','progress','total','scanned','success','failed','updated','lastSuccess','nextRun','snapshots','lastError']){document.getElementById(id).textContent='-';}}
+let loading=false;
+async function load(){if(loading)return;const token=loginToken();if(!token){showError('请先登录管理后台，再刷新本页。');return;}loading=true;try{const res=await fetch('/api/encrypt/dir-sync/overview',{cache:'no-store',headers:{Authorization:'Bearer '+token}});if(res.status===401){showError('登录已过期，请重新登录管理后台。');return;}if(!res.ok)throw new Error('overview unavailable');const root=await res.json();if(root.code!==0)throw new Error('overview unavailable');document.getElementById('notice').textContent='';const d=root.data||{};const j=d.current_job||{};const s=d.snapshot_stats||{};
 document.getElementById('status').textContent=(j.status||'idle').toUpperCase();
 document.getElementById('progress').textContent=String(j.progress_percent||0)+'%';
 document.getElementById('total').textContent=String(j.total_dirs_estimate||0);
@@ -1203,8 +1241,8 @@ document.getElementById('updated').textContent=j.updated_at||'-';
 document.getElementById('lastSuccess').textContent=j.last_success_at||'-';
 document.getElementById('nextRun').textContent=j.next_run_at||'-';
 document.getElementById('snapshots').textContent='总 '+String(s.total_snapshots||0)+' / 新鲜 '+String(s.fresh_snapshots||0)+' / 陈旧 '+String(s.stale_snapshots||0)+' / 同步中 '+String(s.syncing_snapshots||0);
-document.getElementById('lastError').textContent=j.last_error||'无';}
-document.getElementById('refresh').addEventListener('click',()=>load().catch(console.error));load().catch(console.error);setInterval(()=>load().catch(console.error),5000);
+document.getElementById('lastError').textContent=j.last_error||'无';}catch{showError('暂时无法获取同步状态，请稍后刷新。');}finally{loading=false;}}
+document.getElementById('refresh').addEventListener('click',load);load();setInterval(load,5000);
 </script></body></html>`
 	RespondRaw(w, http.StatusOK, "text/html; charset=utf-8", []byte(page))
 }
