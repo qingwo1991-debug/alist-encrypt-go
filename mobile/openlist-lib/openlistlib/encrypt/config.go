@@ -397,8 +397,13 @@ func (m *ConfigManager) SetEnableH2C(enable bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	old := m.config.EnableH2C
 	m.config.EnableH2C = enable
-	return m.saveConfigLocked()
+	if err := m.saveConfigLocked(); err != nil {
+		m.config.EnableH2C = old
+		return err
+	}
+	return nil
 }
 
 // SetProxyListenLocalOnly 设置代理是否仅监听本机回环（默认全网卡）。
@@ -407,8 +412,13 @@ func (m *ConfigManager) SetProxyListenLocalOnly(localOnly bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	old := m.config.ProxyListenLocalOnly
 	m.config.ProxyListenLocalOnly = localOnly
-	return m.saveConfigLocked()
+	if err := m.saveConfigLocked(); err != nil {
+		m.config.ProxyListenLocalOnly = old
+		return err
+	}
+	return nil
 }
 
 // SetNetworkPolicy 设置网络策略参数
@@ -485,6 +495,9 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	// Advanced fields below are scalar values; keep the previous snapshot until
+	// persistence succeeds so a failed save cannot masquerade as applied config.
+	previous := *m.config
 	if payload.PlayFirstFallback != nil {
 		m.config.PlayFirstFallback = *payload.PlayFirstFallback
 	}
@@ -547,7 +560,11 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 		m.config.ProxyListenLocalOnly = *payload.ProxyListenLocalOnly
 	}
 
-	return m.saveConfigLocked()
+	if err := m.saveConfigLocked(); err != nil {
+		*m.config = previous
+		return err
+	}
+	return nil
 }
 
 // AddEncryptPath 添加加密路径
