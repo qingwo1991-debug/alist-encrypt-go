@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,8 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/debuglog"
+	"github.com/alist-encrypt-go/internal/logring"
 	"github.com/alist-encrypt-go/internal/restart"
 	"github.com/alist-encrypt-go/internal/server"
 	"github.com/alist-encrypt-go/internal/trace"
@@ -112,12 +115,26 @@ func setupLogging(cfg *config.Config) {
 	}
 
 	// Set output format
+	// NoColor keeps console output free of ANSI escapes so the captured ring
+	// buffer (/debug logs) is clean line text for tooling/AI consumption.
+	var out io.Writer = os.Stderr
 	if cfg.Log.Format == "console" {
-		log.Logger = log.Output(zerolog.ConsoleWriter{
+		out = zerolog.ConsoleWriter{
 			Out:        os.Stderr,
 			TimeFormat: time.RFC3339,
-		})
+			NoColor:    true,
+		}
 	}
+
+	// When debug mode is enabled, capture recent log lines into an in-memory
+	// ring exposed via /debug/logs for remote/AI-assisted troubleshooting.
+	if cfg.DebugEnabled() {
+		ring := logring.NewRing(cfg.DebugMaxLogLines())
+		debuglog.SetRing(ring)
+		out = io.MultiWriter(out, ring)
+	}
+
+	log.Logger = log.Output(out)
 
 	// TODO: Add file output support with rotation
 }

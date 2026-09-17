@@ -185,6 +185,16 @@ type DBConfig struct {
 	DirSnapshotCleanupDays int `json:"dir_snapshot_cleanup_days"`
 }
 
+// DebugConfig gates optional /debug endpoints (recent logs + runtime status)
+// used for remote troubleshooting / AI-assisted debugging. Everything stays
+// disabled unless Enabled is explicitly set; when a token is configured, /debug
+// requests must present it.
+type DebugConfig struct {
+	Enabled     bool   `json:"enabled"`
+	Token       string `json:"token,omitempty"`
+	MaxLogLines int    `json:"max_log_lines,omitempty"`
+}
+
 // Config represents the main configuration (compatible with Node.js version)
 type Config struct {
 	// Core settings (compatible with original)
@@ -197,6 +207,7 @@ type Config struct {
 	Proxy     *ProxyConfig  `json:"proxy,omitempty"`
 	Log       *LogConfig    `json:"log,omitempty"`
 	Database  *DBConfig     `json:"database,omitempty"`
+	Debug     *DebugConfig  `json:"debug,omitempty"`
 	DataDir   string        `json:"data_dir,omitempty"`
 	JWTSecret string        `json:"jwt_secret,omitempty"`
 	JWTExpire int           `json:"jwt_expire,omitempty"`
@@ -710,6 +721,10 @@ func (c *Config) snapshotLocked() *Config {
 		value := *c.Database
 		snapshot.Database = &value
 	}
+	if c.Debug != nil {
+		value := *c.Debug
+		snapshot.Debug = &value
+	}
 	return snapshot
 }
 
@@ -791,6 +806,7 @@ func (c *Config) assignSnapshotLocked(src *Config) {
 	c.Proxy = src.Proxy
 	c.Log = src.Log
 	c.Database = src.Database
+	c.Debug = src.Debug
 	c.DataDir = src.DataDir
 	c.JWTSecret = src.JWTSecret
 	c.JWTExpire = src.JWTExpire
@@ -1210,6 +1226,46 @@ func (c *Config) GetAlistURL() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return BuildAlistURL(c.AlistServer)
+}
+
+// DebugEnabled reports whether the optional /debug endpoints are enabled.
+func (c *Config) DebugEnabled() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Debug != nil && c.Debug.Enabled
+}
+
+// DebugToken returns the bearer token required for /debug endpoints ("" = no
+// token required).
+func (c *Config) DebugToken() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.Debug == nil {
+		return ""
+	}
+	return c.Debug.Token
+}
+
+// DebugMaxLogLines returns the /debug/logs ring capacity (default 500).
+func (c *Config) DebugMaxLogLines() int {
+	if c == nil {
+		return 500
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.Debug == nil || c.Debug.MaxLogLines <= 0 {
+		return 500
+	}
+	if c.Debug.MaxLogLines > 100000 {
+		return 100000
+	}
+	return c.Debug.MaxLogLines
 }
 
 // BuildAlistURL formats an upstream endpoint, including IPv6 literals and only
