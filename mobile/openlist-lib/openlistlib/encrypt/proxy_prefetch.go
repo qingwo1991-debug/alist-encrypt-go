@@ -181,7 +181,7 @@ func (p *ProxyServer) prefetchEncryptedSubDirs(parentCtx context.Context, reqDat
 			}
 			req.Header.Set("Content-Type", "application/json")
 
-			resp, err := runtime.httpClient.Do(req)
+			resp, err := doMetadataRequest(runtime.httpClient, req)
 			if err != nil {
 				return
 			}
@@ -190,8 +190,12 @@ func (p *ProxyServer) prefetchEncryptedSubDirs(parentCtx context.Context, reqDat
 				return
 			}
 
+			responseBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
+			if err != nil {
+				return
+			}
 			var result map[string]interface{}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			if err := json.Unmarshal(responseBody, &result); err != nil {
 				return
 			}
 			code, _ := result["code"].(float64)

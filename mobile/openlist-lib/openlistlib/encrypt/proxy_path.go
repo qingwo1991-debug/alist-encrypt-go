@@ -726,7 +726,7 @@ func (p *ProxyServer) tryFetchRemoteProviderRoutingCandidates(ctx context.Contex
 			req.Header.Set("Authorizetoken", token)
 		}
 	}
-	resp, err := dbExportSyncHTTPClient.Do(req)
+	resp, err := doMetadataRequest(dbExportSyncHTTPClient, req)
 	if err != nil {
 		return nil, nil, true
 	}

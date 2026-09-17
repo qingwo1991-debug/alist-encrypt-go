@@ -1795,7 +1795,7 @@ func (p *ProxyServer) fetchWebDAVFileSizeCtx(ctx context.Context, targetURL stri
 	if client == nil {
 		client = runtime.httpClient
 	}
-	resp, err := client.Do(req)
+	resp, err := doMetadataRequest(client, req)
 	if err != nil {
 		return 0
 	}
@@ -1833,6 +1833,8 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 	dec := xml.NewDecoder(body)
 	enc := xml.NewEncoder(w)
 
+	seenRoot := false
+	rootClosed := false
 	inResponse := false
 	var curHref string
 	var curHrefShow string
@@ -1849,6 +1851,10 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 
 		switch tok := t.(type) {
 		case xml.StartElement:
+			if rootClosed || (!seenRoot && !strings.EqualFold(tok.Name.Local, "multistatus")) {
+				return errors.New("invalid PROPFIND metadata root")
+			}
+			seenRoot = true
 			if strings.EqualFold(tok.Name.Local, "response") {
 				inResponse = true
 				curHref = ""
@@ -1950,6 +1956,9 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 			}
 
 		case xml.EndElement:
+			if strings.EqualFold(tok.Name.Local, "multistatus") {
+				rootClosed = true
+			}
 			if err := enc.EncodeToken(tok); err != nil {
 				return err
 			}
@@ -1979,10 +1988,16 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 				inResponse = false
 			}
 		default:
+			if text, ok := tok.(xml.CharData); ok && (!seenRoot || rootClosed) && strings.TrimSpace(string(text)) != "" {
+				return errors.New("unexpected text outside PROPFIND metadata root")
+			}
 			if err := enc.EncodeToken(tok); err != nil {
 				return err
 			}
 		}
+	}
+	if !seenRoot || !rootClosed {
+		return errors.New("incomplete PROPFIND metadata response")
 	}
 	return enc.Flush()
 }
@@ -3608,6 +3623,11 @@ func (p *ProxyServer) streamRewriteFsListResponse(w http.ResponseWriter, body io
 	if _, err := bw.WriteString("}"); err != nil {
 		return nil, err
 	}
+	// Consume through EOF so trailing JSON and gzip checksum/truncation errors
+	// are not mistaken for a complete response.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("invalid trailing fs list metadata")
+	}
 	if err := bw.Flush(); err != nil {
 		return nil, err
 	}
@@ -3850,7 +3870,7 @@ func (p *ProxyServer) refreshStorageDriverMapIfNeededWithRuntime(ctx context.Con
 			req.Header.Add(key, value)
 		}
 	}
-	resp, err := runtime.httpClient.Do(req)
+	resp, err := doMetadataRequest(runtime.httpClient, req)
 	if err != nil {
 		return
 	}
@@ -3945,7 +3965,7 @@ func (p *ProxyServer) fetchAdminDriverNamesWithRuntime(ctx context.Context, srcH
 		return nil, true
 	}
 	copyForwardHeaders(req.Header, srcHeaders)
-	resp, err := runtime.httpClient.Do(req)
+	resp, err := doMetadataRequest(runtime.httpClient, req)
 	if err != nil {
 		return nil, true
 	}
@@ -4013,19 +4033,25 @@ func (p *ProxyServer) proxyFSJSON(w http.ResponseWriter, r *http.Request, apiPat
 		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	resp, err := client.Do(req)
+	resp, err := doMetadataRequest(client, req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
+	if err != nil || (resp.StatusCode >= 200 && resp.StatusCode < 300 && !json.Valid(respBody)) {
+		http.Error(w, "invalid upstream metadata response", http.StatusBadGateway)
+		return
+	}
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+	clearMetadataRepresentationHeaders(w.Header())
 	w.WriteHeader(resp.StatusCode)
-	copyWithBuffer(w, resp.Body)
+	_, _ = w.Write(respBody)
 }
 
 // doFSRequest 向 alist 的 /api/fs/* 端点发 JSON 请求并返回状态 + 响应体。
@@ -4049,7 +4075,7 @@ func (p *ProxyServer) doFSRequest(ctx context.Context, srcHeaders http.Header, a
 	if client == nil {
 		return 0, nil, errors.New("upstream client unavailable")
 	}
-	resp, err := client.Do(req)
+	resp, err := doMetadataRequest(client, req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -4057,6 +4083,9 @@ func (p *ProxyServer) doFSRequest(ctx context.Context, srcHeaders http.Header, a
 	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return 0, nil, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && !json.Valid(respBody) {
+		return 0, nil, errors.New("invalid upstream metadata response")
 	}
 	return resp.StatusCode, respBody, nil
 }
@@ -4082,7 +4111,7 @@ func (p *ProxyServer) doFSRemoveRequest(ctx context.Context, srcHeaders http.Hea
 	if client == nil {
 		return 0, nil, errors.New("upstream client unavailable")
 	}
-	resp, err := client.Do(req)
+	resp, err := doMetadataRequest(client, req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -4090,6 +4119,9 @@ func (p *ProxyServer) doFSRemoveRequest(ctx context.Context, srcHeaders http.Hea
 	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
 	if err != nil {
 		return 0, nil, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && !json.Valid(respBody) {
+		return 0, nil, errors.New("invalid upstream metadata response")
 	}
 	return resp.StatusCode, respBody, nil
 }
@@ -4664,7 +4696,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	resp, err := client.Do(req)
+	resp, err := doWebDAVRequest(client, req)
 	if err != nil {
 		// 一次透明重试：连接池中的坏连接/瞬态降级会让 WebDAV 客户端看到瞬时 502。
 		// 只对幂等方法（GET/HEAD/PROPFIND）重试，PUT/COPY/MOVE 等非幂等操作不重试。
@@ -4684,7 +4716,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					proxyReq.Header.Del("Transfer-Encoding")
 				}
 				retried = true
-				resp, err = client.Do(proxyReq)
+				resp, err = doWebDAVRequest(client, proxyReq)
 				if err == nil {
 					log.Debugf("%s WebDAV client.Do retry success after first error: path=%s", internal.LogPrefix(ctx, internal.TagProxy), filePath)
 				}
@@ -4862,7 +4894,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 						}
 					}
 				}
-				retryResp, retryErr := client.Do(retryReq)
+				retryResp, retryErr := doWebDAVRequest(client, retryReq)
 				if retryErr != nil {
 					retryCancel()
 					p.debugf("webdav", "PROPFIND retry failed stage=%s path=%s err=%v", candidate.stage, candidate.path, retryErr)
@@ -4897,50 +4929,36 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	}
 	defer resp.Body.Close()
 
-	// 5. 处理 PROPFIND 响应 (文件名解密)
+	// Rewrite only successful PROPFIND metadata. Error bodies may be plain text,
+	// not XML; preserve their status (or the existing stale-list fallback).
 	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
-		// Remove Content-Length so Go will use chunked transfer when streaming the response body.
+		if resp.StatusCode >= 400 && listDepth == "1" && p.serveStaleWebDAVList(w, ctx, webdavListCacheKey, listDepth, negativeCachePath, filePath, r.Header) {
+			return
+		}
 		for key, values := range resp.Header {
-			if strings.ToLower(key) == "content-length" {
-				continue
-			}
 			for _, v := range values {
 				w.Header().Add(key, v)
 			}
 		}
-
-		// 目录列表缓存写入：只在列表请求（Depth=1）时缓存明文正文，供后续
-		// 重复进入同一目录直接复用（见上方 listDepth=="1" 命中分支）。
-		if listDepth == "1" {
-			// 上游返回 4xx/5xx（冷存储 404/502）时优先回退历史快照，而不是把错误
-			// 正文当 PROPFIND 响应写回客户端。真正删除的目录没有旧快照，仍按原样
-			// 透传真实错误状态。
-			if resp.StatusCode >= 400 {
-				if p.serveStaleWebDAVList(w, ctx, webdavListCacheKey, listDepth, negativeCachePath, filePath, r.Header) {
-					return
-				}
-			}
-			var listBuf bytes.Buffer
-			multi := io.MultiWriter(w, &listBuf)
-			status := resp.StatusCode
-			w.WriteHeader(status)
-			if err := p.processPropfindResponse(resp.Body, multi, encPath); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if status >= 200 && status < 300 {
-				p.storeWebdavListCache(webdavListCacheKey, status, listBuf.Bytes())
-				log.Debugf("%s WebDAV directory list cached: dir=%s status=%d bytes=%d",
-					internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, status, listBuf.Len())
-			}
-			p.maybePersistDirList(ctx, webdavListCacheKey, listBuf.Bytes())
+		clearMetadataRepresentationHeaders(w.Header())
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			w.WriteHeader(resp.StatusCode)
+			_, _ = copyWithBuffer(w, resp.Body)
 			return
 		}
-
-		w.WriteHeader(resp.StatusCode)
-
-		if err := p.processPropfindResponse(resp.Body, w, encPath); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		output := &metadataResponseWriter{ResponseWriter: w, status: resp.StatusCode}
+		var listBuf bytes.Buffer
+		var dst io.Writer = output
+		if listDepth == "1" {
+			dst = io.MultiWriter(output, &listBuf)
+		}
+		if err := p.processPropfindResponse(resp.Body, dst, encPath); err != nil {
+			output.fail()
+			return
+		}
+		if listDepth == "1" {
+			p.storeWebdavListCache(webdavListCacheKey, resp.StatusCode, listBuf.Bytes())
+			p.maybePersistDirList(ctx, webdavListCacheKey, listBuf.Bytes())
 		}
 		return
 	}

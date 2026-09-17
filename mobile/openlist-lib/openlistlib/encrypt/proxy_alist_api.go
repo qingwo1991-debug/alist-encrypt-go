@@ -645,12 +645,19 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	resp, err := client.Do(req)
+	upstreamStarted := time.Now()
+	resp, err := doMetadataRequest(client, req)
+	headersElapsed := time.Since(upstreamStarted)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	rewriteStarted := time.Now()
+	rewriteOK := false
+	defer func() {
+		p.debugf("list", "metadata timing headers_ms=%d rewrite_ms=%d complete=%t", headersElapsed.Milliseconds(), time.Since(rewriteStarted).Milliseconds(), rewriteOK)
+	}()
 
 	reqData := map[string]interface{}{}
 	_ = json.Unmarshal(body, &reqData)
@@ -658,17 +665,20 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	parentEncPath := p.findEncryptPath(dirPath)
 	p.debugf("list", "%s Handling fs list for path: %s", internal.LogPrefix(ctx, internal.TagList), dirPath)
 
+	clearMetadataRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
+		w.WriteHeader(resp.StatusCode)
 		copyWithBuffer(w, resp.Body)
 		return
 	}
-	prefetchDirs, err := p.streamRewriteFsListResponse(w, resp.Body, dirPath, parentEncPath)
+	output := &metadataResponseWriter{ResponseWriter: w, status: resp.StatusCode}
+	prefetchDirs, err := p.streamRewriteFsListResponse(output, resp.Body, dirPath, parentEncPath)
 	if err != nil {
-		log.Warnf("%s stream rewrite fs list failed: %v", internal.LogPrefix(ctx, internal.TagList), err)
+		output.fail()
 		return
 	}
+	rewriteOK = true
 	if parentEncPath != nil && len(prefetchDirs) > 0 {
 		headers := r.Header.Clone()
 		go p.prefetchEncryptedSubDirs(context.Background(), reqData, prefetchDirs, headers)
@@ -750,7 +760,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	resp, err := client.Do(req)
+	resp, err := doMetadataRequest(client, req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -760,8 +770,8 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 
 	// 读取响应
 	respBody, err := readLimitedBody(resp.Body, maxBufferedJSONBody)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err != nil || (respStatusCode >= 200 && respStatusCode < 300 && !json.Valid(respBody)) {
+		http.Error(w, "invalid upstream metadata response", http.StatusBadGateway)
 		return
 	}
 
@@ -810,7 +820,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 							}
 						}
 					}
-					resp2, err3 := client.Do(req2)
+					resp2, err3 := doMetadataRequest(client, req2)
 					if err3 != nil {
 						return false
 					}
@@ -819,11 +829,13 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 					if err4 != nil {
 						return false
 					}
-					respBody = bodyRetry
-					respStatusCode = resp2.StatusCode
-					if err5 := json.Unmarshal(respBody, &result); err5 != nil {
+					var retryResult map[string]interface{}
+					if err5 := json.Unmarshal(bodyRetry, &retryResult); err5 != nil {
 						return false
 					}
+					respBody = bodyRetry
+					respStatusCode = resp2.StatusCode
+					result = retryResult
 					msg, _ := result["message"].(string)
 					data, _ := result["data"].(map[string]interface{})
 					rawURL, _ := data["raw_url"].(string)
@@ -969,6 +981,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// 返回响应
+	clearMetadataRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(respStatusCode)
 	w.Write(respBody)
