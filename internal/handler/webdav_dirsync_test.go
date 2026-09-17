@@ -151,6 +151,133 @@ func TestServeSnapshotListingRejectsPoisonPayload(t *testing.T) {
 	}
 }
 
+// seedDirSnapshotTimed writes a request-fill snapshot with explicit refresh/
+// staleness fields so tests can exercise the freshness guard.
+func seedDirSnapshotTimed(t *testing.T, store DirSyncStore, dirPath, scopeKey string, content []map[string]interface{}, stale bool, nextRefreshAt, updatedAt time.Time) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]interface{}{
+		"code": 200,
+		"data": map[string]interface{}{
+			"total":   len(content),
+			"content": content,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := store.UpsertSnapshot(context.Background(), DirListSnapshot{
+		ScopeKey:      scopeKey,
+		ProviderHost:  "http://127.0.0.1:5244",
+		DisplayPath:   dirPath,
+		AuthScopeHash: "test",
+		RuleVersion:   "v1",
+		ItemCount:     len(content),
+		Stale:         stale,
+		SyncState:     "fresh",
+		LastSyncAt:    updatedAt,
+		LastSuccessAt: updatedAt,
+		NextRefreshAt: nextRefreshAt,
+		LastError:     "",
+		SourceMode:    dirSyncModeReq,
+		PayloadJSON:   payload,
+		UpdatedAt:     updatedAt,
+		LastAccessed:  updatedAt,
+	}); err != nil {
+		t.Fatalf("upsert snapshot: %v", err)
+	}
+}
+
+func TestServeSnapshotListingExpiredFallsThrough(t *testing.T) {
+	// A request_fill snapshot whose refresh window has already closed (like the
+	// leftover 3-item skeleton rows) must NOT be served: falling through lets
+	// the live upstream repopulate the full listing. This is the regression the
+	// user hit where the WebDAV list stayed 3 entries while storage had 536.
+	h, dirStore, _ := newWebDAVSnapshotTestHandler(t)
+	scopeKey := buildDirScopeKey("/156联通云盘/encrypt", "anon")
+	now := time.Now()
+	seedDirSnapshotTimed(t, dirStore, "/156联通云盘/encrypt", scopeKey,
+		[]map[string]interface{}{
+			{"name": "skeleton.mp4", "path": "/156联通云盘/encrypt/skeleton.mp4", "size": 100, "is_dir": false},
+		},
+		false,
+		now.Add(-1*time.Minute), // refresh window already closed
+		now.Add(-2*time.Hour))
+
+	r := httptest.NewRequest(http.MethodGet, "/PROPFIND", nil)
+	r.Header.Set("Depth", "1")
+	if _, ok := h.serveSnapshotListing(r, "/156联通云盘/encrypt"); ok {
+		t.Fatalf("expired snapshot (refresh window closed) must not be served")
+	}
+}
+
+func TestServeSnapshotListingStaleMarkerFallsThrough(t *testing.T) {
+	h, dirStore, _ := newWebDAVSnapshotTestHandler(t)
+	dirPath := "/156联通云盘/encrypt"
+	scopeKey := buildDirScopeKey(dirPath, "anon")
+	seedDirSnapshotTimed(t, dirStore, dirPath, scopeKey,
+		[]map[string]interface{}{
+			{"name": "a.mkv", "path": dirPath + "/a.mkv", "size": 10, "is_dir": false},
+		},
+		true, // explicitly marked stale by dir-sync
+		time.Now().Add(time.Hour),
+		time.Now())
+
+	r := httptest.NewRequest(http.MethodGet, "/PROPFIND", nil)
+	r.Header.Set("Depth", "1")
+	if _, ok := h.serveSnapshotListing(r, dirPath); ok {
+		t.Fatalf("snapshot marked Stale must not be served")
+	}
+}
+
+func TestServeSnapshotListingFreshHitStillWorks(t *testing.T) {
+	// Guard must not regress the fast path: a snapshot within its refresh
+	// window still serves without an upstream round trip.
+	h, dirStore, _ := newWebDAVSnapshotTestHandler(t)
+	dirPath := "/156联通云盘/encrypt"
+	scopeKey := buildDirScopeKey(dirPath, "anon")
+	seedDirSnapshotTimed(t, dirStore, dirPath, scopeKey,
+		[]map[string]interface{}{
+			{"name": "fresh.mkv", "path": dirPath + "/fresh.mkv", "size": 20, "is_dir": false},
+		},
+		false,
+		time.Now().Add(time.Minute),
+		time.Now())
+
+	r := httptest.NewRequest(http.MethodGet, "/PROPFIND", nil)
+	r.Header.Set("Depth", "1")
+	body, ok := h.serveSnapshotListing(r, dirPath)
+	if !ok {
+		t.Fatalf("fresh in-window snapshot must be served from cache")
+	}
+	if !strings.Contains(string(body), "fresh.mkv") {
+		t.Errorf("expected fresh.mkv in body; body=%s", string(body))
+	}
+}
+
+func TestSnapshotFreshEnough(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		snap *DirListSnapshot
+		want bool
+	}{
+		{"nil snapshot", nil, false},
+		{"stale marker", &DirListSnapshot{Stale: true, NextRefreshAt: now.Add(time.Minute)}, false},
+		{"in window", &DirListSnapshot{Stale: false, NextRefreshAt: now.Add(time.Minute)}, true},
+		{"window closed", &DirListSnapshot{Stale: false, NextRefreshAt: now.Add(-time.Second)}, false},
+		{"zero refresh but fresh updated", &DirListSnapshot{Stale: false, NextRefreshAt: time.Time{}, UpdatedAt: now.Add(-30 * time.Second)}, true},
+		{"zero refresh and old updated", &DirListSnapshot{Stale: false, NextRefreshAt: time.Time{}, UpdatedAt: now.Add(-10 * time.Minute)}, false},
+		{"zero refresh and zero updated", &DirListSnapshot{Stale: false, NextRefreshAt: time.Time{}, UpdatedAt: time.Time{}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := snapshotFreshEnough(tc.snap, now); got != tc.want {
+				t.Errorf("snapshotFreshEnough(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPersistWebDAVSnapshotWritesSharedPayload(t *testing.T) {
 	h, dirStore, _ := newWebDAVSnapshotTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet, "/PROPFIND",
