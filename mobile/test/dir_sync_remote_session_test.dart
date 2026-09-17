@@ -8,7 +8,7 @@ import 'package:openlist_mobile/utils/dir_sync_remote_session.dart';
 
 class _StubAdapter implements HttpClientAdapter {
   _StubAdapter(this.handler);
-  final ResponseBody Function(RequestOptions options) handler;
+  final Future<ResponseBody> Function(RequestOptions options) handler;
   final List<RequestOptions> requests = [];
 
   @override

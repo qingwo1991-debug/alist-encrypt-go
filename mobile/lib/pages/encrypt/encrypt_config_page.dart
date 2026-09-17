@@ -298,34 +298,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     }
   }
 
-  Future<void> _saveConfig() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    if (_enableDbExportSync && _dbExportBaseUrlController.text.trim().isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('请填写 DB_EXPORT API 地址')),
-        );
-      }
-      return;
-    }
-    if (_enableDbExportSync &&
-        _dbExportAuthEnabled &&
-        _dbExportUsernameController.text.trim().isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('请填写鉴权账号')),
-        );
-      }
-      return;
-    }
-
-    int syncInterval = 300;
-    final parsedSyncInterval = int.tryParse(_dbExportSyncIntervalController.text.trim());
-    if (parsedSyncInterval != null && parsedSyncInterval > 0) {
-      syncInterval = parsedSyncInterval;
-    }
-    
   /// Saves each section independently and reports exactly which parts failed,
   /// instead of a blanket "保存失败" after some sections already persisted.
   Future<void> _saveConfig() async {
