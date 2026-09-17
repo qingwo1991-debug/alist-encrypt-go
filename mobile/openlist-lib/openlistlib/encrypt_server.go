@@ -217,6 +217,72 @@ func (m *EncryptProxyManager) SetEnableH2C(enable bool) error {
 	return err
 }
 
+// SetProxyListenLocalOnly 设置代理是否仅监听本机回环（供 gomobile 调用）。
+// true 时代理只监听 127.0.0.1，局域网/其他设备不能访问代理端口；
+// 监听地址变化需要重绑，运行中执行安全重启。
+func (m *EncryptProxyManager) SetProxyListenLocalOnly(localOnly bool) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.configManager == nil {
+		return errors.New("config manager not initialized")
+	}
+	oldCfg := m.configManager.GetConfig()
+	oldLocalOnly := false
+	if oldCfg != nil {
+		oldLocalOnly = oldCfg.ProxyListenLocalOnly
+	}
+	err := m.configManager.SetProxyListenLocalOnly(localOnly)
+	if err != nil {
+		return err
+	}
+	if oldLocalOnly == localOnly {
+		// 值没变：仅同步运行时配置，无需重绑监听。
+		m.updateProxyServerConfig()
+		return nil
+	}
+	m.restartProxyIfRunning()
+	log.Infof("[%s] Encrypt proxy listen mode changed: localOnly=%v", internal.TagServer, localOnly)
+	return nil
+}
+
+// restartProxyIfRunning 在代理运行中时执行安全重启，用当前配置重建并
+// 重新绑定监听。调用方需持有 EncryptProxyManager.mutex。
+func (m *EncryptProxyManager) restartProxyIfRunning() {
+	if m.proxyServer == nil || !m.proxyServer.IsRunning() {
+		m.updateProxyServerConfig()
+		return
+	}
+	if stopErr := m.proxyServer.Stop(); stopErr != nil {
+		log.Errorf("[%s] Proxy stop failed during restart: %v", internal.TagServer, stopErr)
+		return
+	}
+	newCfg := m.configManager.GetConfig()
+	server, newErr := encrypt.NewProxyServer(newCfg)
+	if newErr != nil {
+		log.Errorf("[%s] Recreate proxy failed during restart: %v", internal.TagServer, newErr)
+		return
+	}
+	if startErr := server.Start(); startErr != nil {
+		log.Errorf("[%s] Proxy start failed during restart: %v", internal.TagServer, startErr)
+		return
+	}
+	m.proxyServer = server
+	log.Infof("[%s] Encrypt proxy restarted", internal.TagServer)
+}
+
+// GetProxyListenLocalOnly 获取代理是否仅监听本机回环（供 gomobile 调用）。
+func (m *EncryptProxyManager) GetProxyListenLocalOnly() bool {
+	if m.configManager == nil {
+		return false
+	}
+	cfg := m.configManager.GetConfig()
+	if cfg == nil {
+		return false
+	}
+	return cfg.ProxyListenLocalOnly
+}
+
 // SetNetworkPolicy 设置网络策略
 func (m *EncryptProxyManager) SetNetworkPolicy(upstreamTimeoutSeconds, probeTimeoutSeconds, probeBudgetSeconds, upstreamBackoffSeconds int, enableLocalBypass bool) error {
 	m.mutex.Lock()
@@ -255,8 +321,26 @@ func (m *EncryptProxyManager) SetAdvancedConfigJSON(configJSON string) error {
 	if m.configManager == nil {
 		return errors.New("config manager not initialized")
 	}
+	oldCfg := m.configManager.GetConfig()
+	oldLocalOnly := false
+	if oldCfg != nil {
+		oldLocalOnly = oldCfg.ProxyListenLocalOnly
+	}
 	err := m.configManager.SetAdvancedConfigFromJSON(configJSON)
 	if err == nil {
+		newCfg := m.configManager.GetConfig()
+		newLocalOnly := false
+		if newCfg != nil {
+			newLocalOnly = newCfg.ProxyListenLocalOnly
+		}
+		if oldLocalOnly != newLocalOnly {
+			// 监听模式变化需要重绑监听。
+			m.restartProxyIfRunning()
+			if m.proxyServer != nil {
+				log.Infof("[%s] Encrypt proxy listen mode changed via advanced config: localOnly=%v", internal.TagServer, newLocalOnly)
+			}
+			return nil
+		}
 		m.updateProxyServerConfig()
 	}
 	return err
@@ -440,6 +524,16 @@ func GetEncryptEnableH2C() bool {
 	return config.EnableH2C
 }
 
+// SetEncryptListenLocalOnly 设置代理是否仅监听本机回环（供 gomobile 调用）。
+func SetEncryptListenLocalOnly(localOnly bool) error {
+	return GetEncryptManager().SetProxyListenLocalOnly(localOnly)
+}
+
+// GetEncryptListenLocalOnly 获取代理是否仅监听本机回环（供 gomobile 调用）。
+func GetEncryptListenLocalOnly() bool {
+	return GetEncryptManager().GetProxyListenLocalOnly()
+}
+
 // AddEncryptPathConfig 添加加密路径配置（供 gomobile 调用）
 func AddEncryptPathConfig(path, password, encType string, encName bool, encSuffix string) error {
 	return GetEncryptManager().AddEncryptPath(path, password, encType, encName, encSuffix)
@@ -560,6 +654,7 @@ func GetEncryptConfigJson() string {
 		UpstreamBackoffSeconds   int        `json:"upstreamBackoffSeconds"`
 		EnableLocalBypass        bool       `json:"enableLocalBypass"`
 		EnableH2C                bool       `json:"enableH2C"`
+		ProxyListenLocalOnly     bool       `json:"proxyListenLocalOnly"`
 		EnableDbExportSync       bool       `json:"enableDbExportSync"`
 		DbExportBaseUrl          string     `json:"dbExportBaseUrl"`
 		DbExportSyncIntervalSecs int        `json:"dbExportSyncIntervalSeconds"`
@@ -601,6 +696,7 @@ func GetEncryptConfigJson() string {
 		UpstreamBackoffSeconds:   config.UpstreamBackoffSeconds,
 		EnableLocalBypass:        config.EnableLocalBypass,
 		EnableH2C:                config.EnableH2C,
+		ProxyListenLocalOnly:     config.ProxyListenLocalOnly,
 		EnableDbExportSync:       config.EnableDBExportSync,
 		DbExportBaseUrl:          config.DBExportBaseURL,
 		DbExportSyncIntervalSecs: config.DBExportSyncIntervalSeconds,

@@ -46,6 +46,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   // H2C 开关（HTTP/2 Cleartext）
   bool _enableH2C = false;
 
+  // 代理仅监听本机（true=仅本机访问，局域网不可访问）
+  bool _listenLocalOnly = false;
+
   // DB_EXPORT 元数据同步配置
   bool _enableDbExportSync = false;
   final _dbExportBaseUrlController = TextEditingController(text: '');
@@ -133,6 +136,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           _webdavNegativeCacheTtlController.text =
               (config['webdavNegativeCacheTtlMinutes'] ?? 10).toString();
           _enableH2C = config['enableH2C'] ?? false;
+          _listenLocalOnly = config['proxyListenLocalOnly'] ?? false;
           _enableDbExportSync = config['enableDbExportSync'] ?? false;
           _dbExportBaseUrlController.text = config['dbExportBaseUrl'] ?? '';
           _dbExportSyncIntervalController.text =
@@ -917,6 +921,21 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                             await NativeBridge.encryptProxy.setEncryptEnableH2C(value);
                           } catch (e) {
                             debugPrint('Failed to set H2C: $e');
+                          }
+                        },
+                      ),
+                      SwitchListTile(
+                        title: const Text('仅本机访问（关闭局域网）'),
+                        subtitle: const Text('开启后代理只监听本机回环，局域网/其他设备无法访问 5344'),
+                        value: _listenLocalOnly,
+                        onChanged: (value) async {
+                          setState(() => _listenLocalOnly = value);
+                          try {
+                            await NativeBridge.encryptProxy
+                                .setEncryptAdvancedConfigJson(
+                                    '{"proxyListenLocalOnly":$value}');
+                          } catch (e) {
+                            debugPrint('Failed to set listen local only: $e');
                           }
                         },
                       ),

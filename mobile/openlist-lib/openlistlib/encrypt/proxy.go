@@ -716,6 +716,10 @@ type ProxyConfig struct {
 	LocalStrategyRetentionDays int `json:"localStrategyRetentionDays,omitempty"`
 	// ConfigPath: 配置文件路径（运行时注入，不序列化）
 	ConfigPath string `json:"-"`
+	// ProxyListenLocalOnly: 代理仅监听本机回环（127.0.0.1）。默认 false
+	// 表示监听所有网卡（局域网/其他设备可访问）。开启后仅本机能访问
+	// 5344 代理端口；不影响 AlistHost（代理→OpenList 的出站连接）。
+	ProxyListenLocalOnly bool `json:"proxyListenLocalOnly,omitempty"`
 }
 
 // FileInfo 文件信息
