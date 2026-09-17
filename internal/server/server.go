@@ -197,7 +197,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 	encAPI := r.Group("/enc-api")
 	{
 		// Public routes (no auth required)
-		encAPI.POST("/login", ginWrap(apiHandler.Login))
+		encAPI.POST("/login", newLoginAttemptLimiter().middleware(), ginWrap(apiHandler.Login))
 		encAPI.Any("/getBuildInfo", ginWrap(apiHandler.GetBuildInfo))
 
 		// Protected routes (auth required)
@@ -284,7 +284,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 	r.POST("/api/fs/rename", ginWrap(alistHandler.HandleFsRename))
 	r.POST("/api/fs/move", ginWrap(alistHandler.HandleFsMove))
 	r.POST("/api/fs/copy", ginWrap(alistHandler.HandleFsCopy))
-	r.GET("/api/encrypt/dir-sync/overview", ginWrap(alistHandler.HandleDirSyncOverview))
+	r.GET("/api/encrypt/dir-sync/overview", AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire), ginWrap(alistHandler.HandleDirSyncOverview))
 	r.POST("/api/encrypt/dir-sync/run", AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire), ginWrap(alistHandler.HandleDirSyncRun))
 	r.GET("/api/encrypt/dir-sync/page", ginWrap(alistHandler.HandleDirSyncPage))
 
