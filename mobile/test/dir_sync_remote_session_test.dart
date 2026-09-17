@@ -30,9 +30,23 @@ Map<String, dynamic> _ok(dynamic data) => {'code': 0, 'data': data};
 void main() {
   group('DirSyncRemoteSession origin parsing', () {
     test('normalizes to scheme/host/port only', () {
-      final session = DirSyncRemoteSession('http://example.com:8080/sub?q=1#f');
+      final session = DirSyncRemoteSession('http://example.com:8080/');
       expect(session.origin.toString(), 'http://example.com:8080');
       session.dispose();
+    });
+
+    test('rejects base URL carrying path, query or fragment', () {
+      for (final bad in [
+        'http://example.com:8080/sub',
+        'http://example.com:8080/?q=1',
+        'http://example.com:8080/#f',
+      ]) {
+        expect(
+          () => DirSyncRemoteSession(bad),
+          throwsFormatException,
+          reason: bad,
+        );
+      }
     });
 
     test('rejects credentials, non-http schemes and bare hosts', () {
@@ -167,8 +181,11 @@ void main() {
     test('logout clears token and cancels in-flight requests', () async {
       final adapter = _StubAdapter((options) async {
         await Future<void>.delayed(const Duration(milliseconds: 50));
+        final payload = options.uri.path == '/enc-api/login'
+            ? _ok({'jwtToken': 'jwt-1'})
+            : _ok(const <String, dynamic>{});
         return ResponseBody.fromString(
-          jsonEncode(_ok(const <String, dynamic>{})),
+          jsonEncode(payload),
           200,
           headers: {
             Headers.contentTypeHeader: [Headers.jsonContentType],
