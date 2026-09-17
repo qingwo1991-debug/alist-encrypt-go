@@ -89,7 +89,7 @@ void main() {
 
     test('failed login keeps unauthenticated and reports error', () async {
       final adapter = _StubAdapter(
-        (options) => ResponseBody.fromString(
+        (options) async => ResponseBody.fromString(
           jsonEncode({'code': 500, 'msg': 'passwword error'}),
           200,
           headers: {
