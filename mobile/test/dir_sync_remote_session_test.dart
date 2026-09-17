@@ -54,7 +54,7 @@ void main() {
 
   group('DirSyncRemoteSession auth', () {
     test('login stores jwtToken and sends it as Bearer on overview', () async {
-      final adapter = _StubAdapter((options) {
+      final adapter = _StubAdapter((options) async {
         if (options.uri.path == '/enc-api/login') {
           return ResponseBody.fromString(
             jsonEncode(_ok({'jwtToken': 'jwt-1'})),
@@ -108,7 +108,7 @@ void main() {
 
     test('401 clears token so later calls require re-login', () async {
       var status = 200;
-      final adapter = _StubAdapter((options) {
+      final adapter = _StubAdapter((options) async {
         if (options.uri.path == '/enc-api/login') {
           return ResponseBody.fromString(
             jsonEncode(_ok({'jwtToken': 'jwt-1'})),
@@ -140,7 +140,7 @@ void main() {
     });
 
     test('redirect responses are rejected, not followed', () async {
-      final adapter = _StubAdapter((options) {
+      final adapter = _StubAdapter((options) async {
         if (options.uri.path == '/enc-api/login') {
           return ResponseBody.fromString(
             jsonEncode(_ok({'jwtToken': 'jwt-1'})),

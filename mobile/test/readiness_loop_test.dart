@@ -28,7 +28,6 @@ void main() {
       () async {
     var concurrent = 0;
     var maxConcurrent = 0;
-    Timer? timer;
     final loop = ReadinessLoop(
       check: () async {
         concurrent++;
@@ -45,7 +44,6 @@ void main() {
     loop.start();
     await Future<void>.delayed(const Duration(milliseconds: 90));
     loop.dispose();
-    timer?.cancel();
     expect(maxConcurrent, 1);
   });
 

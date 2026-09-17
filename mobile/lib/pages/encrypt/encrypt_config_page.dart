@@ -253,14 +253,12 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   /// Persist first; on restart failure keep the saved (safer) value and show
   /// the real running state instead of falsely claiming it is applied.
   Future<void> _setListenConfig({
-    required bool Function() currentValue,
     required bool newValue,
     required Future<void> Function() persist,
     required String successMessage,
   }) async {
     if (_switchBusy) return;
     _switchBusy = true;
-    final saved = currentValue();
     setState(() {
       _switchError = null;
       _switchApplying = true;
@@ -1020,7 +1018,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         onChanged: _switchApplying ? null : (value) {
                           setState(() => _enableH2C = value);
                           _setListenConfig(
-                            currentValue: () => _enableH2C,
                             newValue: value,
                             persist: () => NativeBridge.encryptProxy.setEncryptEnableH2C(value),
                             successMessage: 'H2C 已保存并生效',
@@ -1034,7 +1031,6 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         onChanged: _switchApplying ? null : (value) {
                           setState(() => _listenLocalOnly = value);
                           _setListenConfig(
-                            currentValue: () => _listenLocalOnly,
                             newValue: value,
                             persist: () => NativeBridge.encryptProxy
                                 .setEncryptAdvancedConfigJson('{"proxyListenLocalOnly":$value}'),
