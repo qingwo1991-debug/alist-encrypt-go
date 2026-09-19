@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -846,6 +847,19 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 
 	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
 	if err != nil {
+		// Huge-directory budget (mirrors the mobile proxy): a WebDAV Depth:1
+		// PROPFIND of a 100k-class directory legitimately exceeds the generic
+		// 10MB buffer cap (100k entries × ~300B of multistatus XML ≈ 30MB+).
+		// Instead of hard-failing with 502, stream the upstream multistatus XML
+		// through unchanged — no name decryption, no persist, no probe. The
+		// client still gets a listing rather than an unusable directory.
+		if isDirRequest {
+			log.Warn().Str("path", davPath).Err(err).Msg("PROPFIND huge dir: streaming upstream XML raw (budget exceeded)")
+			httputil.CopyResponseHeaders(w, resp, "Content-Length")
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			return
+		}
 		log.Warn().Err(err).Msg("Upstream response body read failed")
 		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
 		return
@@ -1078,6 +1092,11 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 	// Keep hot data in pathCache and let background mechanisms persist metadata.
 	persistToStore := len(entries) <= propfindPersistentWriteThreshold
 	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
+	// Huge-directory budget (mirrors the mobile proxy): once a listing reaches
+	// the 100k entry class, entirely skip the per-entry path-cache writes,
+	// MySQL meta upserts and probe enqueues in the loop below. Name decryption
+	// above stays 100% intact.
+	hugeDir := len(entries) >= dirServerHugeListEntries
 
 	for _, entry := range entries {
 		displayPath := entry.Path
@@ -1098,6 +1117,10 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 			Name:  displayName,
 			Size:  entry.Size,
 			IsDir: entry.IsDir,
+		}
+
+		if hugeDir {
+			continue
 		}
 
 		if persistToStore {
