@@ -152,17 +152,22 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 	if !h.snapshotScopeEnabled(dirPath) {
 		return nil, false
 	}
-	// Cross-storage reuse: a rotated/new auth scope shares the fresh
-	// request_fill snapshot of the same directory (like the HTTP path), so the
-	// WebDAV cold path is fast before scan preheats the directory. Only the
-	// MySQL backend can enumerate by display path; the Bolt backend falls back
-	// to the same-session scope key.
+	// Cross-storage reuse: a rotated/new auth scope with the SAME credential
+	// shares the fresh request_fill snapshot of the same directory (like the
+	// HTTP path), so the WebDAV cold path is fast before scan preheats. The
+	// lookup is scoped by auth hash + provider host so a higher-privileged
+	// account's listing is never served to a different WebDAV credential, and
+	// snapshots from another upstream URL are never reused. Only the MySQL
+	// backend can enumerate by display path; the Bolt backend falls back to
+	// the same-session scope key.
 	var snap *DirListSnapshot
 	var ok bool
-	if s, found, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), dirPath); found && s != nil {
+	webdavAuth := authScopeHash(h.webdavAuthHeaders(r))
+	webdavProvider := h.cfg.GetAlistURL()
+	if s, found, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), dirPath, webdavAuth, webdavProvider); found && s != nil {
 		snap, ok = s, true
 	} else {
-		scopeKey := buildDirScopeKey(dirPath, authScopeHash(h.webdavAuthHeaders(r)))
+		scopeKey := buildDirScopeKey(dirPath, webdavAuth)
 		s, found, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
 		snap, ok = s, found
 	}

@@ -313,6 +313,11 @@ func (s *MySQLRangeCompatStore) evictOldestLocked() {
 	}
 }
 
+// Close implements proxy.RangeCompatStore. MySQL persistence is write-through
+// at Upsert time (each changed state is persisted immediately) and has no
+// background flusher, so there is nothing to drain on shutdown.
+func (s *MySQLRangeCompatStore) Close() error { return nil }
+
 func (s *MySQLRangeCompatStore) Stats() map[string]interface{} {
 	if s == nil || s.store == nil {
 		return map[string]interface{}{"mode": "mysql", "entries": 0}
