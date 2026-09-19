@@ -183,6 +183,45 @@ func isFirstFrameRangeHint(method, rangeHeader string) bool {
 	return end-start+1 <= firstFrameWindowBytes
 }
 
+// tryServeEmptyTailRange answers the tail-probe class of clients with an empty
+// 200 instead of a 416 that makes the player abort the stream and spin forever.
+//
+// The trouble: media clients (VidHub/Infuse/ExoPlayer etc.) learn the file size
+// from the listing — which for an encrypted file is the *ciphertext* size —
+// while the decrypt proxy validates ranges against the *plaintext* EOF. Seeking
+// to the tail therefore produces requests such as "bytes=<plainEOF>-" or
+// "bytes=<plainEOF+n>-" (n ≤ headerLen) that fall just past the plaintext
+// boundary. Those are not real corruption or a stale size; they are the client
+// probing the exact end of the representation it knows. Answering them with
+// 416 makes the client consider the stream dead; answering with an empty 200
+// lets it settle at EOF and keep the already-buffered playback.
+//
+// fileSize is the plaintext size; headerLen is the ciphertext header delta.
+// Returns true when the request was handled (caller must return immediately).
+func tryServeEmptyTailRange(w http.ResponseWriter, rangeHeader string, fileSize, headerLen int64) bool {
+	if !isOpenEndedByteRange(rangeHeader) {
+		return false
+	}
+	start, ok := parseRangeStart(rangeHeader)
+	if !ok {
+		return false
+	}
+	if start < fileSize {
+		return false
+	}
+	slack := headerLen
+	if slack < 0 {
+		slack = 0
+	}
+	if start > fileSize+slack {
+		return false
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(http.StatusOK)
+	return true
+}
+
 func isOpenEndedByteRange(rangeHeader string) bool {
 	rangeHeader = strings.TrimSpace(rangeHeader)
 	if !strings.HasPrefix(rangeHeader, "bytes=") {
@@ -964,6 +1003,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	clientRangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	openEndedClientRange := isOpenEndedByteRange(clientRangeHeader)
 	upstreamRangeHeader := clientRangeHeader
+	if meta.IsV2() && tryServeEmptyTailRange(w, clientRangeHeader, fileSize, meta.HeaderLen) {
+		return &StreamOutcome{StatusCode: http.StatusOK, ResponseStarted: true}
+	}
 	startPos, endPos, hasRange, rangeErr := parseSingleRange(clientRangeHeader, fileSize)
 	if rangeErr != nil {
 		writeRangeNotSatisfiable(w, fileSize)
@@ -1145,6 +1187,13 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		if meta.PlainSize > 0 {
 			fileSize = meta.PlainSize
 		}
+	}
+	// Client seeked past the plaintext EOF using the ciphertext size it saw in
+	// the listing (within the V2 header delta). Answer with an empty tail
+	// instead of a 416 so the player keeps the already-buffered playback
+	// instead of aborting on "Range Not Satisfiable" and spinning forever.
+	if meta.IsV2() && tryServeEmptyTailRange(w, clientRangeHeader, fileSize, meta.HeaderLen) {
+		return &StreamOutcome{StatusCode: http.StatusOK, ResponseStarted: true}
 	}
 	startPos, endPos, hasRange, rangeErr = parseSingleRange(clientRangeHeader, fileSize)
 	if rangeErr != nil {
@@ -1457,6 +1506,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		log.Debugf("V2 redirect normalized size: url=%s contentRange=%q fileSize=%d->%d cipherSize=%d plainSize=%d",
 			safeURLForLog(info.RedirectURL), resp.Header.Get("Content-Range"), originalSize, fileSize, meta.CiphertextSize, meta.PlainSize)
 	}
+	if meta.IsV2() && tryServeEmptyTailRange(w, clientRangeHeader, fileSize, meta.HeaderLen) {
+		return &StreamOutcome{StatusCode: http.StatusOK, ResponseStarted: true}
+	}
 	startPos, endPos, hasRange, rangeErr = parseSingleRange(clientRangeHeader, fileSize)
 	if rangeErr != nil {
 		writeRangeNotSatisfiable(w, fileSize)
@@ -1756,6 +1808,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rangeHeader := r.Header.Get("Range")
+	if tryServeEmptyTailRange(w, rangeHeader, fileSize, info.HeaderLen) {
+		return
+	}
 	if _, _, _, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr != nil {
 		rangeStart, hasRangeStart := parseRangeStart(rangeHeader)
 		// 播放器（VidHub/Infuse 等）常用 "bytes=<size+N>-" 尾部探测确认文件
