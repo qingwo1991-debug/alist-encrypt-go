@@ -4,9 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"strings"
-	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 type contextKey string
@@ -90,32 +91,37 @@ func LogPrefix(ctx context.Context, operation string) string {
 	return "[" + reqID + "] [" + pathTag + "] [" + operation + "]"
 }
 
-// Log outputs formatted log: [timestamp] [req-xxx] [path_tag] [operation] message
+// logEvent builds a zerolog event carrying the request context (req_id,
+// path_tag) plus the operation, so request-scoped diagnostics stay correlated.
+func logEvent(ctx context.Context, operation string) *zerolog.Event {
+	ev := log.Info()
+	if reqID := GetRequestID(ctx); reqID != "" {
+		ev = ev.Str("req_id", reqID)
+	}
+	if pathTag := GetPathTag(ctx); pathTag != "" {
+		ev = ev.Str("path_tag", pathTag)
+	}
+	if operation != "" {
+		ev = ev.Str("operation", operation)
+	}
+	return ev
+}
+
+// Log 输出一条带请求上下文的服务端日志（走 zerolog）。
 func Log(ctx context.Context, operation, message string) {
-	reqID := GetRequestID(ctx)
-	pathTag := GetPathTag(ctx)
-	if reqID == "" {
-		reqID = "------"
-	}
-	if pathTag == "" {
-		pathTag = "/"
-	}
-	ts := time.Now().Format("2006-01-02T15:04:05")
-	fmt.Printf("%s [%s] [%s] [%s] %s\n", ts, reqID, pathTag, operation, message)
+	logEvent(ctx, operation).Msg(message)
 }
 
-// Logf outputs formatted log with printf-style formatting
+// Logf 输出一条格式化服务端日志（走 zerolog）。
 func Logf(ctx context.Context, operation, format string, args ...interface{}) {
-	Log(ctx, operation, fmt.Sprintf(format, args...))
+	logEvent(ctx, operation).Msgf(format, args...)
 }
 
-// ServerLog outputs server-level log: [timestamp] [category] message
+// ServerLog 输出一条服务器级分类日志（走 zerolog）。
 func ServerLog(category, message string) {
-	ts := time.Now().Format("2006-01-02T15:04:05")
-	fmt.Printf("%s [%s] %s\n", ts, category, message)
-}
-
-// sprintf wraps fmt.Sprintf
-func sprintf(format string, args ...interface{}) string {
-	return fmt.Sprintf(format, args...)
+	ev := log.Info()
+	if category != "" {
+		ev = ev.Str("category", category)
+	}
+	ev.Msg(message)
 }
