@@ -172,7 +172,9 @@ func TestPlayV2RedirectRejectsInvalidOrUnsupportedRanges(t *testing.T) {
 
 	invalid := []string{
 		"bytes=-0",
-		"bytes=1000-",
+		// NOTE: "bytes=1000-" (open-ended at EOF) is intentionally NOT in this
+		// list: the plaintext-EOF tail-probe fix answers it with an empty 200
+		// instead of a 416 (see TestPlayV2RedirectOpenEndedEOFEmptyTail).
 		"bytes=100-99",
 		"bytes=0-1,4-5",
 		"items=0-1",
@@ -2298,5 +2300,79 @@ func TestPlayV2DoesNotOverwriteStartedResponseOnStreamFailure(t *testing.T) {
 
 	if rr.Code != http.StatusPartialContent {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPlayV2RedirectOpenEndedEOFEmptyTail(t *testing.T) {
+	password := "123456"
+	encType := EncTypeAESCTR
+	fileSize := int64(1000)
+
+	p, err := NewProxyServer(&ProxyConfig{
+		ProxyPort: 5344,
+		EncryptPaths: []*EncryptPath{
+			{
+				Path:     "/enc/*",
+				Password: password,
+				EncType:  encType,
+				EncName:  true,
+				Enable:   true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new proxy server: %v", err)
+	}
+	defer p.stopRangeProbeLoop()
+	defer p.stopCacheCleanup()
+	defer p.closeLocalStore()
+
+	var upstreamCalls int
+	p.streamClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamCalls++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Length": []string{"1000"}},
+				Body:       io.NopCloser(bytes.NewReader(make([]byte, 1000))),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	key := "eof-empty-tail-key"
+	p.storeRedirectCache(key, &RedirectInfo{
+		RedirectURL: "http://upstream.local/encrypted",
+		PasswdInfo: &EncryptPath{
+			Path:     "/enc/*",
+			Password: password,
+			EncType:  encType,
+			EncName:  true,
+			Enable:   true,
+		},
+		FileSize:    fileSize,
+		OriginalURL: "/enc/demo.mp4",
+	})
+
+	// Player seeking to the exact plaintext EOF with an open-ended range: this
+	// is the tail-probe regression from the logs (bytes=<plainEOF>-). It must
+	// be answered as an empty 200 (or 206 with zero length) — NOT a 416 that
+	// makes the player abort the stream and spin forever.
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
+	req.Header.Set("Range", "bytes=1000-")
+	rr := httptest.NewRecorder()
+	newPlayOrchestrator(p).ServeRedirect(rr, req)
+
+	if rr.Code != http.StatusOK && rr.Code != http.StatusPartialContent {
+		t.Fatalf("status=%d want 200/206, got body=%q", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("expected empty body for tail beyond EOF, got %d bytes", rr.Body.Len())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("empty-tail probe must not hit upstream, got %d upstream calls", upstreamCalls)
+	}
+	if got := rr.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("Accept-Ranges=%q, want bytes", got)
 	}
 }
