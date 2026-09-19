@@ -863,6 +863,53 @@ type storageCooldownState struct {
 // 保证播放器初始连接最多等待 8 秒而不是 23 秒以上。
 const webdavPropfindTimeout = 8 * time.Second
 
+// 超大目录重写预算：PROPFIND / fs-list 响应条目数或清单体积达到阈值后，
+// 流式改写改走"大目录直通"：只流式转码/改名输出给客户端，不再逐条回读或
+// 写入本地 SQLite（避免百万级目录把一次列表拖成"永远转圈"），也不再整份
+// 缓冲解密后的清单到 webdavListCache/内存。
+const (
+	// propdirHugeListEntries 单条目录考写的最大 fileCache 回填条目数。超过后
+	// 后续条目只按"透明直通流"处理，不再逐条写 fileCache/sizeMap/DB。
+	propdirHugeListEntries = 100000
+	// propdirListCacheMaxBytes 超过该体积的脚本清单不再整份缓存到
+	// webdavListCache，避免百万级目录把手机内存打爆；仍以流式方式转发输出。
+	propdirListCacheMaxBytes = 16 << 20 // 16 MiB
+)
+
+// propfindRewriteBudget 跟踪 PROPFIND 目录改写过程中已输出的条目数。
+type propfindRewriteBudget struct {
+	entries int
+}
+
+func (b *propfindRewriteBudget) exceeded() bool {
+	return b != nil && b.entries >= propdirHugeListEntries
+}
+
+// boundedBuffer 只保留流式写入的前 max 字节（超出部分丢弃），用于超大目录
+// 采样缓存：客户端仍拿到全量明文流（经由 MultiWriter 的另一路），内存只留前导。
+type boundedBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if len(b.buf) >= b.max {
+		return len(p), nil // 已满：丢弃，但对外报告全部写入（消费者端仍有全量流）
+	}
+	room := b.max - len(b.buf)
+	if len(p) <= room {
+		b.buf = append(b.buf, p...)
+	} else {
+		b.buf = append(b.buf, p[:room]...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) Len() int { return len(b.buf) }
+func (b *boundedBuffer) Bytes() []byte {
+	return b.buf
+}
+
 // storagePrefixFromPath 提取 WebDAV 路径的首个存储名，如
 // "/dav/谷歌云盘1991/电影/x.mp4" -> "谷歌云盘1991"。
 func storagePrefixFromPath(filePath string) string {
@@ -1830,6 +1877,14 @@ func (p *ProxyServer) fetchWebDAVFileSizeCtx(ctx context.Context, targetURL stri
 
 // processPropfindResponse 解析并替换 PROPFIND XML 中的 href/displayname，并缓存文件信息
 func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPath *EncryptPath) error {
+	return p.processPropfindResponseBudget(body, w, encPath, nil)
+}
+
+// processPropfindResponseBudget 在 processPropfindResponse 基础上支持"超大目录预算"：
+// budget 非空且 entries 达到 propdirHugeListEntries 后，仅保留流式改名输出，
+// 不再逐条写 fileCache/sizeMap（目录百万级时这是能让列表"能完成"的关键）。
+// budget 为空时行为与旧版完全一致（测试/直通场景不受影响）。
+func (p *ProxyServer) processPropfindResponseBudget(body io.Reader, w io.Writer, encPath *EncryptPath, budget *propfindRewriteBudget) error {
 	dec := xml.NewDecoder(body)
 	enc := xml.NewEncoder(w)
 
@@ -1971,18 +2026,28 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 						isDir = true
 						size = 0
 					}
-					if curHrefShow != "" && curHrefShow != curHref {
-						showDir := path.Dir(curHrefShow)
-						showName := path.Base(curHrefShow)
-						realName := path.Base(curHref)
-						if showName != "" && showName != "." && showName != "/" && realName != "" && realName != "." && realName != "/" {
-							CacheNameMapping(showDir, showName, realName)
+					// 超大目录预算：超过上限后该条只按"透明直通流"输出，不逐条
+					// 回填这些缓存/DB。列表本身已经流式写到 w 了，客户端能拿全；
+					// 缺的只是 fileCache/name 映射的提前预热（后续 GET 再补）。
+					if budget == nil || budget.entries < propdirHugeListEntries {
+						if curHrefShow != "" && curHrefShow != curHref {
+							showDir := path.Dir(curHrefShow)
+							showName := path.Base(curHrefShow)
+							realName := path.Base(curHref)
+							if showName != "" && showName != "." && showName != "/" && realName != "" && realName != "." && realName != "/" {
+								CacheNameMapping(showDir, showName, realName)
+							}
+						}
+						// 列表专用纯内存缓存：超大目录不再逐条回读本地 SQLite。
+						// 这是"万级/百万级目录可秒开"的关键（之前逐条 storeFileCache
+						// 每次未命中都会回查 SQLite）。
+						p.storeFileCacheList(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
+						if curHrefShow != "" && curHrefShow != curHref {
+							p.storeFileCacheList(curHrefShow, &FileInfo{Name: path.Base(curHrefShow), Size: size, IsDir: isDir, Path: curHrefShow})
 						}
 					}
-					// 使用带 TTL 的缓存（同时缓存密文与明文路径，便于 WebDAV GET 命中）
-					p.storeFileCache(curHref, &FileInfo{Name: name, Size: size, IsDir: isDir, Path: curHref})
-					if curHrefShow != "" && curHrefShow != curHref {
-						p.storeFileCache(curHrefShow, &FileInfo{Name: path.Base(curHrefShow), Size: size, IsDir: isDir, Path: curHrefShow})
+					if budget != nil {
+						budget.entries++
 					}
 				}
 				inResponse = false
@@ -3554,7 +3619,9 @@ func (p *ProxyServer) streamRewriteFsListResponse(w http.ResponseWriter, body io
 					filePath = apiPath
 				}
 
-				p.storeFileCache(filePath, &FileInfo{
+				// 列表专用纯内存缓存（不逐条回读 SQLite）：超大目录 fs-list
+				// 也要秒回，不能因为每条写缓存而反向查询本地库。
+				p.storeFileCacheList(filePath, &FileInfo{
 					Name:  name,
 					Size:  int64(size),
 					IsDir: isDir,
@@ -4416,7 +4483,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			// 每个条目回填 fileCache（本书字幕探测依赖 fileCache 来判断文件是否
 			// 存在）。命中也重放一遍，保证 fileCache 与目录快照一致。
 			if encPath != nil && encPath.EncName {
-				if err := p.processPropfindResponse(bytes.NewReader(cachedBody), w, encPath); err != nil {
+				if err := p.processPropfindResponseBudget(bytes.NewReader(cachedBody), w, encPath, nil); err != nil {
 					log.Warnf("%s WebDAV list cache reparse failed: dir=%s err=%v",
 						internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, err)
 				}
@@ -4947,18 +5014,29 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		output := &metadataResponseWriter{ResponseWriter: w, status: resp.StatusCode}
-		var listBuf bytes.Buffer
+		listBuf := &boundedBuffer{max: propdirListCacheMaxBytes}
 		var dst io.Writer = output
 		if listDepth == "1" {
-			dst = io.MultiWriter(output, &listBuf)
+			dst = io.MultiWriter(output, listBuf)
 		}
-		if err := p.processPropfindResponse(resp.Body, dst, encPath); err != nil {
+		// 超大目录预算：源目录条目/体积达到阈值时，改写走"大目录直通"，
+		// 避免把百万级目录逐条写 DB / 整份二次解析持久化拖成永远转圈。
+		budget := &propfindRewriteBudget{}
+		if err := p.processPropfindResponseBudget(resp.Body, dst, encPath, budget); err != nil {
 			output.fail()
 			return
 		}
 		if listDepth == "1" {
-			p.storeWebdavListCache(webdavListCacheKey, resp.StatusCode, listBuf.Bytes())
-			p.maybePersistDirList(ctx, webdavListCacheKey, listBuf.Bytes())
+			if listBuf.Len() >= propdirListCacheMaxBytes || budget.exceeded() {
+				// 超大目录：明文流已完整写给客户端；不整份缓存（内存保护），也
+				// 不做二次解析逐条持久化（整份 XML 全量再解析同样拖慢）。截断的
+				// 半份 XML 缓存只会让后续 stale 回退解析失败，所以干脆不缓存。
+				log.Infof("%s WebDAV huge dir listing: path=%s entries=%d bytes=%d (streamed, skip full cache/persist)",
+					internal.LogPrefix(ctx, internal.TagList), filePath, budget.entries, listBuf.Len())
+			} else {
+				p.storeWebdavListCache(webdavListCacheKey, resp.StatusCode, listBuf.Bytes())
+				p.maybePersistDirList(ctx, webdavListCacheKey, listBuf.Bytes())
+			}
 		}
 		return
 	}

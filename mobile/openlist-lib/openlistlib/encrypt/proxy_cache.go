@@ -286,6 +286,129 @@ func (p *ProxyServer) clearRawURLFailure(rawURL string) {
 	p.rawURLNegativeMu.Unlock()
 }
 
+// loadFileCacheMem 仅从进程内缓存（fileCache + sizeMap）读取文件信息，
+// 绝不回读本地 SQLite。目录列表流式改写（PROPFIND / fs-list）在超大目录
+// （数千 ~ 百万级条目）下会逐条索引 → 逐条查库会直接拖死列表；这里的
+// 语义是“本次响应刚拿到的最新域内数据”，回读 DB 没有收益，只纯内存才可控。
+func (p *ProxyServer) loadFileCacheInMem(filePath string) (*FileInfo, bool) {
+	if p == nil {
+		return nil, false
+	}
+	p.ensureRuntimeCaches()
+	key := normalizeCacheKey(filePath)
+	if value, ok := p.fileCache.Get(key); ok {
+		if cached, ok := value.(*CachedFileInfo); ok {
+			if time.Now().Before(cached.ExpireAt) {
+				return cached.Info, true
+			}
+			p.fileCache.Delete(key)
+		}
+	}
+	if key != filePath {
+		if value, ok := p.fileCache.Get(filePath); ok {
+			if cached, ok := value.(*CachedFileInfo); ok {
+				if time.Now().Before(cached.ExpireAt) {
+					return cached.Info, true
+				}
+				p.fileCache.Delete(filePath)
+			}
+		}
+	}
+	if entry, ok := p.getSizeMap(key); ok {
+		info := &FileInfo{
+			Name:  path.Base(filePath),
+			Size:  entry.Size,
+			IsDir: false,
+			Path:  filePath,
+		}
+		return info, true
+	}
+	return nil, false
+}
+
+// storeFileCacheList 以"最新列表快照"语义写 fileCache：
+//   - 只与进程内存现有条目合并（保留播放所需的 V2 元数据等），
+//     绝不因条目缺失而回读本地 SQLite；
+//   - 超大目录（万级 +）列表改写时，逐条回读 SQLite 会把每个请求拖成
+//     "永远转圈"，这个变体把逐条成本压到纯内存（TTL map + sizeMap）。
+//
+// 它供 PROPFIND / fs-list 的流式逐条回调使用；单文件探测/播放等仍走
+// 带 DB 回读的 storeFileCache。
+func (p *ProxyServer) storeFileCacheList(path string, info *FileInfo) {
+	if info == nil {
+		return
+	}
+	key := normalizeCacheKey(path)
+	// 合并内存已有条目（保留 V2 / RawURL / HeaderLen / Nonce 等元数据），
+	// 与 storeFileCache 行为一致，但只取内存层，不做 SQLite 回源。
+	if existing, ok := p.loadFileCacheInMem(path); ok && existing != nil {
+		incomingRawURL := strings.TrimSpace(info.RawURL)
+		existingRawURL := strings.TrimSpace(existing.RawURL)
+		rawURLChanged := incomingRawURL != "" && existingRawURL != "" && incomingRawURL != existingRawURL
+		incomingMetaTrusted := (info.ContentVersion == ContentVersionV1 && info.Size > 0) ||
+			(info.ContentVersion == ContentVersionV2 &&
+				info.Size > 0 &&
+				info.CiphertextSize > 0 &&
+				info.HeaderLen > 0 &&
+				len(info.NonceField) == 16)
+		if rawURLChanged && !incomingMetaTrusted {
+			info.Size = 0
+			info.CiphertextSize = 0
+			info.ContentVersion = 0
+			info.HeaderLen = 0
+			info.NonceField = nil
+			p.sizeMapMu.Lock()
+			if p.sizeMap != nil {
+				delete(p.sizeMap, key)
+				p.sizeMapDirty = true
+			}
+			p.sizeMapMu.Unlock()
+		}
+		if info.Name == "" {
+			info.Name = existing.Name
+		}
+		if !rawURLChanged && (info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2)) {
+			info.Size = existing.Size
+		}
+		if !rawURLChanged && info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+			info.CiphertextSize = existing.CiphertextSize
+		}
+		if !rawURLChanged && info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
+			info.ContentVersion = existing.ContentVersion
+		}
+		if !rawURLChanged && info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+			info.HeaderLen = existing.HeaderLen
+		}
+		if !rawURLChanged && len(info.NonceField) == 0 && len(existing.NonceField) > 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+			info.NonceField = cloneNonceField(existing.NonceField)
+		}
+		if !info.IsDir && existing.IsDir {
+			info.IsDir = false
+		}
+		if strings.TrimSpace(info.Path) == "" {
+			info.Path = existing.Path
+		}
+		if strings.TrimSpace(info.RawURL) == "" {
+			info.RawURL = existing.RawURL
+		}
+	}
+	entry := &CachedFileInfo{
+		Info:     info,
+		ExpireAt: time.Now().Add(p.getFileCacheTTL()),
+	}
+	p.ensureRuntimeCaches()
+	p.fileCache.Set(key, entry)
+	if key != path {
+		p.fileCache.Set(path, entry)
+	}
+	if info != nil && !info.IsDir && info.Size > 0 {
+		p.updateSizeMap(key, info.Size)
+		if key != path {
+			p.updateSizeMap(path, info.Size)
+		}
+	}
+}
+
 // storeFileCache 存储文件信息到缓存（带 TTL）
 func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	p.ensureRuntimeCaches()
