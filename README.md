@@ -26,8 +26,8 @@ Alist-Encrypt-Go 部署在客户端与 Alist/OpenList 之间。它拦截文件�
 |---|---|
 | HTTP | 拦截 `/api/fs/*`、`/d/*`、`/p/*`，转换路径、文件名、大小和下载地址 |
 | WebDAV | `/dav/*` 的 GET、HEAD、PUT、PROPFIND、DELETE、MOVE、COPY 等方法 |
-| 加密格式 | V2 新格式，以及对既有 V1 文件的兼容读取 |
-| 算法 | AES-128-CTR、ChaCha20、RC4-MD5；文件名使用 MixBase64 + CRC6 |
+| 加密格式 | V3 分块 AEAD 认证加密（新默认），保留对既有 V2/V1 文件的兼容读取 |
+| 算法 | V3 AES-256-GCM 分块 AEAD；兼容层 AES-128-CTR、ChaCha20、RC4-MD5；文件名使用 MixBase64 + CRC6 |
 | 视频播放 | 单 Range 映射、Range 能力学习、Chunked/Full 回退、过期直链刷新、客户端取消识别 |
 | 性能 | 连接复用、流缓冲、V2 派生密钥缓存、解密块缓存、并发保护 |
 | 后台预热 | 预取大小、签名 URL、Range 能力与 V2 头元数据；支持冷却和存储源限流 |
@@ -159,14 +159,15 @@ Restart=always
 
 ## 加密格式与安全边界
 
-新上传和 `encrypt-tool` 默认生成 V2。V2 有 32 字节头，包含格式标识、随机 nonce 和明文大小；密文 Range 会自动补偿头长度。V1 没有文件头，仅用于兼容旧文件。
+新上传和 `encrypt-tool` **默认生成 V3**（分块 AES-256-GCM AEAD，每块独立认证）；仅当显式选择 legacy（`v3:false`、`--v2/--legacy`）时才生成 V2。V3 容器由 48 字节头 + 定宽分块记录 + 尾部元数据组成，密文 Range 按块分片映射，联网播放可做字节级定位与整块校验。V2 有 32 字节头（格式标识 + 随机 nonce + 明文大小），沿用兼容读取；V1 无文件头，仅供旧文件只读兼容。
 
-| 格式 | KDF / nonce | 用途 |
+| 格式 | KDP / 认证 | 用途 |
 |---|---|---|
-| V2 | PBKDF2-SHA256 600,000 次，每文件随机 nonce | 新数据推荐 |
-| V1 | PBKDF2 1,000 次，nonce/IV 与大小相关 | 只读兼容；同密码同大小文件可能重用密钥流 |
+| V3 | PBKDF2-SHA256 600,000 次 + 每块 AES-GCM | 新数据默认；可校验防篡改 |
+| V2 | PBKDF2-SHA256 600,000 次，每文件随机 nonce | 只读兼容 / legacy 新写 |
+| V1 | PBKDF2 1,000 次，nonce/IV 与大小相关 | 只读兼容 |
 
-算法建议：有 AES 硬件加速时优先 AES-128-CTR V2；无 AES 加速的平台可选 ChaCha20 V2。RC4-MD5 仅建议用于兼容既有数据。ChaCha20 的随机访问上限约为 256 GiB。
+算法建议：V3 默认 AES-256-GCM（硬件加速平台性能更佳）。V2 层保留 AES-128-CTR / ChaCha20 供旧数据与无 AES 平台：有 AES 硬件加速时优先 AES-128-CTR；否则可选 ChaCha20；RC4-MD5 仅明确选择时使用（兼容既有数据）。ChaCha20 随机访问上限约 256 GiB。
 
 V1/V2 都是未认证流加密，不提供 AEAD/MAC，不能检测恶意篡改。文件名 CRC6 和播放 sniff 也不是密码学完整性校验。对高安全性归档，应在外层增加签名或认证加密。
 
