@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 )
 
 // V3Magic is the exported identifier for the V3 stream header magic, letting
@@ -83,4 +84,18 @@ func NewV3ReadSeekerDecoder(rs V3ReadableFile, size int64, password string) (io.
 		return nil, err
 	}
 	return container.Sequential(), nil
+}
+
+// V3DetectFromFile reports whether the file starts with the V3 container magic
+// without changing the file's read position (ReadAt is position-independent).
+func V3DetectFromFile(f *os.File) (bool, error) {
+	if f == nil {
+		return false, fmt.Errorf("v3: nil file")
+	}
+	b := make([]byte, v3MagicLen)
+	n, err := f.ReadAt(b, 0)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, err
+	}
+	return n >= v3MagicLen && HasV3Magic(b[:n]), nil
 }

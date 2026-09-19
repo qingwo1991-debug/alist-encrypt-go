@@ -40,7 +40,7 @@ func TestRunEncryptTaskCreatesNestedOutputAndPublishesFile(t *testing.T) {
 		t.Fatalf("nested output was not published: %v", err)
 	}
 	decryptedFile := filepath.Join(t.TempDir(), "episode.dat")
-	if err := processFile(encryptedFile, decryptedFile, "test-password", "aesctr", encryptedInfo.Size(), "dec"); err != nil {
+	if err := processFile(encryptedFile, decryptedFile, "test-password", "aesctr", encryptedInfo.Size(), "dec", false); err != nil {
 		t.Fatalf("decrypt generated output: %v", err)
 	}
 	decrypted, err := os.ReadFile(decryptedFile)
@@ -128,7 +128,7 @@ func TestRunDecryptTaskRejectsEscapingDecodedName(t *testing.T) {
 	converter := encryption.NewFileNameConverter(password, "aesctr", "")
 	craftedName := converter.EncryptFileName("../escape") + ".dat"
 	encrypted := filepath.Join(srcDir, craftedName)
-	if err := processFile(plain, encrypted, password, "aesctr", int64(len(content)), "enc"); err != nil {
+	if err := processFile(plain, encrypted, password, "aesctr", int64(len(content)), "enc", false); err != nil {
 		t.Fatalf("create encrypted fixture: %v", err)
 	}
 	encryptedInfo, err := os.Stat(encrypted)
@@ -175,5 +175,91 @@ func assertNoEncryptTempDirs(t *testing.T, dstDir, taskID string) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary task directories were not removed: %v", matches)
+	}
+}
+
+func TestProcessFileV3RoundTripAndTamper(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "source.bin")
+	data := bytes.Repeat([]byte("v3-content-chunk"), 300) // ~5 KiB payload
+	if err := os.WriteFile(src, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enc := filepath.Join(t.TempDir(), "enc.v3")
+	if err := processFile(src, enc, "test-password", "aesctr", st.Size(), "enc", true); err != nil {
+		t.Fatalf("v3 encrypt: %v", err)
+	}
+	encBytes, err := os.ReadFile(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !encryption.HasV3Magic(encBytes) {
+		t.Fatal("v3 output does not start with the V3 magic")
+	}
+
+	dec := filepath.Join(t.TempDir(), "dec.bin")
+	encStat, err := os.Stat(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := processFile(enc, dec, "test-password", "aesctr", encStat.Size(), "dec", true); err != nil {
+		t.Fatalf("v3 decrypt: %v", err)
+	}
+	decBytes, err := os.ReadFile(dec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decBytes, data) {
+		t.Fatalf("v3 round trip mismatch: got %d bytes want %d", len(decBytes), len(data))
+	}
+
+	// Tamper with ciphertext in the middle: per-chunk AEAD must fail the
+	// decryption rather than silently producing wrong output.
+	encBytes[len(encBytes)/2] ^= 0xff
+	if err := os.WriteFile(enc, encBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tamperedStat, err := os.Stat(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := processFile(enc, dec, "test-password", "aesctr", tamperedStat.Size(), "dec", true); err == nil {
+		t.Fatal("tampered V3 container decrypted without error")
+	}
+}
+
+func TestProcessFileV2RoundTripsEvenWhenV3ProbeEnabled(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "legacy.bin")
+	data := []byte("legacy-aesctr-v2-content")
+	if err := os.WriteFile(src, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(src)
+
+	enc := filepath.Join(t.TempDir(), "legacy.enc")
+	if err := processFile(src, enc, "pw", "aesctr", st.Size(), "enc", false); err != nil {
+		t.Fatalf("v2 encrypt: %v", err)
+	}
+	encBytes, _ := os.ReadFile(enc)
+	if encryption.HasV3Magic(encBytes) {
+		t.Fatal("v2 output must not carry the V3 magic")
+	}
+
+	// The v3=decrypt probe must transparently fall back to the V2 reader.
+	dec := filepath.Join(t.TempDir(), "legacy.dec")
+	est, _ := os.Stat(enc)
+	if err := processFile(enc, dec, "pw", "aesctr", est.Size(), "dec", true); err != nil {
+		t.Fatalf("v2 round trip with v3 probe enabled: %v", err)
+	}
+	decBytes, err := os.ReadFile(dec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decBytes, data) {
+		t.Fatalf("v2 decryption mismatch under v3 probe: %d != %d", len(decBytes), len(data))
 	}
 }

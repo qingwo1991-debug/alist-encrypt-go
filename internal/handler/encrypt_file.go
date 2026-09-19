@@ -26,6 +26,7 @@ type EncryptTask struct {
 	SrcPath    string    `json:"srcPath"`
 	DstPath    string    `json:"dstPath"`
 	EncName    bool      `json:"encName"`
+	V3         bool      `json:"v3"` // enc: write V3 chunked AEAD containers
 	TotalFiles int       `json:"totalFiles"`
 	DoneFiles  int       `json:"doneFiles"`
 	TotalBytes int64     `json:"totalBytes"`
@@ -47,6 +48,7 @@ type EncryptTaskView struct {
 	SrcPath    string    `json:"srcPath"`
 	DstPath    string    `json:"dstPath"`
 	EncName    bool      `json:"encName"`
+	V3         bool      `json:"v3"`
 	TotalFiles int       `json:"totalFiles"`
 	DoneFiles  int       `json:"doneFiles"`
 	TotalBytes int64     `json:"totalBytes"`
@@ -67,6 +69,7 @@ func (t *EncryptTask) snapshot() EncryptTaskView {
 		SrcPath:    t.SrcPath,
 		DstPath:    t.DstPath,
 		EncName:    t.EncName,
+		V3:         t.V3,
 		TotalFiles: t.TotalFiles,
 		DoneFiles:  t.DoneFiles,
 		TotalBytes: t.TotalBytes,
@@ -130,6 +133,7 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 		SrcPath   string `json:"folderPath"` // match old API field name
 		DstPath   string `json:"outPath"`
 		EncName   bool   `json:"encName"`
+		V3        bool   `json:"v3"` // enc: use V3 chunked AEAD container
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondAPIError(w, 500, "Invalid request")
@@ -206,6 +210,7 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 		SrcPath:    req.SrcPath,
 		DstPath:    req.DstPath,
 		EncName:    req.EncName,
+		V3:         req.V3,
 		TotalFiles: len(files),
 		TotalBytes: totalBytes,
 		Status:     "running",
@@ -347,7 +352,7 @@ func runEncryptTask(task *EncryptTask, files []string, password string) {
 		}
 		fileSize := fileInfo.Size()
 
-		if err := processFile(filePath, outTemp, password, task.EncType, fileSize, task.Operation); err != nil {
+		if err := processFile(filePath, outTemp, password, task.EncType, fileSize, task.Operation, task.V3); err != nil {
 			setEncryptTaskError(task, fmt.Sprintf("process %s: %v", filePath, err))
 			return
 		}
@@ -390,7 +395,7 @@ func setEncryptTaskError(task *EncryptTask, message string) {
 	task.mu.Unlock()
 }
 
-func processFile(src, dst, password, encType string, fileSize int64, operation string) (retErr error) {
+func processFile(src, dst, password, encType string, fileSize int64, operation string, v3 bool) (retErr error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open src: %w", err)
@@ -408,22 +413,54 @@ func processFile(src, dst, password, encType string, fileSize int64, operation s
 	}()
 
 	if operation == "enc" {
-		enc, err := encryption.NewLatestContentEncryptor(password, encType, fileSize)
-		if err != nil {
-			return fmt.Errorf("create cipher: %w", err)
-		}
-		reader, err := enc.EncryptReader(in, 0)
-		if err != nil {
-			return fmt.Errorf("create encrypt reader: %w", err)
+		var reader io.Reader
+		if v3 {
+			// V3 chunked AEAD: the whole file is a self-contained container
+			// (header + fixed-width chunk records + trailer).
+			ce, err := encryption.NewV3ContentEncryptor(0)
+			if err != nil {
+				return fmt.Errorf("create v3 cipher: %w", err)
+			}
+			reader, err = ce.EncryptReader(password, in)
+			if err != nil {
+				return fmt.Errorf("create v3 encrypt reader: %w", err)
+			}
+		} else {
+			enc, err := encryption.NewLatestContentEncryptor(password, encType, fileSize)
+			if err != nil {
+				return fmt.Errorf("create cipher: %w", err)
+			}
+			reader, err = enc.EncryptReader(in, 0)
+			if err != nil {
+				return fmt.Errorf("create encrypt reader: %w", err)
+			}
 		}
 		buf := make([]byte, 512*1024)
 		_, err = io.CopyBuffer(out, reader, buf)
 		return err
 	}
 
-	reader, _, err := encryption.AutoDecryptReader(password, encryption.EncType(encType), in, fileSize)
-	if err != nil {
-		return fmt.Errorf("create decrypt reader: %w", err)
+	// Decrypt: V3 containers self-identify by magic, so sniff before the
+	// V1/V2 header heuristic and skip encType guessing.
+	var reader io.Reader
+	if v3 {
+		if _, err := in.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewind: %w", err)
+		}
+		if sniffed, err := encryption.V3DetectFromFile(in); err != nil {
+			return fmt.Errorf("sniff container: %w", err)
+		} else if sniffed {
+			reader, err = encryption.NewV3ReadSeekerDecoder(in, fileSize, password)
+			if err != nil {
+				return fmt.Errorf("open v3 container: %w", err)
+			}
+		}
+	}
+	if reader == nil {
+		reader, _, err = encryption.AutoDecryptReader(password, encryption.EncType(encType), in, fileSize)
+		if err != nil {
+			return fmt.Errorf("create decrypt reader: %w", err)
+		}
 	}
 	buf := make([]byte, 512*1024)
 	_, err = io.CopyBuffer(out, reader, buf)

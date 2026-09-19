@@ -57,6 +57,11 @@ func (m ContentMeta) IsV2() bool {
 	return m.Version == ContentVersionV2
 }
 
+// IsV3 reports whether the metadata refers to the V3 chunked AEAD container.
+func (m ContentMeta) IsV3() bool {
+	return m.Version == ContentVersionV3
+}
+
 func (m ContentMeta) UpstreamOffset(plainOffset int64) int64 {
 	if !m.IsV2() {
 		return plainOffset
