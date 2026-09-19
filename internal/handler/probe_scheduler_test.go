@@ -410,7 +410,7 @@ func TestProbeSchedulerRunItemUsesEffectiveAuthForRawURLAndRangeProbe(t *testing
 		cfg:           cfg,
 		fileDAO:       fileDAO,
 		stream:        sp,
-		resolver:      NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		resolver:      NewFileSizeResolver(cfg, fileDAO, nil, 1, MinMetaSize(cfg), RedirectMaxHops(cfg)),
 		providerLimit: 1,
 		providerSem:   make(map[string]chan struct{}),
 	}
@@ -669,7 +669,7 @@ func TestProbeSchedulerPersistsV1LegacyContentMeta(t *testing.T) {
 		queue:         make(chan probeItem, 8),
 		seen:          make(map[string]time.Time),
 		cooldown:      24 * time.Hour,
-		resolver:      NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		resolver:      NewFileSizeResolver(cfg, fileDAO, nil, 1, MinMetaSize(cfg), RedirectMaxHops(cfg)),
 		providerLimit: 1,
 		providerSem:   make(map[string]chan struct{}),
 	}

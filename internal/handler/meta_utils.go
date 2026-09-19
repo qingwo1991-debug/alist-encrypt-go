@@ -6,7 +6,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 )
 
-func getMinMetaSize(cfg *config.Config) int64 {
+func MinMetaSize(cfg *config.Config) int64 {
 	if cfg == nil {
 		return 0
 	}
@@ -24,7 +24,7 @@ func getAlistRequestTimeout(cfg *config.Config) time.Duration {
 	return time.Duration(alist.RequestTimeoutSeconds) * time.Second
 }
 
-func getRedirectMaxHops(cfg *config.Config) int {
+func RedirectMaxHops(cfg *config.Config) int {
 	if cfg == nil {
 		return 0
 	}
