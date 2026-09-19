@@ -150,7 +150,6 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
 import { clearPlaybackStatsReq, getBuildInfoReq, getPlaybackStatsReq, getStatsReq } from '@/api/user'
 
 const buildInfo = reactive({})

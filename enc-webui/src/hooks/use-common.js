@@ -1,7 +1,5 @@
 //复制文本
 import useClipboard from 'vue-clipboard3'
-import { ElMessage } from 'element-plus'
-
 // i18n language  match title
 import { i18n } from '@/lang'
 // the keys using  zh file

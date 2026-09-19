@@ -64,8 +64,6 @@
 import { reactive, ref } from 'vue'
 import { usePageStore } from '@/store/pageStore'
 import { encryptFileReq } from '@/api/user'
-import { ElMessage } from 'element-plus'
-
 const labelPosition = ref('right')
 
 const { folderInfo, setFolderInfo } = usePageStore()

@@ -494,7 +494,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import {
   cleanupLegacyBoltDBReq,
   decodeFoldNameReq,

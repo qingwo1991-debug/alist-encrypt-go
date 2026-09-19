@@ -1,5 +1,4 @@
 import axios from 'axios'
-import { ElLoading, ElMessage } from 'element-plus'
 import { useBasicStore } from '@/store/basic'
 
 //使用axios.create()创建一个axios请求实例

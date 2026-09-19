@@ -1,7 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
-import ElementPlus from 'element-plus'
 import App from './App.vue'
 import router from './router'
 
@@ -23,9 +22,9 @@ import directive from '@/directives'
 
 //import router intercept
 import './permission'
-
-//import element-plus
-import 'element-plus/dist/index.css'
+//element-plus 按需加载：组件/样式交给 unplugin-vue-components + ElementPlusResolver
+//（主入口只保留基础变量样式，其余按需注入）
+import 'element-plus/theme-chalk/base.css'
 const app = createApp(App)
 
 //router
@@ -40,8 +39,5 @@ app.use(pinia)
 app.use(setupI18n)
 app.component('SvgIcon', svgIcon)
 directive(app)
-
-//element-plus
-app.use(ElementPlus)
 
 app.mount('#app')

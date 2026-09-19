@@ -3,6 +3,7 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vueJsx from '@vitejs/plugin-vue-jsx'
 import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import UnoCSS from 'unocss/vite'
 import { presetAttributify, presetIcons, presetUno } from 'unocss'
 import AutoImport from 'unplugin-auto-import/vite'
@@ -60,7 +61,9 @@ export default defineConfig(({ mode }) => {
         dirs: ['src/components', 'src/icons'],
         extensions: ['vue'],
         deep: true,
-        dts: './typings/components.d.ts'
+        dts: './typings/components.d.ts',
+        // Element Plus 按需自动引入组件及其样式，替代整包 app.use(ElementPlus)
+        resolvers: [ElementPlusResolver({ importStyle: 'css' })]
       }),
       AutoImport({
         imports: [
@@ -68,8 +71,12 @@ export default defineConfig(({ mode }) => {
           'vue-router',
           {
             'pinia/dist/pinia': ['storeToRefs']
+          },
+          {
+            'element-plus': ['ElMessage', 'ElMessageBox', 'ElLoading', 'ElNotification']
           }
         ],
+        resolvers: [ElementPlusResolver()],
         //配置后会自动扫描目录下的文件
         dirs: ['src/hooks/**', 'src/utils/**', 'src/store/**', 'src/api/**'],
         eslintrc: {
