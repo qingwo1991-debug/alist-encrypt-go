@@ -1003,9 +1003,6 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	clientRangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	openEndedClientRange := isOpenEndedByteRange(clientRangeHeader)
 	upstreamRangeHeader := clientRangeHeader
-	if meta.IsV2() && tryServeEmptyTailRange(w, clientRangeHeader, fileSize, meta.HeaderLen) {
-		return &StreamOutcome{StatusCode: http.StatusOK, ResponseStarted: true}
-	}
 	startPos, endPos, hasRange, rangeErr := parseSingleRange(clientRangeHeader, fileSize)
 	if rangeErr != nil {
 		writeRangeNotSatisfiable(w, fileSize)
