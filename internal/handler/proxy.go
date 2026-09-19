@@ -20,6 +20,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
 	"golang.org/x/sync/singleflight"
@@ -28,9 +29,9 @@ import (
 // ProxyHandler handles proxy requests
 type ProxyHandler struct {
 	cfg                   *config.Config
-	streamProxy           *proxy.StreamProxy
-	fileDAO               *dao.FileDAO
-	passwdDAO             *dao.PasswdDAO
+	streamProxy           ports.Streamer
+	fileDAO               ports.FileRepository
+	passwdDAO             ports.KeyRepository
 	redirectMap           sync.Map // key -> redirect info
 	client                *proxy.Client
 	shortClient           *http.Client // shared short-timeout client for HEAD/probe ops
@@ -133,7 +134,7 @@ func (h *ProxyHandler) prefetchStats() map[string]interface{} {
 }
 
 // NewProxyHandler creates a new proxy handler
-func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore) *ProxyHandler {
+func NewProxyHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO ports.FileRepository, passwdDAO ports.KeyRepository, selector *StrategySelector, metaStore FileMetaStore) *ProxyHandler {
 	sharedTransport := proxy.NewSharedTransport(cfg)
 	h := &ProxyHandler{
 		cfg:           cfg,

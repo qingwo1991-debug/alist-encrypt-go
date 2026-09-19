@@ -18,19 +18,20 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // AlistHandler handles Alist API interception
 type AlistHandler struct {
 	cfg            *config.Config
-	streamProxy    *proxy.StreamProxy
+	streamProxy    ports.Streamer
 	httpClient     *http.Client
-	fileDAO        *dao.FileDAO
-	passwdDAO      *dao.PasswdDAO
+	fileDAO        ports.FileRepository
+	passwdDAO      ports.KeyRepository
 	proxyHandler   *ProxyHandler
 	metaStore      FileMetaStore
 	probe          *ProbeScheduler
@@ -101,7 +102,7 @@ type fsMetaFetchResult struct {
 
 // NewAlistHandler creates a new Alist handler
 // proxyHandler must be the same instance used for /redirect routes
-func NewAlistHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
+func NewAlistHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO ports.FileRepository, passwdDAO ports.KeyRepository, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
 	dirSyncCtx, dirSyncCancel := context.WithCancel(context.Background())
 	return &AlistHandler{
 		cfg:               cfg,

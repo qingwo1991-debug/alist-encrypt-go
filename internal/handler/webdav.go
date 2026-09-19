@@ -18,19 +18,20 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // WebDAVHandler handles WebDAV requests
 type WebDAVHandler struct {
 	cfg                   *config.Config
-	streamProxy           *proxy.StreamProxy
-	fileDAO               *dao.FileDAO
-	passwdDAO             *dao.PasswdDAO
+	streamProxy           ports.Streamer
+	fileDAO               ports.FileRepository
+	passwdDAO             ports.KeyRepository
 	proxyHandler          *ProxyHandler
 	strategyCache         *StrategyCache
 	sizeResolver          *FileSizeResolver
@@ -96,7 +97,7 @@ func (h *WebDAVHandler) Stats() map[string]interface{} {
 }
 
 // NewWebDAVHandler creates a new WebDAV handler
-func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore, proxyHandler *ProxyHandler) *WebDAVHandler {
+func NewWebDAVHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO ports.FileRepository, passwdDAO ports.KeyRepository, selector *StrategySelector, metaStore FileMetaStore, proxyHandler *ProxyHandler) *WebDAVHandler {
 	sharedTransport := proxy.NewSharedTransport(cfg)
 	h := &WebDAVHandler{
 		cfg:         cfg,

@@ -12,14 +12,14 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/rs/zerolog/log"
 )
 
 // FileSizeResolver provides robust file size resolution with multi-source validation
 type FileSizeResolver struct {
-	fileDAO          *dao.FileDAO
+	fileDAO          ports.FileRepository
 	metaStore        FileMetaStore
 	semaphore        chan struct{} // Limit concurrent HTTP requests
 	maxWorkers       int
@@ -80,7 +80,7 @@ const (
 )
 
 // NewFileSizeResolver creates a new file size resolver
-func NewFileSizeResolver(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64, maxRedirects int) *FileSizeResolver {
+func NewFileSizeResolver(cfg *config.Config, fileDAO ports.FileRepository, metaStore FileMetaStore, maxWorkers int, minMetaSizeBytes int64, maxRedirects int) *FileSizeResolver {
 	if maxWorkers <= 0 {
 		maxWorkers = 20
 	}

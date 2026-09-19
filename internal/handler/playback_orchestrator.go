@@ -12,10 +12,11 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 type decryptPlaybackRequest struct {
@@ -24,8 +25,8 @@ type decryptPlaybackRequest struct {
 
 	Config           *config.Config
 	Probe            *ProbeScheduler
-	StreamProxy      *proxy.StreamProxy
-	FileDAO          *dao.FileDAO
+	StreamProxy      ports.Streamer
+	FileDAO          ports.FileRepository
 	SizeResolver     *FileSizeResolver
 	StrategySel      *StrategySelector
 	PasswdInfo       *config.PasswdInfo
