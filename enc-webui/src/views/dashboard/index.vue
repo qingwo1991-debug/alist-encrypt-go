@@ -125,9 +125,7 @@ import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/store/config'
 import { useBasicStore } from '@/store/basic'
 import { getStatsReq, upatePasswordReq, updateUsernameReq } from '@/api/user'
-import { ElMessage } from 'element-plus'
-
-const labelPosition = ref('right')
+const labelPosition = ref<'left' | 'right' | 'top'>('right')
 const router = useRouter()
 
 const basicStore = useBasicStore()

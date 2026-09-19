@@ -8,6 +8,11 @@ module.exports = defineConfig({
   },
   globals: {
     defineOptions: true,
+    // unplugin-auto-import 按需注入的 element-plus API（.js 文件里的 no-undef 需要显式声明）
+    ElMessage: 'readonly',
+    ElMessageBox: 'readonly',
+    ElLoading: 'readonly',
+    ElNotification: 'readonly'
   },
   plugins: ['@typescript-eslint', 'prettier', 'unicorn'],
   extends: [

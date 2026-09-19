@@ -7,6 +7,10 @@
 export {}
 declare global {
   const EffectScope: typeof import('vue').EffectScope
+  const ElLoading: typeof import('element-plus').ElLoading
+  const ElMessage: typeof import('element-plus').ElMessage
+  const ElMessageBox: typeof import('element-plus').ElMessageBox
+  const ElNotification: typeof import('element-plus').ElNotification
   const axiosReq: typeof import('../src/utils/axios-req.js').default
   const bus: typeof import('../src/utils/bus.js').default
   const casHandleChange: typeof import('../src/hooks/use-element.js').casHandleChange

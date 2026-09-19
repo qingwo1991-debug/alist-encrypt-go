@@ -167,7 +167,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { delWebdavConfigReq, getWebdavConfigReq, saveWebdavConfigReq, updateWebdavConfigReq } from '@/api/user'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 import { createPasswordRule, hasEnabledRuleWithoutPassword } from '@/utils/password-rules'
 
