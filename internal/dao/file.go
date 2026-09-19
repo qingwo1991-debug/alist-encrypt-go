@@ -392,10 +392,10 @@ func (d *FileDAO) Delete(path string) error {
 func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 	// Check if we already have this mapping with file info
 	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok {
-		// Update encrypted path if needed
+		// Update encrypted path if needed (value copy: safe to mutate the copy)
 		if existing.EncryptedPath != encryptedPath {
 			existing.EncryptedPath = encryptedPath
-			d.pathCache.Set(existing, 24*time.Hour)
+			d.pathCache.Set(&existing, 24*time.Hour)
 		}
 		return
 	}
@@ -413,13 +413,16 @@ func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 
 // SetEncPathMappingWithInfo caches mapping with full file info (recommended)
 func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name string, size int64, isDir bool) {
-	var existing *PathEntry
-	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok && cached != nil {
+	var existing PathEntry
+	hasExisting := false
+	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok {
 		existing = cached
-		size = mergeCachedPathSize(existing, size, isDir, displayPath, encryptedPath, name)
-	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok && cached != nil {
+		hasExisting = true
+		size = mergeCachedPathSize(&existing, size, isDir, displayPath, encryptedPath, name)
+	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok {
 		existing = cached
-		size = mergeCachedPathSize(existing, size, isDir, displayPath, encryptedPath, name)
+		hasExisting = true
+		size = mergeCachedPathSize(&existing, size, isDir, displayPath, encryptedPath, name)
 	}
 	entry := &PathEntry{
 		EncryptedPath: encryptedPath,
@@ -428,7 +431,7 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 		Size:          size,
 		IsDir:         isDir,
 	}
-	if existing != nil {
+	if hasExisting {
 		entry.CiphertextSize = existing.CiphertextSize
 		entry.ContentVersion = existing.ContentVersion
 		entry.HeaderLen = existing.HeaderLen
@@ -499,11 +502,11 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 		ttl = 24 * time.Hour
 	}
 
-	// Try to update existing entry
+	// Try to update existing entry (value copy: mutate the copy, then store)
 	if entry, ok := d.pathCache.Get(path); ok {
 		size = preserveLargerMediaSize(entry.Size, size, entry.IsDir, path, entry.DisplayPath, entry.EncryptedPath, entry.Name)
 		entry.Size = size
-		d.pathCache.Set(entry, ttl)
+		d.pathCache.Set(&entry, ttl)
 	} else {
 		// Create minimal entry for size caching
 		cacheEntry := &PathEntry{
@@ -530,7 +533,7 @@ func (d *FileDAO) DeleteFileSize(path string) {
 	// We don't delete the whole entry, just mark size as 0
 	if entry, ok := d.pathCache.Get(path); ok {
 		entry.Size = 0
-		d.pathCache.Set(entry, 24*time.Hour)
+		d.pathCache.Set(&entry, 24*time.Hour)
 	}
 	_ = d.store.Delete(storage.BucketFileSize, path)
 }
@@ -548,13 +551,13 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	// lookup is sufficient. The second GetByDispPath() call in the original
 	// code always returned the same *PathEntry pointer (dual-indexed cache),
 	// making it a redundant double-lookup.
-	if entry, ok := d.pathCache.Get(displayPath); ok && entry != nil {
+	if entry, ok := d.pathCache.Get(displayPath); ok {
 		entry.Size = 0
 		entry.RawURL = ""
 		entry.RawURLAuthScope = ""
 		entry.Sign = ""
 		entry.UpstreamFetchedAt = 0
-		d.pathCache.Set(entry, 24*time.Hour)
+		d.pathCache.Set(&entry, 24*time.Hour)
 		if entry.EncryptedPath != "" && entry.EncryptedPath != displayPath {
 			d.DeleteFileSize(entry.EncryptedPath)
 		}
@@ -577,13 +580,12 @@ func (d *FileDAO) InvalidateRawURLForScope(displayPath, authScope string) bool {
 		authScope = "anon"
 	}
 	invalidated := false
-	if entry, ok := d.pathCache.Get(displayPath); ok && entry != nil && entry.RawURLAuthScope == authScope {
-		updated := *entry
-		updated.RawURL = ""
-		updated.RawURLAuthScope = ""
-		updated.Sign = ""
-		updated.UpstreamFetchedAt = 0
-		d.pathCache.Set(&updated, 24*time.Hour)
+	if entry, ok := d.pathCache.Get(displayPath); ok && entry.RawURLAuthScope == authScope {
+		entry.RawURL = ""
+		entry.RawURLAuthScope = ""
+		entry.Sign = ""
+		entry.UpstreamFetchedAt = 0
+		d.pathCache.Set(&entry, 24*time.Hour)
 		invalidated = true
 	}
 	if d.store != nil {

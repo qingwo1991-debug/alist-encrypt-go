@@ -324,3 +324,124 @@ func TestPathCache_StaleBareMirrorDoesNotShieldFreshMeta(t *testing.T) {
 		t.Fatalf("Get(displayPath).ContentVersion=%d, want 1 (stale by-enc mirror must not shield fresh meta)", got.ContentVersion)
 	}
 }
+
+// TestPathCache_ImmutableValue_MutationIsolated proves the immutable-value
+// contract: a caller mutating a returned entry (struct fields or the nonce
+// slice) can never corrupt the cached entry, because every read returns a
+// defensive copy and every write stores a fresh value.
+func TestPathCache_ImmutableValue_MutationIsolated(t *testing.T) {
+	cache := NewPathCache(4, 100)
+	cache.Set(&PathEntry{
+		EncryptedPath:   "/e/victim.mp4",
+		DisplayPath:     "/d/victim.mp4",
+		Size:            1000,
+		ContentVersion:  2,
+		HeaderLen:       48,
+		NonceField:      []byte{1, 2, 3, 4},
+		RawURL:          "https://upstream/raw",
+		RawURLAuthScope: "s1",
+	}, time.Hour)
+
+	// Corrupt the entire returned copy.
+	got, ok := cache.Get("/e/victim.mp4")
+	if !ok {
+		t.Fatal("expected entry present")
+	}
+	got.Size = 42
+	got.EncryptedPath = "/e/hacked"
+	got.RawURL = ""
+	got.NonceField[0] = 9
+	got.NonceField = append(got.NonceField, 5)
+
+	// The cache must be unaffected.
+	fresh, ok := cache.Get("/e/victim.mp4")
+	if !ok {
+		t.Fatal("expected entry still present")
+	}
+	if fresh.Size != 1000 {
+		t.Errorf("Size corrupted: got %d want 1000", fresh.Size)
+	}
+	if fresh.EncryptedPath != "/e/victim.mp4" {
+		t.Errorf("EncryptedPath corrupted: got %q", fresh.EncryptedPath)
+	}
+	if fresh.RawURL != "https://upstream/raw" {
+		t.Errorf("RawURL mutated via returned copy: %q", fresh.RawURL)
+	}
+	if len(fresh.NonceField) != 4 || fresh.NonceField[0] != 1 {
+		t.Errorf("NonceField aliased: got %v want [1 2 3 4]", fresh.NonceField)
+	}
+}
+
+// TestMapCache_IndexCopiesAreNotAliased confirms each index lookup returns its
+// own slice clone, so mutating the copy from the encrypted-path lookup cannot
+// affect the copy from the display-path lookup.
+func TestPathCache_NonceCopiesNotAliasedBetweenIndexes(t *testing.T) {
+	cache := NewPathCache(4, 100)
+	nonce := []byte{1, 2, 3, 4}
+	cache.Set(&PathEntry{
+		EncryptedPath: "/e/b.mp4", DisplayPath: "/d/b.mp4",
+		Size: 500, NonceField: nonce,
+	}, time.Hour)
+
+	viaEnc, _ := cache.GetByEncPath("/e/b.mp4")
+	viaDisp, _ := cache.GetByDispPath("/d/b.mp4")
+
+	viaEnc.NonceField[0] = 7
+	// Mutating the enc copy must not leak into the disp copy's backing array.
+	if viaDisp.NonceField[0] != 1 {
+		t.Errorf("nonce slices are aliased across index copies: disp.Nonce[0]=%d want 1", viaDisp.NonceField[0])
+	}
+	// Nor into the stored value.
+	again, _ := cache.GetByEncPath("/e/b.mp4")
+	if again.NonceField[0] != 1 {
+		t.Errorf("nonce leak into cache storage: %v", again.NonceField)
+	}
+}
+
+// TestPathCache_GetMutateConcurrentExercises the full -race detector over many
+// goroutines that each Get-and-mutate a returned copy. Under the old
+// pointer-based cache this was a genuine data race (every caller received the
+// very pointer the cache held); with value semantics it is race-free.
+func TestPathCache_GetMutateConcurrent(t *testing.T) {
+	cache := NewPathCache(8, 100)
+	cache.Set(&PathEntry{
+		EncryptedPath: "/e/race.mp4", DisplayPath: "/d/race.mp4",
+		Size: 1234, ContentVersion: 1, NonceField: []byte{9, 9, 9},
+	}, time.Hour)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 12; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 3000; i++ {
+				if e, ok := cache.Get("/e/race.mp4"); ok {
+					e.Size = int64(i)
+					e.NonceField[0] = byte(i)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestPathCache_InPlaceMutateThenSetStillWorks ensures the documented
+// read-modify-write pattern (mutate the returned copy, then Set it) remains
+// functional for DAO mutation helpers.
+func TestPathCache_InPlaceMutateThenSetStillWorks(t *testing.T) {
+	cache := NewPathCache(4, 100)
+	cache.Set(&PathEntry{EncryptedPath: "/e/m.mp4", DisplayPath: "/d/m.mp4", Size: 10}, time.Hour)
+
+	e, ok := cache.Get("/e/m.mp4")
+	if !ok {
+		t.Fatal("missing")
+	}
+	e.Size = 2048
+	e.RawURL = "https://x/y"
+	cache.Set(&e, time.Hour)
+
+	got, _ := cache.Get("/e/m.mp4")
+	if got.Size != 2048 || got.RawURL != "https://x/y" {
+		t.Fatalf("read-modify-write failed: %+v", got)
+	}
+}
