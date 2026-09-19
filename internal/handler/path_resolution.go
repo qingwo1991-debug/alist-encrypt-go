@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
@@ -18,7 +18,7 @@ const (
 	pathModeDerived                  = "derived"
 )
 
-func resolveEncryptedRealPath(fileDAO *dao.FileDAO, passwdInfo *config.PasswdInfo, displayPath string, allowLoose bool) (string, string) {
+func resolveEncryptedRealPath(fileDAO ports.FileRepository, passwdInfo *config.PasswdInfo, displayPath string, allowLoose bool) (string, string) {
 	if passwdInfo == nil || !passwdInfo.EncName {
 		return displayPath, pathModePlain
 	}

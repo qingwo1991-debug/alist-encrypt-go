@@ -20,6 +20,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/errors"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 )
@@ -1422,7 +1423,7 @@ func fetchAlistJWT(alistURL, username, password string) string {
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
 // staleThreshold: if positive and the cached raw_url is fresher than this,
 // skip the fetch. A zero/negative value explicitly forces an upstream refresh.
-func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO, staleThreshold time.Duration) rawURLFetchResult {
+func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository, staleThreshold time.Duration) rawURLFetchResult {
 	if alistURL == "" || fileDAO == nil {
 		return rawURLFetchResult{}
 	}
@@ -1461,7 +1462,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	return result
 }
 
-func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO, apiPath string) rawURLFetchResult {
+func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository, apiPath string) rawURLFetchResult {
 	body, _ := json.Marshal(map[string]string{"path": realPath})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, alistURL+apiPath, bytes.NewReader(body))
 	if err != nil {

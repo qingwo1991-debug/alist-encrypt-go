@@ -12,12 +12,13 @@ import (
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
 const finalRawURLResolveTimeout = 3 * time.Second
 
-func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO *dao.FileDAO) rawURLFetchResult {
+func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository) rawURLFetchResult {
 	if cfg == nil || strings.TrimSpace(alistURL) == "" || strings.TrimSpace(realPath) == "" {
 		return rawURLFetchResult{}
 	}
@@ -110,7 +111,7 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 	return rawURLFetchResult{FailureReason: errors.ReasonRawURLEmpty}
 }
 
-func cacheResolvedRawURL(fileDAO *dao.FileDAO, displayPath, realPath, rawURL string, size int64, authScope string) {
+func cacheResolvedRawURL(fileDAO ports.FileRepository, displayPath, realPath, rawURL string, size int64, authScope string) {
 	if fileDAO == nil || strings.TrimSpace(displayPath) == "" || strings.TrimSpace(rawURL) == "" {
 		return
 	}
