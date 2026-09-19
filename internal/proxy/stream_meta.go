@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 type contentMetaContextKey struct{}
@@ -86,6 +86,9 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 		if err != nil {
 			return result
 		}
+		// Probe the legacy 32-byte header by default. Only V3 containers pay
+		// the extra 16-byte tail fetch (see v3TailAwareProbe below), so V1/V2
+		// flows keep their single-range behavior.
 		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", encryption.ContentHeaderSize()-1))
 		req.Header.Set("Accept-Encoding", "identity")
 		copyProbeAuthHeaders(req, currentAuth)
@@ -118,7 +121,13 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 		if resp.StatusCode >= http.StatusBadRequest {
 			return result
 		}
-		prefix, err := io.ReadAll(io.LimitReader(resp.Body, encryption.ContentHeaderSize()))
+		// Probe enough bytes to recognize either a V1/V2 header or a V3
+		// container prefix (48 bytes); V3 must never be mislabeled as legacy.
+		probePrefixLen := int64(encryption.ContentHeaderSize())
+		if probePrefixLen < encryption.V3HeaderSize {
+			probePrefixLen = int64(encryption.V3HeaderSize)
+		}
+		prefix, err := io.ReadAll(io.LimitReader(resp.Body, probePrefixLen))
 		if err != nil {
 			return result
 		}
@@ -132,7 +141,9 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 				meta.PlainSize = total
 			}
 		}
-		expectedPrefix := encryption.ContentHeaderSize()
+		// Require only the V1/V2 header length to proceed; V3 recognition is
+		// an opportunistic bonus when the probe actually received 48 bytes.
+		expectedPrefix := int64(encryption.ContentHeaderSize())
 		if meta.CiphertextSize > 0 && meta.CiphertextSize < expectedPrefix {
 			expectedPrefix = meta.CiphertextSize
 		}
@@ -143,8 +154,22 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 			result.Meta = meta
 			return result
 		}
-		parsed, ok, err := encryption.ParseContentHeader(encType, prefix, meta.CiphertextSize)
+		parsed, ok, err := encryption.ParseFrontMatter(encType, prefix, meta.CiphertextSize)
 		if err != nil {
+			// A partial V3 prefix (magic present, header incomplete) needs the
+			// remaining 16 bytes before it can be certified. Fetch the tail and
+			// re-parse; failures keep the legacy result.
+			if encryption.IsV3Prefix(prefix) && len(prefix) < int(encryption.V3HeaderSize) {
+				tailPrefix, tailErr := s.probeV3Tail(currentURL, currentAuth, prefix)
+				if tailErr == nil && len(tailPrefix) >= int(encryption.V3HeaderSize) {
+					parsed, ok, err = encryption.ParseFrontMatter(encType, tailPrefix, meta.CiphertextSize)
+					if err == nil && ok {
+						result.Meta = parsed
+						result.Confirmed = true
+						return result
+					}
+				}
+			}
 			result.Meta = meta
 			return result
 		}
@@ -171,6 +196,37 @@ func (s *StreamProxy) InspectEncryptedContentResult(ctx context.Context, targetU
 	return s.inspectEncryptedContentResult(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
 }
 
+// probeV3Tail completes a partial V3 header probe: it fetches the remaining
+// header bytes (48 total, 16 beyond the legacy 32) so the front matter can be
+// certified as V3. The returned slice is the full 48-byte prefix on success.
+func (s *StreamProxy) probeV3Tail(targetURL string, authHeaders http.Header, prefix []byte) ([]byte, error) {
+	req, err := httputil.NewRequest(http.MethodGet, targetURL).
+		Build()
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", encryption.ContentHeaderSize(), encryption.V3HeaderSize-1))
+	req.Header.Set("Accept-Encoding", "identity")
+	copyProbeAuthHeaders(req, authHeaders)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("v3 tail probe: upstream status %d", resp.StatusCode)
+	}
+	tail, err := io.ReadAll(io.LimitReader(resp.Body, int64(encryption.V3HeaderSize)-int64(len(prefix))))
+	if err != nil {
+		return nil, err
+	}
+	full := append(append([]byte(nil), prefix...), tail...)
+	if len(full) < int(encryption.V3HeaderSize) {
+		return nil, fmt.Errorf("v3 tail probe: short prefix (%d bytes)", len(full))
+	}
+	return full, nil
+}
+
 func resolveRedirectTarget(baseURL, location string) (string, error) {
 	ref, err := url.Parse(location)
 	if err != nil {
@@ -187,6 +243,9 @@ func resolveRedirectTarget(baseURL, location string) (string, error) {
 }
 
 func buildUpstreamRangeHeader(rangeHeader string, meta encryption.ContentMeta) string {
+	if meta.IsV3() {
+		return buildV3UpstreamRangeHeader(rangeHeader, meta)
+	}
 	if !meta.IsV2() {
 		return rangeHeader
 	}
@@ -234,6 +293,69 @@ func buildUpstreamRangeHeader(rangeHeader string, meta encryption.ContentMeta) s
 	}
 	end += meta.HeaderLen
 	return fmt.Sprintf("bytes=%d-%d", start, end)
+}
+
+// buildV3UpstreamRangeHeader0 translates a client plaintext Range into the
+// contiguous ciphertext chunk window covering it. Records are fixed width, so
+// one upstream range serves any number of chunk records contiguously; the
+// stream reader slices the requested plain after per-chunk AEAD.
+func buildV3UpstreamRangeHeader(headRange string, meta encryption.ContentMeta) string {
+	headRange = strings.TrimSpace(headRange)
+	if headRange == "" || !strings.HasPrefix(headRange, "bytes=") {
+		return headRange
+	}
+	parts := strings.SplitN(strings.TrimPrefix(headRange, "bytes="), ",", 2)
+	if len(parts) == 0 {
+		return headRange
+	}
+	spec := strings.TrimSpace(parts[0])
+	bounds := strings.SplitN(spec, "-", 2)
+	if len(bounds) != 2 {
+		return headRange
+	}
+	startText := strings.TrimSpace(bounds[0])
+	endText := strings.TrimSpace(bounds[1])
+	chunkSize := int64(meta.ChunkSize)
+	if chunkSize <= 0 {
+		chunkSize = encryption.V3DefaultChunkSize()
+	}
+	var start, end int64
+	if startText == "" {
+		if meta.PlainSize <= 0 {
+			return headRange
+		}
+		suffixLen, err := strconv.ParseInt(endText, 10, 64)
+		if err != nil || suffixLen <= 0 {
+			return headRange
+		}
+		start = meta.PlainSize - suffixLen
+		if start < 0 {
+			start = 0
+		}
+		end = meta.PlainSize - 1
+	} else {
+		var err error
+		start, err = strconv.ParseInt(startText, 10, 64)
+		if err != nil || start < 0 {
+			return headRange
+		}
+		if endText != "" {
+			end, err = strconv.ParseInt(endText, 10, 64)
+			if err != nil || end < start {
+				return headRange
+			}
+		} else {
+			if meta.PlainSize <= 0 {
+				return headRange
+			}
+			end = meta.PlainSize - 1
+		}
+		if meta.PlainSize > 0 && end >= meta.PlainSize {
+			end = meta.PlainSize - 1
+		}
+	}
+	cstart, cend := encryption.V3ChunkWindow(start, end, chunkSize)
+	return fmt.Sprintf("bytes=%d-%d", cstart, cend)
 }
 
 func normalizeV2ClientRangeHeader(rangeHeader string, meta encryption.ContentMeta) string {
@@ -462,6 +584,17 @@ func discardBytes(r io.Reader, n int64) error {
 
 func normalizePlainFileSize(fileSize int64, meta *encryption.ContentMeta, contentRange string) int64 {
 	if meta == nil {
+		return fileSize
+	}
+	if meta.IsV3() {
+		// The wire size is the container (ciphertext) bytes. Remember it and
+		// keep the authoritative plaintext size the metadata/cache agreed on.
+		if fileSize > 0 && meta.PlainSize > 0 && fileSize != meta.PlainSize {
+			meta.CiphertextSize = fileSize
+		}
+		if meta.PlainSize > 0 {
+			return meta.PlainSize
+		}
 		return fileSize
 	}
 	if total := parseContentRangeTotal(contentRange); total > 0 {

@@ -13,9 +13,9 @@ import (
 
 	"github.com/alist-encrypt-go/internal/backoff"
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/rs/zerolog/log"
 )
 
@@ -390,6 +390,13 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		copied := *activeRange
 		fullRequestedRange = &copied
 		activeRange = nil
+	}
+
+	// V3 containers use their own decrypt-and-stream phase: a per-request Range
+	// becomes a contiguous chunk-window upstream Range decrypted by per-chunk
+	// AEAD (V3StreamReader). Do not fall through to the linear V2 cipher path.
+	if meta.IsV3() {
+		return s.streamV3Response(w, req, resp, passwdInfo, fileSize, meta, rangeHeader, strategy, activeRange, fullRequestedRange, targetURL, compatStorageKey)
 	}
 
 	if activeRange != nil && strategy == StreamStrategyRange {
