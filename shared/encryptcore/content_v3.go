@@ -53,6 +53,12 @@ var errV3TagMismatch = errors.New("v3: chunk authentication failed (ciphertext t
 
 var v3MagicBytes = []byte(v3Magic)
 
+// IsV3Prefix reports whether the given byte slice begins with the V3
+// container magic. It is safe on short slices.
+func IsV3Prefix(prefix []byte) bool {
+	return len(prefix) >= v3MagicLen && bytes.Equal(prefix[:v3MagicLen], v3MagicBytes)
+}
+
 // V3ChunkCipher seals/unseals single chunks with AES-256-GCM. It is created
 // from the 32-byte per-file key material and the container's 16-byte nonce.
 type V3ChunkCipher struct {
@@ -229,10 +235,55 @@ func ParseV3Header(prefix []byte, ciphertextSize int64) (ContentMeta, bool, erro
 	}
 	meta.PlainSize = int64(binary.BigEndian.Uint64(prefix[24:32]))
 	meta.NonceField = append([]byte(nil), prefix[8:24]...)
+	meta.ChunkSize = binary.BigEndian.Uint32(prefix[32:36])
+	if meta.ChunkSize == 0 || meta.ChunkSize > v3MaxChunkSize {
+		meta.ChunkSize = uint32(v3DefaultChunkSize)
+	}
+	meta.KDFIterations = binary.BigEndian.Uint32(prefix[40:44])
 	if ciphertextSize >= V3HeaderSize {
 		meta.CiphertextSize = ciphertextSize
 	} else {
-		meta.CiphertextSize = V3CiphertextSize(meta.PlainSize, v3DefaultChunkSize)
+		meta.CiphertextSize = V3CiphertextSize(meta.PlainSize, int64(meta.ChunkSize))
 	}
 	return meta, true, nil
 }
+
+// ParseFrontMatter inspects a content prefix and returns the strongest
+// metadata it can: a V3 container prefix is recognized by its magic, otherwise
+// the V2 header parser (which also covers legacy V1) is used.
+func ParseFrontMatter(encType EncType, prefix []byte, ciphertextSize int64) (ContentMeta, bool, error) {
+	if len(prefix) >= v3MagicLen && bytes.Equal(prefix[:v3MagicLen], v3MagicBytes) {
+		return ParseV3Header(prefix, ciphertextSize)
+	}
+	return ParseContentHeader(encType, prefix, ciphertextSize)
+}
+
+// V3DefaultChunkSize returns the standard chunk size used when a container's
+// header omits one (16 MiB).
+func V3DefaultChunkSize() int64 { return v3DefaultChunkSize }
+
+// V3ChunkRecordSize returns the on-disk size of one chunk record.
+func V3ChunkRecordSize(chunkSize int64) int64 {
+	if chunkSize <= 0 {
+		chunkSize = v3DefaultChunkSize
+	}
+	return chunkSize + v3TagSize
+}
+
+// V3ChunkWindow maps a plaintext byte interval [plainStart, plainEnd]
+// (inclusive, both outside the V3 header) to the contiguous ciphertext range
+// that covers every chunk record it touches. Because records are fixed width
+// the window is contiguous even when the client range crosses chunk bounds.
+func V3ChunkWindow(plainStart, plainEnd, chunkSize int64) (cipherStart, cipherEnd int64) {
+	if chunkSize <= 0 {
+		chunkSize = v3DefaultChunkSize
+	}
+	a := plainStart / chunkSize
+	b := plainEnd / chunkSize
+	cipherStart = V3HeaderSize + a*V3ChunkRecordSize(chunkSize)
+	cipherEnd = V3HeaderSize + (b+1)*V3ChunkRecordSize(chunkSize) - 1
+	return cipherStart, cipherEnd
+}
+
+// V3NonceFieldLen returns the fixed length of a V3 container nonce (16 bytes).
+func V3NonceFieldLen() int64 { return v3NonceFieldLen }

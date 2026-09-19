@@ -41,6 +41,8 @@ type ContentMeta struct {
 	PlainSize      int64
 	CiphertextSize int64
 	NonceField     []byte
+	ChunkSize      uint32 // V3 only: AEAD chunk size (0 for V1/V2)
+	KDFIterations  uint32 // V3 only: PBKDF2 iteration count (0 for V1/V2)
 }
 
 func LegacyContentMeta(encType EncType, ciphertextSize int64) ContentMeta {
