@@ -183,7 +183,7 @@ class DownloadManager {
   static Future<void> _downloadChunk({
     required String url,
     List<String>? chunkUrls,
-    required Directory partsDirectory,
+    required RandomAccessFile raf,
     required _DownloadChunk chunk,
     required int totalBytes,
     required String? ifRange,
@@ -266,12 +266,13 @@ class DownloadManager {
           );
     }
 
-    final partFile = File(
-      '${partsDirectory.path}/part-${chunk.index.toString().padLeft(2, '0')}',
-    );
-    final sink = partFile.openWrite();
+    // 直接以字节偏移写入最终目标文件，不再先落盘 part-NN。
+    // 使用外层共享的写句柄：先达到 chunk.start 再同步写；Dart 单线程下
+    // setPosition+writeFromSync 属于同步块，期间不会被其它分片打断，
+    // 因此各分片按偏移写入互不覆盖，合并阶段整体消除。
     var received = 0;
     try {
+      raf.setPosition(chunk.start);
       final stream = responseBody.stream.map((bytes) {
         _throwIfCancelled(cancelToken);
         received += bytes.length;
@@ -284,67 +285,23 @@ class DownloadManager {
         onReceived(received);
         return bytes;
       });
-      await sink.addStream(stream);
-      await sink.flush();
-    } finally {
-      await sink.close();
+      await for (final bytes in stream) {
+        raf.writeFromSync(bytes);
+      }
+    } catch (e) {
+      // 句柄由外层统一关闭；此处仅抛给 Future.wait 触发整段失败回退。
+      rethrow;
     }
 
     _throwIfCancelled(cancelToken);
-    final actualLength = await partFile.length();
-    if (received != chunk.length || actualLength != chunk.length) {
+    if (received != chunk.length) {
       throw StateError(
         'incomplete range body for bytes=${chunk.start}-${chunk.end}: '
-        'received=$received file=$actualLength expected=${chunk.length}',
+        'received=$received expected=${chunk.length}',
       );
     }
   }
 
-  static Future<void> _mergeDownloadChunks({
-    required String filePath,
-    required Directory partsDirectory,
-    required List<_DownloadChunk> chunks,
-    required int totalBytes,
-    required CancelToken? cancelToken,
-  }) async {
-    final outputFile = File(filePath);
-    await outputFile.parent.create(recursive: true);
-    final sink = outputFile.openWrite();
-    var mergedBytes = 0;
-    try {
-      for (final chunk in chunks) {
-        _throwIfCancelled(cancelToken);
-        final partFile = File(
-          '${partsDirectory.path}/part-${chunk.index.toString().padLeft(2, '0')}',
-        );
-        final partLength = await partFile.length();
-        if (partLength != chunk.length) {
-          throw StateError(
-            'part ${chunk.index} length changed before merge: '
-            '$partLength != ${chunk.length}',
-          );
-        }
-        await sink.addStream(partFile.openRead().map((bytes) {
-          _throwIfCancelled(cancelToken);
-          return bytes;
-        }));
-        mergedBytes += partLength;
-      }
-      await sink.flush();
-    } finally {
-      await sink.close();
-    }
-
-    _throwIfCancelled(cancelToken);
-    final outputLength = await outputFile.length();
-    if (mergedBytes != totalBytes || outputLength != totalBytes) {
-      throw StateError(
-        'merged download length mismatch: '
-        'merged=$mergedBytes file=$outputLength expected=$totalBytes',
-      );
-    }
-  }
-  
   /// 获取所有活跃的下载任务
   static List<DownloadTask> get activeTasks => _activeTasks.values.toList();
   
@@ -628,7 +585,7 @@ class DownloadManager {
     CancelToken? cancelToken,
     required void Function(int received, int total) onProgress,
   }) async {
-    Directory? partsDirectory;
+    RandomAccessFile? raf;
     try {
       // HEAD 始终用首选 URL（最快源），确定 content-length/accept-ranges/etag。
       final headUrl = (chunkUrls != null && chunkUrls.isNotEmpty)
@@ -660,11 +617,11 @@ class DownloadManager {
       }
 
       final chunks = _buildDownloadChunks(contentLength);
-      final currentPartsDirectory = Directory(
-        '$filePath.parts-${DateTime.now().microsecondsSinceEpoch}',
-      );
-      partsDirectory = currentPartsDirectory;
-      await currentPartsDirectory.create(recursive: true);
+      // 直写目标文件：只打开一次写句柄（FileMode.write 会截断存量），
+      // 各分片复用一个句柄、按字节偏移直接写入，不再生成本地 .parts-*。
+      final targetFile = File(filePath);
+      await targetFile.parent.create(recursive: true);
+      raf = await targetFile.open(mode: FileMode.write);
 
       String? ifRange = headResp.headers.value('etag')?.trim();
       if (ifRange == null || ifRange.isEmpty || ifRange.startsWith('W/')) {
@@ -677,7 +634,7 @@ class DownloadManager {
         return _downloadChunk(
           url: url,
           chunkUrls: chunkUrls,
-          partsDirectory: currentPartsDirectory,
+          raf: raf!,
           chunk: chunk,
           totalBytes: contentLength,
           ifRange: ifRange,
@@ -693,36 +650,36 @@ class DownloadManager {
         );
       }));
 
-      await _mergeDownloadChunks(
-        filePath: filePath,
-        partsDirectory: currentPartsDirectory,
-        chunks: chunks,
-        totalBytes: contentLength,
-        cancelToken: cancelToken,
-      );
+      // Future.wait 默认（eagerError=false）等所有分片完成后再抛错，
+      // 因此这里关闭句柄时不会再有人写入。成功时关闭以释放资源。
+      await raf.close();
+      _throwIfCancelled(cancelToken);
+      final writtenLength = await targetFile.length();
+      if (writtenLength != contentLength) {
+        throw StateError(
+          'direct-write download length mismatch: '
+          'file=$writtenLength expected=$contentLength',
+        );
+      }
       onProgress(contentLength, contentLength);
       return true;
     } catch (e) {
+      // 失败或取消：先关闭句柄再清理残留的部分下载文件，避免 Windows
+      // 上句柄占用导致删除失败；成功时不落盘任何临时分片。
+      try {
+        await raf?.close();
+      } catch (_) {}
+      try {
+        if (await File(filePath).exists()) {
+          await File(filePath).delete();
+        }
+      } catch (_) {}
       final cancellation = cancelToken?.cancelError;
       if (cancellation != null) {
         throw cancellation;
       }
       log('多线程下载失败，将回退到单线程: $e');
-      try {
-        await File(filePath).delete();
-      } catch (_) {}
       return false;
-    } finally {
-      final directoryToDelete = partsDirectory;
-      if (directoryToDelete != null) {
-        try {
-          if (await directoryToDelete.exists()) {
-            await directoryToDelete.delete(recursive: true);
-          }
-        } catch (e) {
-          log('清理下载分片失败: $e');
-        }
-      }
     }
   }
 
