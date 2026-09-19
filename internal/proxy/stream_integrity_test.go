@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 type closeTrackingBody struct {

@@ -24,6 +24,9 @@ WORKDIR /app
 
 # Copy go mod files
 COPY go.mod go.sum ./
+# shared/encryptcore 是独立嵌套模块（replace => ./shared/encryptcore），
+# 它的 go.mod 必须在 go mod download 前就位，否则替换解析失败。
+COPY shared/encryptcore/go.mod shared/encryptcore/go.sum ./shared/encryptcore/
 RUN go mod download
 
 # Copy source

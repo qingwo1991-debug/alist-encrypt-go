@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // rewritePropfindBody decrypts filenames and adjusts V2 getcontentlength in a

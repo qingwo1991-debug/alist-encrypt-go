@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 func TestUploadMetaIsPartitionedByFilePathConcurrently(t *testing.T) {

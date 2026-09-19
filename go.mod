@@ -2,6 +2,8 @@ module github.com/alist-encrypt-go
 
 go 1.25.0
 
+require github.com/alist-encrypt-go/shared/encryptcore v0.0.0
+
 require (
 	github.com/gin-contrib/gzip v1.2.5
 	github.com/gin-gonic/gin v1.11.0
@@ -47,3 +49,5 @@ require (
 	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
+
+replace github.com/alist-encrypt-go/shared/encryptcore => ./shared/encryptcore
