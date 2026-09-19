@@ -178,7 +178,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	}
 	alistHandler.SetDirSyncStore(dirSyncStore)
 	alistHandler.StartDirSyncLoop()
-	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
+	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore, proxyHandler)
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	webdavHandler.SetSizeResolver(sizeResolver)
 	// WebDAV shares the same dir-sync snapshot store as the HTTP fs/list path so

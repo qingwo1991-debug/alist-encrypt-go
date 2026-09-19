@@ -96,14 +96,16 @@ func (h *WebDAVHandler) Stats() map[string]interface{} {
 }
 
 // NewWebDAVHandler creates a new WebDAV handler
-func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore) *WebDAVHandler {
+func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO *dao.FileDAO, passwdDAO *dao.PasswdDAO, selector *StrategySelector, metaStore FileMetaStore, proxyHandler *ProxyHandler) *WebDAVHandler {
 	sharedTransport := proxy.NewSharedTransport(cfg)
 	h := &WebDAVHandler{
-		cfg:             cfg,
-		streamProxy:     streamProxy,
-		fileDAO:         fileDAO,
-		passwdDAO:       passwdDAO,
-		proxyHandler:    NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
+		cfg:         cfg,
+		streamProxy: streamProxy,
+		fileDAO:     fileDAO,
+		passwdDAO:   passwdDAO,
+		// 复用进程级单例 ProxyHandler，不再在 WebDAV 内寄生第二份实例
+		// (旧的寄生实例只被 Stop() 引用，浪费了一整套信号/清理 goroutine)。
+		proxyHandler:    proxyHandler,
 		strategyCache:   NewStrategyCache(1000),
 		sizeResolver:    NewFileSizeResolver(cfg, fileDAO, metaStore, 20, MinMetaSize(cfg), RedirectMaxHops(cfg)),
 		strategySel:     selector,
