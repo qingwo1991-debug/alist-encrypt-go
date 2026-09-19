@@ -19,6 +19,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 )
@@ -64,7 +65,7 @@ type ProbeScheduler struct {
 	successfulWarm         map[string]probeWarmState
 	sourceCounts           map[string]uint64
 	statusCounts           map[string]uint64
-	recentFailureReasons   map[string]uint64
+	recentFailureReasons   map[errors.FailureReason]uint64
 	filesDiscoveredTotal   uint64
 	filesQueuedTotal       uint64
 	filesSucceededTotal    uint64
@@ -143,30 +144,30 @@ type probeWarmState struct {
 }
 
 type ProbeRecord struct {
-	DisplayPath       string `json:"display_path"`
-	EncryptedPath     string `json:"encrypted_path"`
-	TargetHost        string `json:"target_host"`
-	ProviderKey       string `json:"provider_key"`
-	FileName          string `json:"file_name"`
-	Source            string `json:"source"`
-	Priority          string `json:"priority"`
-	Status            string `json:"status"`
-	WarmState         string `json:"warm_state"`
-	ReportedSize      int64  `json:"reported_size"`
-	ResolvedSize      int64  `json:"resolved_size"`
-	SizeSource        string `json:"size_source"`
-	UsedAuthMode      string `json:"used_auth_mode"`
-	FailureReason     string `json:"failure_reason"`
-	RawURLFetched     bool   `json:"raw_url_fetched"`
-	RangeProbed       bool   `json:"range_probed"`
-	MetaPersisted     bool   `json:"meta_persisted"`
-	QueueWaitMs       int64  `json:"queue_wait_ms"`
-	Invalidated       bool   `json:"invalidated"`
-	ConsumerHitCount  uint64 `json:"consumer_hit_count"`
-	LastConsumerHitAt string `json:"last_consumer_hit_at"`
-	StartedAt         string `json:"started_at"`
-	FinishedAt        string `json:"finished_at"`
-	DurationMs        int64  `json:"duration_ms"`
+	DisplayPath       string               `json:"display_path"`
+	EncryptedPath     string               `json:"encrypted_path"`
+	TargetHost        string               `json:"target_host"`
+	ProviderKey       string               `json:"provider_key"`
+	FileName          string               `json:"file_name"`
+	Source            string               `json:"source"`
+	Priority          string               `json:"priority"`
+	Status            string               `json:"status"`
+	WarmState         string               `json:"warm_state"`
+	ReportedSize      int64                `json:"reported_size"`
+	ResolvedSize      int64                `json:"resolved_size"`
+	SizeSource        string               `json:"size_source"`
+	UsedAuthMode      string               `json:"used_auth_mode"`
+	FailureReason     errors.FailureReason `json:"failure_reason"`
+	RawURLFetched     bool                 `json:"raw_url_fetched"`
+	RangeProbed       bool                 `json:"range_probed"`
+	MetaPersisted     bool                 `json:"meta_persisted"`
+	QueueWaitMs       int64                `json:"queue_wait_ms"`
+	Invalidated       bool                 `json:"invalidated"`
+	ConsumerHitCount  uint64               `json:"consumer_hit_count"`
+	LastConsumerHitAt string               `json:"last_consumer_hit_at"`
+	StartedAt         string               `json:"started_at"`
+	FinishedAt        string               `json:"finished_at"`
+	DurationMs        int64                `json:"duration_ms"`
 }
 
 type ProbeConsumerHit struct {
@@ -195,7 +196,7 @@ type ProbeWarmSnapshot struct {
 
 type probeExecutionResult struct {
 	resolvedSize  int64
-	failureReason string
+	failureReason errors.FailureReason
 	rawURLFetched bool
 	rangeProbed   bool
 	metaPersisted bool
@@ -208,7 +209,7 @@ type rawURLFetchResult struct {
 	Size          int64
 	Source        string
 	StatusCode    int
-	FailureReason string
+	FailureReason errors.FailureReason
 }
 
 type probeSourceContextKey struct{}
@@ -250,7 +251,7 @@ func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileM
 		successfulWarm:         make(map[string]probeWarmState),
 		sourceCounts:           make(map[string]uint64),
 		statusCounts:           make(map[string]uint64),
-		recentFailureReasons:   make(map[string]uint64),
+		recentFailureReasons:   make(map[errors.FailureReason]uint64),
 		consumerHitsBySource:   make(map[string]uint64),
 		consumerHitsByScenario: make(map[string]uint64),
 	}
@@ -418,11 +419,11 @@ func (ps *ProbeScheduler) Stats() map[string]interface{} {
 		"last_success_at":           formatProbeTimestamp(atomic.LoadInt64(&ps.lastSuccessAtUnixNano)),
 		"last_failure_at":           formatProbeTimestamp(atomic.LoadInt64(&ps.lastFailureAtUnixNano)),
 		"last_record_finished_at":   formatProbeTimestamp(atomic.LoadInt64(&ps.lastRecordFinishedNano)),
-		"source_counts":             ps.snapshotCounterMap(ps.sourceCounts),
-		"status_counts":             ps.snapshotCounterMap(ps.statusCounts),
-		"failure_reasons":           ps.snapshotCounterMap(ps.recentFailureReasons),
-		"consumer_hits_by_source":   ps.snapshotCounterMap(ps.consumerHitsBySource),
-		"consumer_hits_by_scenario": ps.snapshotCounterMap(ps.consumerHitsByScenario),
+		"source_counts":             snapshotCounterMap(&ps.recordMu, ps.sourceCounts),
+		"status_counts":             snapshotCounterMap(&ps.recordMu, ps.statusCounts),
+		"failure_reasons":           snapshotCounterMap(&ps.recordMu, ps.recentFailureReasons),
+		"consumer_hits_by_source":   snapshotCounterMap(&ps.recordMu, ps.consumerHitsBySource),
+		"consumer_hits_by_scenario": snapshotCounterMap(&ps.recordMu, ps.consumerHitsByScenario),
 		"recent_records":            ps.snapshotRecentRecords(),
 		"recent_consumer_hits":      ps.snapshotRecentConsumerHits(),
 		"invalidations_total":       atomic.LoadUint64(&ps.invalidationsTotal),
@@ -555,7 +556,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 		resultState.sizeSource = string(result.Source)
 		atomic.AddUint64(&ps.filesMetaPersisted, 1)
 	} else if result.Error != nil {
-		resultState.failureReason = "size_resolve:" + result.Error.Error()
+		resultState.failureReason = errors.FailureReason("size_resolve:" + result.Error.Error())
 	}
 	resultState.usedAuthMode = authMode
 	// Pre-fetch raw_url so WebDAV first-play is zero-latency.
@@ -643,7 +644,7 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 	if !usefulWarmArtifact || (resultState.failureReason != "" && !resultState.rawURLFetched) {
 		status = probeStatusFailed
 		if resultState.failureReason == "" {
-			resultState.failureReason = "no_warm_artifact"
+			resultState.failureReason = errors.ReasonNoWarmArtifact
 		}
 		atomic.AddUint64(&ps.filesFailedTotal, 1)
 	} else {
@@ -823,13 +824,14 @@ func formatProbeTimestamp(unixNano int64) string {
 	return time.Unix(0, unixNano).Format(time.RFC3339)
 }
 
-func (ps *ProbeScheduler) snapshotCounterMap(src map[string]uint64) map[string]uint64 {
-	ps.ensureRecordState()
-	ps.recordMu.Lock()
-	defer ps.recordMu.Unlock()
+func snapshotCounterMap[K ~string](mu *sync.Mutex, src map[K]uint64) map[string]uint64 {
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
 	out := make(map[string]uint64, len(src))
 	for k, v := range src {
-		out[k] = v
+		out[string(k)] = v
 	}
 	return out
 }
@@ -1123,7 +1125,7 @@ func (ps *ProbeScheduler) ensureRecordState() {
 		ps.statusCounts = make(map[string]uint64)
 	}
 	if ps.recentFailureReasons == nil {
-		ps.recentFailureReasons = make(map[string]uint64)
+		ps.recentFailureReasons = make(map[errors.FailureReason]uint64)
 	}
 	if ps.successfulWarm == nil {
 		ps.successfulWarm = make(map[string]probeWarmState)
@@ -1434,7 +1436,7 @@ func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, au
 	}
 
 	result := fetchRawURLViaAPI(ctx, alistURL, displayPath, realPath, authHeaders, fileDAO, "/api/fs/get")
-	if strings.TrimSpace(result.RawURL) != "" || result.FailureReason != "raw_url_empty" {
+	if strings.TrimSpace(result.RawURL) != "" || result.FailureReason != errors.ReasonRawURLEmpty {
 		return result
 	}
 
@@ -1470,7 +1472,7 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return rawURLFetchResult{FailureReason: "raw_url_fetch:" + err.Error(), Source: rawURLSourceFromAPIPath(apiPath)}
+		return rawURLFetchResult{FailureReason: errors.FailureReason("raw_url_fetch:" + err.Error()), Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
@@ -1478,7 +1480,7 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		return rawURLFetchResult{
 			StatusCode:    resp.StatusCode,
 			Source:        rawURLSourceFromAPIPath(apiPath),
-			FailureReason: "raw_url_http_" + http.StatusText(resp.StatusCode),
+			FailureReason: errors.FailureReason("raw_url_http_" + http.StatusText(resp.StatusCode)),
 		}
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
@@ -1490,10 +1492,10 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		} `json:"data"`
 	}
 	if json.Unmarshal(respBody, &result) != nil {
-		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_invalid_json", Source: rawURLSourceFromAPIPath(apiPath)}
+		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLInvalidJSON, Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	if result.Code != 200 || result.Data.RawURL == "" {
-		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_empty", Source: rawURLSourceFromAPIPath(apiPath)}
+		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLEmpty, Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	fileDAO.Set(&dao.FileInfo{
 		Path:              displayPath,

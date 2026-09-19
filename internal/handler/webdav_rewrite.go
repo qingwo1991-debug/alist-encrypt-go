@@ -35,7 +35,7 @@ func (h *WebDAVHandler) rewritePropfindBody(body []byte, passwdInfo *config.Pass
 	encryptNames := passwdInfo != nil && passwdInfo.EncName
 
 	const (
-		kindResp  = iota // opening <response> (matched as "<...response>")
+		kindResp = iota // opening <response> (matched as "<...response>")
 		kindDisplay
 		kindHref
 		kindLength

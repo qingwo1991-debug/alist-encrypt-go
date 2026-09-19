@@ -13,6 +13,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
@@ -165,7 +166,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	}
 	lastUpstreamStatus := 0
 
-	trySingle := func(size int64) (bool, string, error) {
+	trySingle := func(size int64) (bool, errors.FailureReason, error) {
 		log.Info().
 			Str("category", "playback").
 			Str("consumer_scenario", req.ConsumerScenario).
@@ -334,9 +335,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				return true, "", nil
 			}
 			if fallback.Err != nil {
-				return false, "range_unsatisfiable", fallback.Err
+				return false, errors.ReasonRangeUnsatisfiable, fallback.Err
 			}
-			return false, "range_unsatisfiable", result.Err
+			return false, errors.ReasonRangeUnsatisfiable, result.Err
 		}
 
 		// 当策略直接选了 Chunked 但 seek 偏移超过 maxDiscard 时，回退到 Full 策略
@@ -364,9 +365,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				return true, "", nil
 			}
 			if fallback.Err != nil {
-				return false, "chunked_seek_too_large", fallback.Err
+				return false, errors.ReasonChunkedSeekTooLarge, fallback.Err
 			}
-			return false, "chunked_seek_too_large", result.Err
+			return false, errors.ReasonChunkedSeekTooLarge, result.Err
 		}
 
 		if result.Err != nil {
@@ -471,13 +472,13 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	}
 	if lastErr != nil {
 		invalidatePlaybackState(req, lastFailure)
-		log.Error().Err(lastErr).Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
-		RespondHTTPErrorWithStatus(w, "Decryption error: "+lastFailure, http.StatusBadGateway)
+		log.Error().Err(lastErr).Str("path", req.Path).Str("failure", lastFailure.String()).Msg(req.FailureLogMsg)
+		RespondHTTPErrorWithStatus(w, "Decryption error: "+lastFailure.String(), http.StatusBadGateway)
 		return
 	}
 	invalidatePlaybackState(req, lastFailure)
-	log.Error().Str("path", req.Path).Str("failure", lastFailure).Msg(req.FailureLogMsg)
-	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure, http.StatusBadGateway)
+	log.Error().Str("path", req.Path).Str("failure", lastFailure.String()).Msg(req.FailureLogMsg)
+	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure.String(), http.StatusBadGateway)
 }
 
 // playbackOutcomeServed treats a player cancel after response bytes were sent
@@ -494,7 +495,7 @@ func playbackOutcomeServed(result *proxy.StreamOutcome) bool {
 	return result.ResponseStarted && result.BytesWritten > 0 && result.FailureReason == "client_disconnect"
 }
 
-func isWebDAVUpstreamFailure(reason string) bool {
+func isWebDAVUpstreamFailure(reason errors.FailureReason) bool {
 	switch reason {
 	case "upstream_4xx", "upstream_5xx":
 		return true
@@ -514,7 +515,7 @@ func webDAVInternalPlaybackTarget(req decryptPlaybackRequest) string {
 	return httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, "")
 }
 
-func shouldRetryFreshResolve(failureReason string, firstFrameHint bool, consumerScenario string) bool {
+func shouldRetryFreshResolve(failureReason errors.FailureReason, firstFrameHint bool, consumerScenario string) bool {
 	if consumerScenario == consumerScenarioRedirect {
 		switch failureReason {
 		case "range_unsatisfiable", "decrypt_validation_failed", "upstream_4xx", "upstream_5xx", "stream_error", "unknown", "":
@@ -718,7 +719,7 @@ func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.Conten
 	_ = req.FileDAO.Set(info)
 }
 
-func logDecryptFailure(req decryptPlaybackRequest, strategy proxy.StreamStrategy, failureReason string, freshRetry bool) {
+func logDecryptFailure(req decryptPlaybackRequest, strategy proxy.StreamStrategy, failureReason errors.FailureReason, freshRetry bool) {
 	category := strings.TrimSpace(req.LogCategory)
 	if category == "" {
 		category = "playback"
@@ -734,7 +735,7 @@ func logDecryptFailure(req decryptPlaybackRequest, strategy proxy.StreamStrategy
 		Str("target_url", req.TargetURL).
 		Str("range", rangeHeader).
 		Str("strategy", string(strategy)).
-		Str("failure_reason", failureReason).
+		Str("failure_reason", failureReason.String()).
 		Bool("fresh_retry", freshRetry).
 		Str("consumer_scenario", req.ConsumerScenario).
 		Msg("Decrypt playback attempt failed")
@@ -813,9 +814,8 @@ func maybeEnqueueNextEpisodeWarmup(req decryptPlaybackRequest, authHeaders http.
 	req.Probe.EnqueueWithSource(item, authHeaders, sibling.Size, probeSourceFirstFrame)
 }
 
-func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
+func invalidatePlaybackState(req decryptPlaybackRequest, reason errors.FailureReason) {
+	if strings.TrimSpace(reason.String()) == "" {
 		return
 	}
 	switch reason {
@@ -823,7 +823,7 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason string) {
 		return
 	}
 	if req.Probe != nil {
-		req.Probe.InvalidateWarm(req.FileItem.DisplayPath, reason)
+		req.Probe.InvalidateWarm(req.FileItem.DisplayPath, reason.String())
 	}
 	if req.FileDAO == nil {
 		return

@@ -7,6 +7,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/backoff"
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/errors"
 )
 
 // Buffer pool for streaming - default 512KB buffers for high-bitrate video
@@ -92,7 +93,7 @@ type StreamProxy struct {
 type StreamOutcome struct {
 	Err             error
 	Retryable       bool
-	FailureReason   string
+	FailureReason   errors.FailureReason
 	NoLearning      bool
 	BytesWritten    int64
 	ExpectedBytes   int64

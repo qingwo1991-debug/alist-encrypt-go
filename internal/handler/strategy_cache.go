@@ -173,12 +173,12 @@ func (sc *StrategyCache) Stats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_paths":       len(sc.strategies),
-		"learned_paths":     learnedCount,
-		"learning_paths":    len(sc.strategies) - learnedCount,
+		"total_paths":        len(sc.strategies),
+		"learned_paths":      learnedCount,
+		"learning_paths":     len(sc.strategies) - learnedCount,
 		"strategy_breakdown": strategyCount,
-		"capacity":          sc.maxEntries,
-		"usage_percent":     float64(len(sc.strategies)) / float64(sc.maxEntries) * 100,
+		"capacity":           sc.maxEntries,
+		"usage_percent":      float64(len(sc.strategies)) / float64(sc.maxEntries) * 100,
 	}
 }
 

@@ -4,11 +4,13 @@ import (
 	"errors"
 	"testing"
 
+	interr "github.com/alist-encrypt-go/internal/errors"
+
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
 func TestShouldRetryFreshResolveForSizeRelatedFailures(t *testing.T) {
-	cases := []string{
+	cases := []interr.FailureReason{
 		"range_unsatisfiable",
 		"decrypt_validation_failed",
 	}
@@ -23,7 +25,7 @@ func TestShouldRetryFreshResolveForSizeRelatedFailures(t *testing.T) {
 }
 
 func TestShouldRetryFreshResolveSkipsNonSizeFailuresOnFirstFrame(t *testing.T) {
-	cases := []string{
+	cases := []interr.FailureReason{
 		"range_unsupported",
 		"chunked_seek_too_large",
 		"upstream_4xx",
@@ -41,7 +43,7 @@ func TestShouldRetryFreshResolveSkipsNonSizeFailuresOnFirstFrame(t *testing.T) {
 }
 
 func TestShouldRetryFreshResolveAllowsUnknownForNonFirstFrame(t *testing.T) {
-	cases := []string{
+	cases := []interr.FailureReason{
 		"",
 		"unknown",
 		"stream_error",
@@ -55,7 +57,7 @@ func TestShouldRetryFreshResolveAllowsUnknownForNonFirstFrame(t *testing.T) {
 }
 
 func TestShouldRetryFreshResolveAllowsRedirectMetadataRecovery(t *testing.T) {
-	cases := []string{"upstream_4xx", "upstream_5xx", "stream_error", "unknown", "", "network_error"}
+	cases := []interr.FailureReason{"upstream_4xx", "upstream_5xx", "stream_error", "unknown", "", "network_error"}
 	for _, reason := range cases {
 		if !shouldRetryFreshResolve(reason, true, consumerScenarioRedirect) {
 			t.Fatalf("expected redirect retry for %q", reason)
