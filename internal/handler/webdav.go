@@ -326,28 +326,45 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// WebDAV clients often start playback without a Range header. Some signed
 	// CDN URLs reject that full-file GET, and some providers reject deep seek
-	// ranges on signed URLs. Keep startup and arbitrary seeks on the stable
-	// internal /dav path; only first-frame shaped ranges may use raw_url.
+	// ranges on signed URLs. Startup and arbitrary seeks historically went
+	// through the stable internal /dav path (one extra hop before redirect to
+	// the CDN). To cut that hop for the dominant startup case, a full-file GET
+	// without Range (first startup probe) now prefers a fresh raw_url as well:
+	// if the cached raw_url is fresh we use it directly, otherwise we resolve
+	// it synchronously once and fall back to internal /dav when unavailable.
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 	trace.Logf(r.Context(), "webdav-get", "Using internal /dav target for playback, display=%s source=dav_internal", davPath)
 	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
 	firstFrameRange := proxy.IsFirstFrameRangeHint(r.Method, rangeHeader)
+	// A Range-less full GET is the classic playback startup probe (many players
+	// issue "GET /file" with no Range first). Treat it like a first-frame read
+	// for the purpose of choosing a fresh raw_url, trimming an extra hop.
+	startupFullGET := r.Method == http.MethodGet && rangeHeader == ""
+	preferRawURL := firstFrameRange || startupFullGET
 	staleThreshold := h.upstreamStalenessThreshold()
 	rawURLScope := rawURLAuthScope(r.Header)
 	needsRawURLWarmup := true
-	if firstFrameRange {
+	if preferRawURL {
 		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold, rawURLScope) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			targetURL = cachedInfo.RawURL
 			needsRawURLWarmup = false
-			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for first-frame playback, display=%s source=cache", davPath)
+			sourceHint := "first-frame"
+			if !firstFrameRange {
+				sourceHint = "startup-full"
+			}
+			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for %s playback, display=%s source=cache", sourceHint, davPath)
 		}
 	}
-	if firstFrameRange {
+	if preferRawURL {
 		if needsRawURLWarmup {
 			if resolve := h.resolveRawURLFromAlist(r, davPath, realPath); resolve.RawURL != "" {
 				if !strings.EqualFold(targetURL, resolve.RawURL) {
 					targetURL = resolve.RawURL
-					trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for first-frame playback, display=%s source=%s", davPath, resolve.Source)
+					sourceHint := "first-frame"
+					if !firstFrameRange {
+						sourceHint = "startup-full"
+					}
+					trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for %s playback, display=%s source=%s", sourceHint, davPath, resolve.Source)
 				} else {
 					trace.Logf(r.Context(), "webdav-get", "Warmed raw_url from alist, display=%s source=%s", davPath, resolve.Source)
 				}
