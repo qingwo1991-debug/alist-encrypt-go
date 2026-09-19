@@ -40,6 +40,14 @@ const (
 	// under sustained miss load dropping the excess is safe and prevents
 	// unbounded goroutine/DB-write growth.
 	dirSyncRefreshMaxConcurrent = 8
+	// dirServerHugeListEntries is the huge-directory budget shared by the
+	// listing paths (fs/list live and WebDAV PROPFIND). Mirrors the mobile
+	// proxy budget: once a single directory reaches this many entries, listing
+	// passes stop the per-entry MySQL meta upserts, path-cache writes and probe
+	// enqueues (name decryption stays 100% intact). That lets 100k-class
+	// directories still stream to the client instead of the per-entry machinery
+	// dragging the request into multi-second hangs or MySQL write storms.
+	dirServerHugeListEntries = 100000
 )
 
 func (h *AlistHandler) ensureDirSyncLoop() {
@@ -676,6 +684,11 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 		if data, ok := respData["data"].(map[string]interface{}); ok {
 			if content, ok := data["content"].([]interface{}); ok {
 				itemCount = len(content)
+				// Huge-directory budget (mirrors the mobile proxy): once a single
+				// listing reaches the 100k entry class, skip the per-entry
+				// path-cache / MySQL / probe machinery below; name decryption still
+				// runs for every entry.
+				hugeDir := itemCount >= dirServerHugeListEntries
 				if dirPath == "/" {
 					// Learn top-level mount names so root-listing masquerades for
 					// deeper dirs can be recognized without mislabeling genuine
@@ -779,16 +792,25 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 							if sizeVal, ok := fileData["size"].(float64); ok {
 								size = int64(sizeVal)
 							}
-							encryptedPath := displayPath
-							if mapped, ok := h.fileDAO.GetEncPath(displayPath); ok && mapped != "" {
-								encryptedPath = mapped
-							}
-							h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, name, size, isDir)
-							if !isDir && enableProbe {
-								if size > 0 {
-									h.upsertMetaFromListing(r.Context(), displayPath, size)
+							if hugeDir {
+								// Huge-directory budget (mirrors the mobile proxy): for
+								// 100k-class listings, skip the per-entry path-cache writes,
+								// MySQL meta upserts and probe enqueues so huge directories
+								// stream back to the client instead of being dragged by
+								// per-entry machinery / write storms. Name decryption above
+								// stays untouched.
+							} else {
+								encryptedPath := displayPath
+								if mapped, ok := h.fileDAO.GetEncPath(displayPath); ok && mapped != "" {
+									encryptedPath = mapped
 								}
-								h.enqueueProbeFromList(r, displayPath, size)
+								h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, name, size, isDir)
+								if !isDir && enableProbe {
+									if size > 0 {
+										h.upsertMetaFromListing(r.Context(), displayPath, size)
+									}
+									h.enqueueProbeFromList(r, displayPath, size)
+								}
 							}
 						}
 						if isDir {
