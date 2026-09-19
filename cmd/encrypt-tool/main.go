@@ -97,6 +97,7 @@ type flags struct {
 	input        string
 	output       string
 	stdout       bool   // enc only: write encrypted bytes to stdout without creating a file
+	v3           bool   // enc only: write the new V3 chunked AES-GCM container
 	encType      string // "auto" for dec; "aesctr"/"chacha20"/"rc4md5" for enc
 	encName      bool   // enc only: encrypt filenames
 	suffix       string // enc only: suffix to append
@@ -210,13 +211,25 @@ func runEncryptStdout(f *flags, fileSize int64) {
 		fatal("open source: %v", err)
 	}
 	defer in.Close()
-	enc, err := encryption.NewLatestContentEncryptor(f.password, f.encType, fileSize)
-	if err != nil {
-		fatal("create encryptor: %v", err)
-	}
-	reader, err := enc.EncryptReader(in, 0)
-	if err != nil {
-		fatal("encrypt reader: %v", err)
+	var reader io.Reader
+	if f.v3 {
+		ce, err := encryption.NewV3ContentEncryptor(0)
+		if err != nil {
+			fatal("create v3 encryptor: %v", err)
+		}
+		reader, err = ce.EncryptReader(f.password, in)
+		if err != nil {
+			fatal("create v3 encrypt reader: %v", err)
+		}
+	} else {
+		enc, err := encryption.NewLatestContentEncryptor(f.password, f.encType, fileSize)
+		if err != nil {
+			fatal("create encryptor: %v", err)
+		}
+		reader, err = enc.EncryptReader(in, 0)
+		if err != nil {
+			fatal("encrypt reader: %v", err)
+		}
 	}
 	if _, err := io.CopyBuffer(os.Stdout, reader, make([]byte, 512*1024)); err != nil {
 		fatal("write encrypted stream: %v", err)
@@ -806,6 +819,27 @@ func formatDuration(sec float64) string {
 // File processing (encrypt / decrypt)
 // ---------------------------------------------------------------------------
 
+// sniffV3ContainerFile reports whether the file starts with the V3 container
+// header magic. It uses ReadAt so the caller's read position is untouched.
+func encTotalSize(f *os.File) int64 {
+	st, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+func sniffV3ContainerFile(f *os.File, size int64) (bool, error) {
+	if size < 6 {
+		return false, nil
+	}
+	b := make([]byte, 6)
+	if _, err := f.ReadAt(b, 0); err != nil {
+		return false, err
+	}
+	return encryption.HasV3Magic(b), nil
+}
+
 func processOne(srcPath, dstPath string, f *flags, command string) (int64, error) {
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
@@ -844,13 +878,40 @@ func processOne(srcPath, dstPath string, f *flags, command string) (int64, error
 	}
 
 	if command == "enc" {
-		enc, err := encryption.NewLatestContentEncryptor(f.password, f.encType, fileSize)
-		if err != nil {
-			return 0, fmt.Errorf("create encryptor: %w", err)
+		var reader io.Reader
+		if f.v3 {
+			ce, err := encryption.NewV3ContentEncryptor(0)
+			if err != nil {
+				return 0, fmt.Errorf("create v3 encryptor: %w", err)
+			}
+			reader, err = ce.EncryptReader(f.password, in)
+			if err != nil {
+				return 0, fmt.Errorf("create v3 encrypt reader: %w", err)
+			}
+		} else {
+			enc, err := encryption.NewLatestContentEncryptor(f.password, f.encType, fileSize)
+			if err != nil {
+				return 0, fmt.Errorf("create encryptor: %w", err)
+			}
+			reader, err = enc.EncryptReader(in, 0)
+			if err != nil {
+				return 0, fmt.Errorf("encrypt reader: %w", err)
+			}
 		}
-		reader, err := enc.EncryptReader(in, 0)
+		return copyWithProgress(out, reader, buf, fileSize, srcPath, showProgress)
+	}
+
+	// Decrypt: a V3 container identifies itself via magic + per-chunk auth, so
+	// sniff it first and skip encType auto-detection entirely.
+	if v3, sniffErr := sniffV3ContainerFile(in, fileSize); sniffErr != nil {
+		return 0, fmt.Errorf("detect container format: %w", sniffErr)
+	} else if v3 {
+		if _, seekErr := in.Seek(0, io.SeekStart); seekErr != nil {
+			return 0, fmt.Errorf("rewind v3 container: %w", seekErr)
+		}
+		reader, err := encryption.NewV3ReadSeekerDecoder(in, fileSize, f.password)
 		if err != nil {
-			return 0, fmt.Errorf("encrypt reader: %w", err)
+			return 0, fmt.Errorf("open v3 container: %w", err)
 		}
 		return copyWithProgress(out, reader, buf, fileSize, srcPath, showProgress)
 	}
@@ -929,7 +990,26 @@ func verifyEncryption(origPath, encPath string, f *flags) error {
 	}
 	encSample = encSample[:encN]
 
-	// AutoDecryptReader reads the V2 header (32 bytes) first, then decrypts.
+	// V3 containers self-identify by magic and authenticate every chunk; use
+	// the whole-file decoder so the sample is actually decrypted plaintext.
+	if v3, sniffErr := sniffV3ContainerFile(encFile, int64(encN)); sniffErr == nil && v3 {
+		decoder, err := encryption.NewV3ReadSeekerDecoder(encFile, encTotalSize(encFile), f.password)
+		if err != nil {
+			return fmt.Errorf("open v3 for verify: %w", err)
+		}
+		decrypted := make([]byte, origN)
+		decN, err := io.ReadFull(decoder, decrypted)
+		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+			return fmt.Errorf("read v3-decrypted sample: %w", err)
+		}
+		decrypted = decrypted[:decN]
+		if !bytes.Equal(origSample[:decN], decrypted) {
+			return fmt.Errorf("v3 decrypted sample does not match original (got %d bytes, expected %d)", decN, origN)
+		}
+		return nil
+	}
+
+	// AutoDecryptReader reads the V2 header (32 bytes) first, then interprets.
 	// So we need at least 32 + 1 bytes to verify anything meaningful.
 	if encN < 33 {
 		return nil // too small to verify meaningfully
@@ -943,7 +1023,7 @@ func verifyEncryption(origPath, encPath string, f *flags) error {
 		return fmt.Errorf("decrypt for verify: %w", err)
 	}
 
-	decrypted := make([]byte, origN)
+	decrypted := make([]byte, encN)
 	decN, err := io.ReadFull(reader, decrypted)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		return fmt.Errorf("read decrypted: %w", err)
@@ -984,6 +1064,7 @@ func parseFlags(command string) *flags {
 	fs.BoolVar(&f.verbose, "v", false, "verbose output")
 	fs.BoolVar(&f.verbose, "verbose", false, "verbose output")
 	fs.StringVar(&f.logFile, "log", "", "write detailed error log to this file")
+	fs.BoolVar(&f.v3, "v3", false, "enc: write the V3 chunked AES-GCM container (default: V2)")
 
 	_ = fs.Parse(os.Args[2:])
 	return f
@@ -1049,6 +1130,7 @@ Encrypt flags:
   -t, --type <algo>      aesctr (default) | chacha20 | rc4md5
   -n, --enc-name         Encrypt filenames (matches proxy's ConvertRealNameWithSuffix)
   -s, --suffix <str>     Encrypted suffix (default: .bin, "" = none)
+      --v3                Write the new V3 chunked AES-GCM container (default: V2)
   -w, --workers <n>      Parallel workers for batch (default: NumCPU)
       --log <path>       Write detailed error log to file
 
