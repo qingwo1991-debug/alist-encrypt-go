@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -59,13 +60,19 @@ func TestLargePropfindDecryptsEveryName(t *testing.T) {
 	if countResponses(decoded) != n {
 		t.Fatalf("decoded response count=%d want=%d", countResponses(decoded), n)
 	}
+	// href 经 (&url.URL{Path:newPath}).EscapedPath() 输出，中文是 %xx 转义，
+	// 先整体 PathUnescape 再断言明文存在。
+	unescaped, err := url.PathUnescape(decoded)
+	if err != nil {
+		t.Fatalf("PathUnescape: %v", err)
+	}
 	for i := 0; i < n; i++ {
 		plain := fmt.Sprintf("测试文件%06d", i)
-		if !strings.Contains(decoded, plain) {
+		if !strings.Contains(unescaped, plain) {
 			t.Fatalf("plain %q not found in rewrite output at index %d", plain, i)
 		}
 	}
-	if strings.Contains(decoded, "orig_") {
+	if strings.Contains(unescaped, "orig_") {
 		t.Fatalf("unexpected orig_ marker in rewrite: %s", decoded)
 	}
 	if budget.entries != n {
@@ -102,9 +109,13 @@ func TestLargePropfindBudgetExhaustedStillDecrypts(t *testing.T) {
 	if countResponses(decoded) != n {
 		t.Fatalf("decoded count=%d want=%d (budget exhausted but names must not drop)", countResponses(decoded), n)
 	}
+	unescaped, err := url.PathUnescape(decoded)
+	if err != nil {
+		t.Fatalf("PathUnescape: %v", err)
+	}
 	for i := 0; i < n; i++ {
 		plain := fmt.Sprintf("测试文件%06d", i)
-		if !strings.Contains(decoded, plain) {
+		if !strings.Contains(unescaped, plain) {
 			t.Fatalf("name %q missing when budget exhausted", plain)
 		}
 	}
