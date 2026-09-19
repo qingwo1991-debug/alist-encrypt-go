@@ -33,4 +33,3 @@ func TestNormalizeDecryptedListItem(t *testing.T) {
 		}
 	})
 }
-

@@ -104,7 +104,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDA
 		passwdDAO:       passwdDAO,
 		proxyHandler:    NewProxyHandler(cfg, streamProxy, fileDAO, passwdDAO, selector, metaStore),
 		strategyCache:   NewStrategyCache(1000),
-		sizeResolver:    NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		sizeResolver:    NewFileSizeResolver(cfg, fileDAO, metaStore, 20, MinMetaSize(cfg), RedirectMaxHops(cfg)),
 		strategySel:     selector,
 		metaStore:       metaStore,
 		probe:           nil,
@@ -145,6 +145,14 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.handlePassthrough(w, r)
 	default:
 		h.handlePassthrough(w, r)
+	}
+}
+
+// SetSizeResolver replaces the per-handler resolver with a process-level
+// shared one (see ProxyHandler.SetSizeResolver).
+func (h *WebDAVHandler) SetSizeResolver(resolver *FileSizeResolver) {
+	if resolver != nil {
+		h.sizeResolver = resolver
 	}
 }
 

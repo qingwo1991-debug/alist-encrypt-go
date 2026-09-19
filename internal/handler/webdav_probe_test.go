@@ -544,7 +544,7 @@ func newProbeTestHandler(t *testing.T, backendURL string) *WebDAVHandler {
 		passwdDAO:     passwdDAO,
 		streamProxy:   proxy.NewStreamProxy(cfg),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, nil, 1, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, nil, 1, MinMetaSize(cfg), RedirectMaxHops(cfg)),
 		negCache:      newNegativePathCache(0),
 	}
 }

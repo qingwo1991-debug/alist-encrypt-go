@@ -143,7 +143,7 @@ func NewProxyHandler(cfg *config.Config, streamProxy *proxy.StreamProxy, fileDAO
 		client:        proxy.NewClient(cfg),
 		shortClient:   proxy.NewHTTPClientWithTransport(sharedTransport, 10*time.Second),
 		strategyCache: NewStrategyCache(1000),
-		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		sizeResolver:  NewFileSizeResolver(cfg, fileDAO, metaStore, 20, MinMetaSize(cfg), RedirectMaxHops(cfg)),
 		strategySel:   selector,
 		stopCleanup:   make(chan struct{}),
 	}
@@ -162,6 +162,16 @@ func (h *ProxyHandler) Stop() {
 	h.stopCleanupOnce.Do(func() {
 		close(h.stopCleanup)
 	})
+}
+
+// SetSizeResolver replaces the per-handler resolver with a process-level
+// shared one, coalescing probing state (host RTT, circuit breakers, provider
+// meta conflicts, hot cache) across proxy/webdav/probe paths instead of
+// maintaining three independent copies.
+func (h *ProxyHandler) SetSizeResolver(resolver *FileSizeResolver) {
+	if resolver != nil {
+		h.sizeResolver = resolver
+	}
 }
 
 func (h *ProxyHandler) SetProbeScheduler(probe *ProbeScheduler) {

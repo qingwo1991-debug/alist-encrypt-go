@@ -159,10 +159,15 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 		log.Warn().Err(err).Msg("Failed to initialize strategy selector")
 		strategySelector, _ = handler.NewStrategySelector(s.cfg, handler.NewMemoryStrategyStore())
 	}
-	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy, s.store)
+	// 进程级唯一的 Metadata/Size 解析器：proxy/webdav/后台 probe 共用同一份
+	// 探测状态（host RTT、熔断、provider meta 冲突、hot cache、并发预算），
+	// 避免三套相互独立的 HEAD/Range 探测与重复请求。
+	sizeResolver := handler.NewFileSizeResolver(s.cfg, s.fileDAO, metaStore, 20, handler.MinMetaSize(s.cfg), handler.RedirectMaxHops(s.cfg))
+	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy, s.store, sizeResolver)
 	s.probeScheduler = probeScheduler
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	proxyHandler.SetProbeScheduler(probeScheduler)
+	proxyHandler.SetSizeResolver(sizeResolver)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
 	s.alistHandler = alistHandler
 	var dirSyncStore handler.DirSyncStore
@@ -175,6 +180,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	alistHandler.StartDirSyncLoop()
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	webdavHandler.SetProbeScheduler(probeScheduler)
+	webdavHandler.SetSizeResolver(sizeResolver)
 	// WebDAV shares the same dir-sync snapshot store as the HTTP fs/list path so
 	// directory listings on whitelisted encrypted paths read the cache too.
 	webdavHandler.SetDirSyncStore(dirSyncStore)

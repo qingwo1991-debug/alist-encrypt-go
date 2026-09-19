@@ -218,15 +218,22 @@ func (ps *ProbeScheduler) SetRawURLFetcher(f RawURLFetcher) {
 	ps.rawURLFetcher = f
 }
 
-func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy, store *storage.Store) *ProbeScheduler {
+func NewProbeScheduler(cfg *config.Config, fileDAO *dao.FileDAO, metaStore FileMetaStore, stream *proxy.StreamProxy, store *storage.Store, sharedResolver ...*FileSizeResolver) *ProbeScheduler {
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
 	alist := config.AlistServer{}
 	if cfg != nil {
 		alist = cfg.AlistServerSnapshot()
 	}
+	resolver := NewFileSizeResolver(cfg, fileDAO, metaStore, 4, MinMetaSize(cfg), RedirectMaxHops(cfg))
+	if len(sharedResolver) > 0 && sharedResolver[0] != nil {
+		// Use the process-level shared resolver so probing state (host RTT,
+		// circuit breakers, meta conflicts, hot cache, concurrency budget) is
+		// coalesced instead of being duplicated per subsystem.
+		resolver = sharedResolver[0]
+	}
 	ps := &ProbeScheduler{
 		cfg:                    cfg,
-		resolver:               NewFileSizeResolver(cfg, fileDAO, metaStore, 4, getMinMetaSize(cfg), getRedirectMaxHops(cfg)),
+		resolver:               resolver,
 		fileDAO:                fileDAO,
 		metaStore:              metaStore,
 		stream:                 stream,
