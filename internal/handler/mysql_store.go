@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 	"golang.org/x/sync/singleflight"

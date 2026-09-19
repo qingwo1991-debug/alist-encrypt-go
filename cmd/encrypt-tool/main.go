@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 const version = "1.2.0"

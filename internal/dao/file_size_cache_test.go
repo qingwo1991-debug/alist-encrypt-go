@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/storage"
 )
 

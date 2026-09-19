@@ -18,7 +18,7 @@ const segmentPosition = 1000000 // 1MB segments for RC4-MD5
 type RC4MD5 struct {
 	password   string
 	fileSize   int64
-	fileHexKey string    // Store hex key for segment resets
+	fileHexKey string // Store hex key for segment resets
 	key        []byte
 	position   int64
 	i, j       int       // RC4 state indices

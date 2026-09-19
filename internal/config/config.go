@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/rs/zerolog/log"
 )
 

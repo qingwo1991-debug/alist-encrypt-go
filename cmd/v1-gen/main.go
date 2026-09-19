@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 func main() {

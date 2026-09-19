@@ -18,7 +18,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/rs/zerolog/log"
 )
 

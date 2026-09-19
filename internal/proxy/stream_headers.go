@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // Pre-compiled regex for Content-Disposition rewriting (avoids per-request compilation)

@@ -15,7 +15,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/backoff"
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 func TestCircuitBreakerOriginKey(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // ---- old decryptPropfindResponse (git HEAD) as a pure function ----
