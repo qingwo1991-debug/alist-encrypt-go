@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
 	"github.com/rs/zerolog/log"
 )
@@ -690,6 +691,10 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 					passwdInfo *config.PasswdInfo
 				}
 				var tasks []decryptTask
+				// One write transaction for the whole directory instead of one per
+				// entry: builds are collected, cache-refreshed immediately, and
+				// flushed together via PersistFromList after the listing pass.
+				var prepared []*dao.FileInfo
 
 				for i, item := range content {
 					if fileData, ok := item.(map[string]interface{}); ok {
@@ -699,9 +704,11 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 							continue
 						}
 						filePath := path.Join(dirPath, name)
-						h.fileDAO.SetFromAlistResponse(filePath, fileData, rawURLAuthScope(r.Header))
-						if cached, ok := h.fileDAO.Get(filePath); ok && cached != nil && cached.ContentVersion == encryption.ContentVersionV2 && cached.Size > 0 {
-							fileData["size"] = float64(cached.Size)
+						if info := h.fileDAO.PrepareFromAlistResponse(filePath, fileData, rawURLAuthScope(r.Header)); info != nil {
+							prepared = append(prepared, info)
+							if info.ContentVersion == encryption.ContentVersionV2 && info.Size > 0 {
+								fileData["size"] = float64(info.Size)
+							}
 						}
 						if isDir || !allowDecrypt {
 							continue
@@ -814,6 +821,12 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 						}
 					}
 					data["content"] = filtered
+				}
+
+				if len(prepared) > 0 {
+					if err := h.fileDAO.PersistFromList(prepared); err != nil {
+						log.Warn().Err(err).Int("items", len(prepared)).Str("dir", dirPath).Msg("failed to batch-persist directory listing")
+					}
 				}
 			}
 		}

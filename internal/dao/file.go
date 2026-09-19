@@ -213,52 +213,58 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	return &info, true
 }
 
-// Set stores file info
-func (d *FileDAO) Set(info *FileInfo) error {
-	if existing, ok := d.Get(info.Path); ok && existing != nil {
-		if info.EncryptedPath == "" {
-			info.EncryptedPath = existing.EncryptedPath
+// mergeMissingFields carries previously-known fields into an incoming FileInfo
+// (encrypted-path mapping, plaintext-vs-ciphertext size reconciliation, raw-url
+// and sign, content version, header len, nonce, modified time). It mirrors the
+// merge that Set() has always performed, extracted so the batch listing path can
+// reuse the exact same semantics.
+func mergeMissingFields(info *FileInfo, existing *FileInfo) {
+	if existing == nil {
+		return
+	}
+	if info.EncryptedPath == "" {
+		info.EncryptedPath = existing.EncryptedPath
+	}
+	if info.Name == "" {
+		info.Name = existing.Name
+	}
+	if info.Size <= 0 {
+		info.Size = existing.Size
+	} else {
+		info.Size = mergeCachedFileSize(existing, info)
+	}
+	if info.CiphertextSize <= 0 {
+		info.CiphertextSize = existing.CiphertextSize
+	}
+	if info.ContentVersion <= 0 {
+		info.ContentVersion = existing.ContentVersion
+	}
+	if info.HeaderLen <= 0 {
+		info.HeaderLen = existing.HeaderLen
+	}
+	if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
+		info.NonceField = append([]byte(nil), existing.NonceField...)
+	}
+	if info.RawURL == "" {
+		info.RawURL = existing.RawURL
+		info.RawURLAuthScope = existing.RawURLAuthScope
+		if info.Sign == "" {
+			info.Sign = existing.Sign
 		}
-		if info.Name == "" {
-			info.Name = existing.Name
-		}
-		if info.Size <= 0 {
-			info.Size = existing.Size
-		} else {
-			info.Size = mergeCachedFileSize(existing, info)
-		}
-		if info.CiphertextSize <= 0 {
-			info.CiphertextSize = existing.CiphertextSize
-		}
-		if info.ContentVersion <= 0 {
-			info.ContentVersion = existing.ContentVersion
-		}
-		if info.HeaderLen <= 0 {
-			info.HeaderLen = existing.HeaderLen
-		}
-		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
-			info.NonceField = append([]byte(nil), existing.NonceField...)
-		}
-		if info.RawURL == "" {
-			info.RawURL = existing.RawURL
-			info.RawURLAuthScope = existing.RawURLAuthScope
-			if info.Sign == "" {
-				info.Sign = existing.Sign
-			}
-			if info.UpstreamFetchedAt.IsZero() {
-				info.UpstreamFetchedAt = existing.UpstreamFetchedAt
-			}
-		}
-		if info.Modified.IsZero() {
-			info.Modified = existing.Modified
+		if info.UpstreamFetchedAt.IsZero() {
+			info.UpstreamFetchedAt = existing.UpstreamFetchedAt
 		}
 	}
+	if info.Modified.IsZero() {
+		info.Modified = existing.Modified
+	}
+}
 
-	// Store in unified path cache
-	now := time.Now()
+// cacheInfo publishes the given FileInfo into the in-memory unified path cache.
+func (d *FileDAO) cacheInfo(info *FileInfo) {
 	upstreamFetchedAt := info.UpstreamFetchedAt
 	if upstreamFetchedAt.IsZero() {
-		upstreamFetchedAt = now
+		upstreamFetchedAt = time.Now()
 	}
 	info.UpstreamFetchedAt = upstreamFetchedAt
 	entry := &PathEntry{
@@ -280,8 +286,11 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		entry.EncryptedPath = info.Path
 	}
 	d.pathCache.Set(entry, 24*time.Hour)
+}
 
-	// Persist: prefer MySQL if available, else BoltDB.
+// persistInfo writes FileInfo to storage: MySQL write-behind when configured,
+// otherwise a single BoltDB SetJSON.
+func (d *FileDAO) persistInfo(info *FileInfo) error {
 	if d.fileMetaWriter != nil {
 		if writeErr := d.fileMetaWriter.UpsertFileMeta(info); writeErr != nil {
 			// Log but don't fail — data is still in the in-memory cache
@@ -291,6 +300,15 @@ func (d *FileDAO) Set(info *FileInfo) error {
 		return nil
 	}
 	return d.store.SetJSON(storage.BucketFileInfo, info.Path, info)
+}
+
+// Set stores file info
+func (d *FileDAO) Set(info *FileInfo) error {
+	if existing, ok := d.Get(info.Path); ok && existing != nil {
+		mergeMissingFields(info, existing)
+	}
+	d.cacheInfo(info)
+	return d.persistInfo(info)
 }
 
 // List iterates every FileInfo persisted in BoltDB. It is used to back the
@@ -609,13 +627,12 @@ func (d *FileDAO) cleanupPathCache() {
 	}
 }
 
-// SetFromAlistResponse parses and stores file info from Alist API response
-func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{}, rawURLAuthScope string) error {
+// parseAlistResponse builds a FileInfo from a raw Alist fs/list item map.
+func parseAlistResponse(path string, data map[string]interface{}, rawURLAuthScope string) *FileInfo {
 	info := &FileInfo{
 		Path:              path,
 		UpstreamFetchedAt: time.Now(),
 	}
-
 	if name, ok := data["name"].(string); ok {
 		info.Name = name
 	}
@@ -639,8 +656,72 @@ func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{},
 			info.Modified = t
 		}
 	}
+	return info
+}
 
-	return d.Set(info)
+// SetFromAlistResponse parses and stores file info from Alist API response
+func (d *FileDAO) SetFromAlistResponse(path string, data map[string]interface{}, rawURLAuthScope string) error {
+	return d.Set(parseAlistResponse(path, data, rawURLAuthScope))
+}
+
+// PrepareFromAlistResponse parses an Alist list item into a FileInfo and
+// refreshes the in-memory unified path cache WITHOUT persisting anything. The
+// returned FileInfo must be handed to PersistPrepared once the caller finished
+// a listing so a whole directory lands in a single write transaction instead of
+// one transaction per entry.
+func (d *FileDAO) PrepareFromAlistResponse(path string, data map[string]interface{}, rawURLAuthScope string) *FileInfo {
+	info := parseAlistResponse(path, data, rawURLAuthScope)
+	if existing, ok := d.Get(path); ok && existing != nil {
+		mergeMissingFields(info, existing)
+	}
+	d.cacheInfo(info)
+	return info
+}
+
+// PersistFromList flushes FileInfo items previously produced by
+// PrepareFromAlistResponse. The BoltDB path writes every item inside ONE write
+// transaction (a 5000-entry listing therefore issues one transaction per list,
+// not per entry); the MySQL path reuses its existing write-behind buffer.
+func (d *FileDAO) PersistFromList(infos []*FileInfo) error {
+	if d == nil {
+		return nil
+	}
+	count := 0
+	for _, info := range infos {
+		if info != nil && info.Path != "" {
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	if d.fileMetaWriter != nil {
+		var firstErr error
+		for _, info := range infos {
+			if info == nil || info.Path == "" {
+				continue
+			}
+			if err := d.fileMetaWriter.UpsertFileMeta(info); err != nil && firstErr == nil {
+				firstErr = err
+				log.Warn().Err(err).Str("path", info.Path).Msg("MySQL file meta batch write failed (cached in memory)")
+			}
+		}
+		return firstErr
+	}
+	if d.store == nil {
+		return nil
+	}
+	return d.store.UpdateBucket(storage.BucketFileInfo, func(tx *storage.BucketTx) error {
+		for _, info := range infos {
+			if info == nil || info.Path == "" {
+				continue
+			}
+			if err := tx.SetJSON(info.Path, info); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // PasswdDAO handles password configuration lookup

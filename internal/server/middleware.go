@@ -7,9 +7,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/auth"
 	"github.com/alist-encrypt-go/internal/trace"
@@ -30,23 +33,50 @@ func TraceMiddleware() gin.HandlerFunc {
 	}
 }
 
-// LoggerMiddleware logs HTTP requests using the new trace format
+// 访问日志采样：成功请求按 1/50 记录；慢请求（>=1s）与 4xx/5xx 全量记录，
+// 避免高频成功请求（磁盘/文件列表/医学请求）刷屏磁盘日志。
+const (
+	accessLogSuccessSampleRate = 50
+	accessLogSlowThreshold     = time.Second
+)
+
+// LoggerMiddleware logs HTTP requests via zerolog with sampling.
 func LoggerMiddleware() gin.HandlerFunc {
+	var sampled uint64
 	return func(c *gin.Context) {
 		start := time.Now()
 
 		// Process request
 		c.Next()
 
-		reqID := trace.GetRequestID(c.Request.Context())
-		pathTag := trace.GetPathTag(c.Request.Context())
 		duration := time.Since(start)
+		status := c.Writer.Status()
+		slow := duration >= accessLogSlowThreshold
 
-		// Use new format: [timestamp] [req-xxx] [path_tag] [request] details
-		ts := time.Now().Format("2006-01-02T15:04:05")
-		fmt.Printf("%s [%s] [%s] [request] %s %s status=%d bytes=%d duration=%v\n",
-			ts, reqID, pathTag, c.Request.Method, c.Request.URL.Path,
-			c.Writer.Status(), c.Writer.Size(), duration)
+		// 成功且不慢的请求按固定比例采样；慢/错误全量。
+		if status < 400 && !slow {
+			if (atomic.AddUint64(&sampled, 1)-1)%accessLogSuccessSampleRate != 0 {
+				return
+			}
+		}
+
+		var ev *zerolog.Event
+		switch {
+		case status >= 500:
+			ev = log.Error()
+		case status >= 400 || slow:
+			ev = log.Warn()
+		default:
+			ev = log.Info()
+		}
+		ev.Str("req_id", trace.GetRequestID(c.Request.Context()))
+		ev.Str("path_tag", trace.GetPathTag(c.Request.Context()))
+		ev.Str("method", c.Request.Method)
+		ev.Str("path", c.Request.URL.Path)
+		ev.Int("status", status)
+		ev.Int64("bytes_out", int64(c.Writer.Size()))
+		ev.Float64("duration_ms", float64(duration.Microseconds())/1000.0)
+		ev.Msg("request")
 	}
 }
 

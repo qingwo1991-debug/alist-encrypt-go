@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -27,6 +28,25 @@ type Store struct {
 	path      string
 	closeOnce sync.Once
 	closeErr  error
+	// writeTxns counts completed write transactions. It exists so batch-write
+	// paths (e.g. directory listings) can assert the transaction budget they
+	// target rather than blindly trusting benchmarks.
+	writeTxns atomic.Uint64
+}
+
+// update runs fn inside a single BoltDB write transaction and counts it.
+func (s *Store) update(fn func(*bolt.Tx) error) error {
+	s.writeTxns.Add(1)
+	return s.db.Update(fn)
+}
+
+// WriteTxnCount returns the cumulative number of write transactions issued
+// against this store. Exported for tests and observability.
+func (s *Store) WriteTxnCount() uint64 {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	return s.writeTxns.Load()
 }
 
 // BucketTx exposes scoped operations within a single BoltDB write transaction.
@@ -61,7 +81,7 @@ func NewStore(dataDir string) (*Store, error) {
 }
 
 func (s *Store) initBuckets() error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		buckets := [][]byte{BucketUsers, BucketPasswd, BucketConfig, BucketFileInfo, BucketFileSize, BucketDirSync, BucketStats}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
@@ -102,7 +122,7 @@ func (s *Store) Get(bucket []byte, key string) ([]byte, error) {
 
 // Set stores a value in a bucket
 func (s *Store) Set(bucket []byte, key string, value []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)
@@ -113,7 +133,7 @@ func (s *Store) Set(bucket []byte, key string, value []byte) error {
 
 // Delete removes a key from a bucket
 func (s *Store) Delete(bucket []byte, key string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)
@@ -124,7 +144,7 @@ func (s *Store) Delete(bucket []byte, key string) error {
 
 // UpdateBucket runs multiple operations against one bucket in a single write transaction.
 func (s *Store) UpdateBucket(bucket []byte, fn func(*BucketTx) error) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)

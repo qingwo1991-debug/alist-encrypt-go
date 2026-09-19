@@ -47,6 +47,7 @@ type Server struct {
 	probeCancel        context.CancelFunc
 	probeWG            sync.WaitGroup
 	statsExportHandler *handler.StatsExportHandler
+	statsShutdown      func() // 停服前冲刷统计（recorder.FlushSessions + store.Stop）
 	rangeCompatStore   proxy.RangeCompatStore
 }
 
@@ -188,6 +189,11 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	statsHandler := handler.NewStatsHandler(s.cfg, s.fileDAO, alistHandler, proxyHandler, webdavHandler, s.streamProxy, startTime)
 	statsHandler.SetStatsStore(statsStore)
 	statsHandler.SetStatsFlusher(statsRecorder.FlushSessions)
+	// 停服前：先落库进行中的播放会话，再停止后台 writer 并冲刷排队中的统计事件。
+	s.statsShutdown = func() {
+		statsRecorder.FlushSessions()
+		statsStore.Stop()
+	}
 	s.proxyHandler = proxyHandler
 	s.webdavHandler = webdavHandler
 
@@ -610,6 +616,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.fileDAO != nil {
 		s.fileDAO.Stop()
+	}
+
+	// Flush playback statistics: recorder drains open sessions, store drains its
+	// pending queue and stops the background writer.
+	if s.statsShutdown != nil {
+		s.statsShutdown()
 	}
 
 	// Flush learned range-state. For the file-backed store this drains
