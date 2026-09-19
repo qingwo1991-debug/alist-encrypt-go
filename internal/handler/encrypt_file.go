@@ -133,7 +133,8 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 		SrcPath   string `json:"folderPath"` // match old API field name
 		DstPath   string `json:"outPath"`
 		EncName   bool   `json:"encName"`
-		V3        bool   `json:"v3"` // enc: use V3 chunked AEAD container
+		V3        bool   `json:"v3"` // enc: use V3 chunked AEAD container (kept for compat)
+		V2        bool   `json:"v2"` // enc: explicitly write the legacy V2 container (default: V3)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondAPIError(w, 500, "Invalid request")
@@ -152,6 +153,14 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 
 	if req.EncType == "" {
 		req.EncType = "aesctr"
+	}
+
+	// The default format for new files is V3 (chunked AEAD); only an explicit
+	// v2=true opt-out falls back to the legacy V2 container.
+	if req.V2 {
+		req.V3 = false
+	} else {
+		req.V3 = true
 	}
 
 	info, err := os.Stat(req.SrcPath)

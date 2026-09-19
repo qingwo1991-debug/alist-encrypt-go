@@ -97,7 +97,8 @@ type flags struct {
 	input        string
 	output       string
 	stdout       bool   // enc only: write encrypted bytes to stdout without creating a file
-	v3           bool   // enc only: write the new V3 chunked AES-GCM container
+	v3           bool   // enc only: write the new V3 chunked AES-GCM container (default)
+	v2           bool   // enc only: force the legacy V2 container for compatibility
 	encType      string // "auto" for dec; "aesctr"/"chacha20"/"rc4md5" for enc
 	encName      bool   // enc only: encrypt filenames
 	suffix       string // enc only: suffix to append
@@ -212,7 +213,7 @@ func runEncryptStdout(f *flags, fileSize int64) {
 	}
 	defer in.Close()
 	var reader io.Reader
-	if f.v3 {
+	if f.useV3() {
 		ce, err := encryption.NewV3ContentEncryptor(0)
 		if err != nil {
 			fatal("create v3 encryptor: %v", err)
@@ -879,7 +880,7 @@ func processOne(srcPath, dstPath string, f *flags, command string) (int64, error
 
 	if command == "enc" {
 		var reader io.Reader
-		if f.v3 {
+		if f.useV3() {
 			ce, err := encryption.NewV3ContentEncryptor(0)
 			if err != nil {
 				return 0, fmt.Errorf("create v3 encryptor: %w", err)
@@ -1064,11 +1065,23 @@ func parseFlags(command string) *flags {
 	fs.BoolVar(&f.verbose, "v", false, "verbose output")
 	fs.BoolVar(&f.verbose, "verbose", false, "verbose output")
 	fs.StringVar(&f.logFile, "log", "", "write detailed error log to this file")
-	fs.BoolVar(&f.v3, "v3", false, "enc: write the V3 chunked AES-GCM container (default: V2)")
+	fs.BoolVar(&f.v3, "v3", true, "enc: write the V3 chunked AES-GCM container (default, V3)")
+	fs.BoolVar(&f.v2, "v2", false, "enc: write the legacy V2 container for compatibility instead of V3")
+	fs.BoolVar(&f.v2, "legacy", false, "alias for --v2")
 
 	_ = fs.Parse(os.Args[2:])
 	return f
 }
+
+// loadPassword resolves the password source after flag parsing.
+//
+// Password files commonly end with one editor-added newline. Remove exactly
+// one trailing LF or CRLF while preserving every other byte, including leading
+// and trailing spaces that may intentionally be part of the password.
+// useV3 reports whether a new encryption should use the V3 chunked AEAD
+// container. V3 is the default; only an explicit --v2/--legacy opt-out
+// switches back to the legacy V2 container.
+func (f *flags) useV3() bool { return f.v3 && !f.v2 }
 
 // loadPassword resolves the password source after flag parsing.
 //
