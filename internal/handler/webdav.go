@@ -19,6 +19,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
@@ -64,7 +65,7 @@ type webdavRawURLResolution struct {
 	RawURL        string
 	Source        string
 	StatusCode    int
-	FailureReason string
+	FailureReason errors.FailureReason
 }
 
 // Stats returns WebDAV handler statistics
@@ -520,7 +521,7 @@ func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, r
 			Str("category", "webdav_get").
 			Str("display_path", displayPath).
 			Int("status", result.StatusCode).
-			Str("reason", result.FailureReason).
+			Str("reason", result.FailureReason.String()).
 			Str("source", result.Source).
 			Msg("raw_url async warmup failed")
 	}()

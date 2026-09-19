@@ -10,6 +10,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
@@ -39,7 +40,7 @@ func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displ
 		cacheResolvedRawURL(fileDAO, displayPath, realPath, result.RawURL, result.Size, rawURLAuthScope(authHeaders))
 		return result
 	}
-	return rawURLFetchResult{FailureReason: "raw_url_empty"}
+	return rawURLFetchResult{FailureReason: errors.ReasonRawURLEmpty}
 }
 
 func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL string, authHeaders http.Header) rawURLFetchResult {
@@ -62,7 +63,7 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 		for redirect := 0; redirect <= maxHops; redirect++ {
 			req, err := http.NewRequestWithContext(ctx, method, currentURL, nil)
 			if err != nil {
-				return rawURLFetchResult{FailureReason: "raw_url_redirect_request"}
+				return rawURLFetchResult{FailureReason: errors.ReasonRawURLRedirectRequest}
 			}
 			copyAuthHeadersConditional(req, authHeaders, origHost, hostOfURL(currentURL))
 			if method == http.MethodGet {
@@ -71,18 +72,18 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 
 			resp, err := client.Do(req)
 			if err != nil {
-				return rawURLFetchResult{FailureReason: "raw_url_redirect:" + err.Error()}
+				return rawURLFetchResult{FailureReason: errors.FailureReason("raw_url_redirect:" + err.Error())}
 			}
 
 			if isRedirectStatusCode(resp.StatusCode) {
 				location := strings.TrimSpace(resp.Header.Get("Location"))
 				resp.Body.Close()
 				if location == "" {
-					return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_redirect_location"}
+					return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLRedirectLocation}
 				}
 				nextURL := resolveRedirectURL(currentURL, location)
 				if nextURL == "" {
-					return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: "raw_url_redirect_invalid"}
+					return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLRedirectInvalid}
 				}
 				currentURL = nextURL
 				redirected = true
@@ -106,7 +107,7 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 			break
 		}
 	}
-	return rawURLFetchResult{FailureReason: "raw_url_empty"}
+	return rawURLFetchResult{FailureReason: errors.ReasonRawURLEmpty}
 }
 
 func cacheResolvedRawURL(fileDAO *dao.FileDAO, displayPath, realPath, rawURL string, size int64, authScope string) {

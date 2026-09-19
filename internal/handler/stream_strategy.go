@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
 
@@ -218,7 +219,7 @@ func (s *StrategySelector) RecordSuccess(provider string, strategy proxy.StreamS
 	_ = s.store.Set(provider, state)
 }
 
-func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamStrategy, reason string) {
+func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamStrategy, reason errors.FailureReason) {
 	provider = normalizeStrategyProviderKey(provider)
 	unlock := s.lockProvider(provider)
 	defer unlock()
@@ -228,7 +229,7 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 	state := s.ensureState(provider)
 	now := time.Now()
 	state.TotalFailures++
-	state.LastFailure = reason
+	state.LastFailure = reason.String()
 	state.LastStrategy = strategy
 	order := s.cfg.ProviderFallbacks
 	preferredIndex := indexOfStrategy(order, state.Preferred)
@@ -270,7 +271,7 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 			state.SuccessStreak = 0
 			state.LastDowngrade = now
 			state.CooldownUntil = now.Add(s.cfg.Cooldown)
-			s.appendEvent(provider, prev, state.Preferred, reason)
+			s.appendEvent(provider, prev, state.Preferred, reason.String())
 		}
 	} else if preferredIndex > 0 && strategyIndex == preferredIndex-1 && !state.CooldownUntil.After(now) {
 		// The faster recovery probe failed. Keep the known-good preferred
@@ -282,18 +283,18 @@ func (s *StrategySelector) RecordFailure(provider string, strategy proxy.StreamS
 	_ = s.store.Set(provider, state)
 }
 
-func normalizeFailureReason(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return "unknown"
+func normalizeFailureReason(reason errors.FailureReason) errors.FailureReason {
+	s := strings.TrimSpace(reason.String())
+	if s == "" {
+		return errors.ReasonUnknown
 	}
-	return reason
+	return errors.FailureReason(s)
 }
 
-func (s *StrategySelector) recordReason(reason string) {
+func (s *StrategySelector) recordReason(reason errors.FailureReason) {
 	s.obsMu.Lock()
 	defer s.obsMu.Unlock()
-	s.reasonCounts[reason]++
+	s.reasonCounts[reason.String()]++
 }
 
 func (s *StrategySelector) appendEvent(provider string, from, to proxy.StreamStrategy, reason string) {
@@ -311,7 +312,7 @@ func (s *StrategySelector) appendEvent(provider string, from, to proxy.StreamStr
 	}
 }
 
-func isNonStrategyFailure(reason string) bool {
+func isNonStrategyFailure(reason errors.FailureReason) bool {
 	switch reason {
 	case "timeout", "network_error", "client_disconnect", "upstream_4xx", "upstream_5xx", "range_invalid",
 		"context_canceled", "broken_pipe", "connection_reset", "stream_error", "unknown", "raw_url_empty":

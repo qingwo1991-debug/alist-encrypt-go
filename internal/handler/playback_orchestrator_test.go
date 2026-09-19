@@ -15,6 +15,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/encryption"
+	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 )
@@ -1060,7 +1061,7 @@ func TestInvalidatePlaybackStatePreservesPlaybackMetaOnClientAbort(t *testing.T)
 		t.Fatalf("seed file info: %v", err)
 	}
 
-	for _, reason := range []string{"client_disconnect", "network_error"} {
+	for _, reason := range []errors.FailureReason{errors.ReasonClientDisconnect, errors.ReasonNetworkError} {
 		invalidatePlaybackState(decryptPlaybackRequest{
 			FileDAO:          fileDAO,
 			ConsumerScenario: consumerScenarioWebDAV,
