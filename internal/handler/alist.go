@@ -762,7 +762,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	scopeKey := buildDirScopeKey(dirPath, authHash)
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
-		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 {
+		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot", page, perPage)
@@ -790,11 +790,14 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		}
 		// Cross-session reuse: a rotated/new auth scope that misses its own
 		// snapshot can still serve another of this same directory's fresh
-		// request_fill snapshots (same contents, different session hash),
+		// request_fill snapshots (same creds, different session hash),
 		// avoiding a ~1.5s rebuild per new token. Only request_fill rows are
 		// eligible — background scan snapshots may carry a privileged scan
-		// account and must not be served from this public endpoint.
-		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath)); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
+		// account and must not be served from this public endpoint. The lookup
+		// is additionally filtered by the caller's auth hash AND provider host
+		// so a higher-privileged account's listing is never served to a lower
+		// one, and snapshots from another upstream URL are never reused.
+		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath), authHash, h.cfg.GetAlistURL()); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && h.snapshotScopeMatches(snap, authHash) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					h.serveSnapshot(w, snap, "snapshot-shared", page, perPage)
@@ -820,12 +823,14 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 
 	// Cold path (no local snapshot): coalesce concurrent misses for this same
 	// directory into ONE shared full upstream listing via singleflight keyed by
-	// the dir path (auth-agnostic, so different sessions/tokens share the fetch).
-	// The shared full payload is then paginated per caller so every client keeps
-	// its own page window contract. A full (per_page=5000) listing is persisted
-	// once by the flight leader; the async refresh goroutine is not needed for
-	// the cold path because the shared full payload IS stored immediately.
-	v, flightErr, _ := h.liveListGroup.Do(normalizeDirPath(dirPath), func() (interface{}, error) {
+	// the auth-scoped directory key (path + auth hash). This keeps the
+	// thundering-herd optimization (N callers with the same credential fetch
+	// once) while never letting a higher-privileged account's listing be served
+	// to a different credential's callers, and keeps the persisted snapshot in
+	// the correct scope for every joiner. The shared full payload is then
+	// paginated per caller so every client keeps its own page window contract.
+	// A full (per_page=5000) listing is persisted once by the flight leader.
+	v, flightErr, _ := h.liveListGroup.Do(scopeKey, func() (interface{}, error) {
 		// Build a detached request so no single client disconnect can abort the
 		// shared flight (which would revive the thundering herd for the waiters).
 		flightCtx := h.dirSyncCtx

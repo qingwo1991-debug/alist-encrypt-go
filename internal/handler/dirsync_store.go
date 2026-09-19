@@ -59,7 +59,11 @@ type DirSyncStatus struct {
 
 type DirSyncStore interface {
 	GetSnapshot(ctx context.Context, scopeKey string) (*DirListSnapshot, bool, error)
-	GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath string) (*DirListSnapshot, bool, error)
+	// GetRequestFilledSnapshotByDisplay serves a warm request_fill snapshot for
+	// the display path. It is scoped by the caller's auth hash and the
+	// configured provider host so a higher-privileged account's (or another
+	// upstream's) listing is never reused across access scopes.
+	GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath, authHash, providerHost string) (*DirListSnapshot, bool, error)
 	UpsertSnapshot(ctx context.Context, snap DirListSnapshot) error
 	DeleteSnapshot(ctx context.Context, scopeKey string) error
 	// SetSnapshotSyncing atomically transitions a snapshot's sync_state so a
@@ -80,7 +84,7 @@ type BoltDirSyncStore struct {
 // GetRequestFilledSnapshotByDisplay supports cross-session warm-cache reuse.
 // The bolt backend stores snapshots keyed by scope key only, so it cannot
 // enumerate by display path; return no result and let the live path rebuild.
-func (s *BoltDirSyncStore) GetRequestFilledSnapshotByDisplay(_ context.Context, _ string) (*DirListSnapshot, bool, error) {
+func (s *BoltDirSyncStore) GetRequestFilledSnapshotByDisplay(_ context.Context, _, _, _ string) (*DirListSnapshot, bool, error) {
 	return nil, false, nil
 }
 
@@ -241,8 +245,8 @@ func (s *MySQLDirSyncStore) GetSnapshot(ctx context.Context, scopeKey string) (*
 	return dirSnapshotRecordToSnapshot(rec), true, nil
 }
 
-func (s *MySQLDirSyncStore) GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath string) (*DirListSnapshot, bool, error) {
-	rec, ok, err := s.store.GetRequestFilledDirSnapshotByDisplay(ctx, displayPath)
+func (s *MySQLDirSyncStore) GetRequestFilledSnapshotByDisplay(ctx context.Context, displayPath, authHash, providerHost string) (*DirListSnapshot, bool, error) {
+	rec, ok, err := s.store.GetRequestFilledDirSnapshotByDisplay(ctx, displayPath, authHash, providerHost)
 	if err != nil || !ok || rec == nil {
 		return nil, ok, err
 	}

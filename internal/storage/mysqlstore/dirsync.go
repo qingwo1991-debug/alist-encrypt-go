@@ -31,19 +31,21 @@ func (s *Store) GetDirSnapshot(ctx context.Context, scopeKey string) (*DirSnapsh
 }
 
 // GetRequestFilledDirSnapshotByDisplay returns the most recently synced
-// request_fill snapshot for a display path regardless of auth scope. Callers
-// use it to serve a warm cache to a different/rotated session of the same
-// directory, avoiding a full rebuild per new token. Only source_mode
-// 'request_fill' rows are eligible (they carry the caller's own view, unlike
-// background scan snapshots which may use a privileged scan account).
-func (s *Store) GetRequestFilledDirSnapshotByDisplay(ctx context.Context, displayPath string) (*DirSnapshotRecord, bool, error) {
+// request_fill snapshot for a display path that ALSO matches the caller's auth
+// scope hash and provider host. The scope filter is deliberate: a snapshot
+// persisted by a higher-privileged account (or a different configured
+// upstream) must never be served to a different access scope, even when the
+// directory listing contents would be identical. A rotated token of the SAME
+// credential yields the same auth hash, so warm reuse across sessions still
+// works; different credentials get their own (fresh) snapshot rebuild.
+func (s *Store) GetRequestFilledDirSnapshotByDisplay(ctx context.Context, displayPath, authScopeHash, providerHost string) (*DirSnapshotRecord, bool, error) {
 	if s == nil {
 		return nil, false, nil
 	}
 	// Prefer the fullest recent snapshot for the display path: a page-windowed
 	// request_fill row (smallest item_count) must never mask the full directory
 	// that a concurrent full listing persisted. Ties still favor the newest.
-	return s.getAnySnapshotWhere(ctx, "display_path=? AND is_active=1 AND source_mode='request_fill' AND item_count>0 ORDER BY item_count DESC, last_sync_at DESC, updated_at DESC LIMIT 1", displayPath)
+	return s.getAnySnapshotWhere(ctx, "display_path=? AND is_active=1 AND source_mode='request_fill' AND item_count>0 AND auth_scope_hash=? AND provider_host=? ORDER BY item_count DESC, last_sync_at DESC, updated_at DESC LIMIT 1", displayPath, authScopeHash, providerHost)
 }
 
 func (s *Store) getAnySnapshotWhere(ctx context.Context, where string, args ...interface{}) (*DirSnapshotRecord, bool, error) {

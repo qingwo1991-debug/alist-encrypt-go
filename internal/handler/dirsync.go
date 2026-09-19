@@ -243,6 +243,26 @@ func listItemBelongsToDir(dirPath, childPath, name string) bool {
 	return name == "" || path.Base(childPath) == name
 }
 
+// snapshotScopeMatches asserts a cached snapshot belongs to the caller's auth
+// scope and to the currently-configured upstream host. The listing scope key
+// already carries the credential hash, but a snapshot can outlive a config
+// switch (provider URL change or credential rotation), so the caller double
+// checks before serving. This is the access-scope part of the listing key:
+// provider ID + normalized path + scope hash (rule version is validated
+// separately, see validateSnapshotForDir).
+func (h *AlistHandler) snapshotScopeMatches(snap *DirListSnapshot, authHash string) bool {
+	if snap == nil || h == nil || h.cfg == nil {
+		return false
+	}
+	if authHash != "" && snap.AuthScopeHash != "" && snap.AuthScopeHash != authHash {
+		return false
+	}
+	if snap.ProviderHost != "" && snap.ProviderHost != h.cfg.GetAlistURL() {
+		return false
+	}
+	return true
+}
+
 func validateSnapshotForDir(dirPath string, snap *DirListSnapshot) (bool, string) {
 	if snap == nil {
 		return false, "snapshot missing"

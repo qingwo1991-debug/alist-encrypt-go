@@ -47,6 +47,7 @@ type Server struct {
 	probeCancel        context.CancelFunc
 	probeWG            sync.WaitGroup
 	statsExportHandler *handler.StatsExportHandler
+	rangeCompatStore   proxy.RangeCompatStore
 }
 
 // New creates a new server instance
@@ -134,19 +135,24 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	strategyStore := handler.StrategyStore(handler.NewMemoryStrategyStore())
 	var metaStore handler.FileMetaStore
 
-	// Initialize range compatibility store: MySQL > file > memory
-	rangeStore := s.initRangeCompatStore()
-
+	// Initialize range compatibility store: MySQL > file > memory. The active
+	// store is retained on the Server so Shutdown can drain its buffered writes.
+	var rangeStore proxy.RangeCompatStore
 	if s.mysqlStore != nil {
 		strategyStore = handler.NewMySQLStrategyStore(s.mysqlStore)
 		metaStore = handler.NewMySQLFileMetaStore(s.mysqlStore)
-		s.streamProxy.SetRangeCompatStore(handler.NewMySQLRangeCompatStore(s.mysqlStore))
+		rangeStore = handler.NewMySQLRangeCompatStore(s.mysqlStore)
+		s.streamProxy.SetRangeCompatStore(rangeStore)
 		if err := migrateStrategyStore(s.cfg, strategyStore); err != nil {
 			log.Warn().Err(err).Msg("Failed to migrate strategy store JSON")
 		}
-	} else if rangeStore != nil {
-		s.streamProxy.SetRangeCompatStore(rangeStore)
+	} else {
+		if fileRange := s.initRangeCompatStore(); fileRange != nil {
+			rangeStore = fileRange
+			s.streamProxy.SetRangeCompatStore(rangeStore)
+		}
 	}
+	s.rangeCompatStore = rangeStore
 	strategySelector, err := handler.NewStrategySelector(s.cfg, strategyStore)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to initialize strategy selector")
@@ -604,6 +610,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.fileDAO != nil {
 		s.fileDAO.Stop()
+	}
+
+	// Flush learned range-state. For the file-backed store this drains
+	// buffered writes so the tail of range-learning survives shutdown.
+	if s.rangeCompatStore != nil {
+		if err := s.rangeCompatStore.Close(); err != nil {
+			lastErr = err
+		}
 	}
 
 	if s.store != nil {
