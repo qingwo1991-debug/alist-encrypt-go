@@ -147,6 +147,12 @@ const (
 	// 解析后直连（已有），而非扩大窗口。
 	firstFrameWindowBytes     int64 = 2 * 1024 * 1024
 	firstFrameStartSlackBytes int64 = 1024
+
+	// mobileRawURLResolveTimeout 移动端本地元数据 resolve 的最大等待时间。
+	// 手机本地 alist 需要出网向存储端拿 CDN 签名元数据时可能很慢/超时。
+	// 用短窗口兜底，让播放路径快速回落内部 /dav → 302 → /redirect 解码链，
+	// 避免播放器首请求被拖到上游默认（60s+）超时。
+	mobileRawURLResolveTimeout = 2500 * time.Millisecond
 )
 
 // isFirstFrameRangeHint deliberately mirrors the server playback policy:
@@ -395,6 +401,17 @@ func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHea
 	defer func() {
 		p.debugf("play", "metadata resolve elapsed_ms=%d", time.Since(resolveStarted).Milliseconds())
 	}()
+	// 元数据 resolve 是播放路径上的前置步骤，绝不能拖长到上游 http.Client
+	// 的默认超时（UpstreamTimeoutSeconds 最高可到 600s）。移动端本地 alist
+	// 出网拿 CDN 元数据时，一次慢/卡会直接让播放器首请求等待超时。
+	// 这里给 resolve 一个明确的短窗口，超时立即返回 "" 让调用方走内部
+	// /dav → 302 → /redirect 解码链，保证首帧请求快速有响应。
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, mobileRawURLResolveTimeout)
+	defer cancel()
 	apiPath := encryptedDAVPath(encryptedPath)
 	apiPath = strings.TrimPrefix(apiPath, "/dav")
 	if apiPath == "" {
