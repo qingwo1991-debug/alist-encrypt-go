@@ -4397,10 +4397,14 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// 块的顺序读取），若命中文件缓存的签名 rawURL → 直连 CDN；否则再用一次严格
 	// fs/get 解析并回填缓存。
 	//
-	// 注意：只对首帧命中生效。普通 seek（大偏移）保持原有 alist /dav 转发链路，
-	// 因为签名 rawURL 可能本身带 Range/Bearer 限制，跨 seek 复用有 416 风险，
-	// 这会影响播放器 seek 的正确性，属于改动前就成立的行为，保持不动。
-	if r.Method == http.MethodGet && encPath != nil && isFirstFrameRangeHint(r.Method, clientRangeHeader) {
+	// 启动全量 GET（无 Range 的 GET，多数播放器首次探测的请求）同样优先直连：
+	// 与服务器端 webdav.go 的 startupFullGET 策略保持一致，砍掉 internal /dav
+	// 一跳，降低首帧延迟与初次加载失败概率（特别是 302→/redirect 断链场景）。
+	//
+	// 注意：普通 seek（大偏移）保持原有 alist /dav 转发链路，因为签名
+	// rawURL 可能本身带 Range/Bearer 限制，跨 seek 复用有 416 风险。
+	startupFullGET := r.Method == http.MethodGet && clientRangeHeader == ""
+	if r.Method == http.MethodGet && encPath != nil && (isFirstFrameRangeHint(r.Method, clientRangeHeader) || startupFullGET) {
 		var rawURL string
 		if cached, ok := p.loadFileCache(filePath); ok {
 			// Older cache entries may contain the stable /dav fallback. Treat
