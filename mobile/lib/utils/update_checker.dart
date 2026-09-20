@@ -122,7 +122,8 @@ class UpdateChecker {
     return result > 0;
   }
 
-  String getApkDownloadUrl() {
+  String getApkDownloadUrl({String? abi}) {
+    final targetABI = (abi == null || abi.isEmpty) ? _systemABI : abi;
     final assets = (data['assets'] as List?) ?? const [];
     final tag = getTag();
     String? fallback;
@@ -131,7 +132,7 @@ class UpdateChecker {
       if (fallback == null && name.endsWith('.apk')) {
         fallback = asset['browser_download_url']?.toString();
       }
-      if (name.contains(_systemABI)) {
+      if (targetABI.isNotEmpty && name.contains(targetABI)) {
         return asset['browser_download_url']?.toString() ?? '';
       }
     }
@@ -141,8 +142,8 @@ class UpdateChecker {
     // 镜像/代理可能截断 assets（如只回 14 个二进制、漏掉全部 .apk）。
     // 此时官方 URL 命名稳定：app-<abi>-release.apk，直接构造兜底，
     // 避免 App 内更新因资产缺失而永远失败。
-    final constructed =
-        constructDirectApkDownloadUrl(owner: owner, repo: repo, tag: tag, abi: _systemABI);
+    final constructed = constructDirectApkDownloadUrl(
+        owner: owner, repo: repo, tag: tag, abi: targetABI);
     log('UpdateChecker: no APK asset in release, falling back to constructed URL: $constructed');
     return constructed;
   }

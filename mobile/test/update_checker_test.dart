@@ -33,9 +33,7 @@ void main() {
         asset('app-arm64-v8a-release.apk'),
         asset('app-x86_64-release.apk'),
       ]));
-      // 通过环境无法注入 ABI，但 fallback 逻辑与 ABI 匹配一致：
-      // arm64-v8a 在 ABI 路径下会命中 app-arm64-v8a-release.apk。
-      final url = checker.getApkDownloadUrl();
+      final url = checker.getApkDownloadUrl(abi: 'arm64-v8a');
       expect(
         url,
         'https://github.com/$owner/$repo/releases/download/$tag/app-arm64-v8a-release.apk',
@@ -47,8 +45,8 @@ void main() {
         asset('alist-encrypt-go-linux-amd64'),
         asset('app-x86_64-release.apk'),
       ]));
-      // 无 arm64 APK -> fallback 为任意 .apk
-      expect(release.getApkDownloadUrl(), contains('app-x86_64-release.apk'));
+      expect(release.getApkDownloadUrl(abi: 'arm64-v8a'),
+          contains('app-x86_64-release.apk'));
     });
 
     test('constructable URL used when assets truncated by mirror', () {
@@ -58,7 +56,7 @@ void main() {
         asset('alist-encrypt-go-linux-arm64'),
         asset('encrypt-tool-linux-amd64'),
       ]));
-      final url = release.getApkDownloadUrl();
+      final url = release.getApkDownloadUrl(abi: 'arm64-v8a');
       expect(
         url,
         'https://github.com/$owner/$repo/releases/download/$tag/app-arm64-v8a-release.apk',
