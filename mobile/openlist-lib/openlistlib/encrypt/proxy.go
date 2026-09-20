@@ -4829,6 +4829,12 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 		if err != nil {
 			p.markUpstreamFailure(err)
+			// 弱网兼容：直连 CDN 出错（超时/拒连/丢包）时把该 signed URL 也标入
+			// 失败黑名单，避免死循环反复撞同一个弱网节点。本次成功回读的是上个
+			// session 之前标记过的失败目录 URL；下一请求直接回落内部 /dav 链。
+			if usingRawURL && targetURL != "" && targetURL != internalTargetURL {
+				p.markRawURLFailure(targetURL)
+			}
 			if retried {
 				log.Errorf("%s WebDAV client.Do failed after retry: %v", internal.LogPrefix(ctx, internal.TagProxy), err)
 			}
