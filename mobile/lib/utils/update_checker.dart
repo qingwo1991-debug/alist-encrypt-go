@@ -7,6 +7,21 @@ import 'package:openlist_mobile/contant/native_bridge.dart';
 
 import 'proxy_speed_test.dart';
 
+/// 根据已知 release 命名规范构造 APK 直链。
+///
+/// 部分镜像/代理在转发 GitHub API 时可能截断 assets 列表（例如只返回
+/// 二进制而漏掉 .apk），此时 assets 中找不到 APK，更新会永远失败。
+/// GitHub 上所有历史 release 的 APK 资产命名均为 `app-<abi>-release.apk`，
+/// 可据此在 tag 确定的情况下直接构造官方下载 URL 作兜底。
+String constructDirectApkDownloadUrl({
+  required String owner,
+  required String repo,
+  required String tag,
+  required String abi,
+}) {
+  return 'https://github.com/$owner/$repo/releases/download/$tag/app-$abi-release.apk';
+}
+
 class UpdateChecker {
   String owner;
   String repo;
@@ -39,6 +54,11 @@ class UpdateChecker {
       throw Exception('Data not downloaded');
     }
     return _data!;
+  }
+
+  /// 仅供测试注入数据，避免依赖真实网络。线上路径不会调用。
+  void setDataForTesting(Map<String, dynamic> data) {
+    _data = data;
   }
 
   static Future<Map<String, dynamic>> _getLatestRelease(
@@ -102,23 +122,30 @@ class UpdateChecker {
     return result > 0;
   }
 
-  String getApkDownloadUrl() {
+  String getApkDownloadUrl({String? abi}) {
+    final targetABI = (abi == null || abi.isEmpty) ? _systemABI : abi;
     final assets = (data['assets'] as List?) ?? const [];
+    final tag = getTag();
     String? fallback;
     for (var asset in assets) {
       final name = asset['name']?.toString() ?? '';
       if (fallback == null && name.endsWith('.apk')) {
         fallback = asset['browser_download_url']?.toString();
       }
-      if (name.contains(_systemABI)) {
+      if (targetABI.isNotEmpty && name.contains(targetABI)) {
         return asset['browser_download_url']?.toString() ?? '';
       }
     }
     if (fallback != null) {
       return fallback;
     }
-    throw Exception(
-        'Failed to get apk download url for ABI: $_systemABI (assets=${assets.length})');
+    // 镜像/代理可能截断 assets（如只回 14 个二进制、漏掉全部 .apk）。
+    // 此时官方 URL 命名稳定：app-<abi>-release.apk，直接构造兜底，
+    // 避免 App 内更新因资产缺失而永远失败。
+    final constructed = constructDirectApkDownloadUrl(
+        owner: owner, repo: repo, tag: tag, abi: targetABI);
+    log('UpdateChecker: no APK asset in release, falling back to constructed URL: $constructed');
+    return constructed;
   }
 
   /// 拿到本设备要下载的那个 APK 的原始 URL，生成代理前缀候选，并行测速，
@@ -180,6 +207,9 @@ class UpdateChecker {
 
     return 0;
   }
+
+  /// 版本比较的测试入口（仅测试用），线上走 [_compareVersions]。
+  static int testCompareVersions(String v1, String v2) => _compareVersions(v1, v2);
 
   static String _normalizeVersion(String version) {
     var v = version.trim();
