@@ -863,6 +863,15 @@ type storageCooldownState struct {
 // 保证播放器初始连接最多等待 8 秒而不是 23 秒以上。
 const webdavPropfindTimeout = 8 * time.Second
 
+// mobileStreamResponseHeaderTimeout 移动端流式请求"等待响应头"的最大预算。
+// 流媒体请求的 body 不限时（streamClient.Timeout=0），但"首字节前的等待"
+// 必须有限宽——手机网络复杂（4G/WiFi 切换、CDN 节点抖动），若沿用上游
+// UpstreamTimeoutSeconds（默认 60s），播放器首请求会在弱网下干等一分钟+
+// 才拿到 502/超时，体验上就是"打不开/卡死"。这里收紧到 20 秒：这个值远
+// 大于正常首字节时间（联通 CDN 通常 <3s），又能让弱网节点快速失效并交给
+// 幂等重试/rawURL 回退接管。
+const mobileStreamResponseHeaderTimeout = 20 * time.Second
+
 // 超大目录重写预算：PROPFIND / fs-list 响应条目数或清单体积达到阈值后，
 // 流式改写改走"大目录直通"：只流式转码/改名输出给客户端，不再逐条回读或
 // 写入本地 SQLite（避免百万级目录把一次列表拖成"永远转圈"），也不再整份
@@ -4404,7 +4413,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// 注意：普通 seek（大偏移）保持原有 alist /dav 转发链路，因为签名
 	// rawURL 可能本身带 Range/Bearer 限制，跨 seek 复用有 416 风险。
 	startupFullGET := r.Method == http.MethodGet && clientRangeHeader == ""
-	if r.Method == http.MethodGet && encPath != nil && (isFirstFrameRangeHint(r.Method, clientRangeHeader) || startupFullGET) {
+	firstFrameHint := isFirstFrameRangeHint(r.Method, clientRangeHeader)
+	if r.Method == http.MethodGet && encPath != nil && firstFrameHint {
+		// 首帧重点读取（短 Range，播放器前顺序块）：命中缓存直连 CDN；未命中时
+		// 同步 resolve 一次并回填缓存（这类探针单次通常很快）。resolve 已内置
+		// 短超时（mobileRawURLResolveTimeout），失败自动落回内部 /dav 链。
 		var rawURL string
 		if cached, ok := p.loadFileCache(filePath); ok {
 			// Older cache entries may contain the stable /dav fallback. Treat
@@ -4425,6 +4438,27 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				cachePlaybackTarget(rawURL)
 				log.Infof("%s WebDAV first-frame resolved raw_url via strict fs/get: display=%s rawURL=%s ciphertextSize=%d",
 					internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(rawURL), ciphertextSize)
+			}
+		}
+		if rawURL != "" {
+			targetURL = rawURL
+			usingRawURL = targetURL != internalTargetURL
+		}
+	} else if r.Method == http.MethodGet && encPath != nil && startupFullGET {
+		// 无 Range 的启动全量 GET（多数播放器首次探测）：**弱网兼容策略**。
+		// 只复用已缓存的 rawURL 直连 CDN；缓存未命中时**绝不同步 resolve**。
+		// 冷启动 + 弱网下本地 alist 出网解析 CDN 签名可能很慢，同步等待会
+		// 拖死播放器首请求（表现为「GET 后长时间无 backend/error 日志」）。
+		// 这里静默落回内部 /dav → 302 → /redirect 解码链（弱网更稳，首播后
+		// 回填 rawURL 缓存，后续直连变快）。
+		var rawURL string
+		if cached, ok := p.loadFileCache(filePath); ok {
+			rawURL = usablePlaybackRawURL(cached.RawURL)
+		}
+		if rawURL == "" && strings.HasPrefix(filePath, "/dav/") {
+			noDav := strings.TrimPrefix(filePath, "/dav")
+			if cached, ok := p.loadFileCache(noDav); ok {
+				rawURL = usablePlaybackRawURL(cached.RawURL)
 			}
 		}
 		if rawURL != "" {

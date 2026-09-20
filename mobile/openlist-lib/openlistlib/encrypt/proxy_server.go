@@ -405,7 +405,17 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	streamTransport := transport.Clone()
 	// Limit only the wait for response headers. streamClient.Timeout remains
 	// zero, so long-running video bodies are not capped by this deadline.
-	streamTransport.ResponseHeaderTimeout = upstreamTimeout + 2*time.Second
+	//
+	// 移动弱网兜底：本地 alist 直连云存储 CDN 时，响应头等待若沿用上游
+	// UpstreamTimeoutSeconds（默认 60s，上限 600s）→ 播放器首请求会干等足足
+	// 一分钟+。手机网络环境复杂（如 4G/WiFi 切换、CDN 节点抖动），这里把
+	// 响应头等待收紧到一个移动端合理窗口，超时由既有的幂等重试/rawURL 失效
+	// 回退机制接管，让播放器快速获得失败决定权，而不是死等。
+	streamTimeoutBudget := upstreamTimeout + 2*time.Second
+	if maxStream := mobileStreamResponseHeaderTimeout; streamTimeoutBudget > maxStream {
+		streamTimeoutBudget = maxStream
+	}
+	streamTransport.ResponseHeaderTimeout = streamTimeoutBudget
 
 	// 配置 HTTP/2 over TLS 支持
 	if err := http2.ConfigureTransport(transport); err != nil {
