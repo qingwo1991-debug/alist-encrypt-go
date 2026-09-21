@@ -547,6 +547,9 @@ func (p *ProxyServer) Start() error {
 	// 路由配置 - 使用 WrapHandler 注入日志上下文实现全链路追踪
 	mux.HandleFunc("/ping", p.handlePing)
 	mux.HandleFunc("/healthz", p.handleHealthz)
+	// 实时日志流（调试模式远程 tail，见 live_log.go；非调试返回 403）
+	mux.HandleFunc("/api/logs", p.handleLiveLogs)
+	mux.HandleFunc("/api/logs/live", p.handleLiveLogs)
 	// 加密配置 API（供 App 前端的加密 tab 使用）
 	mux.HandleFunc("/enc-api/getAlistConfig", p.handleConfig)
 	mux.HandleFunc("/enc-api/saveAlistConfig", p.handleConfig)

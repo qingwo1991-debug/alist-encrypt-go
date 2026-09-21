@@ -4414,6 +4414,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	// rawURL 可能本身带 Range/Bearer 限制，跨 seek 复用有 416 风险。
 	startupFullGET := r.Method == http.MethodGet && clientRangeHeader == ""
 	firstFrameHint := isFirstFrameRangeHint(r.Method, clientRangeHeader)
+	rawURLDecisionCacheHit := false
 	if r.Method == http.MethodGet && encPath != nil && firstFrameHint {
 		// 首帧重点读取（短 Range，播放器前顺序块）：命中缓存直连 CDN；未命中时
 		// 同步 resolve 一次并回填缓存（这类探针单次通常很快）。resolve 已内置
@@ -4423,11 +4424,17 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			// Older cache entries may contain the stable /dav fallback. Treat
 			// those and recently failed signed URLs as a cache miss.
 			rawURL = usablePlaybackRawURL(cached.RawURL)
+			if rawURL != "" {
+				rawURLDecisionCacheHit = true
+			}
 		}
 		if rawURL == "" && strings.HasPrefix(filePath, "/dav/") {
 			noDav := strings.TrimPrefix(filePath, "/dav")
 			if cached, ok := p.loadFileCache(noDav); ok {
 				rawURL = usablePlaybackRawURL(cached.RawURL)
+				if rawURL != "" {
+					rawURLDecisionCacheHit = true
+				}
 			}
 		}
 		if rawURL == "" {
@@ -4454,17 +4461,35 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		var rawURL string
 		if cached, ok := p.loadFileCache(filePath); ok {
 			rawURL = usablePlaybackRawURL(cached.RawURL)
+			if rawURL != "" {
+				rawURLDecisionCacheHit = true
+			}
 		}
 		if rawURL == "" && strings.HasPrefix(filePath, "/dav/") {
 			noDav := strings.TrimPrefix(filePath, "/dav")
 			if cached, ok := p.loadFileCache(noDav); ok {
 				rawURL = usablePlaybackRawURL(cached.RawURL)
+				if rawURL != "" {
+					rawURLDecisionCacheHit = true
+				}
 			}
 		}
 		if rawURL != "" {
 			targetURL = rawURL
 			usingRawURL = targetURL != internalTargetURL
 		}
+	}
+	// 决策日志：标记该 GET 走了 CDN 直连还是内部 /dav 解码链。这是诊断
+	// "webdav 播放卡住"的关键一行——旧日志里 method= 之后到 GET planning 之间
+	// 一片空白，无法判断卡在 resolve/直连 还是 内部链。这里固定打一条 Info，
+	// 不依赖 debugEnabled，保证客户端导出日志即可定位。
+	if r.Method == http.MethodGet && encPath != nil {
+		decide := "internal-dav"
+		if usingRawURL {
+			decide = "raw-cdn"
+		}
+		log.Infof("%s WebDAV GET route: path=%s range=%q target=%s fileCacheHit=%v",
+			internal.LogPrefix(ctx, internal.TagProxy), filePath, clientRangeHeader, decide, rawURLDecisionCacheHit)
 	}
 	negativeCachePath := targetURLPath
 	if strings.HasPrefix(negativeCachePath, "/dav") {
