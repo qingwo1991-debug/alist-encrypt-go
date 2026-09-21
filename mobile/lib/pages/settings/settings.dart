@@ -7,6 +7,7 @@ import 'package:openlist_mobile/pages/settings/warm_stats_page.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
 import 'package:openlist_mobile/utils/config_export.dart';
 import 'package:openlist_mobile/utils/language_controller.dart';
+import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -261,6 +262,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _showLogLevelDialog(context, controller);
             },
           ),
+          // 调试模式：开启后可提供更详细日志（含远程实时日志流）
+          SwitchPreference(
+            title: '调试模式 / 详细日志',
+            subtitle: controller.debugMode
+                ? '已开启：记录详细调试日志（含敏感路径，仅供诊断）'
+                : '开启后记录详细请求/解密日志，并允许局域网远程实时查看日志（仅本机 LAN 可用）',
+            icon: const Icon(Icons.troubleshoot),
+            value: controller.debugMode,
+            onChanged: (value) async {
+              final ok = await controller.setDebugMode(value);
+              if (!ok && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('开启失败：请确认加密代理正在运行'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              }
+            },
+          ),
+          // 显示远程日志地址提示（调试模式开启时）
+          if (controller.debugMode)
+            BasicPreference(
+              title: '实时查看日志方式',
+              subtitle: '同局域网设备的浏览器访问：\n'
+                  'http://${controller._lanAddr.value}:${controller.proxyPort}/api/logs/live\n'
+                  '启用后同网段设备可远程 tail 本机日志（调试用，平时可关闭）',
+              leading: const Icon(Icons.lan),
+              onTap: () {},
+            ),
           
           BasicPreference(
             title: S.of(context).troubleshooting,
@@ -358,6 +389,78 @@ class _SettingsController extends GetxController {
   final _autoUpdate = true.obs;
   final _notificationGranted = true.obs;
   final _storageGranted = true.obs;
+  final _debugMode = false.obs;
+  final _lanAddr = "127.0.0.1".obs;
+  final proxyPort = "5344";
+
+  bool get debugMode => _debugMode.value;
+  String get lanAddr => _lanAddr.value;
+
+  // 读取并保存加密代理的调试模式（debugEnabled），持久化在 v2 配置里。
+  // 调用的端点与 encrypt_config_page 一致：GET/POST /api/encrypt/v2/config。
+  Future<bool> setDebugMode(bool value) async {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 3),
+        receiveTimeout: const Duration(seconds: 5),
+        sendTimeout: const Duration(seconds: 5),
+      ));
+      final resp = await dio.post(
+        'http://127.0.0.1:$proxyPort/api/encrypt/v2/config',
+        data: {'debugEnabled': value},
+      );
+      final data = resp.data is Map<String, dynamic>
+          ? resp.data as Map<String, dynamic>
+          : null;
+      if (data?['code'] != 200) return false;
+      _debugMode.value = value;
+      _refreshLanAddr();
+      return true;
+    } catch (e) {
+      debugPrint('setDebugMode failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _loadDebugMode() async {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 3),
+        receiveTimeout: const Duration(seconds: 5),
+      ));
+      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config');
+      final data = resp.data is Map<String, dynamic>
+          ? resp.data as Map<String, dynamic>
+          : null;
+      final cfg = data?['data']?['config'] as Map<String, dynamic>?;
+      if (cfg == null) return;
+      _debugMode.value = cfg['debugEnabled'] == true;
+      _refreshLanAddr();
+    } catch (e) {
+      debugPrint('load debug mode failed: $e');
+    }
+  }
+
+  void _refreshLanAddr() async {
+    // 从 v2 配置的 dbExportBaseUrl 提取局域网地址（App 实际可见的 LAN IP），
+    // 用于提示远程日志地址；失败时保持 127.0.0.1（App 无法直接可用时由用户自行查）。
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 3),
+        receiveTimeout: const Duration(seconds: 5),
+      ));
+      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config');
+      final data = resp.data is Map<String, dynamic>
+          ? resp.data as Map<String, dynamic>
+          : null;
+      final cfg = data?['data']?['config'] as Map<String, dynamic>?;
+      final base = (cfg?['dbExportBaseUrl'] as String?) ?? '';
+      final uri = Uri.tryParse(base);
+      if (uri != null && uri.host.isNotEmpty) {
+        _lanAddr.value = uri.host;
+      }
+    } catch (_) {}
+  }
 
   setDataDir(String value) async {
     NativeBridge.appConfig.setDataDir(value);
@@ -441,6 +544,7 @@ class _SettingsController extends GetxController {
     cfg.isWakeLockEnabled().then((value) => wakeLock = value);
     cfg.isStartAtBootEnabled().then((value) => startAtBoot = value);
     cfg.isSilentJumpAppEnabled().then((value) => silentJumpApp = value);
+    _loadDebugMode();
 
     _dataDir.value = await cfg.getDataDir();
     _downloadDir.value =
