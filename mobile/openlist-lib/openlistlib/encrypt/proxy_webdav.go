@@ -40,6 +40,13 @@ func shouldRetryPropfind404(depthHeader, filePath string) bool {
 	return false
 }
 
+func shouldRetryWebDAVRequest(method string, elapsed time.Duration) bool {
+	if method != http.MethodGet {
+		return true
+	}
+	return elapsed < mobileStreamResponseHeaderTimeout/2
+}
+
 func (p *ProxyServer) webdavNegativeTTL() time.Duration {
 	if p == nil || p.config == nil || p.config.WebDAVNegativeCacheTTLMinutes <= 0 {
 		return 10 * time.Minute

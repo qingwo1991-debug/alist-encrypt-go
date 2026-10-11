@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+func TestShouldRetryWebDAVRequest(t *testing.T) {
+	if !shouldRetryWebDAVRequest(http.MethodGet, time.Second) {
+		t.Fatal("fast GET failure should be retried")
+	}
+	if shouldRetryWebDAVRequest(http.MethodGet, mobileStreamResponseHeaderTimeout) {
+		t.Fatal("GET response-header timeout must not consume a second full retry window")
+	}
+	if !shouldRetryWebDAVRequest(http.MethodHead, mobileStreamResponseHeaderTimeout) {
+		t.Fatal("non-GET idempotent requests should retain retry behavior")
+	}
+}
+
 func TestShouldRetryPropfind404(t *testing.T) {
 	cases := []struct {
 		name      string

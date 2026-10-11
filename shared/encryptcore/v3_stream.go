@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -40,7 +41,19 @@ func DeriveV3Key(password string, nonce []byte, iterations uint32) []byte {
 	if iterations == 0 {
 		iterations = 600000
 	}
-	return pbkdf2.Key([]byte(password), nonce, int(iterations), 32, sha256.New)
+	cacheKey := v3KeyCacheKey(password, nonce, iterations)
+	if key, ok := loadCachedV3Key(cacheKey, time.Now()); ok {
+		return key
+	}
+	value, _, _ := v3KeyDerivationGroup.Do(cacheKey, func() (interface{}, error) {
+		if key, ok := loadCachedV3Key(cacheKey, time.Now()); ok {
+			return key, nil
+		}
+		key := pbkdf2.Key([]byte(password), nonce, int(iterations), 32, sha256.New)
+		storeCachedV3Key(cacheKey, key, time.Now())
+		return key, nil
+	})
+	return append([]byte(nil), value.([]byte)...)
 }
 
 // V3Writer emits a V3 container using the trailer layout.

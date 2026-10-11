@@ -1033,9 +1033,18 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                           );
                         },
                       ),
+                      const ListTile(
+                        leading: Icon(Icons.play_circle_outline),
+                        title: Text('WebDAV 播放地址'),
+                        subtitle: Text(
+                          '同一手机的播放器：http://127.0.0.1:5344/dav\n'
+                          '其他手机/电视：必须改用本机局域网 IP:5344/dav，不能填写 127.0.0.1。\n'
+                          'Clash TUN 请开启“绕过局域网”，并将 127.0.0.0/8 与局域网网段设为 DIRECT。',
+                        ),
+                      ),
                       SwitchListTile(
                         title: const Text('仅本机访问（关闭局域网）'),
-                        subtitle: const Text('开启后代理只监听本机回环，局域网/其他设备无法访问 5344；切换会重启代理'),
+                        subtitle: const Text('开启后只允许本机播放器访问 127.0.0.1:5344；其他手机/电视将无法连接，切换会重启代理'),
                         value: _listenLocalOnly,
                         onChanged: _switchApplying ? null : (value) {
                           setState(() => _listenLocalOnly = value);

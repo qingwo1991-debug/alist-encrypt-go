@@ -62,9 +62,20 @@ var (
 	v2KeyDerivationGroup singleflight.Group
 	v2KeyCacheTTL        = 24 * time.Hour
 	v2KeyCacheTTLMu      sync.RWMutex
+
+	// v3KeyCache stores per-container AES-256-GCM keys. Unlike V2, the V3
+	// nonce is part of the PBKDF2 salt, so the nonce and iteration count must
+	// participate in the cache key. A bounded cache plus singleflight prevents
+	// concurrent Range/seek requests from repeating the 600K-round derivation.
+	v3KeyCache           = make(map[string]*cacheEntry[[]byte])
+	v3KeyCacheMu         sync.Mutex
+	v3KeyDerivationGroup singleflight.Group
 )
 
-const v2KeyCacheMaxEntries = 128
+const (
+	v2KeyCacheMaxEntries = 128
+	v3KeyCacheMaxEntries = 256
+)
 
 // SetV2KeyCacheTTL configures how long V2 PBKDF2 base keys stay hot in memory.
 // Non-positive values keep the current TTL.
@@ -167,6 +178,58 @@ func cachedV2KeyWithDeriver(password, encType string, keyLen int, derive v2KeyDe
 		return key, nil
 	})
 	return append([]byte(nil), value.([]byte)...)
+}
+
+func v3KeyCacheKey(password string, nonce []byte, iterations uint32) string {
+	passHash := sha256.Sum256([]byte(password))
+	nonceHash := sha256.Sum256(nonce)
+	return fmt.Sprintf("%x:%x:%d", passHash, nonceHash, iterations)
+}
+
+func loadCachedV3Key(cacheKey string, now time.Time) ([]byte, bool) {
+	v3KeyCacheMu.Lock()
+	defer v3KeyCacheMu.Unlock()
+
+	entry, ok := v3KeyCache[cacheKey]
+	if !ok {
+		return nil, false
+	}
+	if !now.Before(entry.expireAt) {
+		delete(v3KeyCache, cacheKey)
+		return nil, false
+	}
+	entry.expireAt = now.Add(currentV2KeyCacheTTL())
+	return append([]byte(nil), entry.value...), true
+}
+
+func storeCachedV3Key(cacheKey string, key []byte, now time.Time) {
+	v3KeyCacheMu.Lock()
+	defer v3KeyCacheMu.Unlock()
+
+	if _, exists := v3KeyCache[cacheKey]; !exists && len(v3KeyCache) >= v3KeyCacheMaxEntries {
+		for candidate, entry := range v3KeyCache {
+			if !now.Before(entry.expireAt) {
+				delete(v3KeyCache, candidate)
+			}
+		}
+	}
+	if _, exists := v3KeyCache[cacheKey]; !exists && len(v3KeyCache) >= v3KeyCacheMaxEntries {
+		var oldestKey string
+		var oldestExpiry time.Time
+		for candidate, entry := range v3KeyCache {
+			if oldestKey == "" || entry.expireAt.Before(oldestExpiry) {
+				oldestKey = candidate
+				oldestExpiry = entry.expireAt
+			}
+		}
+		if oldestKey != "" {
+			delete(v3KeyCache, oldestKey)
+		}
+	}
+	v3KeyCache[cacheKey] = &cacheEntry[[]byte]{
+		value:    append([]byte(nil), key...),
+		expireAt: now.Add(currentV2KeyCacheTTL()),
+	}
 }
 
 // mixBase64Cache caches MixBase64 instances to avoid repeated KSA computation

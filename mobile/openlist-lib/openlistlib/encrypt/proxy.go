@@ -867,10 +867,10 @@ const webdavPropfindTimeout = 8 * time.Second
 // 流媒体请求的 body 不限时（streamClient.Timeout=0），但"首字节前的等待"
 // 必须有限宽——手机网络复杂（4G/WiFi 切换、CDN 节点抖动），若沿用上游
 // UpstreamTimeoutSeconds（默认 60s），播放器首请求会在弱网下干等一分钟+
-// 才拿到 502/超时，体验上就是"打不开/卡死"。这里收紧到 20 秒：这个值远
-// 大于正常首字节时间（联通 CDN 通常 <3s），又能让弱网节点快速失效并交给
-// 幂等重试/rawURL 回退接管。
-const mobileStreamResponseHeaderTimeout = 20 * time.Second
+// 才拿到 502/超时，体验上就是"打不开/卡死"。日志显示客户端约 12 秒就会
+// 放弃并重新 PROPFIND+GET，因此把响应头等待收紧到 7 秒，给失败切换和客户端
+// 重试留下余量。这里只限制响应头，streamClient 的流媒体 body 仍然不设总超时。
+const mobileStreamResponseHeaderTimeout = 7 * time.Second
 
 // 超大目录重写预算：PROPFIND / fs-list 响应条目数或清单体积达到阈值后，
 // 流式改写改走"大目录直通"：只流式转码/改名输出给客户端，不再逐条回读或
@@ -4826,13 +4826,27 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "upstream client unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	requestStarted := time.Now()
 	resp, err := doWebDAVRequest(client, req)
+	requestElapsed := time.Since(requestStarted)
+	if r.Method == http.MethodGet && encPath != nil {
+		if err != nil {
+			log.Warnf("%s WebDAV GET upstream headers failed: path=%s target=%s elapsed=%s err=%v",
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, map[bool]string{true: "raw-cdn", false: "internal-dav"}[usingRawURL], requestElapsed, err)
+		} else {
+			log.Infof("%s WebDAV GET upstream headers: path=%s target=%s elapsed=%s status=%d",
+				internal.LogPrefix(ctx, internal.TagProxy), filePath, map[bool]string{true: "raw-cdn", false: "internal-dav"}[usingRawURL], requestElapsed, resp.StatusCode)
+		}
+	}
 	if err != nil {
 		// 一次透明重试：连接池中的坏连接/瞬态降级会让 WebDAV 客户端看到瞬时 502。
-		// 只对幂等方法（GET/HEAD/PROPFIND）重试，PUT/COPY/MOVE 等非幂等操作不重试。
+		// GET 的首次等待已经由 stream transport 的响应头超时约束；若已经耗尽
+		// 该预算，立即把控制权交还播放器，避免同一请求再等一轮、超过播放器
+		// 约 12 秒的放弃窗口。快速连接错误仍允许透明重试。
 		retried := false
-		if r.Method == http.MethodGet || r.Method == http.MethodHead ||
-			(r.Method == "PROPFIND" && len(reqBodyBytes) > 0) {
+		allowRetry := shouldRetryWebDAVRequest(r.Method, time.Since(requestStarted))
+		if allowRetry && (r.Method == http.MethodGet || r.Method == http.MethodHead ||
+			(r.Method == "PROPFIND" && len(reqBodyBytes) > 0)) {
 			retryBody := io.Reader(nil)
 			if len(reqBodyBytes) > 0 {
 				retryBody = bytes.NewReader(reqBodyBytes)
@@ -5749,24 +5763,19 @@ func rewriteLoopbackRawURLForRequest(r *http.Request, rawURL string) string {
 	}
 
 	requestHostName := requestHost
-	requestHostPort := ""
-	if h, p, err := net.SplitHostPort(requestHost); err == nil {
+	if h, _, err := net.SplitHostPort(requestHost); err == nil {
 		requestHostName = h
-		requestHostPort = p
 	}
 	requestHostName = strings.Trim(strings.TrimSpace(requestHostName), "[]")
 	if requestHostName == "" || requestHostName == "127.0.0.1" || requestHostName == "localhost" || requestHostName == "::1" {
 		return rawURL
 	}
 
-	targetPort := parsed.Port()
-	if targetPort == "" {
-		targetPort = requestHostPort
-	}
-	if targetPort != "" {
-		parsed.Host = net.JoinHostPort(requestHostName, targetPort)
-	} else {
-		parsed.Host = requestHostName
-	}
+	// Keep the rewritten URL on the same public authority that the client used
+	// to reach the encryption proxy. Reusing the upstream loopback port (usually
+	// 5244) would bypass port 5344 and is unreachable from another phone/TV when
+	// the bundled OpenList service only listens locally. This also keeps every
+	// follow-up request on the proxy's WebDAV/decryption and routing path.
+	parsed.Host = requestHost
 	return parsed.String()
 }
