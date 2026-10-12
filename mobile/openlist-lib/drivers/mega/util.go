@@ -8,19 +8,28 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/t3rm1n4l/go-mega"
 )
 
 // do others that not defined in Driver interface
 // openObject represents a download in progress
+type downloadSession interface {
+	Chunks() int
+	ChunkLocation(int) (int64, int, error)
+	DownloadChunkContext(context.Context, int) ([]byte, error)
+	Finish() error
+}
+
 type openObject struct {
-	ctx    context.Context
-	mu     sync.Mutex
-	d      *mega.Download
-	id     int
-	skip   int64
-	chunk  []byte
-	closed bool
+	ctx       context.Context
+	mu        sync.Mutex
+	d         downloadSession
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
+	id        int
+	skip      int64
+	chunk     []byte
+	closed    bool
 }
 
 // get the next chunk
@@ -29,8 +38,8 @@ func (oo *openObject) getChunk(ctx context.Context) (err error) {
 		return io.EOF
 	}
 	var chunk []byte
-	err = utils.Retry(3, time.Second, func() (err error) {
-		chunk, err = oo.d.DownloadChunk(oo.id)
+	err = utils.RetryContext(ctx, 3, time.Second, func() (err error) {
+		chunk, err = oo.d.DownloadChunkContext(ctx, oo.id)
 		return err
 	})
 	if err != nil {
@@ -47,6 +56,12 @@ func (oo *openObject) Read(p []byte) (n int, err error) {
 	defer oo.mu.Unlock()
 	if oo.closed {
 		return 0, fmt.Errorf("read on closed file")
+	}
+	if err := oo.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(p) == 0 {
+		return 0, nil
 	}
 	// Skip data at the start if requested
 	for oo.skip > 0 {
@@ -76,18 +91,21 @@ func (oo *openObject) Read(p []byte) (n int, err error) {
 }
 
 // Close closed the file - MAC errors are reported here
-func (oo *openObject) Close() (err error) {
-	oo.mu.Lock()
-	defer oo.mu.Unlock()
-	if oo.closed {
-		return nil
+func (oo *openObject) Close() error {
+	// Signal the actual HTTP operation before waiting for Read's lock.
+	if oo.cancel != nil {
+		oo.cancel()
 	}
-	err = utils.Retry(3, 500*time.Millisecond, func() (err error) {
-		return oo.d.Finish()
+	oo.closeOnce.Do(func() {
+		oo.mu.Lock()
+		defer oo.mu.Unlock()
+		oo.closed = true
+		// Finish is local MAC verification, not a retryable network operation.
+		// Retrying it mutates the CBC accumulator and can corrupt verification.
+		if err := oo.d.Finish(); err != nil {
+			oo.closeErr = fmt.Errorf("failed to finish download: %w", err)
+		}
+		oo.chunk = nil
 	})
-	if err != nil {
-		return fmt.Errorf("failed to finish download: %w", err)
-	}
-	oo.closed = true
-	return nil
+	return oo.closeErr
 }

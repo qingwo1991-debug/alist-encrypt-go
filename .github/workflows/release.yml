@@ -214,6 +214,7 @@ jobs:
             ./drivers/google_drive \
             ./drivers/onedrive \
             ./drivers/mega \
+            ./internal/net \
             ./internal/bootstrap \
             ./internal/conf \
             ./internal/fs \
@@ -221,6 +222,16 @@ jobs:
             ./pkg/singleflight \
             ./pkg/utils \
             ./server/...
+
+      - name: Test fixed pinned MEGA cancellation fork without external credentials
+        working-directory: shared/go-mega
+        run: |
+          go test -race -mod=readonly -timeout 5m -run 'Test(Context|Close|Backoff)' ./...
+
+      - name: Race-check MEGA reader close, retry and driver client ownership
+        working-directory: mobile/openlist-lib
+        run: |
+          go test -race -mod=readonly -timeout 5m -run 'Test(Mega|RetryContext|Driver)' ./drivers/mega ./pkg/utils ./internal/net
 
       - name: Race-check mobile network and readiness regressions
         working-directory: mobile/openlist-lib
@@ -240,6 +251,7 @@ jobs:
             ./drivers/google_drive \
             ./drivers/onedrive \
             ./drivers/mega \
+            ./internal/net \
             ./internal/bootstrap \
             ./internal/conf \
             ./internal/fs \
@@ -590,20 +602,23 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      - name: Compile debug APK with actual native bridge
+      - name: Compile APK with actual native bridge
         working-directory: mobile
         env:
           ABI_FILTERS: arm64-v8a
         run: |
           set -euo pipefail
           flutter pub get --enforce-lockfile
-          flutter build apk --no-pub --debug --target-platform android-arm64
+          # Flutter debug injects all ABI ndkFilters, conflicting with the
+          # repository's explicit ABI splits. Use the existing release build
+          # mode (local/debug signing fallback, no publishing in this PR job).
+          flutter build apk --no-pub --release --split-per-abi --target-platform android-arm64
 
       - name: Upload native bridge compilation APK
         uses: actions/upload-artifact@v6
         with:
-          name: pr-native-android-arm64-debug
-          path: mobile/build/app/outputs/flutter-apk/app-debug.apk
+          name: pr-native-android-arm64
+          path: mobile/build/app/outputs/flutter-apk/*arm64-v8a*.apk
           if-no-files-found: error
 
   build-mobile-aar:

@@ -136,6 +136,37 @@ func (mr *MultiReadable) Close() error {
 	return nil
 }
 
+// RetryContext keeps the legacy attempt count but cancellation interrupts actual
+// context-aware work and the timer between attempts, never a detached goroutine.
+func RetryContext(ctx context.Context, attempts int, sleep time.Duration, f func() error) (err error) {
+	for i := 0; i < attempts; i++ {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		if i > 0 {
+			timer := time.NewTimer(sleep)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			sleep *= 2
+		}
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		err = f()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("after %d attempts, last error: %w", attempts, err)
+}
+
 func Retry(attempts int, sleep time.Duration, f func() error) (err error) {
 	for i := 0; i < attempts; i++ {
 		//fmt.Println("This is attempt number", i)

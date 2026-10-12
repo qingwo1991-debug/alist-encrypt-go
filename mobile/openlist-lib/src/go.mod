@@ -8,6 +8,9 @@ require github.com/alist-encrypt-go/shared/encryptcore v0.0.0
 
 replace github.com/alist-encrypt-go/shared/encryptcore => ../../../shared/encryptcore
 
+// Fixed a19cff0ec7b5 fork: actual request cancellation and joined session shutdown.
+replace github.com/t3rm1n4l/go-mega => ../../../shared/go-mega
+
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.18.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.2

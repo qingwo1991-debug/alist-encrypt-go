@@ -12,9 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"golang.org/x/net/http2"
 	"time"
+
+	opnet "github.com/OpenListTeam/OpenList/v4/internal/net"
+	"golang.org/x/net/http2"
 )
 
 var ErrRoutePoolBusy = errors.New("network route transport pool busy")
@@ -41,7 +42,17 @@ type providerRouteDecision struct {
 // Neither provider nor driver is inferred from an origin hostname.
 func EvaluateProviderPolicy(cfg *ProxyConfig, req *http.Request, snapshot NativeRouteSnapshot, resolver func(*http.Request) (*url.URL, error)) (providerRouteDecision, error) {
 	d := providerRouteDecision{snapshot: snapshot, token: snapshot.DefaultToken}
-	proxy, err := resolver(req)
+	policyReq := req
+	if req != nil {
+		if identity, trusted := opnet.DriverRouteIdentityFromContext(req.Context()); trusted {
+			// Only policy evaluation sees these detached headers. The actual
+			// provider request retains its original headers without identity leaks.
+			policyReq = req.Clone(req.Context())
+			policyReq.Header.Set("X-Encrypt-Driver", identity.Driver)
+			policyReq.Header.Set("X-Encrypt-Provider", identity.Provider)
+		}
+	}
+	proxy, err := resolver(policyReq)
 	if err != nil {
 		return d, err
 	}
@@ -58,9 +69,9 @@ func EvaluateProviderPolicy(cfg *ProxyConfig, req *http.Request, snapshot Native
 	}
 	action := ""
 	if normalizeRoutingMode(cfg.RoutingMode) != routingModeOff {
-		action, _ = matchRoutingRules(cfg, req.Header.Get("X-Encrypt-Provider"), req.Header.Get("X-Encrypt-Driver"))
+		action, _ = matchRoutingRules(cfg, policyReq.Header.Get("X-Encrypt-Provider"), policyReq.Header.Get("X-Encrypt-Driver"))
 		if action == "" {
-			action, _ = matchBuiltinRouting(req.Header.Get("X-Encrypt-Provider"), req.Header.Get("X-Encrypt-Driver"))
+			action, _ = matchBuiltinRouting(policyReq.Header.Get("X-Encrypt-Provider"), policyReq.Header.Get("X-Encrypt-Driver"))
 		}
 		if action == "" {
 			action = normalizeRoutingUnmatchedDefault(cfg.RoutingUnmatchedDefault)

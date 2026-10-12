@@ -5,6 +5,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 OPENLIST_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 SHARED_ROOT="$OPENLIST_ROOT/../../shared/encryptcore"
+MEGA_ROOT="$OPENLIST_ROOT/../../shared/go-mega"
+if [ ! -f "$MEGA_ROOT/go.mod" ] || ! awk '$1 == "module" && $2 == "github.com/t3rm1n4l/go-mega" { found = 1 } END { exit !found }' "$MEGA_ROOT/go.mod"; then
+    echo "Missing reviewed fixed MEGA module or unexpected identity" >&2
+    exit 1
+fi
 SUM_SEED="$SCRIPT_DIR/module_overlay.sum"
 
 if [ ! -f "$SHARED_ROOT/go.mod" ] || [ ! -f "$SUM_SEED" ]; then
@@ -62,7 +67,8 @@ apply_overlay() {
         -require=golang.org/x/term@v0.43.0 \
         -require=golang.org/x/text@v0.37.0 \
         -require=golang.org/x/tools@v0.44.0 \
-        -replace="github.com/alist-encrypt-go/shared/encryptcore=$relative"
+        -replace="github.com/alist-encrypt-go/shared/encryptcore=$relative" \
+        -replace="github.com/t3rm1n4l/go-mega=${relative%/encryptcore}/go-mega"
     # Preserve the destination permissions and avoid replacing identical files.
     if ! cmp -s "$SUM_TEMP" "$module_dir/go.sum"; then
         cp "$SUM_TEMP" "$module_dir/go.sum"

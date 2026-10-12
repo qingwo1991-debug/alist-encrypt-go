@@ -59,6 +59,7 @@ func (m *EncryptProxyManager) Initialize(configPath string) error {
 		log.Warnf("[%s] Failed to load encrypt config, using default: %v", internal.TagConfig, err)
 	}
 
+	encrypt.InstallDriverRouteFactory(m.configManager.GetConfig())
 	m.initialized = true
 	log.Info("[" + internal.TagServer + "] Encrypt proxy manager initialized")
 	return nil
@@ -87,6 +88,7 @@ func (m *EncryptProxyManager) StartProxy() error {
 		return err
 	}
 
+	encrypt.InstallDriverRouteFactory(config)
 	m.proxyServer = server
 	log.Info("[" + internal.TagServer + "] Encrypt proxy server started")
 	return nil
@@ -142,6 +144,9 @@ func (m *EncryptProxyManager) GetConfig() *encrypt.ProxyConfig {
 
 // updateProxyServerConfig 更新代理服务器配置（内部方法）
 func (m *EncryptProxyManager) updateProxyServerConfig() {
+	if m.configManager != nil {
+		encrypt.InstallDriverRouteFactory(m.configManager.GetConfig())
+	}
 	if m.proxyServer != nil && m.proxyServer.IsRunning() {
 		config := m.configManager.GetConfig()
 		m.proxyServer.UpdateConfig(config)
