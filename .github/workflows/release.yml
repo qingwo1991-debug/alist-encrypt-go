@@ -188,7 +188,12 @@ jobs:
               exit 1
             fi
             shared_dir=$(GOWORK=off go -C "$module" list -mod=readonly -m -f '{{.Replace.Dir}}' github.com/alist-encrypt-go/shared/encryptcore)
-            test "$(realpath "$module/$shared_dir")" = "$GITHUB_WORKSPACE/shared/encryptcore"
+            case "$shared_dir" in
+              /*) resolved_shared=$(realpath "$shared_dir") ;;
+              *) resolved_shared=$(realpath "$module/$shared_dir") ;;
+            esac
+            printf 'Shared module: %s -> %s\n' "$shared_dir" "$resolved_shared"
+            test "$resolved_shared" = "$GITHUB_WORKSPACE/shared/encryptcore"
           done
           git diff --exit-code -- mobile/openlist-lib/go.mod mobile/openlist-lib/go.sum mobile/openlist-lib/src/go.mod mobile/openlist-lib/src/go.sum
 

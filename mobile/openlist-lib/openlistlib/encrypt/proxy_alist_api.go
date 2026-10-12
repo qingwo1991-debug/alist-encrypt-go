@@ -871,29 +871,35 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 				if rawURL != "" {
 					// Check file cache before probing upstream
 					cachedMetaFound := false
+					recognizedCachedV3 := false
 					for _, cacheKey := range []string{originalPath, filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
 						if cacheKey == "" {
 							continue
 						}
-						if cached, ok := p.loadFileCache(cacheKey); ok && cached != nil && cached.ContentVersion > 0 {
-							if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
-								meta = ContentMeta{
-									EncType:        EncryptionType(encPath.EncType),
-									Version:        ContentVersionV2,
-									HeaderLen:      cached.HeaderLen,
-									PlainSize:      cached.Size,
-									CiphertextSize: cached.CiphertextSize,
-									NonceField:     cloneNonceField(cached.NonceField),
-								}
+						if cached, ok := p.loadFileCache(cacheKey); ok && cached != nil && cached.RawURL == rawURL {
+							recognizedCachedV3 = recognizedCachedV3 || cached.ContentVersion == ContentVersionV3
+							if cachedMeta, valid := playbackFileInfoContentMeta(cached, EncryptionType(encPath.EncType), rawURL); valid && cachedMeta.CiphertextSize == ciphertextSize {
+								meta = cachedMeta
+								cachedMetaFound = true
+								break
 							}
-							cachedMetaFound = true
-							break
 						}
 					}
 					if !cachedMetaFound {
-						meta = p.inspectEncryptedContentWithFallback(ctx, rawURL, r.Header, encPath, ciphertextSize, filePath)
+						var confirmed bool
+						meta, confirmed = p.inspectEncryptedContentWithFallbackConfirmed(ctx, rawURL, r.Header, encPath, ciphertextSize, filePath)
+						// Metadata errors must not turn recognized V3 into a legacy
+						// redirect token or persist an incomplete encryption tuple.
+						if !confirmed || (recognizedCachedV3 && !meta.IsV3()) || (meta.IsV3() && ValidateV3ContentMeta(meta) != nil) {
+							clearMetadataRepresentationHeaders(w.Header())
+							w.Header().Set("Content-Type", "application/json")
+							w.Header().Set("Cache-Control", "no-store")
+							w.WriteHeader(http.StatusBadGateway)
+							_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": http.StatusBadGateway, "message": "encrypted content metadata unavailable", "data": nil})
+							return
+						}
 					}
-					if meta.IsV2() && meta.PlainSize > 0 {
+					if (meta.IsV2() && meta.PlainSize > 0) || meta.IsV3() {
 						size = float64(meta.PlainSize)
 						data["size"] = size
 					}
@@ -914,11 +920,17 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 					ContentVersion: meta.Version,
 					HeaderLen:      meta.HeaderLen,
 					NonceField:     cloneNonceField(meta.NonceField),
+					ChunkSize:      meta.ChunkSize,
+					KDFIterations:  meta.KDFIterations,
 					IsDir:          isDir,
 					Path:           originalPath,
 					RawURL:         rawURL,
 					Sign:           sign,
 				})
+
+				if meta.IsV3() {
+					p.recordLocalV2Meta(p.getAlistURL(), originalPath, meta)
+				}
 
 				// 如果开启了文件名加密，将加密名转换为显示名
 				if encPath.EncName {
@@ -939,6 +951,8 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 					ContentVersion: meta.Version,
 					HeaderLen:      meta.HeaderLen,
 					NonceField:     cloneNonceField(meta.NonceField),
+					ChunkSize:      meta.ChunkSize,
+					KDFIterations:  meta.KDFIterations,
 					OriginalURL:    originalPath,
 					EncryptedPath:  filePath,
 					Provider:       provider,

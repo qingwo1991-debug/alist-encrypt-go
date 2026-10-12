@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -421,6 +423,94 @@ func (b *v3PlaybackHeaderTimingBody) Close() error {
 		b.t.Errorf("header latency changed during authentication/output: before=%f after=%f", b.headerMs, b.timing.headerLatencyMs)
 	}
 	return nil
+}
+
+func TestV3PlaybackExpiredURLRefreshOnce(t *testing.T) {
+	oldData, oldMeta := v3PlaybackFixture(t, []byte("old-object"), 8, false)
+	_ = oldData
+	freshPlain := []byte("new replacement plaintext with different chunk geometry")
+	freshData, freshMeta := v3PlaybackFixture(t, freshPlain, 7, false)
+	// Change nonce via shared crypto too, not just geometry: a refreshed object
+	// must not inherit the expired URL's cipher metadata.
+	freshMeta.NonceField = []byte("fedcba9876543210")
+	header, err := core.NewV3Header(freshMeta.PlainSize, freshMeta.NonceField, 7, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := core.NewV3ChunkCipher(core.DeriveV3Key("fixture", freshMeta.NonceField, 1), freshMeta.NonceField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshData = append([]byte(nil), header...)
+	for offset, index := 0, uint64(0); offset < len(freshPlain); index++ {
+		padded := make([]byte, 7)
+		offset += copy(padded, freshPlain[offset:])
+		record, err := cipher.Seal(index, padded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		freshData = append(freshData, record...)
+	}
+	for _, rejectFresh := range []bool{false, true} {
+		var expiredCalls, refreshCalls, recordCalls atomic.Int64
+		expired := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { expiredCalls.Add(1); w.WriteHeader(403) }))
+		fresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var start, end int64
+			if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+				t.Errorf("range=%q", r.Header.Get("Range"))
+				w.WriteHeader(500)
+				return
+			}
+			if start != 0 {
+				recordCalls.Add(1)
+				if rejectFresh {
+					w.WriteHeader(401)
+					return
+				}
+			}
+			if start < 0 || end >= int64(len(freshData)) {
+				w.WriteHeader(416)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(freshData)))
+			w.WriteHeader(206)
+			w.Write(freshData[start : end+1])
+		}))
+		control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			refreshCalls.Add(1)
+			if r.URL.Path != "/api/fs/get" {
+				t.Errorf("path=%s", r.URL.Path)
+			}
+			fmt.Fprintf(w, `{"code":200,"data":{"raw_url":%q,"size":%d}}`, fresh.URL, len(freshData))
+		}))
+		parsed, _ := url.Parse(control.URL)
+		host, portText, _ := net.SplitHostPort(parsed.Host)
+		port, _ := strconv.Atoi(portText)
+		p := &ProxyServer{config: &ProxyConfig{AlistHost: host, AlistPort: port}, httpClient: control.Client(), streamClient: fresh.Client()}
+		info := v3PlaybackInfo(expired.URL)
+		info.EncryptedPath = "/dav/encrypted.bin"
+		info.PasswdInfo.Enable = true
+		req := httptest.NewRequest("GET", "http://client/", nil)
+		req.Header.Set("Range", "bytes=-9")
+		recorder := httptest.NewRecorder()
+		w, r, timing := withPlaybackTiming(recorder, req)
+		err := p.serveV3Playback(w, r, info, oldMeta)
+		if rejectFresh {
+			var failure *V3PlaybackError
+			if !errors.As(err, &failure) || !failure.ResponseStarted || recorder.Code != 502 || recorder.Body.Len() != 0 {
+				t.Fatalf("retryerr=%v status=%d body=%q", err, recorder.Code, recorder.Body.Bytes())
+			}
+		} else if err != nil || recorder.Code != 206 || !bytes.Equal(recorder.Body.Bytes(), freshPlain[len(freshPlain)-9:]) || timing.rangeStart != int64(len(freshPlain)-9) || timing.totalBytes != int64(len(freshPlain)) {
+			t.Fatalf("refresh err=%v status=%d body=%q timing=%+v", err, recorder.Code, recorder.Body.Bytes(), timing)
+		}
+		if expiredCalls.Load() != 1 || refreshCalls.Load() != 1 || recordCalls.Load() != 1 {
+			t.Fatalf("calls expired=%d refresh=%d records=%d", expiredCalls.Load(), refreshCalls.Load(), recordCalls.Load())
+		}
+		expired.Close()
+		fresh.Close()
+		control.Close()
+	}
 }
 
 func TestV3PlaybackOverloadBeforeUpstream(t *testing.T) {

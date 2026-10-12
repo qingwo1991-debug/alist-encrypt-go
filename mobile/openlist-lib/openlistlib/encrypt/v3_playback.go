@@ -22,6 +22,7 @@ type V3PlaybackError struct {
 	ResponseStarted bool
 	StatusCode      int
 	NoLearning      bool
+	UpstreamStatus  int // internal precommit signed-URL refresh signal
 }
 
 func (e *V3PlaybackError) Error() string { return e.Err.Error() }
@@ -150,6 +151,50 @@ func (r v3ContextReader) Read(b []byte) (int, error) {
 // serveV3Playback requires authoritative, fully resolved header/trailer metadata.
 // It never probes metadata, routes legacy requests, or passes ciphertext through.
 func (p *ProxyServer) serveV3Playback(w http.ResponseWriter, r *http.Request, info *RedirectInfo, meta ContentMeta) error {
+	err := p.serveV3PlaybackAttempt(w, r, info, meta, true)
+	var failure *V3PlaybackError
+	if !errors.As(err, &failure) || failure.ResponseStarted || failure.UpstreamStatus == 0 {
+		return err
+	}
+	// The attempt has already closed its response and released its memory lease.
+	// Only one signed-URL refresh is allowed, before any record/KDF/body output.
+	if info == nil || strings.TrimSpace(info.EncryptedPath) == "" || r.Context().Err() != nil {
+		return v3PlaybackFailure(w, http.StatusBadGateway, failure)
+	}
+	fresh, ok := p.refreshRedirectInfo(r.Context(), "", r.Header, info)
+	if !ok {
+		return v3PlaybackFailure(w, http.StatusBadGateway, errors.New("v3: signed URL refresh failed"))
+	}
+	// A resolver may return the same URL for a replaced object. The existing
+	// refresh helper reprobes changed URLs; explicitly recheck an unchanged URL.
+	if fresh.RedirectURL == info.RedirectURL {
+		if fresh.PasswdInfo == nil || !fresh.PasswdInfo.Enable {
+			return v3PlaybackFailure(w, http.StatusBadGateway, errors.New("v3: refreshed encryption configuration is unavailable"))
+		}
+		probeMeta, confirmed := p.inspectEncryptedContentWithFallbackConfirmed(r.Context(), fresh.RedirectURL, fresh.Headers, fresh.PasswdInfo, fresh.CiphertextSize, strings.TrimPrefix(encryptedDAVPath(fresh.EncryptedPath), "/dav"))
+		if !confirmed || !probeMeta.IsV3() || ValidateV3ContentMeta(probeMeta) != nil {
+			return v3PlaybackFailure(w, http.StatusBadGateway, errors.New("v3: refreshed object metadata could not be confirmed"))
+		}
+		fresh.ContentVersion = probeMeta.Version
+		fresh.HeaderLen = probeMeta.HeaderLen
+		fresh.FileSize = probeMeta.PlainSize
+		fresh.CiphertextSize = probeMeta.CiphertextSize
+		fresh.NonceField = cloneNonceField(probeMeta.NonceField)
+		fresh.ChunkSize = probeMeta.ChunkSize
+		fresh.KDFIterations = probeMeta.KDFIterations
+	}
+	freshMeta, complete := redirectInfoContentMeta(fresh)
+	if !complete || !freshMeta.IsV3() {
+		return v3PlaybackFailure(w, http.StatusBadGateway, errors.New("v3: refreshed object lacks complete V3 metadata"))
+	}
+	if err := ValidateV3ContentMeta(freshMeta); err != nil {
+		return v3PlaybackFailure(w, http.StatusBadGateway, err)
+	}
+	// Reparse the original plaintext Range against the refreshed size/geometry.
+	return p.serveV3PlaybackAttempt(w, r, fresh, freshMeta, false)
+}
+
+func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Request, info *RedirectInfo, meta ContentMeta, allowRefresh bool) error {
 	started := time.Now()
 	fail := func(status int, err error) error { return v3PlaybackFailure(w, status, err) }
 	if err := ValidateV3ContentMeta(meta); err != nil {
@@ -224,6 +269,9 @@ func (p *ProxyServer) serveV3Playback(w http.ResponseWriter, r *http.Request, in
 			resp.Body.Close()
 		}
 	}()
+	if allowRefresh && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound) {
+		return &V3PlaybackError{Err: fmt.Errorf("v3: upstream signed URL rejected (%d)", resp.StatusCode), StatusCode: http.StatusBadGateway, UpstreamStatus: resp.StatusCode, NoLearning: true}
+	}
 	fallback := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable
 	if fallback {
 		cap := v3PlaybackDefaultDiscardBytes
