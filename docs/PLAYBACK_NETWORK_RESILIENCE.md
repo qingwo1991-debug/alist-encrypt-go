@@ -1,5 +1,7 @@
 # Playback and mobile network resilience acceptance
 
+> Historical pre-roadmap baseline (PR #66). The residual limits below describe that snapshot, not the current implementation: mobile V3, the native Network bridge and MEGA context/Close were subsequently implemented in stages 2 and 5. Current capability boundaries and pending device acceptance are in `PLAYBACK_FINAL_ACCEPTANCE.md`, `NATIVE_ROUTING_ACCEPTANCE.md` and `PLAYBACK_ACCEPTANCE_ROADMAP.md`. Do not use the old 415/default-only/uncancellable-MEGA statements as current results.
+
 This follow-up targets playback correctness and bounded waiting, not security.
 A passing CI suite is not a measured Android first-frame or VPN compatibility result.
 
