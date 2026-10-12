@@ -47,7 +47,7 @@ func (b *v3AmplificationCountingBody) Read(p []byte) (int, error) {
 func v3AmplificationContainer(t *testing.T, plain []byte, chunk int64) ([]byte, encryption.ContentMeta) {
 	t.Helper()
 	const password = "amplification-fixture-only"
-	nonce := bytes.Repeat([]byte{0x37}, encryption.V3NonceFieldLen())
+	nonce := bytes.Repeat([]byte{0x37}, int(encryption.V3NonceFieldLen()))
 	header, err := encryption.NewV3Header(int64(len(plain)), nonce, chunk, 1)
 	if err != nil {
 		t.Fatal(err)

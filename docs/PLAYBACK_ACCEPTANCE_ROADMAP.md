@@ -11,7 +11,7 @@
 | 阶段 | 目标 | 当前状态 | 必须的完成证据 |
 | --- | --- | --- | --- |
 | 1 | 可重复故障上游、准确指标与播放测量 | 工程交付完成，真机未测 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
-| 2 | 移动端共享 V3 核心 | PR 全绿已合并，main APK/发布验收中 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
+| 2 | 移动端共享 V3 核心 | 工程交付与 main 发布完成，真机未测 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
 | 3 | V3 小块配置、认证缓存、受控回退 | 实施中，待云端验证 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
 | 4 | 切集兴趣调度与有界 KDF | 未开始 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
 | 5 | 驱动取消、控制面路由、原生选网 | 未开始 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
@@ -32,7 +32,7 @@
 ## 阶段 2 云端证据
 
 - [PR #68](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/68) 已全绿合并至 main `78aff12`：共享 V3 header/trailer/认证 record 读取、完整 metadata 缓存及 SQLite/sync 字段，覆盖移动下载、DAV 和播放 token 入口；有界 record 内存及 Range 忽略回退，保留显式 raw 下载。
-- 最终 [Actions 38200886879](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38200886879) 的根/共享/移动 Go、竞态、故障基线、MySQL、两个 Web UI、Flutter、probe、Docker 及三 ABI Android binding 全部成功；actual/src readonly 模块覆盖和同步源码测试通过。main 完整发布 [Actions 38201569198](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38201569198) 正在验证 AAR/APK 与发布，不能以 PR binding 代替 APK 成功。
+- 最终 [Actions 38200886879](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38200886879) 的根/共享/移动 Go、竞态、故障基线、MySQL、两个 Web UI、Flutter、probe、Docker 及三 ABI Android binding 全部成功；actual/src readonly 模块覆盖和同步源码测试通过。main 完整发布 [Actions 38201569198](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38201569198) 已全绿，包括跨平台二进制、Docker、三 ABI AAR 和 APK、核心及移动发布；版本 [v2026.10.12.371](https://github.com/qingwo1991-debug/alist-encrypt-go/releases/tag/v2026.10.12.371)。
 - 修复正常 fs/get 重复播放的 V3 metadata 降级、响应前一次签名 URL 刷新、disabled/raw 表示、DAV 选定目标重新确认和 request 内 metadata 复用。warm cache key 补齐算法字段；云端另发现调度 FIFO 在扫描中释放 provider slot 的生产问题，采用原子释放修复，保留严格 FIFO 断言并在云端连续运行 32 次通过。
 - 真机首帧和弱网收益仍未验证；后续认证缓存、KDF 排队、路由平台桥和目录生命周期按阶段 3–6 实施。
 

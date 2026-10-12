@@ -73,7 +73,7 @@ func TestExecuteDecryptPlaybackCachedNonDefaultV3(t *testing.T) {
 	}
 	passwd := &config.PasswdInfo{Password: password, EncType: "aesctr", Enable: true}
 	sp := proxy.NewStreamProxy(cfg)
-	for _, interval := range [][2]int{{10, 29}, {61, 140}, {130, 159}} {
+	for i, interval := range [][2]int{{10, 29}, {61, 140}, {130, 159}} {
 		before := calls.Load()
 		req := httptest.NewRequest(http.MethodGet, "/d/v3-cache.bin", nil)
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", interval[0], interval[1]))
@@ -82,8 +82,14 @@ func TestExecuteDecryptPlaybackCachedNonDefaultV3(t *testing.T) {
 		if rr.Code != http.StatusPartialContent || !bytes.Equal(rr.Body.Bytes(), plain[interval[0]:interval[1]+1]) {
 			t.Fatalf("range %v status=%d body=%q", interval, rr.Code, rr.Body.String())
 		}
-		if got := calls.Load() - before; got != 1 {
-			t.Fatalf("cached V3 needed %d requests, want exactly one", got)
+		wantCalls := int64(1)
+		if i == 2 {
+			// The second request authenticated chunk 2 in full; a distinct tiny
+			// range inside it must now reuse that record, not just an output slice.
+			wantCalls = 0
+		}
+		if got := calls.Load() - before; got != wantCalls {
+			t.Fatalf("cached V3 needed %d requests, want exactly %d", got, wantCalls)
 		}
 	}
 	// Foreground caching must also retain complete geometry, not only V2.
