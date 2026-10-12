@@ -95,7 +95,7 @@ void main() {
         streams[index].add(Uint8List.sublistView(
           expected, first ? start : middle, first ? middle : end,
         ));
-        await written!.future;
+        await written.future;
       }
     }
     await Future.wait(streams.map((stream) => stream.close()));
