@@ -85,6 +85,7 @@ func (m *EncryptProxyManager) StartProxy() error {
 	}
 
 	if err := server.Start(); err != nil {
+		_ = server.Stop() // constructors own workers and SQLite even if Listen failed
 		return err
 	}
 

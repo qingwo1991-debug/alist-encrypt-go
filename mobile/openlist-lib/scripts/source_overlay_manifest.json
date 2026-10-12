@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "upstream_tag": "v4.2.2",
+  "upstream_commit": "b28208bd76ee19c49dabc7f68c1f4e863f571fc6",
+  "files": {
+    "internal/bootstrap/storage.go": "f31e7ca829031623191932f4ba25fb9937a0edf193dbbcde8a1fbc7da7562051",
+    "internal/fs/list.go": "8dbf5fc86c73cd484553d3e5f412dc9d81a061490f41b2e38f2deac1b779b097",
+    "internal/fs/readiness_navigation_test.go": null,
+    "internal/op/fs.go": "bb532362c5b545dff90e4eaa0bfc29fc864bc2f075f865ee2a8fe9702b4e090a",
+    "internal/op/path.go": "af24694a0b6ce0b479a5283debaf28457f9e1c15e58fa9517b6ac619d7c4548d",
+    "internal/op/storage.go": "3df98f98e95116d92e2521cf8471f830506745189daee377094ee7f0846e2e2b",
+    "internal/op/readiness.go": null,
+    "internal/op/readiness_test.go": null,
+    "pkg/singleflight/singleflight.go": "1064fb436435861476e5f3b9a9e57056c9aae031293bed04d9678043b31edb5f",
+    "pkg/singleflight/context_test.go": null,
+    "server/handles/storage.go": "b43365b5211e6a4944cdbaa9adcf2a7e10fc4b98b2701e3e5e0c63f66ff80f49",
+    "server/middlewares/check.go": "df2cae0cf814fbbf5e6b8158626d1be714362c86a2930c67abe14e6d469321d7",
+    "drivers/google_drive/driver.go": "bed2cc7a9bc958002c110e427c53ee75077df9d4411a0a6f9d9adee3ff651e09",
+    "drivers/google_drive/util.go": "1d54f645de5b99a2a77e331db614a8e319854df330ebf078d575c1ea38101d46",
+    "drivers/google_drive/context_test.go": null,
+    "drivers/onedrive/driver.go": "29ccdaea5519e82e20bfb7d39e48316ac8576cec9a32de0f56b68578943c96d2",
+    "drivers/onedrive/util.go": "7ad0d5fa42f07b0e255bb60484315aee76584df086f8f2875a6eaeea7d81ee73",
+    "drivers/onedrive/context_test.go": null,
+    "drivers/mega/driver.go": "ce994df305641ac027ab3af29e4f78b5cd6385774355d69c0a845b80016746c5",
+    "drivers/mega/context_test.go": null,
+    "drivers/mega/util.go": "7fad47d42ad2483e588829396052a673f6f7f57286621e0838c9e7424032ae2c",
+    "drivers/mega/new_context_test.go": null,
+    "internal/net/driver_client.go": null,
+    "internal/net/driver_client_test.go": null,
+    "pkg/utils/io.go": "eb574613a1c4c8246fb9085167e4609ab85f0f46e6bc490e07528437fefe2c7d",
+    "pkg/utils/new_retry_context_test.go": null
+  }
+}

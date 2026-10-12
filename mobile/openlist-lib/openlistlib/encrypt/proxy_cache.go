@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"context"
 	"net/url"
 	"path"
 	"sort"
@@ -64,17 +65,22 @@ var webdavListCacheMaxEntries = 2048
 // startCacheCleanup 启动定期缓存清理
 func (p *ProxyServer) startCacheCleanup() {
 	p.cleanupTicker = time.NewTicker(2 * time.Minute)
-	go func() {
+	ticker := p.cleanupTicker
+	done := p.cleanupDone
+	p.goBackground(func(ctx context.Context) {
+		defer ticker.Stop()
 		defer recoverBackgroundTask("cache_cleanup")
 		for {
 			select {
-			case <-p.cleanupTicker.C:
+			case <-ticker.C:
 				p.cleanupExpiredCache()
-			case <-p.cleanupDone:
+			case <-done:
+				return
+			case <-ctx.Done():
 				return
 			}
 		}
-	}()
+	})
 }
 
 // stopCacheCleanup 停止缓存清理
@@ -82,9 +88,11 @@ func (p *ProxyServer) stopCacheCleanup() {
 	if p.cleanupTicker != nil {
 		p.cleanupTicker.Stop()
 	}
-	if p.cleanupDone != nil {
-		close(p.cleanupDone)
-	}
+	p.cleanupStopOnce.Do(func() {
+		if p.cleanupDone != nil {
+			close(p.cleanupDone)
+		}
+	})
 }
 
 func (p *ProxyServer) redirectCacheTTL() time.Duration {

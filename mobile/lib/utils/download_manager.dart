@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'notification_manager.dart';
+import 'positional_file_writer.dart';
 import 'app_shell.dart';
 import '../generated/l10n.dart';
 
@@ -329,7 +330,8 @@ class DownloadManager {
       reading = true;
       await for (final bytes in _readBody(body, token)) {
         _throwIfCancelled(token);
-        file.writeFromSync(bytes);
+        await file.writeFrom(bytes);
+        _throwIfCancelled(token);
         received += bytes.length;
         onProgress(received, total);
       }
@@ -470,7 +472,7 @@ class DownloadManager {
   static Future<void> _downloadChunk({
     required String url,
     List<String>? chunkUrls,
-    required RandomAccessFile raf,
+    required PositionalFileWriter writer,
     required _DownloadChunk chunk,
     required int totalBytes,
     required String? ifRange,
@@ -555,11 +557,9 @@ class DownloadManager {
           );
     }
 
-    // Each batch seeks and writes synchronously, with no await or callback
-    // between them. await-for yields between batches, so seeking only once
-    // (even synchronously) would let another chunk move the shared cursor.
-    // Tradeoff: synchronous disk IO briefly occupies the UI isolate. Moving
-    // this off-isolate requires genuine positional IO or an owned writer.
+    // The writer owns the shared cursor across the entire asynchronous
+    // seek/write transaction. Awaiting each batch bounds outstanding buffers
+    // to one per worker and keeps native disk IO off the UI isolate.
     var received = 0;
     await for (final bytes in _readBody(responseBody, cancelToken)) {
       _throwIfCancelled(cancelToken);
@@ -569,8 +569,8 @@ class DownloadManager {
           'bytes=${chunk.start}-${chunk.end}',
         );
       }
-      raf.setPositionSync(chunk.start + received);
-      raf.writeFromSync(bytes);
+      await writer.writeAt(chunk.start + received, bytes);
+      _throwIfCancelled(cancelToken);
       received += bytes.length;
       onReceived(received);
     }
@@ -617,7 +617,7 @@ class DownloadManager {
     // 确定文件名和路径
     String finalFilename = sanitizeFilename(filename ?? _getFilenameFromUrl(url));
     String filePath = '${downloadDir.path}/$finalFilename';
-    filePath = _getUniqueFilePath(filePath);
+    filePath = _reserveDownloadPath(filePath);
     finalFilename = filePath.split('/').last;
 
     // 创建下载任务
@@ -634,14 +634,13 @@ class DownloadManager {
     // 添加到活跃任务列表
     _activeTasks[taskId] = task;
 
-    // 显示开始下载提示（只显示一次）
-    showGlobalSnackBar(SnackBar(
-      content: Text(S.current.startDownloadFile(finalFilename)),
-      duration: const Duration(seconds: 2),
-      backgroundColor: Colors.green,
-    ));
-
     try {
+      // Reservation also covers notification work before the file is opened.
+      showGlobalSnackBar(SnackBar(
+        content: Text(S.current.startDownloadFile(finalFilename)),
+        duration: const Duration(seconds: 2),
+        backgroundColor: Colors.green,
+      ));
       // 更新任务状态
       task.status = DownloadStatus.downloading;
       
@@ -722,6 +721,9 @@ class DownloadManager {
       }
       
       return false;
+    } finally {
+      // The pipeline has joined disk writes before relinquishing this path.
+      _reservedDownloadPaths.remove(filePath);
     }
   }
 
@@ -760,7 +762,7 @@ class DownloadManager {
     // 确定文件名和路径
     String finalFilename = sanitizeFilename(filename ?? _getFilenameFromUrl(url));
     String filePath = '${downloadDir.path}/$finalFilename';
-    filePath = _getUniqueFilePath(filePath);
+    filePath = _reserveDownloadPath(filePath);
 
     // 多源列表非空时以它为准（首个即首选 URL）。
     final primaryUrl =
@@ -798,6 +800,8 @@ class DownloadManager {
         onError(e.toString());
         return null;
       }
+    } finally {
+      _reservedDownloadPaths.remove(filePath);
     }
   }
 
@@ -809,7 +813,7 @@ class DownloadManager {
     CancelToken? cancelToken,
     required void Function(int received, int total) onProgress,
   }) async {
-    RandomAccessFile? raf;
+    PositionalFileWriter? writer;
     final siblings = CancelToken();
     final subscription = _listenForCancellation(
       cancelToken, (error) => siblings.cancel(error),
@@ -850,7 +854,11 @@ class DownloadManager {
       // 各分片复用一个句柄、按字节偏移直接写入，不再生成本地 .parts-*。
       final targetFile = File(filePath);
       await targetFile.parent.create(recursive: true);
-      raf = await targetFile.open(mode: FileMode.write);
+      writer = await PositionalFileWriter.open(
+        targetFile,
+        maxPendingWrites: _downloadThreads,
+        checkCancelled: () => _throwIfCancelled(siblings),
+      );
 
       String? ifRange = headResp.headers.value('etag')?.trim();
       if (ifRange == null || ifRange.isEmpty || ifRange.startsWith('W/')) {
@@ -863,7 +871,7 @@ class DownloadManager {
         return _downloadChunk(
           url: url,
           chunkUrls: chunkUrls,
-          raf: raf!,
+          writer: writer!,
           chunk: chunk,
           totalBytes: contentLength,
           ifRange: ifRange,
@@ -886,7 +894,7 @@ class DownloadManager {
 
       // Future.wait 默认（eagerError=false）等所有分片完成后再抛错，
       // 因此这里关闭句柄时不会再有人写入。成功时关闭以释放资源。
-      await raf.close();
+      await writer.close();
       _throwIfCancelled(cancelToken);
       final writtenLength = await targetFile.length();
       if (writtenLength != contentLength) {
@@ -901,7 +909,7 @@ class DownloadManager {
       // 失败或取消：先关闭句柄再清理残留的部分下载文件，避免 Windows
       // 上句柄占用导致删除失败；成功时不落盘任何临时分片。
       try {
-        await raf?.close();
+        await writer?.close();
       } catch (_) {}
       try {
         if (await File(filePath).exists()) {
@@ -1029,10 +1037,34 @@ class DownloadManager {
     return 'download_${DateTime.now().millisecondsSinceEpoch}';
   }
 
+  static final Set<String> _reservedDownloadPaths = <String>{};
+
+  static bool _downloadPathInUse(String path) =>
+      _reservedDownloadPaths.contains(path) ||
+      _activeTasks.values.any((task) => task.filePath == path) ||
+      File(path).existsSync();
+
+  // Selection and reservation contain no await: callback and notification
+  // downloads cannot both claim a path before either has created its file.
+  static String _reserveDownloadPath(String originalPath) {
+    final path = _getUniqueFilePath(originalPath);
+    _reservedDownloadPaths.add(path);
+    return path;
+  }
+
+  @visibleForTesting
+  static String reserveDownloadPathForTesting(String originalPath) =>
+      _reserveDownloadPath(originalPath);
+
+  @visibleForTesting
+  static void releaseDownloadPathForTesting(String path) {
+    _reservedDownloadPaths.remove(path);
+  }
+
   /// 获取唯一的文件路径（避免重名）
   static String _getUniqueFilePath(String originalPath) {
     File file = File(originalPath);
-    if (!file.existsSync()) {
+    if (!_downloadPathInUse(originalPath)) {
       return originalPath;
     }
 
@@ -1047,7 +1079,7 @@ class DownloadManager {
     do {
       newPath = '$directory/${nameWithoutExtension}_$counter$extension';
       counter++;
-    } while (File(newPath).existsSync());
+    } while (_downloadPathInUse(newPath));
 
     return newPath;
   }

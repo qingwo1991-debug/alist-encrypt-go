@@ -296,33 +296,34 @@ func (p *ProxyServer) startDBExportSyncLoop() {
 	if p == nil || p.metaSyncDone == nil || p.localStore == nil {
 		return
 	}
-	p.metaSyncWG.Add(1)
-	go func() {
-		defer p.metaSyncWG.Done()
+	done := p.metaSyncDone
+	p.goBackground(func(ctx context.Context) {
 		defer recoverBackgroundTask("db_export_sync_loop")
 		timer := time.NewTimer(3 * time.Second)
 		defer timer.Stop()
 		for {
 			select {
-			case <-p.metaSyncDone:
+			case <-done:
+				return
+			case <-ctx.Done():
 				return
 			case <-timer.C:
-				p.syncDBExportMetaOnce(context.Background())
+				p.syncDBExportMetaOnce(ctx)
 				timer.Reset(p.dbExportSyncInterval())
 			}
 		}
-	}()
+	})
 }
 
 func (p *ProxyServer) stopDBExportSyncLoop() {
 	if p == nil {
 		return
 	}
-	if p.metaSyncDone != nil {
-		close(p.metaSyncDone)
-		p.metaSyncDone = nil
-	}
-	p.metaSyncWG.Wait()
+	p.metaStopOnce.Do(func() {
+		if p.metaSyncDone != nil {
+			close(p.metaSyncDone)
+		}
+	})
 }
 
 func (p *ProxyServer) dbExportLogin(ctx context.Context, cfg dbExportSyncConfig) (string, error) {

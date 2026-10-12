@@ -120,10 +120,10 @@ func (p *ProxyServer) scheduleWebDAVListRefresh(ctx context.Context, cacheKey, t
 		}
 	}
 	// 后台刷新不得挂接到请求 ctx（请求返回后 ctx 即被取消，刷新根本发不出去）。
-	// 用独立 Background；超时由 refreshWebDAVListOnce 内的 probeTimeout 兜底。
-	go func() {
-		p.refreshWebDAVListOnce(context.Background(), targetDir, headers)
-	}()
+	// 使用服务器生命周期；请求结束不取消刷新，Stop 则取消并等待实际传输。
+	p.goBackground(func(lifetime context.Context) {
+		p.refreshWebDAVListOnce(lifetime, targetDir, headers)
+	})
 }
 
 // refreshWebDAVListOnce 执行一次深度=1 的 PROPFIND；成功后把解密后的明文正文
