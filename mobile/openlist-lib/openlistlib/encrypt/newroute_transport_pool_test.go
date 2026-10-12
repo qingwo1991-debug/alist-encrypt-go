@@ -21,6 +21,9 @@ func TestRoutePoolSameOriginProviderProxyIsolation(t *testing.T) {
 	// This fixture intentionally tests proxy routing to a loopback origin;
 	// disable the production local-host exemption rather than weaken isolation.
 	cfg.EnableLocalBypass = false
+	// Default AlistHost is also loopback; this is a provider-origin fixture,
+	// not a request to the configured control-plane host.
+	cfg.AlistHost = "control.example"
 	pool := newRouteTransportPool(cfg, &http.Transport{}, &http.Transport{})
 	defer pool.RetireRouteTransports()
 	pool.resolver = func(r *http.Request) (*url.URL, error) {
