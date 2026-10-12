@@ -89,12 +89,15 @@ fi
 
 # Copy go.mod and go.sum from OpenList source
 if [ -f ./src/go.mod ]; then
-    cp ./src/go.mod ./go.mod
-    cp ./src/go.sum ./go.sum 2>/dev/null || true
-    
-    # Keep module name as OpenList but add our openlistlib as local package
-    # The openlistlib directory already exists in this repo
-    go mod edit -replace github.com/djherbis/times@v1.6.0=github.com/jing332/times@latest
+    cp ./src/go.mod ./go.mod || exit 1
+    cp ./src/go.sum ./go.sum || exit 1
+
+    # Keep the reviewed actual-module compatibility replacement pinned.
+    GOWORK=off go mod edit -replace github.com/djherbis/times@v1.6.0=github.com/jing332/times@v0.0.0-20240518094816-0ce84dcd6b94 || exit 1
+
+    # Apply only after copying upstream module files: src and the build root
+    # have different relative paths to the shared module.
+    bash "$SCRIPT_DIR/apply_module_overlay.sh" || exit 1
     
     # Copy ALL required packages from OpenList source
     echo "Copying required packages from OpenList source..."
@@ -179,20 +182,12 @@ else
     exit 1
 fi
 
-# Download dependencies
-echo "Downloading Go dependencies..."
-go mod download || true
-
-# Add golang.org/x/mobile dependency for gomobile
-echo "Adding gomobile dependencies..."
-# 使用 go get 在模块内添加依赖
-echo "Getting golang.org/x/mobile/bind..."
-go get golang.org/x/mobile/bind@latest
-echo "Getting golang.org/x/mobile/cmd/gomobile..."
-go get golang.org/x/mobile/cmd/gomobile@latest
-
-echo "Running go mod tidy..."
-go mod tidy
+# Validate the reviewed graph without silently adding dependencies or hashes.
+# In particular, tidy would remove the shared require until the V3 bridge lands.
+# Missing transitive pins/checksums must be reviewed, not repaired by init.
+echo "Validating readonly module graphs..."
+GOWORK=off go -C "$OPENLIST_LIB_DIR" list -mod=readonly -m all || exit 1
+GOWORK=off go -C "$OPENLIST_LIB_DIR/src" list -mod=readonly -m all || exit 1
 
 echo "Initialization complete!"
 echo ""

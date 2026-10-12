@@ -325,10 +325,8 @@ func (p *ProxyServer) decryptedCacheBaseKey(info *RedirectInfo, meta ContentMeta
 	}
 	passHash := sha256.Sum256([]byte(info.PasswdInfo.Password))
 	targetHash := sha256.Sum256([]byte(stableID))
-	nonceHex := ""
-	if len(info.NonceField) > 0 {
-		nonceHex = hex.EncodeToString(info.NonceField)
-	}
-	return fmt.Sprintf("%x|%x|%d|%d|%d|%s",
-		targetHash[:8], passHash[:8], info.HeaderLen, info.CiphertextSize, meta.PlainSize, nonceHex)
+	nonceHex := hex.EncodeToString(meta.NonceField)
+	return fmt.Sprintf("%x|%x|%s|%d|%d|%d|%d|%d|%d|%s",
+		targetHash[:], passHash[:], meta.EncType, meta.Version, meta.HeaderLen,
+		meta.CiphertextSize, meta.PlainSize, meta.ChunkSize, meta.KDFIterations, nonceHex)
 }

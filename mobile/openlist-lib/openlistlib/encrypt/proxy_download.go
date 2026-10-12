@@ -69,6 +69,51 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	p.handleDownloadLegacy(w, r)
 }
 
+// serveLegacyV3Download dispatches before legacy range translation or size-based
+// passthrough. Even an invalid recognized V3 header is terminal: the service
+// writes the failure and callers must neither retry nor fall back to V1.
+func (p *ProxyServer) serveLegacyV3Download(w http.ResponseWriter, r *http.Request, target string, headers http.Header, encPath *EncryptPath, fileSize int64, encryptedPath string) bool {
+	if encPath == nil || !encPath.Enable || r.URL.Query().Get("decode") == "0" || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return false
+	}
+	w, r, _ = withPlaybackTiming(w, r)
+	meta, confirmed := p.inspectEncryptedContentConfirmed(r.Context(), target, headers, encPath, fileSize)
+	if !confirmed && !meta.IsV3() {
+		// An unreadable or encoded prefix proves neither legacy nor V3.
+		// Never let probe failure select V1 or leak the encrypted object.
+		_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted content metadata could not be confirmed"))
+		return true
+	}
+	if !meta.IsV3() {
+		// A failed re-probe must not reinterpret a previously recognized V3
+		// object as V1, even when its saved metadata is incomplete.
+		for _, key := range []string{r.URL.Path, strings.TrimPrefix(r.URL.Path, "/d"), strings.TrimPrefix(r.URL.Path, "/p"), strings.TrimPrefix(r.URL.Path, "/dav")} {
+			if cached, ok := p.loadFileCache(key); ok && cached.ContentVersion == ContentVersionV3 {
+				meta = ContentMeta{Version: ContentVersionV3}
+				break
+			}
+		}
+		if !meta.IsV3() {
+			return false
+		}
+	}
+	p.serveLegacyResolvedV3(w, r, target, headers, encPath, encryptedPath, meta)
+	return true
+}
+
+func (p *ProxyServer) serveLegacyResolvedV3(w http.ResponseWriter, r *http.Request, target string, headers http.Header, encPath *EncryptPath, encryptedPath string, meta ContentMeta) {
+	info := &RedirectInfo{
+		RedirectURL:   target,
+		PasswdInfo:    encPath,
+		FileSize:      meta.PlainSize,
+		OriginalURL:   r.URL.String(),
+		EncryptedPath: encryptedPath,
+		Headers:       headers.Clone(),
+	}
+	w, r, _ = withPlaybackTiming(w, r)
+	_ = p.serveV3Playback(w, r, info, meta)
+}
+
 // handleDownloadLegacy 保留历史执行链，供 V2 orchestrator 调用
 func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -96,6 +141,9 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 
 	// 检查是否需要解密
 	encPath := p.findEncryptPath(filePath)
+	if r.URL.Query().Get("decode") == "0" {
+		encPath = nil // Explicit raw download must retain ciphertext semantics.
+	}
 
 	// 构建实际请求的 URL 路径
 	actualURLPath := originalPath
@@ -284,6 +332,13 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	var selectedAttempt downloadAttempt
 	for i, attempt := range attempts {
 		p.debugf("playback", "download attempt=%d stage=%s path=%s sendRange=%v", i+1, attempt.stage, attempt.urlPath, attempt.sendRange)
+		targetForV3 := attempt.fullURL
+		if strings.TrimSpace(targetForV3) == "" {
+			targetForV3 = p.getAlistURL() + attempt.urlPath
+		}
+		if p.serveLegacyV3Download(w, r, targetForV3, r.Header, encPath, fileSize, attempt.urlPath) {
+			return
+		}
 		req, err = buildDownloadRequest(attempt.urlPath, attempt.fullURL, attempt.sendRange)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -521,6 +576,11 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 				encProbePath = strings.TrimPrefix(encProbePath, "/d")
 			}
 			meta = p.inspectEncryptedContentWithFallback(ctx, targetForMeta, req.Header, encPath, fileSize, encProbePath)
+		}
+		if meta.IsV3() {
+			resp.Body.Close()
+			p.serveLegacyResolvedV3(w, r, targetForMeta, r.Header, encPath, actualURLPath, meta)
+			return
 		}
 		originalSize := fileSize
 		fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))

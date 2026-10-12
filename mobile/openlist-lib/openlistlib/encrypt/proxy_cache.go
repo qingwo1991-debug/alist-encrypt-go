@@ -326,6 +326,92 @@ func (p *ProxyServer) loadFileCacheInMem(filePath string) (*FileInfo, bool) {
 	return nil, false
 }
 
+// fileInfoHasCompleteV3 validates the whole metadata tuple. Version alone (or
+// matching ciphertext length) is not evidence of a resolved V3 container.
+func fileInfoHasCompleteV3(info *FileInfo) bool {
+	return info != nil && ValidateV3ContentMeta(ContentMeta{
+		Version: info.ContentVersion, HeaderLen: info.HeaderLen, PlainSize: info.Size,
+		CiphertextSize: info.CiphertextSize, NonceField: info.NonceField,
+		ChunkSize: info.ChunkSize, KDFIterations: info.KDFIterations,
+	}) == nil
+}
+
+func resetFileInfoContentMeta(info *FileInfo) {
+	info.Size = 0
+	info.CiphertextSize = 0
+	info.ContentVersion = 0
+	info.HeaderLen = 0
+	info.NonceField = nil
+	info.ChunkSize = 0
+	info.KDFIterations = 0
+}
+
+// mergeFileCacheInfo only inherits a V3 tuple atomically from an in-memory
+// snapshot with the same object URL. Explicit version changes never inherit
+// encryption parameters from the previous version.
+func (p *ProxyServer) mergeFileCacheInfo(key string, info, existing *FileInfo) {
+	incomingURL, existingURL := strings.TrimSpace(info.RawURL), strings.TrimSpace(existing.RawURL)
+	rawURLChanged := incomingURL != "" && incomingURL != existingURL &&
+		(existingURL != "" || existing.ContentVersion == ContentVersionV3)
+	incomingMetaTrusted := (info.ContentVersion == ContentVersionV1 && info.Size > 0) ||
+		(info.ContentVersion == ContentVersionV2 && info.Size > 0 && info.CiphertextSize > 0 && info.HeaderLen > 0 && len(info.NonceField) == 16) ||
+		fileInfoHasCompleteV3(info)
+	if rawURLChanged && !incomingMetaTrusted {
+		resetFileInfoContentMeta(info)
+		p.sizeMapMu.Lock()
+		if p.sizeMap != nil {
+			delete(p.sizeMap, key)
+			p.sizeMapDirty = true
+		}
+		p.sizeMapMu.Unlock()
+	}
+	if info.Name == "" {
+		info.Name = existing.Name
+	}
+	if !rawURLChanged && info.ContentVersion <= 0 && fileInfoHasCompleteV3(existing) {
+		// List responses usually have no URL or encryption fields. Keep the
+		// authoritative plaintext size and immutable nonce/chunk/KDF together.
+		info.Size = existing.Size
+		info.CiphertextSize = existing.CiphertextSize
+		info.ContentVersion = existing.ContentVersion
+		info.HeaderLen = existing.HeaderLen
+		info.NonceField = cloneNonceField(existing.NonceField)
+		info.ChunkSize = existing.ChunkSize
+		info.KDFIterations = existing.KDFIterations
+	} else if !rawURLChanged && info.ContentVersion != ContentVersionV3 && existing.ContentVersion != ContentVersionV3 &&
+		(info.ContentVersion <= 0 || info.ContentVersion == existing.ContentVersion) {
+		if info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2) {
+			info.Size = existing.Size
+		}
+		if info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+			info.CiphertextSize = existing.CiphertextSize
+		}
+		if info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
+			info.ContentVersion = existing.ContentVersion
+		}
+		if info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+			info.HeaderLen = existing.HeaderLen
+		}
+		if len(info.NonceField) == 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
+			info.NonceField = cloneNonceField(existing.NonceField)
+		}
+	}
+	if info.ContentVersion != ContentVersionV3 {
+		info.ChunkSize = 0
+		info.KDFIterations = 0
+		if existing.ContentVersion == ContentVersionV3 && info.ContentVersion != ContentVersionV2 {
+			info.NonceField = nil
+			info.HeaderLen = 0
+		}
+	}
+	if strings.TrimSpace(info.Path) == "" {
+		info.Path = existing.Path
+	}
+	if strings.TrimSpace(info.RawURL) == "" {
+		info.RawURL = existing.RawURL
+	}
+}
+
 // storeFileCacheList 以"最新列表快照"语义写 fileCache：
 //   - 只与进程内存现有条目合并（保留播放所需的 V2 元数据等），
 //     绝不因条目缺失而回读本地 SQLite；
@@ -338,59 +424,15 @@ func (p *ProxyServer) storeFileCacheList(path string, info *FileInfo) {
 	if info == nil {
 		return
 	}
+	if info.ContentVersion != ContentVersionV3 {
+		info.ChunkSize = 0
+		info.KDFIterations = 0
+	}
 	key := normalizeCacheKey(path)
 	// 合并内存已有条目（保留 V2 / RawURL / HeaderLen / Nonce 等元数据），
 	// 与 storeFileCache 行为一致，但只取内存层，不做 SQLite 回源。
 	if existing, ok := p.loadFileCacheInMem(path); ok && existing != nil {
-		incomingRawURL := strings.TrimSpace(info.RawURL)
-		existingRawURL := strings.TrimSpace(existing.RawURL)
-		rawURLChanged := incomingRawURL != "" && existingRawURL != "" && incomingRawURL != existingRawURL
-		incomingMetaTrusted := (info.ContentVersion == ContentVersionV1 && info.Size > 0) ||
-			(info.ContentVersion == ContentVersionV2 &&
-				info.Size > 0 &&
-				info.CiphertextSize > 0 &&
-				info.HeaderLen > 0 &&
-				len(info.NonceField) == 16)
-		if rawURLChanged && !incomingMetaTrusted {
-			info.Size = 0
-			info.CiphertextSize = 0
-			info.ContentVersion = 0
-			info.HeaderLen = 0
-			info.NonceField = nil
-			p.sizeMapMu.Lock()
-			if p.sizeMap != nil {
-				delete(p.sizeMap, key)
-				p.sizeMapDirty = true
-			}
-			p.sizeMapMu.Unlock()
-		}
-		if info.Name == "" {
-			info.Name = existing.Name
-		}
-		if !rawURLChanged && (info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2)) {
-			info.Size = existing.Size
-		}
-		if !rawURLChanged && info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
-			info.CiphertextSize = existing.CiphertextSize
-		}
-		if !rawURLChanged && info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
-			info.ContentVersion = existing.ContentVersion
-		}
-		if !rawURLChanged && info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
-			info.HeaderLen = existing.HeaderLen
-		}
-		if !rawURLChanged && len(info.NonceField) == 0 && len(existing.NonceField) > 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
-			info.NonceField = cloneNonceField(existing.NonceField)
-		}
-		if !info.IsDir && existing.IsDir {
-			info.IsDir = false
-		}
-		if strings.TrimSpace(info.Path) == "" {
-			info.Path = existing.Path
-		}
-		if strings.TrimSpace(info.RawURL) == "" {
-			info.RawURL = existing.RawURL
-		}
+		p.mergeFileCacheInfo(key, info, existing)
 	}
 	entry := &CachedFileInfo{
 		Info:     info,
@@ -415,60 +457,13 @@ func (p *ProxyServer) storeFileCache(path string, info *FileInfo) {
 	if info == nil {
 		return
 	}
+	if info.ContentVersion != ContentVersionV3 {
+		info.ChunkSize = 0
+		info.KDFIterations = 0
+	}
 	key := normalizeCacheKey(path)
 	if existing, ok := p.loadFileCache(path); ok && existing != nil {
-		incomingRawURL := strings.TrimSpace(info.RawURL)
-		existingRawURL := strings.TrimSpace(existing.RawURL)
-		rawURLChanged := incomingRawURL != "" && existingRawURL != "" && incomingRawURL != existingRawURL
-		incomingMetaTrusted := (info.ContentVersion == ContentVersionV1 && info.Size > 0) ||
-			(info.ContentVersion == ContentVersionV2 &&
-				info.Size > 0 &&
-				info.CiphertextSize > 0 &&
-				info.HeaderLen > 0 &&
-				len(info.NonceField) == 16)
-		if rawURLChanged && !incomingMetaTrusted {
-			// A different signed URL can also represent a replaced object at the
-			// same display path. Do not bind the previous V2 nonce/size to the
-			// new identity; the next playback performs a cheap 32-byte probe.
-			info.Size = 0
-			info.CiphertextSize = 0
-			info.ContentVersion = 0
-			info.HeaderLen = 0
-			info.NonceField = nil
-			p.sizeMapMu.Lock()
-			if p.sizeMap != nil {
-				delete(p.sizeMap, key)
-				p.sizeMapDirty = true
-			}
-			p.sizeMapMu.Unlock()
-		}
-		if info.Name == "" {
-			info.Name = existing.Name
-		}
-		if !rawURLChanged && (info.Size <= 0 || (info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2)) {
-			info.Size = existing.Size
-		}
-		if !rawURLChanged && info.CiphertextSize <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
-			info.CiphertextSize = existing.CiphertextSize
-		}
-		if !rawURLChanged && info.ContentVersion <= 0 && existing.ContentVersion == ContentVersionV2 {
-			info.ContentVersion = existing.ContentVersion
-		}
-		if !rawURLChanged && info.HeaderLen <= 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
-			info.HeaderLen = existing.HeaderLen
-		}
-		if !rawURLChanged && len(info.NonceField) == 0 && len(existing.NonceField) > 0 && (info.ContentVersion > 0 || existing.ContentVersion == ContentVersionV2) {
-			info.NonceField = cloneNonceField(existing.NonceField)
-		}
-		if !info.IsDir && existing.IsDir {
-			info.IsDir = false
-		}
-		if strings.TrimSpace(info.Path) == "" {
-			info.Path = existing.Path
-		}
-		if strings.TrimSpace(info.RawURL) == "" {
-			info.RawURL = existing.RawURL
-		}
+		p.mergeFileCacheInfo(key, info, existing)
 	}
 	entry := &CachedFileInfo{
 		Info:     info,
@@ -528,7 +523,9 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 		for _, candidate := range candidates {
 			if meta, ok := p.lookupLocalFileMeta(p.getAlistURL(), candidate); ok && meta != nil {
 				rawURL := ""
-				if meta.UpstreamFetchedAt > 0 && time.Since(time.Unix(meta.UpstreamFetchedAt, 0)) <= p.getFileCacheTTL() {
+				// Persisted V3 geometry is not a fresh header identity check. Leave
+				// its URL unbound so playback must probe the current object.
+				if meta.ContentVersion != ContentVersionV3 && meta.UpstreamFetchedAt > 0 && time.Since(time.Unix(meta.UpstreamFetchedAt, 0)) <= p.getFileCacheTTL() {
 					rawURL = strings.TrimSpace(meta.RawURL)
 				}
 				info := &FileInfo{
@@ -538,6 +535,8 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 					ContentVersion: meta.ContentVersion,
 					HeaderLen:      meta.HeaderLen,
 					NonceField:     cloneNonceField(meta.NonceField),
+					ChunkSize:      meta.ChunkSize,
+					KDFIterations:  meta.KDFIterations,
 					IsDir:          false,
 					Path:           candidate,
 					RawURL:         rawURL,
@@ -546,15 +545,17 @@ func (p *ProxyServer) loadFileCache(filePath string) (*FileInfo, bool) {
 				if info.Name == "" {
 					info.Name = path.Base(candidate)
 				}
-				p.storeFileCache(candidate, info)
+				p.storeFileCacheList(candidate, info)
 				if candidate != filePath {
-					p.storeFileCache(filePath, &FileInfo{
+					p.storeFileCacheList(filePath, &FileInfo{
 						Name:           info.Name,
 						Size:           info.Size,
 						CiphertextSize: info.CiphertextSize,
 						ContentVersion: info.ContentVersion,
 						HeaderLen:      info.HeaderLen,
 						NonceField:     cloneNonceField(info.NonceField),
+						ChunkSize:      info.ChunkSize,
+						KDFIterations:  info.KDFIterations,
 						IsDir:          info.IsDir,
 						Path:           filePath,
 						RawURL:         info.RawURL,

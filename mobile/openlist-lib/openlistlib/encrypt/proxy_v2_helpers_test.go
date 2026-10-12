@@ -21,8 +21,8 @@ func v1ProbeResponse(req *http.Request, bodyLen int) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusPartialContent,
 		Header: http.Header{
-			"Content-Range":  []string{"bytes 0-31/4096"},
-			"Content-Length": []string{"32"},
+			"Content-Range":  []string{"bytes 0-47/4096"},
+			"Content-Length": []string{"48"},
 		},
 		Body:    io.NopCloser(bytes.NewReader(body)),
 		Request: req,
@@ -38,7 +38,7 @@ func TestInspectEncryptedContentFallbackOnlyForUnconfirmedProbe(t *testing.T) {
 		{
 			name: "confirmed V1 stops immediately",
 			initial: func(req *http.Request) (*http.Response, error) {
-				return v1ProbeResponse(req, int(ContentHeaderSize())), nil
+				return v1ProbeResponse(req, int(V3HeaderSize)), nil
 			},
 			wantCalls: []string{"initial:/raw/video.bin"},
 		},
@@ -95,7 +95,7 @@ func TestInspectEncryptedContentFallbackOnlyForUnconfirmedProbe(t *testing.T) {
 					}
 					calls = append(calls, "alist:"+req.URL.Path)
 					if req.URL.Path == "/dav/video.bin" {
-						return v1ProbeResponse(req, int(ContentHeaderSize())), nil
+						return v1ProbeResponse(req, int(V3HeaderSize)), nil
 					}
 					return &http.Response{
 						StatusCode: http.StatusNotFound,

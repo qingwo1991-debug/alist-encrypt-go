@@ -120,6 +120,16 @@ func (p *ProxyServer) recordLocalV2Meta(providerURL, originalURL string, meta Co
 	if p == nil || p.localStore == nil {
 		return
 	}
+	if meta.IsV3() {
+		if ValidateV3ContentMeta(meta) != nil {
+			return
+		}
+		key, host, originalPath, ok := p.localKeyFromURLs(providerURL, originalURL)
+		if ok {
+			p.localStore.AddContentMeta(key, host, originalPath, originalURL, meta, time.Now())
+		}
+		return
+	}
 	if meta.Version <= 0 || meta.PlainSize <= 0 {
 		return
 	}
@@ -140,6 +150,24 @@ func (p *ProxyServer) recordLocalV2Meta(providerURL, originalURL string, meta Co
 	// content_version/ciphertext_size/header_len/nonce_field，导致重读时
 	// ContentVersion==0、lookup 恒 miss。
 	p.localStore.AddSizeV2Meta(key, providerHost, originalPath, encryptedPath, meta.PlainSize, cipherSize, meta.Version, meta.HeaderLen, meta.NonceField, time.Now())
+}
+
+// lookupLocalV3Meta returns geometry only, never object-identity confirmation.
+// The caller must revalidate the current header nonce/chunk/KDF before reuse;
+// equal ciphertext size cannot establish that an object was not replaced.
+func (p *ProxyServer) lookupLocalV3Meta(providerURL, originalURL string, currentCipherSize int64) (ContentMeta, bool) {
+	rec, ok := p.lookupLocalFileMeta(providerURL, originalURL)
+	if !ok || rec == nil || rec.ContentVersion != ContentVersionV3 {
+		return ContentMeta{}, false
+	}
+	meta := localRecordContentMeta(*rec)
+	if currentCipherSize > 0 && currentCipherSize != meta.CiphertextSize {
+		return ContentMeta{}, false
+	}
+	if ValidateV3ContentMeta(meta) != nil {
+		return ContentMeta{}, false
+	}
+	return meta, true
 }
 
 // lookupLocalV2Meta 从本地 SQLite 读取一条持久化的 V2 加密元数据。

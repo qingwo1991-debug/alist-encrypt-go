@@ -77,8 +77,8 @@ func TestPlaybackFirstByteDirectSuffixStats(t *testing.T) {
 			p.streamClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				var start, end int
 				switch req.Header.Get("Range") {
-				case "bytes=0-31":
-					start, end = 0, 31
+				case "bytes=0-47":
+					start, end = 0, 47
 				case "bytes=32-":
 					start, end = 32, len(ciphertext)-1
 				case "bytes=4126-4127":

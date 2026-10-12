@@ -240,14 +240,14 @@ func TestPlayV2RedirectSuffixRange(t *testing.T) {
 		rangeHeader := req.Header.Get("Range")
 		ranges = append(ranges, rangeHeader)
 		switch rangeHeader {
-		case "bytes=0-31":
+		case "bytes=0-47":
 			return &http.Response{
 				StatusCode: http.StatusPartialContent,
 				Header: http.Header{
-					"Content-Range":  []string{"bytes 0-31/4096"},
-					"Content-Length": []string{"32"},
+					"Content-Range":  []string{"bytes 0-47/4096"},
+					"Content-Length": []string{"48"},
 				},
-				Body: io.NopCloser(bytes.NewReader(encrypted[:32])), Request: req,
+				Body: io.NopCloser(bytes.NewReader(encrypted[:48])), Request: req,
 			}, nil
 		case "bytes=-64":
 			return &http.Response{
@@ -850,17 +850,17 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 		if got := req.URL.String(); got != freshURL {
 			t.Fatalf("probe URL=%q", got)
 		}
-		if got := req.Header.Get("Range"); got != "bytes=0-31" {
+		if got := req.Header.Get("Range"); got != "bytes=0-47" {
 			t.Fatalf("probe Range=%q", got)
 		}
 		return &http.Response{
 			StatusCode: http.StatusPartialContent,
 			Header: http.Header{
 				"Content-Type":   []string{"application/octet-stream"},
-				"Content-Length": []string{"32"},
-				"Content-Range":  []string{"bytes 0-31/4128"},
+				"Content-Length": []string{"48"},
+				"Content-Range":  []string{"bytes 0-47/4128"},
 			},
-			Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+			Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
 			Request: req,
 		}, nil
 	})}
@@ -1553,15 +1553,15 @@ func TestPlayV2RedirectRangePreserves206HeadersForV2(t *testing.T) {
 
 	p.streamClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Header.Get("Range") == "bytes=0-31" {
+			if req.Header.Get("Range") == "bytes=0-47" {
 				return &http.Response{
 					StatusCode: http.StatusPartialContent,
 					Header: http.Header{
-						"Content-Range":  []string{"bytes 0-31/4128"},
-						"Content-Length": []string{"32"},
+						"Content-Range":  []string{"bytes 0-47/4128"},
+						"Content-Length": []string{"48"},
 						"Content-Type":   []string{"application/octet-stream"},
 					},
-					Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
 					Request: req,
 				}, nil
 			}
@@ -1657,14 +1657,14 @@ func TestPlayV2RedirectIgnoresV1CacheForEncryptedV2Path(t *testing.T) {
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			ranges = append(ranges, req.Header.Get("Range"))
 			switch req.Header.Get("Range") {
-			case "bytes=0-31":
+			case "bytes=0-47":
 				return &http.Response{
 					StatusCode: http.StatusPartialContent,
 					Header: http.Header{
-						"Content-Range":  []string{"bytes 0-31/2080"},
-						"Content-Length": []string{"32"},
+						"Content-Range":  []string{"bytes 0-47/2080"},
+						"Content-Length": []string{"48"},
 					},
-					Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
 					Request: req,
 				}, nil
 			case "bytes=32-47":
@@ -1721,7 +1721,7 @@ func TestPlayV2RedirectIgnoresV1CacheForEncryptedV2Path(t *testing.T) {
 	if got := rr.Body.Bytes(); !bytes.Equal(got, plain[:16]) {
 		t.Fatalf("decrypted body mismatch: got=%q", string(got))
 	}
-	if len(ranges) < 2 || ranges[0] != "bytes=0-31" || ranges[1] != "bytes=32-47" {
+	if len(ranges) < 2 || ranges[0] != "bytes=0-47" || ranges[1] != "bytes=32-47" {
 		t.Fatalf("expected v2 probe then shifted range, got %v", ranges)
 	}
 }
@@ -1770,14 +1770,14 @@ func TestPlayV2RedirectPreservesOpenEndedRange(t *testing.T) {
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			ranges = append(ranges, req.Header.Get("Range"))
 			switch req.Header.Get("Range") {
-			case "bytes=0-31":
+			case "bytes=0-47":
 				return &http.Response{
 					StatusCode: http.StatusPartialContent,
 					Header: http.Header{
-						"Content-Range":  []string{"bytes 0-31/" + strconv.Itoa(len(ciphertext))},
-						"Content-Length": []string{"32"},
+						"Content-Range":  []string{"bytes 0-47/" + strconv.Itoa(len(ciphertext))},
+						"Content-Length": []string{"48"},
 					},
-					Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+					Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
 					Request: req,
 				}, nil
 			case expectedUpstreamRange:
@@ -2002,14 +2002,14 @@ func TestServeRedirectRefreshesStaleSizeBeforeRejectingSeek(t *testing.T) {
 		if req.URL.String() != freshURL {
 			t.Fatalf("stream URL=%q want=%q", req.URL, freshURL)
 		}
-		if req.Header.Get("Range") == "bytes=0-31" {
+		if req.Header.Get("Range") == "bytes=0-47" {
 			return &http.Response{
 				StatusCode: http.StatusPartialContent,
 				Header: http.Header{
-					"Content-Range":  []string{fmt.Sprintf("bytes 0-31/%d", len(ciphertext))},
-					"Content-Length": []string{"32"},
+					"Content-Range":  []string{fmt.Sprintf("bytes 0-47/%d", len(ciphertext))},
+					"Content-Length": []string{"48"},
 				},
-				Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+				Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
 				Request: req,
 			}, nil
 		}
@@ -2181,15 +2181,15 @@ func TestServeRedirectRecoversUnknownV2SizeFromHeader(t *testing.T) {
 		if req.URL.String() != rawURL {
 			t.Fatalf("stream URL=%q", req.URL)
 		}
-		if req.Header.Get("Range") == "bytes=0-31" {
+		if req.Header.Get("Range") == "bytes=0-47" {
 			probeAuthorization = req.Header.Get("Authorization")
 			return &http.Response{
 				StatusCode: http.StatusPartialContent,
 				Header: http.Header{
-					"Content-Range":  []string{fmt.Sprintf("bytes 0-31/%d", len(ciphertext))},
-					"Content-Length": []string{"32"},
+					"Content-Range":  []string{fmt.Sprintf("bytes 0-47/%d", len(ciphertext))},
+					"Content-Length": []string{"48"},
 				},
-				Body:    io.NopCloser(bytes.NewReader(ciphertext[:32])),
+				Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
 				Request: req,
 			}, nil
 		}

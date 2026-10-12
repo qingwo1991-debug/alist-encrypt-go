@@ -1,8 +1,12 @@
 module github.com/OpenListTeam/OpenList/v4
 
-go 1.24.0
+go 1.25.0
 
-toolchain go1.24.13
+toolchain go1.26.5
+
+require github.com/alist-encrypt-go/shared/encryptcore v0.0.0
+
+replace github.com/alist-encrypt-go/shared/encryptcore => ../../../shared/encryptcore
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.18.1
@@ -76,8 +80,9 @@ require (
 	github.com/upyun/go-sdk/v3 v3.0.4
 	github.com/winfsp/cgofuse v1.6.0
 	github.com/zzzhr1990/go-common-entity v0.0.0-20250202070650-1a200048f0d3
-	golang.org/x/crypto v0.46.0
+	golang.org/x/crypto v0.51.0
 	golang.org/x/image v0.29.0
+	golang.org/x/mobile v0.0.0-20250606033058-a2a15c67f36f
 	golang.org/x/net v0.48.0
 	golang.org/x/oauth2 v0.34.0
 	golang.org/x/time v0.14.0
@@ -294,8 +299,8 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
 	golang.org/x/arch v0.18.0 // indirect
-	golang.org/x/sync v0.19.0
-	golang.org/x/sys v0.40.0
+	golang.org/x/sync v0.20.0
+	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.38.0 // indirect
 	golang.org/x/text v0.32.0
 	golang.org/x/tools v0.39.0 // indirect

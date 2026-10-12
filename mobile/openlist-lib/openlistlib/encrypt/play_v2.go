@@ -750,13 +750,13 @@ func shouldDecryptRedirect(r *http.Request, info *RedirectInfo) bool {
 }
 
 func redirectRawFileSize(info *RedirectInfo, fallback int64) int64 {
-	if info == nil || info.ContentVersion != ContentVersionV2 {
+	if info == nil || (info.ContentVersion != ContentVersionV2 && info.ContentVersion != ContentVersionV3) {
 		return fallback
 	}
 	if info.CiphertextSize > 0 {
 		return info.CiphertextSize
 	}
-	if info.FileSize > 0 && info.HeaderLen > 0 && info.FileSize <= (1<<63-1)-info.HeaderLen {
+	if info.ContentVersion == ContentVersionV2 && info.FileSize > 0 && info.HeaderLen > 0 && info.FileSize <= (1<<63-1)-info.HeaderLen {
 		return info.FileSize + info.HeaderLen
 	}
 	return fallback
@@ -816,7 +816,16 @@ func playbackCachePathVariants(info *RedirectInfo) []string {
 }
 
 func fileInfoContentMeta(cached *FileInfo, encType EncryptionType) (ContentMeta, bool) {
-	if cached == nil || cached.ContentVersion != ContentVersionV2 || len(cached.NonceField) != 16 {
+	if cached == nil {
+		return ContentMeta{}, false
+	}
+	if cached.ContentVersion == ContentVersionV3 {
+		meta := ContentMeta{EncType: encType, Version: cached.ContentVersion, HeaderLen: cached.HeaderLen,
+			PlainSize: cached.Size, CiphertextSize: cached.CiphertextSize, NonceField: cloneNonceField(cached.NonceField),
+			ChunkSize: cached.ChunkSize, KDFIterations: cached.KDFIterations}
+		return meta, ValidateV3ContentMeta(meta) == nil
+	}
+	if cached.ContentVersion != ContentVersionV2 || len(cached.NonceField) != 16 {
 		return ContentMeta{}, false
 	}
 	cipherSize := cached.CiphertextSize
@@ -838,8 +847,8 @@ func fileInfoContentMeta(cached *FileInfo, encType EncryptionType) (ContentMeta,
 // after a file is replaced by V2 content, while a same-URL conclusion safely
 // eliminates the repeated 32-byte format probe on every seek.
 func playbackFileInfoContentMeta(cached *FileInfo, encType EncryptionType, redirectURL string) (ContentMeta, bool) {
-	if cached != nil && cached.ContentVersion == ContentVersionV3 {
-		return ContentMeta{EncType: encType, Version: ContentVersionV3, CiphertextSize: cached.CiphertextSize}, true
+	if cached != nil && cached.ContentVersion == ContentVersionV3 && (cached.RawURL == "" || cached.RawURL != redirectURL) {
+		return ContentMeta{}, false
 	}
 	if meta, ok := fileInfoContentMeta(cached, encType); ok {
 		return meta, true
@@ -873,8 +882,10 @@ func redirectInfoContentMeta(info *RedirectInfo) (ContentMeta, bool) {
 		}
 		return LegacyContentMeta(encType, size), true
 	case ContentVersionV3:
-		// Recognition is enough to reject; do not require V2 nonce or size fields.
-		return ContentMeta{EncType: encType, Version: ContentVersionV3, CiphertextSize: info.CiphertextSize}, true
+		meta := ContentMeta{EncType: encType, Version: ContentVersionV3, HeaderLen: info.HeaderLen,
+			PlainSize: info.FileSize, CiphertextSize: info.CiphertextSize, NonceField: cloneNonceField(info.NonceField),
+			ChunkSize: info.ChunkSize, KDFIterations: info.KDFIterations}
+		return meta, ValidateV3ContentMeta(meta) == nil
 	case ContentVersionV2:
 		if len(info.NonceField) != 16 || info.HeaderLen <= 0 {
 			return ContentMeta{}, false
@@ -962,7 +973,7 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 	refreshed := cloneRedirectInfo(info)
 	refreshed.RedirectURL = rawURL
 	refreshed.Headers = headers
-	rawIdentityChanged := strings.TrimSpace(rawURL) != strings.TrimSpace(info.RedirectURL)
+	rawIdentityChanged := rawURL != info.RedirectURL
 	if rawIdentityChanged {
 		// A new signed URL may point at a replacement object at the same path.
 		// Never carry a V2 nonce across that identity boundary without
@@ -970,6 +981,7 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 		refreshed.ContentVersion = 0
 		refreshed.HeaderLen = 0
 		refreshed.NonceField = nil
+		refreshed.ChunkSize, refreshed.KDFIterations = 0, 0
 		refreshed.FileSize = size
 		refreshed.CiphertextSize = size
 		if refreshed.PasswdInfo != nil && refreshed.PasswdInfo.Enable {
@@ -982,16 +994,27 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 				size,
 				encProbePath,
 			)
-			if confirmed {
+			if meta.IsV3() && ValidateV3ContentMeta(meta) != nil {
+				// Preserve recognition only; incomplete fields are never reusable metadata.
+				refreshed.ContentVersion = ContentVersionV3
+			} else if confirmed {
 				refreshed.ContentVersion = meta.Version
 				refreshed.HeaderLen = meta.HeaderLen
 				refreshed.NonceField = cloneNonceField(meta.NonceField)
+				refreshed.ChunkSize, refreshed.KDFIterations = meta.ChunkSize, meta.KDFIterations
 				refreshed.CiphertextSize = meta.TotalCiphertextSize()
 				refreshed.FileSize = meta.PlainSize
 			}
 		}
 	} else if size > 0 {
-		if refreshed.ContentVersion == ContentVersionV2 && refreshed.HeaderLen > 0 {
+		if refreshed.ContentVersion == ContentVersionV3 {
+			if refreshed.CiphertextSize != size {
+				refreshed.CiphertextSize = size
+				refreshed.HeaderLen = 0
+				refreshed.NonceField = nil
+				refreshed.ChunkSize, refreshed.KDFIterations = 0, 0
+			}
+		} else if refreshed.ContentVersion == ContentVersionV2 && refreshed.HeaderLen > 0 {
 			// The strict encrypted-path resolver reads OpenList directly, so size
 			// is the ciphertext representation (including the V2 header).
 			refreshed.CiphertextSize = size
@@ -1011,6 +1034,12 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 
 func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request, info *RedirectInfo) int64 {
 	if o == nil || o.proxy == nil || info == nil {
+		return 0
+	}
+	if info.ContentVersion == ContentVersionV3 {
+		if meta, ok := redirectInfoContentMeta(info); ok {
+			return meta.PlainSize
+		}
 		return 0
 	}
 	fileSize := info.FileSize
@@ -1072,17 +1101,70 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 	return fileSize
 }
 
-// Reject before writing stream headers or learning a provider capability: this
-// is a local format limitation, not an upstream strategy failure.
-func rejectUnsupportedV3Playback(w http.ResponseWriter) *StreamOutcome {
-	http.Error(w, unsupportedV3Playback, http.StatusUnsupportedMediaType)
-	return &StreamOutcome{
-		Err:             fmt.Errorf("%s", unsupportedV3Playback),
-		FailureReason:   "unsupported_content_version",
-		Retryable:       false,
-		ResponseStarted: true,
-		StatusCode:      http.StatusUnsupportedMediaType,
+// resolvePlaybackContentMeta resolves the representation before legacy range,
+// cache and strategy handling. Recognized but incomplete V3 never becomes V1.
+func (p *ProxyServer) resolvePlaybackContentMeta(r *http.Request, info *RedirectInfo, size int64) (ContentMeta, bool) {
+	if meta, ok := redirectInfoContentMeta(info); ok {
+		return meta, true
 	}
+	recognizedV3 := info.ContentVersion == ContentVersionV3
+	for _, cachePath := range playbackCachePathVariants(info) {
+		if cached, ok := p.loadFileCache(cachePath); ok {
+			if cached.ContentVersion == ContentVersionV3 && cached.RawURL == info.RedirectURL {
+				recognizedV3 = true
+			}
+			if meta, ok := playbackFileInfoContentMeta(cached, info.PasswdInfo.EncType, info.RedirectURL); ok {
+				return meta, true
+			}
+		}
+	}
+	if info.CiphertextSize > 0 {
+		size = info.CiphertextSize
+	}
+	headers := headersWithStoredOriginCredentials(r.Header, info.Headers)
+	meta, confirmed := p.inspectEncryptedContentWithFallbackConfirmed(r.Context(), info.RedirectURL, headers,
+		info.PasswdInfo, size, strings.TrimPrefix(encryptedDAVPath(info.EncryptedPath), "/dav"))
+	if recognizedV3 && !meta.IsV3() {
+		return ContentMeta{EncType: info.PasswdInfo.EncType, Version: ContentVersionV3}, true
+	}
+	return meta, confirmed
+}
+
+func (p *ProxyServer) persistPlaybackContentMeta(key string, info *RedirectInfo, meta ContentMeta) *RedirectInfo {
+	if meta.IsV3() && ValidateV3ContentMeta(meta) != nil {
+		return info
+	}
+	updated := cloneRedirectInfo(info)
+	updated.ContentVersion, updated.HeaderLen = meta.Version, meta.HeaderLen
+	updated.NonceField = cloneNonceField(meta.NonceField)
+	updated.ChunkSize, updated.KDFIterations = meta.ChunkSize, meta.KDFIterations
+	updated.CiphertextSize, updated.FileSize = meta.CiphertextSize, meta.PlainSize
+	if key != "" {
+		p.storeRedirectCache(key, updated)
+	}
+	for _, cachePath := range playbackCachePathVariants(info) {
+		p.storeFileCache(cachePath, &FileInfo{Name: path.Base(cachePath), Path: cachePath, RawURL: info.RedirectURL,
+			Size: meta.PlainSize, CiphertextSize: meta.CiphertextSize, ContentVersion: meta.Version,
+			HeaderLen: meta.HeaderLen, NonceField: cloneNonceField(meta.NonceField), ChunkSize: meta.ChunkSize, KDFIterations: meta.KDFIterations})
+	}
+	if meta.PlainSize > 0 || meta.IsV3() {
+		p.recordLocalV2Meta(info.RedirectURL, info.OriginalURL, meta)
+	}
+	return updated
+}
+
+// The V3 service owns all error responses. This terminal adapter deliberately
+// suppresses legacy retries and provider learning, even after partial writes.
+func (o *PlayOrchestrator) serveResolvedV3Playback(w http.ResponseWriter, r *http.Request, info *RedirectInfo, meta ContentMeta) *StreamOutcome {
+	err := o.proxy.serveV3Playback(w, r, info, meta)
+	status := http.StatusOK
+	if timing, ok := r.Context().Value(playbackTimingKey{}).(*playbackTiming); ok && timing.status != 0 {
+		status = timing.status
+	}
+	if typed, ok := err.(*V3PlaybackError); ok {
+		status = typed.StatusCode
+	}
+	return &StreamOutcome{Err: err, FailureReason: "v3_terminal", ResponseStarted: true, StatusCode: status}
 }
 
 func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
@@ -1095,6 +1177,17 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 ) *StreamOutcome {
 	p := o.proxy
 	ctx := r.Context()
+	if shouldDecryptRedirect(r, info) {
+		resolved, confirmed := p.resolvePlaybackContentMeta(r, info, fileSize)
+		if resolved.IsV3() {
+			info = p.persistPlaybackContentMeta(redirectKey, info, resolved)
+			return o.serveResolvedV3Playback(w, r, info, resolved)
+		}
+		if !confirmed {
+			return &StreamOutcome{Err: fmt.Errorf("unable to confirm encrypted content metadata"), FailureReason: "metadata_probe_failed"}
+		}
+		info = p.persistPlaybackContentMeta(redirectKey, info, resolved)
+	}
 
 	// 墙钟起点：用于统计本次流式写出的时长（近似播放时长）。
 	streamWallStart := time.Now()
@@ -1172,7 +1265,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		// constant across sessions. Snapshot it on first real INSPECT and reuse it
 		// here -- including after an app restart -- to skip redundant upstream probes.
 		if !cachedMetaLoaded {
-			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL, fileSize); ok {
+			if dbMeta, ok := p.lookupLocalV2Meta(info.RedirectURL, info.OriginalURL, fileSize); ok && !dbMeta.IsV3() {
 				meta = dbMeta
 				cachedMetaLoaded = true
 				v2MetaFromSQLite = true
@@ -1186,9 +1279,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 						ContentVersion: meta.Version,
 						HeaderLen:      meta.HeaderLen,
 						NonceField:     cloneNonceField(meta.NonceField),
-						IsDir:          false,
-						Path:           displayPath,
-						RawURL:         info.RedirectURL,
+						ChunkSize:      meta.ChunkSize, KDFIterations: meta.KDFIterations,
+						IsDir:  false,
+						Path:   displayPath,
+						RawURL: info.RedirectURL,
 					}
 					for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
 						infoCopy := &FileInfo{
@@ -1198,9 +1292,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 							ContentVersion: cacheInfo.ContentVersion,
 							HeaderLen:      cacheInfo.HeaderLen,
 							NonceField:     cloneNonceField(cacheInfo.NonceField),
-							IsDir:          false,
-							Path:           cachePath,
-							RawURL:         cacheInfo.RawURL,
+							ChunkSize:      cacheInfo.ChunkSize, KDFIterations: cacheInfo.KDFIterations,
+							IsDir:  false,
+							Path:   cachePath,
+							RawURL: cacheInfo.RawURL,
 						}
 						p.storeFileCache(cachePath, infoCopy)
 					}
@@ -1222,7 +1317,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 				encProbePath,
 			)
 			if meta.Version == ContentVersionV3 {
-				return rejectUnsupportedV3Playback(w)
+				return o.serveResolvedV3Playback(w, r, info, meta)
 			}
 			if !metaConfirmed {
 				return &StreamOutcome{
@@ -1244,9 +1339,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 					ContentVersion: meta.Version,
 					HeaderLen:      meta.HeaderLen,
 					NonceField:     cloneNonceField(meta.NonceField),
-					IsDir:          false,
-					Path:           displayPath,
-					RawURL:         info.RedirectURL,
+					ChunkSize:      meta.ChunkSize, KDFIterations: meta.KDFIterations,
+					IsDir:  false,
+					Path:   displayPath,
+					RawURL: info.RedirectURL,
 				}
 				for _, cachePath := range appendUniquePathVariant(nil, displayPath) {
 					infoCopy := &FileInfo{
@@ -1256,9 +1352,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 						ContentVersion: cacheInfo.ContentVersion,
 						HeaderLen:      cacheInfo.HeaderLen,
 						NonceField:     cloneNonceField(cacheInfo.NonceField),
-						IsDir:          false,
-						Path:           cachePath,
-						RawURL:         cacheInfo.RawURL,
+						ChunkSize:      cacheInfo.ChunkSize, KDFIterations: cacheInfo.KDFIterations,
+						IsDir:  false,
+						Path:   cachePath,
+						RawURL: cacheInfo.RawURL,
 					}
 					p.storeFileCache(cachePath, infoCopy)
 				}
@@ -1277,6 +1374,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 				updated.ContentVersion = meta.Version
 				updated.HeaderLen = meta.HeaderLen
 				updated.NonceField = cloneNonceField(meta.NonceField)
+				updated.ChunkSize, updated.KDFIterations = meta.ChunkSize, meta.KDFIterations
 				updated.CiphertextSize = meta.CiphertextSize
 				updated.FileSize = meta.PlainSize
 				p.storeRedirectCache(redirectKey, updated)
@@ -1291,7 +1389,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	}
 
 	if !decodeDisabled && meta.Version == ContentVersionV3 {
-		return rejectUnsupportedV3Playback(w)
+		return o.serveResolvedV3Playback(w, r, info, meta)
 	}
 
 	// Always apply V2 corrections — whether meta came from inspection, cache, or pre-population.
@@ -1427,7 +1525,8 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			resp.Body.Close()
 			info = refreshed
 			if !decodeDisabled && info.ContentVersion == ContentVersionV3 {
-				return rejectUnsupportedV3Playback(w)
+				resolved, _ := p.resolvePlaybackContentMeta(r, info, info.CiphertextSize)
+				return o.serveResolvedV3Playback(w, r, info, resolved)
 			}
 			resp, err = doStreamRequest(info)
 			if err != nil {
@@ -1830,10 +1929,6 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 	info = cloneRedirectInfo(info)
 
-	if shouldDecryptRedirect(r, info) && info.ContentVersion == ContentVersionV3 {
-		rejectUnsupportedV3Playback(w)
-		return
-	}
 	// Register before resolve so metadata/prework is included in the measurement.
 	fileSize := int64(0)
 	statsEnabled, statsCompleted, cacheHit := false, false, false
@@ -1861,6 +1956,21 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			timing.bytesWritten, timing.totalBytes, statsCompleted, "", duration,
 			timing.rangeStart, timing.headerLatencyMs, mbps, timing.firstByteLatencyMs)
 	}()
+	if shouldDecryptRedirect(r, info) {
+		meta, confirmed := o.proxy.resolvePlaybackContentMeta(r, info, info.FileSize)
+		if meta.IsV3() {
+			info = o.proxy.persistPlaybackContentMeta(key, info, meta)
+			statsEnabled = true
+			outcome := o.serveResolvedV3Playback(w, r, info, meta)
+			statsCompleted = outcome.Err == nil
+			return
+		}
+		if !confirmed {
+			http.Error(w, "unable to confirm encrypted content metadata", http.StatusBadGateway)
+			return
+		}
+		info = o.proxy.persistPlaybackContentMeta(key, info, meta)
+	}
 	fileSize = o.resolveFileSize(r.Context(), r, info)
 	decodeDisabled := r.URL.Query().Get("decode") == "0"
 	if decodeDisabled {
@@ -1905,8 +2015,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			0,
 			encProbePath,
 		)
-		if meta.Version == ContentVersionV3 {
-			rejectUnsupportedV3Playback(w)
+		if meta.IsV3() {
+			info = o.proxy.persistPlaybackContentMeta(key, info, meta)
+			statsEnabled = true
+			statsCompleted = o.serveResolvedV3Playback(w, r, info, meta).Err == nil
 			return
 		}
 		if confirmed && meta.IsV2() && meta.PlainSize > 0 {
@@ -1957,7 +2069,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rangeHeader := r.Header.Get("Range")
-	if tryServeEmptyTailRange(w, rangeHeader, fileSize, info.HeaderLen) {
+	if !decodeDisabled && tryServeEmptyTailRange(w, rangeHeader, fileSize, info.HeaderLen) {
 		return
 	}
 	if _, _, _, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr != nil {
@@ -2043,6 +2155,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		if outcome != nil && outcome.Err != nil {
 			log.Warnf("V2 redirect strategy failed: strategy=%s reason=%s retryable=%v responseStarted=%v err=%v",
 				strategy, outcome.FailureReason, outcome.Retryable, outcome.ResponseStarted, outcome.Err)
+		}
+		if outcome.FailureReason == "v3_terminal" {
+			return outcome
 		}
 		if outcome.Err == nil && !outcome.Retryable {
 			if o.proxy.strategySelector != nil {

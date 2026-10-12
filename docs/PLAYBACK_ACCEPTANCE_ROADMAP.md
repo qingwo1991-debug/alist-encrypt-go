@@ -10,8 +10,8 @@
 
 | 阶段 | 目标 | 当前状态 | 必须的完成证据 |
 | --- | --- | --- | --- |
-| 1 | 可重复故障上游、准确指标与播放测量 | 实施中 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
-| 2 | 移动端共享 V3 核心 | 未开始 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
+| 1 | 可重复故障上游、准确指标与播放测量 | 工程交付完成，真机未测 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
+| 2 | 移动端共享 V3 核心 | 实施中，待云端验证 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
 | 3 | V3 小块配置、认证缓存、受控回退 | 未开始 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
 | 4 | 切集兴趣调度与有界 KDF | 未开始 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
 | 5 | 驱动取消、控制面路由、原生选网 | 未开始 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
@@ -26,7 +26,7 @@
 - `internal/proxy/playback_acceptance*_test.go`：V1/V2/V3 共 36 个精确正文与范围组合、6 个下载取消、12 个重定向/错误场景和 2 个元数据取消场景。`PLAYBACK_ACCEPTANCE_REPORT` 指定绝对路径输出 JSON；量化的是上游 Write 接受字节，不是 TCP 流量或播放器渲染。
 - `tools/playback-probe`：独立 HTML 工具，使用 requestVideoFrameCallback 测首帧/seek 的 compositor submission 延迟，隔离过期回调、来源与缓存标签，API 不支持时明确 unsupported。不会自动绕过授权或清理缓存；不是应用内外部播放器的测量代理。
 - 统计页面区分响应头与正文首字节，不以历史响应头代替新指标。移动重定向直读/解密缓存路径增加 handler 开始至首次成功正文写出的计时、SQLite 兼容迁移与会话保留，旧记录没有该字段即未知；legacy 路由及原密文下载未据此宣称完整播放遥测。真实渲染指标只来自测量工具/未来播放器事件。
-- Actions 添加 fault acceptance artifact 和独立 Node 测量语义测试；新增测试也作为后续构建发布依赖。当前尚待首阶段云端运行，未宣称真机测试通过。
+- Actions 添加 fault acceptance artifact 和独立 Node 测量语义测试；新增测试也作为后续构建发布依赖。首阶段 [PR #67](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/67) 全绿合并，main `2374ca3` 的 [Actions 38197844019](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38197844019) 测试、竞态、Docker、跨平台二进制、三 ABI AAR/APK 与发布全部成功。未宣称真机测试通过。
 - 后续实现设计：`docs/MOBILE_V3_IMPLEMENTATION.md`、`docs/NETWORK_ROUTING_IMPLEMENTATION.md`。
 
 ## 评分与硬性门槛
