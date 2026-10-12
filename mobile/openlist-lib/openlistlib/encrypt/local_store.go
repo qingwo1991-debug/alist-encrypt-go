@@ -79,6 +79,9 @@ type localStore struct {
 	buffer         []storeRecord
 	flushThreshold int
 	flushing       bool
+	backupDone     <-chan struct{}
+	closeDone      chan struct{}
+	closeErr       error
 	closed         bool
 }
 
@@ -155,6 +158,10 @@ type LocalProviderCatalogRecord struct {
 const defaultFlushThreshold = 20
 
 func newLocalStore(baseDir string) (*localStore, error) {
+	return newLocalStoreWithBackup(baseDir, backupLocalStoreDB)
+}
+
+func newLocalStoreWithBackup(baseDir string, backup func(string) error) (*localStore, error) {
 	if baseDir == "" {
 		return nil, nil
 	}
@@ -162,9 +169,18 @@ func newLocalStore(baseDir string) (*localStore, error) {
 		return nil, err
 	}
 	dbPath := filepath.Join(baseDir, "local_media.db")
-	// Run backup asynchronously to avoid blocking service startup on large DB copies.
+	// This best-effort main-file copy is owned, not a WAL-consistent SQLite
+	// snapshot. Startup can overlap its I/O; Close and failed construction join it.
+	backupDone := make(chan struct{})
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			<-backupDone
+		}
+	}()
 	go func() {
-		if err := backupLocalStoreDB(dbPath); err != nil {
+		defer close(backupDone)
+		if err := backup(dbPath); err != nil {
 			log.Warnf("[%s] local store backup failed: %v", internal.TagCache, err)
 		}
 	}()
@@ -189,8 +205,10 @@ func newLocalStore(baseDir string) (*localStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	succeeded = true
 	return &localStore{
 		db:             db,
+		backupDone:     backupDone,
 		flushThreshold: defaultFlushThreshold,
 	}, nil
 }
@@ -208,14 +226,15 @@ func backupLocalStoreDB(dbPath string) error {
 	}
 	dir := filepath.Dir(dbPath)
 	base := filepath.Base(dbPath)
-	backupPath := filepath.Join(dir, base+".bak-"+time.Now().Format("20060102150405"))
+	// O_EXCL unique suffix prevents rapid/concurrent startup truncating a backup.
+	pattern := base + ".bak-" + time.Now().Format("20060102150405.000000000") + "-*"
 
 	src, err := os.Open(dbPath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	dst, err := os.Create(backupPath)
+	dst, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -425,17 +444,32 @@ func (s *localStore) Close() error {
 		return nil
 	}
 	s.mu.Lock()
-	if s.closed {
+	if s.closeDone != nil {
+		done := s.closeDone
 		s.mu.Unlock()
-		return nil
+		<-done
+		s.mu.Lock()
+		err := s.closeErr
+		s.mu.Unlock()
+		return err
 	}
+	s.closeDone = make(chan struct{})
 	s.closed = true
 	s.mu.Unlock()
-	_ = s.Flush(true)
-	if s.db != nil {
-		return s.db.Close()
+	if s.backupDone != nil {
+		<-s.backupDone
 	}
-	return nil
+	err := s.Flush(true)
+	if s.db != nil {
+		if closeErr := s.db.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	s.mu.Lock()
+	s.closeErr = err
+	close(s.closeDone)
+	s.mu.Unlock()
+	return err
 }
 
 func (s *localStore) Cleanup(sizeOlderThan, strategyOlderThan time.Duration) error {

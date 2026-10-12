@@ -44,6 +44,7 @@ func (p *ProxyServer) closeLocalStore() {
 	p.sealLifetime()
 	p.lifetime().background.Wait()
 	p.lifetime().handlers.Wait()
+	p.FlushPlaybackSessions()
 	if p.localStore == nil {
 		return
 	}
