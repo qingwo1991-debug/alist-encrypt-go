@@ -13,8 +13,8 @@
 | 1 | 可重复故障上游、准确指标与播放测量 | 工程交付完成，真机未测 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
 | 2 | 移动端共享 V3 核心 | 工程交付与 main 发布完成，真机未测 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
 | 3 | V3 小块配置、认证缓存、受控回退 | 工程交付与 main 发布完成，真机未测 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
-| 4 | 切集兴趣调度与有界 KDF | 实施中，Draft PR #70 云端验证 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
-| 5 | 驱动取消、控制面路由、原生选网 | 未开始 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
+| 4 | 切集兴趣调度与有界 KDF | 工程交付与 main 发布完成，真机未测 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
+| 5 | 驱动取消、控制面路由、原生选网 | 实施中，原生桥/路由待云端编译 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
 | 6 | 非 UI 文件写入、统计锁外、同步维护 | 未开始 | 文件逐字节正确、取消与隔离、资源稳定、源码覆盖冲突检测 |
 | 7 | 完整云端及真机验收矩阵 | 未开始 | main 全绿、发布产物；设备测试通过或明确标注待人工验证 |
 
@@ -46,11 +46,13 @@
 - 云端放大报告：同样 4096 字节 tiny seek，1 MiB/16 MiB chunk 的冷请求分别读取 1,048,592 / 16,777,232 字节（整认证 record 加 16 字节 tag），同块另一区间的热请求均零上游请求、零正文读取。fixture KDF iterations=1，只比较正文放大，不衡量生产 KDF CPU 或 TCP/播放器延迟。
 - 审查补修：4096 条目上限包括 resident、reserved 和 evicted-but-pinned；移动 scope 保守绑定完整原始/存储请求头，custom provider token 和 representation selector 不得跨身份复用。
 
-## 阶段 4 当前实施（尚未完成）
+## 阶段 4 实施与云端证据
 
-- [Draft PR #70](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/70) 接入固定 worker、有界队列及可取消等待的 V3 KDF service，保留原 256 项/sliding TTL/copy 缓存；不创建逐 flight/waiter 的 goroutine。已启动的 PBKDF2 不可抢占，最后 waiter 取消也不会提前释放真实 CPU slot。
+- [PR #70](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/70) 经独立复审与补修后全绿合并至 main `fa8ee6b`。最终 [Actions 38210123567](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38210123567) 根/共享/移动测试、竞态、故障验收、MySQL、Web、Flutter、Docker 及三 ABI binding 全绿；main [Actions 38210664342](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38210664342) 完整二进制、Docker、三 ABI AAR/APK 与发布成功，版本 [v2026.10.12.381](https://github.com/qingwo1991-debug/alist-encrypt-go/releases/tag/v2026.10.12.381)。
+- 接入固定 worker、有界队列及可取消等待的 V3 KDF service，保留原 256 项/sliding TTL/copy 缓存；不创建逐 flight/waiter 的 goroutine。已启动的 PBKDF2 不可抢占，最后 waiter 取消也不会提前释放真实 CPU slot。
 - root/mobile context-aware foreground 派生成功后才持有 record buffer admission；HEAD 和整 record 热命中保持零 KDF。speculative admission 为前台留 queue/waiter 名额；尚未启动的 queued promotion 在最后 foreground 引用撤销后恢复 speculative，运行中的分类保持不变。
-- 可信 session/provider/scope/generation 调度及鉴权 explicit-intent API 正在实施；不凭 IP、Range 或猜集识别用户会话，不将 generation context 挂到活跃 HTTP media 请求。云端初始编译信号不是阶段完成证据。
+- 可信 session/provider/scope/generation 调度及鉴权 explicit-intent API 已实施，详见 `PLAYBACK_INTEREST_API.md`。任务绑定 endpoint 验证时的同一份完整配置快照；排队期间切换 provider 凭据/origin 不改变旧任务，登录与 metadata 的真实传输使用任务 context。多 session 共享引用、最后兴趣撤销与真实转移结束后的资源归还均有回归。
+- 不凭 IP、Range 或猜集识别用户会话，不将 generation context 挂到活跃 HTTP media 请求。现有管理页面没有嵌入式播放器 session；这是显式客户端接口，不是外部播放器自动切集报告，也未据此宣称真机性能改善。
 
 ## 评分与硬性门槛
 

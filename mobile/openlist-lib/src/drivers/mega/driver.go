@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
@@ -14,6 +15,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	opnet "github.com/OpenListTeam/OpenList/v4/internal/net"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	log "github.com/sirupsen/logrus"
@@ -23,7 +25,9 @@ import (
 type Mega struct {
 	model.Storage
 	Addition
-	c *mega.Mega
+	c             *mega.Mega
+	clientRelease func()
+	dropOnce      sync.Once
 }
 
 func (d *Mega) Config() driver.Config {
@@ -39,7 +43,6 @@ func (d *Mega) Init(ctx context.Context) error {
 		return err
 	}
 	var twoFACode = d.TwoFACode
-	client := mega.New()
 	if d.TwoFASecret != "" {
 		code, err := totp.GenerateCode(d.TwoFASecret, time.Now())
 		if err != nil {
@@ -47,21 +50,37 @@ func (d *Mega) Init(ctx context.Context) error {
 		}
 		twoFACode = code
 	}
-	// go-mega's login API has no context argument. Keep it synchronous: a
-	// goroutine/select wrapper would abandon, not cancel, its HTTP requests.
-	err := client.MultiFactorLogin(d.Email, d.Password, twoFACode)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
+	client := mega.New()
+	httpClient, release := opnet.NewDriverHTTPClient(opnet.DriverRouteIdentity{Driver: d.Config().Name}, 0)
+	client.SetClient(httpClient)
+	err := client.MultiFactorLoginContext(ctx, d.Email, d.Password, twoFACode)
 	if err != nil {
+		_ = client.Close()
+		release()
 		return err
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = client.Close()
+		release()
+		return ctxErr
+	}
 	d.c = client
+	d.clientRelease = release
+	d.dropOnce = sync.Once{}
 	return nil
 }
 
 func (d *Mega) Drop(ctx context.Context) error {
-	return nil
+	var err error
+	d.dropOnce.Do(func() {
+		if d.c != nil {
+			err = d.c.Close()
+		}
+		if d.clientRelease != nil {
+			d.clientRelease()
+		}
+	})
+	return err
 }
 
 func (d *Mega) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
@@ -119,17 +138,19 @@ func (d *Mega) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 				length = size - httpRange.Start
 			}
 			var down *mega.Download
-			err := utils.Retry(3, time.Second, func() (err error) {
-				down, err = d.c.NewDownload(node.n)
+			err := utils.RetryContext(ctx, 3, time.Second, func() (err error) {
+				down, err = d.c.NewDownloadContext(ctx, node.n)
 				return err
 			})
 			if err != nil {
 				return nil, fmt.Errorf("open download file failed: %w", err)
 			}
+			readerCtx, cancel := context.WithCancel(ctx)
 			oo := &openObject{
-				ctx:  ctx,
-				d:    down,
-				skip: httpRange.Start,
+				ctx:    readerCtx,
+				cancel: cancel,
+				d:      down,
+				skip:   httpRange.Start,
 			}
 
 			return readers.NewLimitedReadCloser(oo, length), nil
@@ -143,7 +164,7 @@ func (d *Mega) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 
 func (d *Mega) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
 	if parentNode, ok := parentDir.(*MegaNode); ok {
-		_, err := d.c.CreateDir(dirName, parentNode.n)
+		_, err := d.c.CreateDirContext(ctx, dirName, parentNode.n)
 		return err
 	}
 	return fmt.Errorf("unable to convert dir to mega n")
@@ -152,7 +173,7 @@ func (d *Mega) MakeDir(ctx context.Context, parentDir model.Obj, dirName string)
 func (d *Mega) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 	if srcNode, ok := srcObj.(*MegaNode); ok {
 		if dstNode, ok := dstDir.(*MegaNode); ok {
-			return d.c.Move(srcNode.n, dstNode.n)
+			return d.c.MoveContext(ctx, srcNode.n, dstNode.n)
 		}
 	}
 	return fmt.Errorf("unable to convert dir to mega n")
@@ -160,7 +181,7 @@ func (d *Mega) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 
 func (d *Mega) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
 	if srcNode, ok := srcObj.(*MegaNode); ok {
-		return d.c.Rename(srcNode.n, newName)
+		return d.c.RenameContext(ctx, srcNode.n, newName)
 	}
 	return fmt.Errorf("unable to convert dir to mega n")
 }
@@ -171,14 +192,14 @@ func (d *Mega) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 
 func (d *Mega) Remove(ctx context.Context, obj model.Obj) error {
 	if node, ok := obj.(*MegaNode); ok {
-		return d.c.Delete(node.n, !d.MoveToTrash)
+		return d.c.DeleteContext(ctx, node.n, !d.MoveToTrash)
 	}
 	return fmt.Errorf("unable to convert dir to mega n")
 }
 
 func (d *Mega) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
 	if dstNode, ok := dstDir.(*MegaNode); ok {
-		u, err := d.c.NewUpload(dstNode.n, stream.GetName(), stream.GetSize())
+		u, err := d.c.NewUploadContext(ctx, dstNode.n, stream.GetName(), stream.GetSize())
 		if err != nil {
 			return err
 		}
@@ -201,21 +222,21 @@ func (d *Mega) Put(ctx context.Context, dstDir model.Obj, stream model.FileStrea
 				return errors.New("chunk too short")
 			}
 
-			err = u.UploadChunk(id, chunk)
+			err = u.UploadChunkContext(ctx, id, chunk)
 			if err != nil {
 				return err
 			}
 			up(float64(id) * 100 / float64(u.Chunks()))
 		}
 
-		_, err = u.Finish()
+		_, err = u.FinishContext(ctx)
 		return err
 	}
 	return fmt.Errorf("unable to convert dir to mega n")
 }
 
 func (d *Mega) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
-	quota, err := d.c.GetQuota()
+	quota, err := d.c.GetQuotaContext(ctx)
 	if err != nil {
 		return nil, err
 	}

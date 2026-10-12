@@ -77,12 +77,12 @@ class OpenListService : Service(), OpenList.Listener {
     private var mDbSyncJob: Job? = null
     private var mConnectivityManager: ConnectivityManager? = null
     private var mNetworkCallback: ConnectivityManager.NetworkCallback? = null
-
-    // 双网络（WiFi+蜂窝）：缓存各自的 Network 对象，用于计算 fwmark 绑定。
-    @Volatile
-    private var mWifiNetwork: Network? = null
-    @Volatile
-    private var mCellNetwork: Network? = null
+    private var mDefaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var mNativeNetworkBridge: NativeNetworkBridge? = null
+    private val mPhysicalNetworks = mutableMapOf<Network, NetworkCapabilities>()
+    private val mAvailablePhysicalNetworks = mutableSetOf<Network>()
+    private val mNetworkLock = Any()
+    private var mDefaultNetwork: Network? = null
 
     // Database sync interval in milliseconds (5 minutes)
     private val DB_SYNC_INTERVAL = 5 * 60 * 1000L
@@ -225,6 +225,7 @@ class OpenListService : Service(), OpenList.Listener {
         Log.d(TAG, "OpenList shutdown: $type")
         if (!OpenList.isRunning()) {
             isRunning = false
+            stopNetworkMonitoring()
             // Stop database sync task when service shuts down
             stopDatabaseSyncTask()
             notifyStatusChanged()
@@ -262,90 +263,136 @@ class OpenListService : Service(), OpenList.Listener {
         Log.d(TAG, "Database sync task stopped")
     }
 
-    private fun startNetworkMonitoring() {
-        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        mConnectivityManager = connectivityManager
-        Log.w(TAG, "Dual-network socket selection unsupported: using default system route; no Network.bindSocket bridge installed")
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                rememberDualNetwork(network)
-                updateNetworkStateFromActive()
-                pushDualNetworkMarks()
-            }
-
-            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                rememberDualNetwork(network)
-                // A non-default cellular callback must not overwrite active WiFi state.
-                updateNetworkStateFromActive()
-                pushDualNetworkMarks()
-            }
-
-            override fun onLost(network: Network) {
-                if (mWifiNetwork == network) mWifiNetwork = null
-                if (mCellNetwork == network) mCellNetwork = null
-                updateNetworkStateFromActive()
-                pushDualNetworkMarks()
-            }
-        }
-        mNetworkCallback = callback
-
-        try {
-            // 同时监听 WiFi 与蜂窝两条网络（registerDefaultNetworkCallback 只会给当前
-            // 生效的那一条，无法同时拿到 WiFi+蜂窝两个 Network 对象做双网络绑定）。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                val request = NetworkRequest.Builder()
-                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-                    .build()
-                connectivityManager.registerNetworkCallback(request, callback)
-            } else {
-                // API < 24 退化为默认回调（只能跟踪生效网络，双网络不完整但可编译）。
-                connectivityManager.registerDefaultNetworkCallback(callback)
-            }
-            updateNetworkStateFromActive()
-            pushDualNetworkMarks()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to register network callback", e)
-        }
-    }
-
-    /**
-     * 根据网络能力把 network 归入 WiFi 或蜂窝缓存。
-     */
-    private fun rememberDualNetwork(network: Network) {
-        val connectivityManager = mConnectivityManager ?: return
-        val caps = connectivityManager.getNetworkCapabilities(network) ?: return
-        when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> mWifiNetwork = network
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> mCellNetwork = network
-        }
-    }
-
-    /**
-     * Network handles are opaque, not Linux fwmarks. Ordinary apps cannot
-     * reliably use SO_MARK either. Keep the existing bridge ABI fail-safe;
-     * supported per-socket selection requires a future Network.bindSocket(fd)
-     * callback with explicit FD ownership, rather than guessed mark bits.
-     * Default Android routing (including VPN/TUN) remains unchanged.
-     */
-    private fun pushDualNetworkMarks() {
+    private fun startNetworkMonitoring() = synchronized(mNetworkLock) {
+        if (mNativeNetworkBridge != null) return@synchronized
+        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        mConnectivityManager = manager
+        // Install before backend startup. Never reinterpret Network handles as fwmarks.
+        val bridge = NativeNetworkBridge()
+        mNativeNetworkBridge = bridge
+        bridge.install()
         OpenList.setEncryptDualNetworkMarks(0L, 0L, false)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Log.w(TAG, "Selected-network cancellable DNS unsupported: default system routing only")
+        }
+        val physical = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                synchronized(mNetworkLock) {
+                    if (mNativeNetworkBridge !== bridge) return
+                    mAvailablePhysicalNetworks.add(network)
+                }
+                manager.getNetworkCapabilities(network)?.let { rememberPhysicalNetwork(network, it) }
+                publishNativeRoutes()
+            }
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                synchronized(mNetworkLock) {
+                    if (mNativeNetworkBridge !== bridge) return
+                    rememberPhysicalNetwork(network, caps)
+                    publishNativeRoutes()
+                }
+            }
+            override fun onLost(network: Network) {
+                synchronized(mNetworkLock) {
+                    if (mNativeNetworkBridge !== bridge) return
+                    mAvailablePhysicalNetworks.remove(network)
+                    mPhysicalNetworks.remove(network)
+                }
+                publishNativeRoutes()
+            }
+        }
+        mNetworkCallback = physical
+        try {
+            manager.registerNetworkCallback(NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build(), physical)
+        } catch (_: Exception) {
+            Log.w(TAG, "Physical-network monitoring unavailable")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val defaultCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    synchronized(mNetworkLock) {
+                        if (mNativeNetworkBridge !== bridge) return
+                        mDefaultNetwork = network
+                    }
+                    publishNativeRoutes()
+                }
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    // Late callbacks for an old default must not resurrect it.
+                    synchronized(mNetworkLock) {
+                        if (mNativeNetworkBridge !== bridge || mDefaultNetwork != network) return
+                    }
+                    publishNativeRoutes()
+                }
+                override fun onLost(network: Network) {
+                    synchronized(mNetworkLock) {
+                        if (mNativeNetworkBridge !== bridge) return
+                        if (mDefaultNetwork == network) mDefaultNetwork = null
+                    }
+                    publishNativeRoutes()
+                }
+            }
+            mDefaultNetworkCallback = defaultCallback
+            try { manager.registerDefaultNetworkCallback(defaultCallback) } catch (_: Exception) {
+                Log.w(TAG, "Default-network monitoring unavailable")
+            }
+        }
+        // API 21-23 uses ordinary system routing; no API24 method is called there.
+        publishNativeRoutes()
     }
 
-    private fun stopNetworkMonitoring() {
-        val connectivityManager = mConnectivityManager ?: return
-        val callback = mNetworkCallback ?: return
-        try {
-            connectivityManager.unregisterNetworkCallback(callback)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to unregister network callback", e)
+    private fun rememberPhysicalNetwork(network: Network, caps: NetworkCapabilities) {
+        synchronized(mNetworkLock) {
+            if (network in mAvailablePhysicalNetworks && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))) {
+                mPhysicalNetworks[network] = caps
+            } else mPhysicalNetworks.remove(network)
+        }
+    }
+
+    private fun publishNativeRoutes() {
+        synchronized(mNetworkLock) {
+            val physical = mPhysicalNetworks.entries
+                .sortedWith(compareBy<Map.Entry<Network, NetworkCapabilities>> {
+                    if (it.value.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) 0 else 1
+                }.thenBy { it.key.toString() })
+                .firstOrNull()?.key
+            mNativeNetworkBridge?.updateRoutes(mDefaultNetwork, physical)
+        }
+        updateNetworkStateFromActive()
+    }
+
+    private fun stopNetworkMonitoring() = synchronized(mNetworkLock) {
+        val manager = mConnectivityManager
+        for (callback in listOfNotNull(mNetworkCallback, mDefaultNetworkCallback)) {
+            try { manager?.unregisterNetworkCallback(callback) } catch (_: Exception) {
+                Log.w(TAG, "Network callback already unregistered")
+            }
+        }
+        synchronized(mNetworkLock) {
+            mNativeNetworkBridge?.close()
+            mNativeNetworkBridge = null
+            mPhysicalNetworks.clear()
+            mAvailablePhysicalNetworks.clear()
+            mDefaultNetwork = null
         }
         mNetworkCallback = null
+        mDefaultNetworkCallback = null
         mConnectivityManager = null
     }
 
     private fun updateNetworkStateFromActive() {
         val connectivityManager = mConnectivityManager ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            @Suppress("DEPRECATION")
+            val connected = connectivityManager.activeNetworkInfo?.isConnected == true
+            OpenList.setNetworkState(if (connected) "wifi" else "offline")
+            return
+        }
         val activeNetwork = connectivityManager.activeNetwork
         if (activeNetwork == null) {
             OpenList.setNetworkState("offline")
@@ -490,6 +537,8 @@ class OpenListService : Service(), OpenList.Listener {
         
         mScope.launch(Dispatchers.IO) {
             try {
+                // Same-Service restarts must reinstall a bridge closed by onShutdown.
+                startNetworkMonitoring()
                 // Start OpenList
                 OpenList.startup()
                 if (!OpenList.isRunning()) {

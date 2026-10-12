@@ -11,6 +11,7 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
+	"github.com/OpenListTeam/OpenList/v4/openlistlib/encrypt"
 	"github.com/OpenListTeam/OpenList/v4/openlistlib/internal"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	log "github.com/sirupsen/logrus"
@@ -89,6 +90,13 @@ func IsRunning(t string) bool {
 
 // Start starts the server
 func Start() {
+	// Storage initialization/login precedes starting the optional media proxy.
+	// Register its independent driver transport factory before bootstrap loads drivers.
+	config := GetEncryptManager().GetConfig()
+	if config == nil {
+		config = encrypt.DefaultConfig()
+	}
+	encrypt.InstallDriverRouteFactory(config)
 	bootstrap.Start()
 }
 
@@ -96,6 +104,7 @@ func Start() {
 func Shutdown(timeout int64) (err error) {
 	timeoutDuration := time.Duration(timeout) * time.Millisecond
 	bootstrap.Shutdown(timeoutDuration)
+	encrypt.UninstallDriverRouteFactory()
 
 	// Force database sync before shutdown
 	ForceDBSync()
