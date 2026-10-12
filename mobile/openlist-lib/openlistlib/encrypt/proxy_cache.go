@@ -429,6 +429,12 @@ func (p *ProxyServer) mergeFileCacheInfo(key string, info, existing *FileInfo) {
 // 它供 PROPFIND / fs-list 的流式逐条回调使用；单文件探测/播放等仍走
 // 带 DB 回读的 storeFileCache。
 func (p *ProxyServer) storeFileCacheList(path string, info *FileInfo) {
+	p.storeFileCacheListProof(path, info, false)
+}
+
+// rejectInheritance is used after a fresh header proof failed, even if another
+// concurrent reader has just populated an older same-size metadata tuple.
+func (p *ProxyServer) storeFileCacheListProof(path string, info *FileInfo, rejectInheritance bool) {
 	if info == nil {
 		return
 	}
@@ -440,7 +446,16 @@ func (p *ProxyServer) storeFileCacheList(path string, info *FileInfo) {
 	// 合并内存已有条目（保留 V2 / RawURL / HeaderLen / Nonce 等元数据），
 	// 与 storeFileCache 行为一致，但只取内存层，不做 SQLite 回源。
 	if existing, ok := p.loadFileCacheInMem(path); ok && existing != nil {
-		p.mergeFileCacheInfo(key, info, existing)
+		// A fresh raw listing with a changed size invalidates its old container
+		// tuple. Snapshot replays have CiphertextSize=0 and are not raw evidence.
+		changedSize := info.ContentVersion == 0 && info.CiphertextSize > 0 && existing.CiphertextSize > 0 && info.CiphertextSize != existing.CiphertextSize
+		if rejectInheritance || changedSize || strings.HasPrefix(info.Name, "orig_") {
+			if info.RawURL == "" {
+				info.RawURL = existing.RawURL
+			}
+		} else {
+			p.mergeFileCacheInfo(key, info, existing)
+		}
 	}
 	entry := &CachedFileInfo{
 		Info:     info,

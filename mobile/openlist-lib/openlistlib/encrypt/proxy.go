@@ -1902,6 +1902,17 @@ func (p *ProxyServer) processPropfindResponse(body io.Reader, w io.Writer, encPa
 // 不再逐条写 fileCache/sizeMap（目录百万级时这是能让列表"能完成"的关键）。
 // budget 为空时行为与旧版完全一致（测试/直通场景不受影响）。
 func (p *ProxyServer) processPropfindResponseBudget(body io.Reader, w io.Writer, encPath *EncryptPath, budget *propfindRewriteBudget) error {
+	return p.processPropfindMetadata(body, w, encPath, budget, nil)
+}
+
+// Already rewritten directory snapshots must not reinterpret plaintext as raw size,
+// decode names again, or seed unconfirmed plaintext into raw-object caches.
+func (p *ProxyServer) processPropfindResponseSnapshot(body io.Reader, w io.Writer, encPath *EncryptPath, budget *propfindRewriteBudget) error {
+	_, err := io.Copy(w, body)
+	return err
+}
+
+func (p *ProxyServer) processPropfindResponseNamesBudget(body io.Reader, w io.Writer, encPath *EncryptPath, budget *propfindRewriteBudget) error {
 	dec := xml.NewDecoder(body)
 	enc := xml.NewEncoder(w)
 
@@ -4313,9 +4324,6 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	if encPath == nil && matchPath != filePath {
 		encPath = p.findEncryptPath(filePath)
 	}
-	if r.URL.Query().Get("decode") == "0" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-		encPath = nil // Explicit raw reads do not enter plaintext decryption.
-	}
 	rangeHeader := r.Header.Get("Range")
 	clientRangeHeader := rangeHeader
 	upstreamRangeHeader := clientRangeHeader
@@ -4392,6 +4400,19 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			convertedTargetURL = targetURLPath != originalTargetURLPath
 			log.Debugf("%s Convert real name URL (%s): %s -> %s", internal.LogPrefix(ctx, internal.TagEncrypt), r.Method, r.URL.Path, targetURLPath)
 		}
+	}
+
+	// Raw content reads still require the filename mapping performed above.
+	if r.URL.Query().Get("decode") == "0" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		encPath = nil
+	}
+
+	// orig_ is a filename-layer marker for an unencrypted object, not a
+	// content format. Strip it through the normal filename conversion above,
+	// but do not probe/decrypt its bytes (or subtract a container header).
+	if encPath != nil && encPath.EncName && strings.HasPrefix(fileName, "orig_") &&
+		(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		encPath = nil
 	}
 
 	// Keep WebDAV GET/HEAD on /dav.
@@ -4576,7 +4597,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			// 每个条目回填 fileCache（本书字幕探测依赖 fileCache 来判断文件是否
 			// 存在）。命中也重放一遍，保证 fileCache 与目录快照一致。
 			if encPath != nil && encPath.EncName {
-				if err := p.processPropfindResponseBudget(bytes.NewReader(cachedBody), w, encPath, nil); err != nil {
+				if err := p.processPropfindResponseSnapshot(bytes.NewReader(cachedBody), w, encPath, nil); err != nil {
 					log.Warnf("%s WebDAV list cache reparse failed: dir=%s err=%v",
 						internal.LogPrefix(ctx, internal.TagCache), webdavListCacheKey, err)
 				}
@@ -4807,6 +4828,16 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			if !confirmed {
 				_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
 				return
+			}
+			if meta.PlainSize > 0 && upstreamRangeHeader != "" {
+				start, end, _, rangeErr := parseSingleRange(clientRangeHeader, meta.PlainSize)
+				if rangeErr != nil {
+					writeRangeNotSatisfiable(w, meta.PlainSize)
+					return
+				}
+				// Canonicalize suffix ranges in plaintext coordinates before adding
+				// the V2 header offset (especially for files smaller than the suffix).
+				upstreamRangeHeader = fmt.Sprintf("bytes=%d-%d", start, end)
 			}
 			upstreamRangeHeader = buildUpstreamRangeHeader(upstreamRangeHeader, meta)
 		}
@@ -5105,7 +5136,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 
 	// Rewrite only successful PROPFIND metadata. Error bodies may be plain text,
 	// not XML; preserve their status (or the existing stale-list fallback).
-	if r.Method == "PROPFIND" && encPath != nil && encPath.EncName {
+	if r.Method == "PROPFIND" && encPath != nil && (encPath.EncName || encPath.Enable) {
 		if resp.StatusCode >= 400 && listDepth == "1" && p.serveStaleWebDAVList(w, ctx, webdavListCacheKey, listDepth, negativeCachePath, filePath, r.Header) {
 			return
 		}
@@ -5129,7 +5160,11 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		// 超大目录预算：源目录条目/体积达到阈值时，改写走"大目录直通"，
 		// 避免把百万级目录逐条写 DB / 整份二次解析持久化拖成永远转圈。
 		budget := &propfindRewriteBudget{}
-		if err := p.processPropfindResponseBudget(resp.Body, dst, encPath, budget); err != nil {
+		var sizeProbe *propfindSizeProbe
+		if listDepth == "0" {
+			sizeProbe = &propfindSizeProbe{ctx: r.Context(), target: targetURL, headers: r.Header}
+		}
+		if err := p.processPropfindMetadata(resp.Body, dst, encPath, budget, sizeProbe); err != nil {
 			output.fail()
 			return
 		}
@@ -5172,109 +5207,30 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		log.Infof("WebDAV backend redirect: method=%s path=%s statusCode=%d location=%s",
 			r.Method, filePath, resp.StatusCode, safeURLForLog(location))
 
-		if r.Method == "GET" && encPath != nil && encPath.Enable && location != "" {
-			driver := p.inferDriverFromPath(ctx, filePath, r.Header)
-			p.noteDriverCandidate(driver)
-			// 对于需要解密的 GET 请求，创建代理重定向
-			// 尝试获取文件大小（从缓存或响应头）
-			var fileSize int64 = 0
-			if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir && cached.Size > 0 {
-				fileSize = cached.Size
-			} else if strings.HasPrefix(filePath, "/dav/") {
-				noDav := strings.TrimPrefix(filePath, "/dav")
-				if cached, ok := p.loadFileCache(noDav); ok && !cached.IsDir && cached.Size > 0 {
-					fileSize = cached.Size
-				}
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && encPath != nil && encPath.Enable && location != "" {
+			// Validate the actual redirect object, not an HTML redirect body or
+			// persisted file-cache metadata. Resolve relative Locations first.
+			base, baseErr := url.Parse(targetURL)
+			ref, refErr := url.Parse(location)
+			if baseErr != nil || refErr != nil {
+				w.Header().Del("Content-Length")
+				_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("invalid encrypted redirect"))
+				return
 			}
-			// 也尝试用密文路径查缓存
-			if fileSize == 0 && encPath.EncName {
-				realName := convertRealNameByRule(encPath, filePath)
-				encPathFull := path.Join(path.Dir(filePath), realName)
-				if !strings.HasPrefix(encPathFull, "/") {
-					encPathFull = "/" + encPathFull
-				}
-				if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
-					fileSize = cached.Size
-				}
+			location = base.ResolveReference(ref).String()
+			redirectMeta, confirmed := p.inspectLegacyContentMeta(ctx, location, r.Header, encPath, 0)
+			if !confirmed {
+				w.Header().Del("Content-Length")
+				_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted redirect metadata unconfirmed"))
+				return
 			}
-
-			if fileSize == 0 {
-				if size, ok := p.lookupLocalSize(location, filePath); ok {
-					fileSize = size
-				}
+			if redirectMeta.IsV3() {
+				p.serveLegacyResolvedV3(w, r, location, r.Header, encPath, targetURLPath, redirectMeta)
+				return
 			}
-
-			// 如果缓存中没有 fileSize，尝试通过 PROPFIND 获取（修复 WebDAV 播放问题）
-			if fileSize == 0 {
-				propfindURL := targetURL
-				if size := p.fetchWebDAVFileSizeWithPath(propfindURL, r.Header, encPath.Path); size > 0 {
-					fileSize = size
-					log.Infof("%s WebDAV redirect: got fileSize from PROPFIND: %d for %s", internal.LogPrefix(ctx, internal.TagFileSize), fileSize, filePath)
-					// 缓存文件大小
-					p.storeFileCache(filePath, &FileInfo{Name: path.Base(filePath), Size: size, IsDir: false, Path: filePath})
-					if strings.HasPrefix(filePath, "/dav/") {
-						noDav := strings.TrimPrefix(filePath, "/dav")
-						p.storeFileCache(noDav, &FileInfo{Name: path.Base(noDav), Size: size, IsDir: false, Path: noDav})
-					}
-				}
-			}
-
-			// 如果 PROPFIND 也获取不到，强制探测远程文件大小（加密文件没有 fileSize 无法解密）
-			if fileSize == 0 {
-				probed := p.forceProbeRemoteFileSizeWithPath(location, r.Header, encPath.Path)
-				if probed > 0 {
-					fileSize = probed
-					log.Infof("WebDAV redirect: probed remote fileSize: %d for %s", fileSize, filePath)
-				}
-			}
-			log.Infof("%s WebDAV redirect planning: path=%s location=%s fileSize=%d range=%q",
-				internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(location), fileSize, clientRangeHeader)
-
-			// 生成唯一的重定向 key
-			redirectKey := fmt.Sprintf("%d-%s", time.Now().UnixNano(), path.Base(filePath))
-
-			// 缓存重定向信息
-			redirectInfo := &RedirectInfo{
-				RedirectURL:   location,
-				PasswdInfo:    encPath,
-				FileSize:      fileSize,
-				OriginalURL:   r.URL.String(),
-				EncryptedPath: targetURLPath,
-				Headers:       r.Header.Clone(),
-				Driver:        driver,
-			}
-			// Pre-populate trusted V2 metadata from file cache so ServeRedirect can skip re-probing.
-			for _, cacheKey := range appendUniquePathVariant(nil, filePath) {
-				if cacheKey == "" {
-					continue
-				}
-				if cached, ok := p.loadFileCache(cacheKey); ok {
-					if cachedMeta, ok := fileInfoContentMeta(cached, encPath.EncType); ok {
-						redirectInfo.ContentVersion = ContentVersionV2
-						redirectInfo.HeaderLen = cachedMeta.HeaderLen
-						redirectInfo.NonceField = cloneNonceField(cachedMeta.NonceField)
-						redirectInfo.CiphertextSize = cachedMeta.CiphertextSize
-						if cachedMeta.PlainSize > 0 {
-							redirectInfo.FileSize = cachedMeta.PlainSize
-						}
-						log.Infof("WebDAV redirect: pre-populated V2 meta from cache: version=%d cipherSize=%d plainSize=%d", cached.ContentVersion, redirectInfo.CiphertextSize, cachedMeta.PlainSize)
-						break
-					}
-				}
-			}
-			p.storeRedirectCache(redirectKey, redirectInfo)
-
-			// 构建代理重定向 URL
-			proxyLocation := fmt.Sprintf("/redirect/%s?decode=1&lastUrl=%s",
-				redirectKey, url.QueryEscape(r.URL.Path))
-
-			log.Infof("WebDAV proxy redirect: path=%s, original=%s, proxy=%s, fileSize=%d",
-				filePath, safeURLForLog(location), proxyLocation, fileSize)
-
-			// 返回修改后的重定向响应
-			w.Header().Set("Location", proxyLocation)
-			w.WriteHeader(resp.StatusCode)
-			copyWithBuffer(w, resp.Body)
+			// Resolve encrypted redirects internally: neither HEAD nor GET may
+			// expose a storage ciphertext URL or enter the old V1 redirect reader.
+			p.serveWebDAVResolvedLegacy(w, r, location, encPath, redirectMeta, targetURLPath)
 			return
 		}
 
@@ -5282,6 +5238,18 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Location", location)
 		w.WriteHeader(statusCode)
 		copyWithBuffer(w, resp.Body)
+		return
+	}
+
+	// HEAD reports authoritative plaintext geometry without an encrypted URL/body.
+	if r.Method == http.MethodHead && encPath != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		meta, confirmed := p.inspectLegacyContentMeta(r.Context(), targetURL, r.Header, encPath, 0)
+		if !confirmed {
+			w.Header().Del("Content-Length")
+			_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
+			return
+		}
+		writeWebDAVPlainHeaders(w, r, meta, http.StatusOK)
 		return
 	}
 
@@ -5307,82 +5275,15 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		// 尝试从缓存获取文件大小（WebDAV PROPFIND 已缓存）
-		var fileSize int64 = 0
-		if cached, ok := p.loadFileCache(filePath); ok && !cached.IsDir && cached.Size > 0 {
-			fileSize = cached.Size
-		} else {
-			// 兼容不带 /dav 前缀的缓存键
-			if strings.HasPrefix(filePath, "/dav/") {
-				noDav := strings.TrimPrefix(filePath, "/dav")
-				if cached, ok := p.loadFileCache(noDav); ok && !cached.IsDir && cached.Size > 0 {
-					fileSize = cached.Size
-				}
-			}
+		// Fresh inspection is the sole source of plaintext geometry; stale list
+		// sizes and repeated PROPFIND/force-probes must not choose the cipher size.
+		meta, confirmed := p.inspectLegacyContentMeta(r.Context(), targetURL, r.Header, encPath, 0)
+		if !confirmed {
+			w.Header().Del("Content-Length")
+			_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
+			return
 		}
-
-		// 进一步尝试：使用密文路径查缓存（对齐 alist-encrypt 的重试逻辑）
-		if fileSize == 0 && encPath != nil && encPath.EncName {
-			realName := convertRealNameByRule(encPath, filePath)
-			encPathFull := path.Join(path.Dir(filePath), realName)
-			if !strings.HasPrefix(encPathFull, "/") {
-				encPathFull = "/" + encPathFull
-			}
-			if cached, ok := p.loadFileCache(encPathFull); ok && !cached.IsDir && cached.Size > 0 {
-				fileSize = cached.Size
-			} else if strings.HasPrefix(encPathFull, "/dav/") {
-				noDav := strings.TrimPrefix(encPathFull, "/dav")
-				if cached, ok := p.loadFileCache(noDav); ok && !cached.IsDir && cached.Size > 0 {
-					fileSize = cached.Size
-				}
-			}
-		}
-		if fileSize == 0 {
-			if size, ok := p.lookupLocalSize(targetURL, filePath); ok {
-				fileSize = size
-			}
-		}
-
-		// 尝试获取文件大小
-		contentRange := resp.Header.Get("Content-Range")
-		if contentRange != "" {
-			// 格式: bytes start-end/total
-			parts := strings.Split(contentRange, "/")
-			if len(parts) == 2 {
-				if total, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-					fileSize = total
-				}
-			}
-		}
-
-		// Range 请求下 Content-Length 只是分片大小，不能用作总大小
-		if fileSize == 0 && clientRangeHeader == "" {
-			if cl := resp.Header.Get("Content-Length"); cl != "" {
-				fileSize, _ = strconv.ParseInt(cl, 10, 64)
-			}
-		}
-
-		// 如果仍然未知，先尝试 WebDAV PROPFIND 获取大小
-		if fileSize == 0 {
-			if size := p.fetchWebDAVFileSizeWithPath(targetURL, req.Header, encPath.Path); size > 0 {
-				fileSize = size
-				p.storeFileCache(filePath, &FileInfo{Name: path.Base(filePath), Size: size, IsDir: false, Path: filePath})
-				if strings.HasPrefix(filePath, "/dav/") {
-					noDav := strings.TrimPrefix(filePath, "/dav")
-					p.storeFileCache(noDav, &FileInfo{Name: path.Base(noDav), Size: size, IsDir: false, Path: noDav})
-				}
-				log.Infof("handleWebDAV: propfind fileSize=%d for %s", fileSize, safeURLForLog(targetURL))
-			}
-		}
-
-		// 如果仍然未知，强制探测远程总大小（加密文件没有 fileSize 无法解密）
-		if fileSize == 0 {
-			probed := p.forceProbeRemoteFileSizeWithPath(targetURL, req.Header, encPath.Path)
-			if probed > 0 {
-				fileSize = probed
-				log.Infof("handleWebDAV: probed remote fileSize=%d for %s", fileSize, safeURLForLog(targetURL))
-			}
-		}
+		fileSize := meta.PlainSize
 		log.Infof("%s WebDAV GET planning: path=%s target=%s fileSize=%d range=%q contentRange=%q",
 			internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(targetURL), fileSize, clientRangeHeader, resp.Header.Get("Content-Range"))
 
@@ -5396,11 +5297,6 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
 				filePath, clientRangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
-			meta, confirmed := p.inspectLegacyContentMeta(r.Context(), targetURL, r.Header, encPath, fileSize)
-			if !confirmed {
-				_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
-				return
-			}
 			if meta.IsV3() {
 				resp.Body.Close()
 				p.serveLegacyResolvedV3(w, r, targetURL, r.Header, encPath, targetURLPath, meta)
@@ -5458,20 +5354,23 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				encryptor, err = NewFlowEncryptor(encPath.Password, encPath.EncType, fileSize)
 			}
 			if err != nil {
-				// 无法创建解密器(如未知算法)，直接透传
-				log.Warnf("Failed to create encryptor for download: %v", err)
-				if p.config != nil && p.config.PlayFirstFallback {
-					atomic.AddUint64(&p.playFirstCount, 1)
-					w.WriteHeader(statusCode)
-					copyWithBuffer(w, resp.Body)
-					return
-				}
-				w.WriteHeader(statusCode)
-				copyWithBuffer(w, resp.Body)
+				w.Header().Del("Content-Length")
+				w.Header().Del("Content-Range")
+				http.Error(w, "encrypted content cipher unavailable", http.StatusBadGateway)
 				return
 			}
 
 			upstreamIsRange := resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != ""
+			if upstreamIsRange && !hasClientRange {
+				w.Header().Del("Content-Length")
+				w.Header().Del("Content-Range")
+				http.Error(w, "unexpected encrypted partial response", http.StatusBadGateway)
+				return
+			}
+			if !hasClientRange {
+				statusCode = http.StatusOK
+				w.Header().Del("Content-Range")
+			}
 			validatedRangeEnd := int64(-1)
 			if clientRangeHeader != "" && !upstreamIsRange {
 				p.markRangeIncompatible(targetURL, filePath)
@@ -5534,12 +5433,12 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				}
 				p.markRangeCompatible(targetURL, filePath)
 			}
-			if clientRangeHeader != "" && !upstreamIsRange && startPos > 0 {
-				endPos := fileSize - 1
+			if hasClientRange && !upstreamIsRange {
+				endPos := clientRangeEnd
 				if endPos >= startPos {
 					statusCode = http.StatusPartialContent
 					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startPos, endPos, fileSize))
-					w.Header().Set("Content-Length", strconv.FormatInt(fileSize-startPos, 10))
+					w.Header().Set("Content-Length", strconv.FormatInt(endPos-startPos+1, 10))
 					w.Header().Set("Accept-Ranges", "bytes")
 				} else {
 					startPos = 0
@@ -5557,7 +5456,9 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 					if startPos > p.rangeSkipMaxBytes() {
 						log.Warnf("WebDAV decrypt: skip exceeds limit start=%d limit=%d upstreamRange=%v status=%d contentRange=%q path=%s",
 							startPos, p.rangeSkipMaxBytes(), upstreamIsRange, resp.StatusCode, resp.Header.Get("Content-Range"), filePath)
-						http.Error(w, "range skip exceeds limit", http.StatusRequestedRangeNotSatisfiable)
+						w.Header().Del("Content-Length")
+						w.Header().Del("Content-Range")
+						writeRangeNotSatisfiable(w, fileSize)
 						return
 					}
 					discardLen := startPos
@@ -5565,20 +5466,32 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 						discardLen += meta.HeaderLen
 					}
 					if _, err := io.CopyN(io.Discard, resp.Body, discardLen); err != nil {
-						log.Warnf("WebDAV decrypt: skip encrypted prefix failed: %v", err)
+						w.Header().Del("Content-Length")
+						w.Header().Del("Content-Range")
+						http.Error(w, "encrypted prefix truncated", http.StatusBadGateway)
+						return
 					}
 					encryptor.SetPosition(startPos)
 				}
 			} else if meta.IsV2() && !upstreamIsRange {
 				if err := discardBytes(resp.Body, meta.HeaderLen); err != nil {
 					log.Warnf("WebDAV decrypt: discard v2 header failed: %v", err)
+					w.Header().Del("Content-Length")
+					w.Header().Del("Content-Range")
 					http.Error(w, err.Error(), http.StatusBadGateway)
 					return
 				}
 			}
 
-			var readerToDecrypt io.Reader = resp.Body
-			expectedRangeLength := int64(-1)
+			// Every plaintext response has exact bounded framing, including full
+			// GET and ignored-Range fallback starting at zero.
+			expectedRangeLength := fileSize
+			if hasClientRange {
+				expectedRangeLength = clientRangeEnd - clientRangeStart + 1
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(expectedRangeLength, 10))
+			w.Header().Set("Accept-Ranges", "bytes")
+			var readerToDecrypt io.Reader = io.LimitReader(resp.Body, expectedRangeLength)
 			if upstreamIsRange && hasClientRange && validatedRangeEnd >= clientRangeStart {
 				expectedRangeLength = validatedRangeEnd - clientRangeStart + 1
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", clientRangeStart, validatedRangeEnd, fileSize))
@@ -5599,6 +5512,10 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			}
 			return
 		}
+		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Range")
+		http.Error(w, "encrypted plaintext size unavailable", http.StatusBadGateway)
+		return
 	}
 
 	w.WriteHeader(statusCode)
