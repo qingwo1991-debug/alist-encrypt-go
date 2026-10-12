@@ -13,7 +13,7 @@ export const formatLatency = (row, field) => {
 
 // Root exports RFC3339 time.Time; mobile exports Unix seconds.
 export const playbackTimestamp = value => {
-  const timestamp = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : NaN
+  const timestamp = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : Number.NaN
   return Number.isFinite(timestamp) ? timestamp : null
 }
 

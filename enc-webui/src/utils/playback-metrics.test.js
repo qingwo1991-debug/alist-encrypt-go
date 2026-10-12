@@ -21,7 +21,7 @@ describe('server body-first-byte metrics', () => {
   })
 
   it('filters invalid values without producing undefined', () => {
-    const values = [undefined, null, -1, NaN, Infinity, '20']
+    const values = [undefined, null, -1, Number.NaN, Number.POSITIVE_INFINITY, '20']
     expect(latencySeriesFor(values.map(value => ({ played_at: 1, first_byte_latency_ms: value })))).toEqual([])
     expect(percentile(values, 0.95)).toBe('-')
     expect(formatLatency({}, 'first_byte_latency_ms')).toBe('-')

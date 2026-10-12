@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,6 +20,9 @@ func TestPlaybackFirstByteCacheRoutes(t *testing.T) {
 			defer p.closeLocalStore()
 			store := &testSessionStore{}
 			p.localStore = &localStore{}
+			p.streamClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("unexpected upstream call in cache route test")
+			})}
 			p.playbackSessionOnce.Do(func() { p.playbackSession = newPlaybackSessionTracker(store) })
 			info := &RedirectInfo{RedirectURL: "http://upstream.local/encrypted", OriginalURL: "/enc/demo.mp4", FileSize: 4, ContentVersion: ContentVersionV1, PasswdInfo: &EncryptPath{Path: "/enc/*", Password: "test", EncType: EncTypeAESCTR, Enable: true}}
 			p.storeRedirectCache("cached", info)
