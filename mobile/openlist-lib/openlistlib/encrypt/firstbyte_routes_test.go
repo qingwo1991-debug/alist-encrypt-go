@@ -10,14 +10,10 @@ import (
 func TestPlaybackFirstByteCacheRoutes(t *testing.T) {
 	for _, route := range []string{"redirect", "api"} {
 		t.Run(route, func(t *testing.T) {
-			p, err := NewProxyServer(&ProxyConfig{ProxyPort: 5344, EncryptPaths: []*EncryptPath{{Path: "/enc/*", Password: "test", EncType: EncTypeAESCTR, Enable: true}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			p.stopRangeProbeLoop()
-			p.stopCacheCleanup()
-			p.closeLocalStore()
-			defer p.closeLocalStore()
+			// Exercise the playback boundary, not server startup/shutdown. The full
+			// constructor starts unrelated asynchronous provider-catalog discovery.
+			p := &ProxyServer{config: &ProxyConfig{StreamEngineVersion: 2}}
+			p.ensureRuntimeCaches()
 			store := &testSessionStore{}
 			p.localStore = &localStore{}
 			p.streamClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

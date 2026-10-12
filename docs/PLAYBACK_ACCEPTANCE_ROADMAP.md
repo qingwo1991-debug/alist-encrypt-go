@@ -43,6 +43,10 @@
 
 移动加密代码是独立实现，不能导入根 `internal/proxy`。适配独立 `shared/encryptcore` 模块的公开接口，显式映射类型：移动 AES 名称为 `aes-ctr`，共享名称为 `aesctr`。不能未经迁移直接给 ContentMeta 作别名。覆盖 `/d`、`/p`、`/dav`、`/dav2` 与重定向入口，不允许 V3 落入旧 cipher 或明文密文透传 fallback。模块覆盖初始化必须保留共享依赖及固定 gomobile 版本，不能让 reclone 恢复旧 go.mod。
 
+### 后台目录生命周期（阶段 1 云端竞态新增证据）
+
+首阶段缓存路由测试在构建 ProxyServer 后替换/关闭 localStore 时暴露 provider catalog 后台刷新与 localStore 关闭的竞态。缓存计时 fixture 应禁用无关后台任务，但生产目录刷新采用 context.Background 且缺少 shutdown join 的现状仍需阶段 6 明确修复，不以隔离测试宣称该生命周期已解决。证据：`provider_catalog.go` 的 async refresh 和 `local_integration.go` 的 closeLocalStore。
+
 ### Android 与驱动
 
 支持式 socket 绑定应通过平台 Network API，不能把 network handle 推算成 SO_MARK。路由决定必须不可变、DNS 与 socket 同网络、连接池按路由隔离；不能依靠全局 host hint。API 及权限不支持时明示 default-only。HTTP proxy bypass 不等于 VPN/TUN bypass。

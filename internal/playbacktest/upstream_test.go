@@ -145,6 +145,51 @@ func TestUpstreamCancellationAndSafeShutdown(t *testing.T) {
 	}
 }
 
+// Isolate the first phase of Close: cancel the fixture without closing sockets.
+// This deterministically exercises the handler-abort path, rather than relying
+// on CloseClientConnections winning the race against an implicit HTTP 200.
+func TestUpstreamHeaderShutdownNeverSynthesizesSuccess(t *testing.T) {
+	for iteration := 0; iteration < 32; iteration++ {
+		func() {
+			u := New([]byte("data"), Behavior{StallHeaders: true}, nil)
+			defer u.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.URL("/object"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				resp, err := u.Server.Client().Do(req)
+				if resp != nil {
+					resp.Body.Close()
+				}
+				done <- err
+			}()
+			select {
+			case <-u.Started:
+			case <-ctx.Done():
+				t.Fatalf("iteration %d: fixture did not start", iteration)
+			}
+			u.cancel()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatalf("iteration %d: header shutdown synthesized success", iteration)
+				}
+			case <-ctx.Done():
+				t.Fatalf("iteration %d: handler abort failed to unblock client", iteration)
+			}
+			u.Close()
+			snapshot := u.Snapshot()
+			if snapshot.RequestCount != 1 || snapshot.BodyBytes != 0 || snapshot.Requests[0].Status != 0 || !snapshot.Requests[0].Canceled {
+				t.Fatalf("iteration %d: shutdown snapshot=%+v", iteration, snapshot)
+			}
+		}()
+	}
+}
+
 func TestWriteJSONExplicitPath(t *testing.T) {
 	if err := WriteJSON("artifact.json", Snapshot{}); err == nil {
 		t.Fatal("relative artifact path accepted")

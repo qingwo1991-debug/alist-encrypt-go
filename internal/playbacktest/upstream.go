@@ -103,7 +103,10 @@ func New(data []byte, fallback Behavior, routes map[string]Behavior) *Upstream {
 		}
 		if !u.wait(r.Context(), b.HeaderGate, b.StallHeaders, b.HeaderLatency) {
 			markCanceled()
-			return
+			// Returning before headers would let net/http synthesize an empty
+			// 200 response while Close races with CloseClientConnections. Abort
+			// instead: canceled header stalls must never look like success.
+			panic(http.ErrAbortHandler)
 		}
 		for k, values := range b.Headers {
 			w.Header()[k] = append([]string(nil), values...)
