@@ -90,6 +90,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		authHeaders.Set("Cookie", cookie)
 	}
 	rawURLScope := rawURLAuthScope(authHeaders)
+	// This orchestration boundary has already selected an authorized playback
+	// route. Preserve the original caller scope even when provider headers differ;
+	// an explicit empty scope represents an authorized anonymous route.
+	r = r.WithContext(proxy.WithV3CacheAuthorization(r.Context(), authHeaders.Get("Authorization"), authHeaders.Get("Cookie")))
+	req.Request = r
 
 	metaLoaded := false
 	emptyContent := false

@@ -3,11 +3,11 @@
 //	encrypt-tool enc --password-file <path> -i <input> [-o output] [-t aesctr] [-n] [-s .bin] [-w 4] [-v]
 //	encrypt-tool dec --password-file <path> -i <input> [-o output] [-w 4] [-v]
 //
-// Encryption produces V2-format files fully compatible with the alist-encrypt-go proxy:
-// content uses NewLatestContentEncryptor (32-byte V2 header), filenames use the same
+// Encryption defaults to V3 chunked AES-GCM containers; --v2 selects legacy V2.
+// Filenames use the same
 // EncodeName(full_filename) + suffix format as the proxy's ConvertRealNameWithSuffix.
 //
-// Decryption is fully automatic: V1/V2 auto-detected from header, encType auto-detected
+// Decryption is fully automatic: V1/V2/V3 auto-detected from header, encType auto-detected
 // from V2 magic bytes (AECTR2/CHC202/RC4MD2), suffix auto-stripped, filename auto-decrypted
 // via CRC6 verification. Only the password is required.
 package main
@@ -99,6 +99,8 @@ type flags struct {
 	stdout       bool   // enc only: write encrypted bytes to stdout without creating a file
 	v3           bool   // enc only: write the new V3 chunked AES-GCM container (default)
 	v2           bool   // enc only: force the legacy V2 container for compatibility
+	v3ChunkSize  int64  // enc V3 only: bytes; 0 retains the 16 MiB default
+	v3ChunkSet   bool   // distinguishes omitted from explicitly supplied 0
 	encType      string // "auto" for dec; "aesctr"/"chacha20"/"rc4md5" for enc
 	encName      bool   // enc only: encrypt filenames
 	suffix       string // enc only: suffix to append
@@ -132,6 +134,9 @@ func main() {
 
 func runName() {
 	f := parseFlags("name")
+	if err := f.validateV3Chunk("name"); err != nil {
+		fatal("%s", err)
+	}
 	if err := loadPassword(f); err != nil {
 		fatal("%s", err)
 	}
@@ -148,6 +153,9 @@ func runName() {
 func run(command string) {
 	f := parseFlags(command)
 
+	if err := f.validateV3Chunk(command); err != nil {
+		fatal("%s", err)
+	}
 	if err := loadPassword(f); err != nil {
 		fatal("%s", err)
 	}
@@ -207,6 +215,9 @@ func run(command string) {
 }
 
 func runEncryptStdout(f *flags, fileSize int64) {
+	if err := f.validateV3Chunk("enc"); err != nil {
+		fatal("%s", err)
+	}
 	in, err := os.Open(f.input)
 	if err != nil {
 		fatal("open source: %v", err)
@@ -214,7 +225,7 @@ func runEncryptStdout(f *flags, fileSize int64) {
 	defer in.Close()
 	var reader io.Reader
 	if f.useV3() {
-		ce, err := encryption.NewV3ContentEncryptor(0)
+		ce, err := encryption.NewV3ContentEncryptor(f.v3ChunkSize)
 		if err != nil {
 			fatal("create v3 encryptor: %v", err)
 		}
@@ -294,7 +305,7 @@ func runBatch(command string, f *flags) {
 			return nil
 		}
 		fi, e := d.Info()
-		if e != nil || fi.Size() == 0 {
+		if e != nil || (command == "dec" && fi.Size() == 0) {
 			return nil
 		}
 		outFile, skip := resolveOutputPath(path, f, command, f.input)
@@ -309,7 +320,7 @@ func runBatch(command string, f *flags) {
 		fatal("walking directory: %v", err)
 	}
 	if len(jobs) == 0 {
-		fatal("no non-empty files found in: %s", f.input)
+		fatal("no files to process in: %s", f.input)
 	}
 
 	// Disk space pre-check (warn only)
@@ -842,6 +853,9 @@ func sniffV3ContainerFile(f *os.File, size int64) (bool, error) {
 }
 
 func processOne(srcPath, dstPath string, f *flags, command string) (int64, error) {
+	if err := f.validateV3Chunk(command); err != nil {
+		return 0, err
+	}
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
 		return 0, fmt.Errorf("stat source: %w", err)
@@ -881,7 +895,7 @@ func processOne(srcPath, dstPath string, f *flags, command string) (int64, error
 	if command == "enc" {
 		var reader io.Reader
 		if f.useV3() {
-			ce, err := encryption.NewV3ContentEncryptor(0)
+			ce, err := encryption.NewV3ContentEncryptor(f.v3ChunkSize)
 			if err != nil {
 				return 0, fmt.Errorf("create v3 encryptor: %w", err)
 			}
@@ -1068,20 +1082,33 @@ func parseFlags(command string) *flags {
 	fs.BoolVar(&f.v3, "v3", true, "enc: write the V3 chunked AES-GCM container (default, V3)")
 	fs.BoolVar(&f.v2, "v2", false, "enc: write the legacy V2 container for compatibility instead of V3")
 	fs.BoolVar(&f.v2, "legacy", false, "alias for --v2")
+	fs.Int64Var(&f.v3ChunkSize, "v3-chunk-size", 0, "enc V3 only: integer chunk bytes (0/default: 16777216; playback: 1048576; max: 33554432)")
 
 	_ = fs.Parse(os.Args[2:])
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "v3-chunk-size" {
+			f.v3ChunkSet = true
+		}
+	})
 	return f
 }
 
-// loadPassword resolves the password source after flag parsing.
-//
-// Password files commonly end with one editor-added newline. Remove exactly
-// one trailing LF or CRLF while preserving every other byte, including leading
-// and trailing spaces that may intentionally be part of the password.
 // useV3 reports whether a new encryption should use the V3 chunked AEAD
 // container. V3 is the default; only an explicit --v2/--legacy opt-out
 // switches back to the legacy V2 container.
 func (f *flags) useV3() bool { return f.v3 && !f.v2 }
+
+// Bound new-file allocations to the supported mobile playback limit. V3
+// permits arbitrary positive byte sizes; no power-of-two restriction is needed.
+func (f *flags) validateV3Chunk(command string) error {
+	if (f.v3ChunkSet || f.v3ChunkSize != 0) && (command != "enc" || !f.useV3()) {
+		return fmt.Errorf("--v3-chunk-size is only supported for V3 encryption")
+	}
+	if f.v3ChunkSize < 0 || f.v3ChunkSize > 32*1024*1024 {
+		return fmt.Errorf("--v3-chunk-size must be 0 (default 16 MiB) or positive integer bytes up to 33554432 (32 MiB)")
+	}
+	return nil
+}
 
 // loadPassword resolves the password source after flag parsing.
 //
@@ -1130,7 +1157,7 @@ Usage:
 
 Commands:
   enc    Encrypt file(s) or directory
-  dec    Decrypt file(s) — fully automatic (V1/V2, type, suffix, filename)
+  dec    Decrypt file(s) — fully automatic (V1/V2/V3, type, suffix, filename)
   name   Print the deterministic encrypted filename for -i
 
 Encrypt flags:
@@ -1139,11 +1166,15 @@ Encrypt flags:
                          Read password from file (recommended for scripts)
   -i, --input <path>     Input file or directory (required)
   -o, --output <path>    Output path (default: alongside source)
-      --stdout           Stream V2 ciphertext to stdout (single file only)
+      --stdout           Stream ciphertext to stdout (single file only)
   -t, --type <algo>      aesctr (default) | chacha20 | rc4md5
   -n, --enc-name         Encrypt filenames (matches proxy's ConvertRealNameWithSuffix)
   -s, --suffix <str>     Encrypted suffix (default: .bin, "" = none)
-      --v3                Write the new V3 chunked AES-GCM container (default: V2)
+      --v3                Write V3 chunked AES-GCM (default; content always AES-GCM)
+      --v2, --legacy      Write legacy V2 using --type for compatibility
+      --v3-chunk-size <n> V3 integer chunk bytes: 0/default = 16777216 (16 MiB),
+                          playback opt-in = 1048576 (1 MiB), max = 33554432 (32 MiB)
+                          Not supported with --v2 or dec; --type selects V3 filename algorithm
   -w, --workers <n>      Parallel workers for batch (default: NumCPU)
       --log <path>       Write detailed error log to file
 
@@ -1185,8 +1216,11 @@ Examples:
   encrypt-tool dec -p mypass -i oceans.mp4.bin
   encrypt-tool dec -p mypass -i ./encrypted -o ./decrypted -v -w 4
 
-  # Use chacha20 for encryption
-  encrypt-tool enc -p mypass -i file.zip -t chacha20
+  # Opt in to 1 MiB V3 chunks for playback
+  encrypt-tool enc -p mypass -i oceans.mp4 --v3-chunk-size 1048576
+
+  # Use legacy V2 chacha20 for encryption
+  encrypt-tool enc -p mypass -i file.zip --v2 -t chacha20
 
   # No suffix
   encrypt-tool enc -p mypass -i file.zip -s ""

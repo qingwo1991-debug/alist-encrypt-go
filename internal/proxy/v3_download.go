@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,6 +29,50 @@ func writeV3ResourceFailure(w http.ResponseWriter, err error, reason errors.Fail
 	return &StreamOutcome{Err: err, FailureReason: reason, NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
 }
 
+// v3FallbackCipherDiscard counts header bytes and complete authenticated records
+// before the requested chunk. The intra-chunk prefix still requires that chunk's
+// authentication, but is not a discarded record. Geometry is codec metadata, not
+// proof that the password or any plaintext has been authenticated.
+func v3FallbackCipherDiscard(meta encryption.ContentMeta, plainStart int64) (int64, error) {
+	chunkSize := int64(meta.ChunkSize)
+	if chunkSize <= 0 || chunkSize > 1<<30 || meta.HeaderLen != encryption.V3HeaderSize || plainStart < 0 {
+		return 0, errors.NewDecryptionError("v3: invalid fallback geometry")
+	}
+	recordBytes := chunkSize + 16
+	records := plainStart / chunkSize
+	if records > (math.MaxInt64-meta.HeaderLen)/recordBytes {
+		return 0, errors.NewDecryptionError("v3: fallback geometry overflows")
+	}
+	return meta.HeaderLen + records*recordBytes, nil
+}
+
+const v3SeekBudgetExceeded errors.FailureReason = "v3_seek_budget_exceeded"
+
+// checkV3FallbackBudget is used both before fetch (when metadata is resolved)
+// and defensively after upstream headers. It never applies to an exact Range
+// window, HEAD, or an empty container, none of which discard complete records.
+func (s *StreamProxy) checkV3FallbackBudget(w http.ResponseWriter, req *http.Request, meta encryption.ContentMeta, fileSize int64, rangeHeader string, strategy StreamStrategy) *StreamOutcome {
+	if !meta.IsV3() || req.Method != http.MethodGet || fileSize <= 0 || (strategy != StreamStrategyFull && strategy != StreamStrategyChunked) {
+		return nil
+	}
+	start := int64(0)
+	if rangeHeader != "" {
+		parsed, err := httputil.ParseRange(rangeHeader, fileSize)
+		if err != nil || parsed == nil || len(parsed.Ranges) != 1 {
+			return nil // Preserve the dispatcher's invalid/multiple-range response.
+		}
+		start = parsed.Ranges[0].Start
+	}
+	discard, err := v3FallbackCipherDiscard(meta, start)
+	if err != nil {
+		return writeV3ResourceFailure(w, err, "bad_v3_metadata")
+	}
+	if discard > s.chunkedSeekMaxDiscardBytes() {
+		return writeV3ResourceFailure(w, errors.NewProxyError("v3 fallback ciphertext discard exceeds playback budget"), v3SeekBudgetExceeded)
+	}
+	return nil
+}
+
 // streamV3Response performs the decrypt-and-stream phase for a V3 container.
 //
 // The upstream Range built by buildUpstreamRangeHeader covers the contiguous
@@ -44,23 +90,8 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	}
 
 	chunkSize := int64(meta.ChunkSize)
-	if chunkSize <= 0 {
-		chunkSize = encryption.V3DefaultChunkSize()
-	}
-	// The format allows large records, but playback must not allocate an
-	// unbounded per-stream buffer. Reject before KDF, body reads or player data.
-	recordBytes := chunkSize + 16
-	if recordBytes > v3RecordBudgetBytes {
-		return writeV3ResourceFailure(w, errors.NewDecryptionError("v3 chunk exceeds playback memory budget"), "bad_v3_metadata")
-	}
-	if req.Method != http.MethodHead {
-		release, ok := s.acquireV3Memory(recordBytes)
-		if !ok {
-			// Commit a terminal overload response: another strategy/URL cannot
-			// lower this request's record memory and would amplify the overload.
-			return writeV3ResourceFailure(w, errors.NewProxyError("v3 playback memory budget exhausted"), "resource_exhausted")
-		}
-		defer release()
+	if _, err := v3FallbackCipherDiscard(meta, 0); err != nil {
+		return writeV3ResourceFailure(w, err, "bad_v3_metadata")
 	}
 	nonce := meta.NonceField
 	if int64(len(nonce)) != encryption.V3NonceFieldLen() {
@@ -71,17 +102,14 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 			NoLearning:    true,
 		}
 	}
-	key := encryption.DeriveV3Key(passwdInfo.Password, nonce, meta.KDFIterations)
-	v3Cipher, err := encryption.NewV3ChunkCipher(key, nonce)
-	if err != nil {
-		result.Err = errors.NewDecryptionErrorWithCause("v3: create chunk cipher", err)
-		return result
-	}
-
 	// A Range-strategy request must come back as the exact chunk window we
 	// asked for; any other interval would decrypt at the wrong position.
 	if strategy == StreamStrategyRange && activeRange != nil {
-		cipherStart, cipherEnd := encryption.V3ChunkWindow(activeRange.Start, activeRange.End, chunkSize)
+		windowStart := activeRange.Start
+		if p := v3Plan(req); p != nil {
+			windowStart = p.tailStart
+		}
+		cipherStart, cipherEnd := encryption.V3ChunkWindow(windowStart, activeRange.End, chunkSize)
 		contentRangeHeader := resp.Header.Get("Content-Range")
 		if resp.StatusCode == http.StatusOK && contentRangeHeader == "" {
 			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsupported")
@@ -92,7 +120,7 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 			return &StreamOutcome{Err: errors.NewProxyError("range unsatisfiable"), Retryable: true, FailureReason: "range_unsatisfiable"}
 		}
 		actual, valid := parseContentRange(contentRangeHeader)
-		if !valid || actual.Start != cipherStart || actual.End < cipherEnd {
+		if resp.StatusCode != http.StatusPartialContent || !valid || actual.Start != cipherStart || actual.End < cipherEnd {
 			s.recordRangeFailure(targetURL, compatStorageKey, "range_unsupported")
 			return &StreamOutcome{
 				Err:           errors.NewProxyError(fmt.Sprintf("upstream Content-Range %q does not cover v3 chunk window %d-%d", contentRangeHeader, cipherStart, cipherEnd)),
@@ -101,6 +129,13 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 				StatusCode:    resp.StatusCode,
 			}
 		}
+	}
+
+	if outcome := s.checkV3FallbackBudget(w, req, meta, fileSize, rangeHeader, strategy); outcome != nil {
+		return outcome
+	}
+	if err := req.Context().Err(); err != nil {
+		return &StreamOutcome{Err: err, FailureReason: errors.ReasonClientDisconnect, NoLearning: true}
 	}
 
 	responseRange := activeRange
@@ -162,6 +197,25 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 		return result
 	}
 
+	// HEAD has returned using resolved codec geometry only; it neither needs
+	// record memory nor claims to authenticate plaintext. Reject GET resources
+	// before deriving a key or touching the upstream body.
+	recordBytes := chunkSize + 16
+	if recordBytes > v3RecordBudgetBytes {
+		return writeV3ResourceFailure(w, errors.NewDecryptionError("v3 chunk exceeds playback memory budget"), "bad_v3_metadata")
+	}
+	release, ok := s.acquireV3Memory(recordBytes)
+	if !ok {
+		return writeV3ResourceFailure(w, errors.NewProxyError("v3 playback memory budget exhausted"), "resource_exhausted")
+	}
+	defer release()
+	key := encryption.DeriveV3Key(passwdInfo.Password, nonce, meta.KDFIterations)
+	v3Cipher, err := encryption.NewV3ChunkCipher(key, nonce)
+	if err != nil {
+		result.Err = errors.NewDecryptionErrorWithCause("v3: create chunk cipher", err)
+		return result
+	}
+
 	// Where the plaintext begins inside the upstream body:
 	// - Range strategy: body starts at the window's first chunk record, so only
 	//   the intra-chunk skip remains.
@@ -183,10 +237,6 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	case activeRange != nil && strategy == StreamStrategyChunked:
 		// applyStrategyHeaders removed upstream Range. The body still includes
 		// front matter and starts at record zero, not at the requested window.
-		maxDiscard := s.chunkedSeekMaxDiscardBytes()
-		if maxDiscard > 0 && activeRange.Start > maxDiscard {
-			return &StreamOutcome{Err: errors.NewProxyError("chunked seek offset too large"), Retryable: true, FailureReason: "chunked_seek_too_large"}
-		}
 		if err := discardBytes(resp.Body, meta.HeaderLen); err != nil {
 			result.Err = errors.NewProxyErrorWithCause("failed to discard v3 header", err)
 			return result
@@ -194,9 +244,13 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 		skip = activeRange.Start
 		limit = activeRange.ContentLength()
 	case activeRange != nil:
-		firstChunk = activeRange.Start / chunkSize
-		skip = activeRange.Start % chunkSize
-		limit = activeRange.ContentLength()
+		start := activeRange.Start
+		if p := v3Plan(req); p != nil {
+			start = p.tailStart
+		}
+		firstChunk = start / chunkSize
+		skip = start % chunkSize
+		limit = activeRange.End - start + 1
 	default:
 		if err := discardBytes(resp.Body, meta.HeaderLen); err != nil {
 			result.Err = errors.NewProxyErrorWithCause("failed to discard v3 header", err)
@@ -209,12 +263,41 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 		skip = 0
 	}
 	var bodyReader io.Reader
-	reader, err := encryption.NewV3StreamReader(resp.Body, v3Cipher, chunkSize, firstChunk, skip, limit)
+	var reader *encryption.V3StreamReader
+	cacheKey, cacheEnabled := v3CacheIdentity(req, targetURL, passwdInfo, meta, compatStorageKey)
+	if p := v3Plan(req); p != nil {
+		cacheKey, cacheEnabled = p.key, true
+	}
+	if cacheEnabled {
+		reader, err = encryption.NewV3RecordReader(req.Context(), v3Cipher, chunkSize, firstChunk, skip, limit, meta.PlainSize, rootV3RecordCache, cacheKey, sequentialV3Loader(resp.Body, firstChunk, chunkSize))
+	} else {
+		reader, err = encryption.NewV3StreamReader(resp.Body, v3Cipher, chunkSize, firstChunk, skip, limit)
+	}
 	if err != nil {
 		result.Err = errors.NewDecryptionErrorWithCause("failed to create v3 stream reader", err)
 		return result
 	}
-	bodyReader = reader
+	defer reader.Close()
+	// Read one byte before committing: this authenticates the complete first
+	// tail record even at nonzero offsets with sniff disabled. Never emit a
+	// successful cached prefix followed by a first-tail authentication failure.
+	var first [1]byte
+	n, firstErr := reader.Read(first[:])
+	if firstErr != nil || n != 1 {
+		if firstErr == nil {
+			firstErr = io.ErrUnexpectedEOF
+		}
+		result.Err = errors.NewDecryptionErrorWithCause("v3: first record authentication", firstErr)
+		result.FailureReason = "decrypt_validation_failed"
+		result.NoLearning = true
+		return result
+	}
+	bodyReader = io.MultiReader(bytes.NewReader(first[:]), reader)
+	if p := v3Plan(req); p != nil && len(p.readers) > 0 {
+		parts := append([]io.Reader(nil), p.readers...)
+		parts = append(parts, bodyReader)
+		bodyReader = io.MultiReader(parts...)
+	}
 
 	sniffOffset := int64(0)
 	switch {
@@ -240,11 +323,6 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 			}
 		}
 		bodyReader = sniffed
-	}
-
-	if req.Method == http.MethodGet && rangeHeader != "" && s != nil && s.blockCache != nil {
-		baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
-		bodyReader = newDecryptedCacheReader(bodyReader, s.blockCache, baseKey, sniffOffset)
 	}
 
 	result.HeaderLatency = time.Since(streamStart)
@@ -277,6 +355,12 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 			result.FailureReason = reason
 			result.Retryable = retryable
 		}
+	}
+	// Once any successful response has started, body failures are terminal.
+	// Never advertise a retry which could append another URL/strategy response.
+	if result.Err != nil && result.ResponseStarted {
+		result.Retryable = false
+		result.NoLearning = true
 	}
 	if strategy == StreamStrategyRange && activeRange != nil && result.Err == nil {
 		s.recordRangeSuccess(targetURL, compatStorageKey)

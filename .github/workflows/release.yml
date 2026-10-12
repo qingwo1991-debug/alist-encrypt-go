@@ -80,9 +80,11 @@ jobs:
       - name: Record deterministic playback fault acceptance
         env:
           PLAYBACK_ACCEPTANCE_REPORT: ${{ github.workspace }}/performance-results/playback-acceptance.json
+          PLAYBACK_V3_AMPLIFICATION_REPORT: ${{ github.workspace }}/performance-results/v3-amplification.json
         run: |
           mkdir -p performance-results
           go test -race -mod=readonly -timeout 3m -count=1 -run '^TestPlaybackAcceptance' ./internal/proxy
+          go test -race -mod=readonly -timeout 3m -count=1 -run '^TestV3AmplificationAcceptance$' ./internal/proxy
           go test -race -mod=readonly -timeout 1m -count=10 ./internal/playbacktest
       - name: Record network-free performance baselines
         run: |

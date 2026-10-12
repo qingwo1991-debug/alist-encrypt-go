@@ -26,10 +26,25 @@
               <el-radio label="dec" border>解密</el-radio>
             </el-radio-group>
           </el-form-item>
-          <el-form-item label="算法">
+          <template v-if="folderForm.operation === 'enc'">
+            <el-form-item label="格式">
+              <el-select v-model="folderForm.v2">
+                <el-option :value="false" label="V3 AES-GCM（默认）" />
+                <el-option :value="true" label="V2（旧版兼容）" />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="!folderForm.v2" label="分块">
+              <el-select v-model="folderForm.v3ChunkSize">
+                <el-option :value="0" label="兼容默认 · 16 MiB" />
+                <el-option :value="1048576" label="播放优化 · 1 MiB（可选）" />
+              </el-select>
+              <div class="helper-inline">仅影响新加密文件；1 MiB 减少播放与拖动时的单块读取量。</div>
+            </el-form-item>
+          </template>
+          <el-form-item :label="folderForm.operation === 'enc' && !folderForm.v2 ? '文件名算法' : '算法'">
             <el-radio-group v-model="folderForm.encType" size="small">
               <el-radio label="aesctr" border>AES-CTR</el-radio>
-              <el-radio label="rc4" border>RC4</el-radio>
+              <el-radio label="rc4md5" border>RC4-MD5</el-radio>
               <el-radio label="chacha20" border>ChaCha20</el-radio>
             </el-radio-group>
           </el-form-item>
@@ -75,7 +90,9 @@ const folderForm = reactive({
   password: '',
   operation: 'enc',
   encName: false,
-  encSuffix: ''
+  encSuffix: '',
+  v2: false,
+  v3ChunkSize: 0
 })
 
 const refSearchForm = ref()
@@ -87,7 +104,13 @@ const encryptFile = () => {
   }
 
   setFolderInfo({ folderPath: folderForm.folderPath, outPath: folderForm.outPath })
-  return encryptFileReq(folderForm).then((res) => {
+  // Chunk geometry belongs to newly written V3 files, not global settings
+  // or the decoding of existing containers. Never send it for V2/decryption.
+  const { v2, v3ChunkSize, ...fields } = folderForm
+  const request = folderForm.operation === 'enc'
+    ? { ...fields, v2, ...(!v2 ? { v3ChunkSize } : {}) }
+    : fields
+  return encryptFileReq(request).then((res) => {
     ElMessage.success(res.msg)
   })
 }
