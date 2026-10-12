@@ -12,6 +12,12 @@ test('FD ownership duplicates the descriptor and never adopts the Go FD', () => 
   assert.match(bridge, /network\.bindSocket\(duplicate\.fileDescriptor\)/)
   assert.doesNotMatch(bridge, /adoptFd\(/)
 })
+test('socket bind errors preserve bounded numeric errno instead of claiming missing route', () => {
+  assert.match(bridge, /catch \(error: Exception\) \{\s*nativeErrorCode\(error\)/)
+  assert.match(bridge, /current is SecurityException\) return 1L/)
+  assert.match(bridge, /current is ErrnoException && current\.errno in 1\.\.4095\) return current\.errno\.toLong\(\)/)
+  assert.match(bridge, /repeat\(16\)/)
+})
 test('selected DNS uses both address families on the captured Network with cancellation', () => {
   assert.match(bridge, /DnsResolver\.TYPE_A, DnsResolver\.TYPE_AAAA/)
   assert.match(bridge, /resolver\.query\(query\.network, host, type, 0, executor, query\.signals\[slot\]/)

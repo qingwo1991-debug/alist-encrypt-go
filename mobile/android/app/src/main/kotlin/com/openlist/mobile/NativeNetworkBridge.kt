@@ -5,6 +5,7 @@ import android.net.Network
 import android.os.Build
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
 import com.openlist.mobile.model.openlist.OpenList
 import openlistlib.NetworkBridge
 import org.json.JSONArray
@@ -90,9 +91,22 @@ class NativeNetworkBridge : NetworkBridge, AutoCloseable {
                 network.bindSocket(duplicate.fileDescriptor)
             }
             0L
-        } catch (_: Exception) {
-            NO_ROUTE
+        } catch (error: Exception) {
+            nativeErrorCode(error)
         }
+    }
+
+    // Preserve numeric diagnostics only; do not expose exception messages/hosts.
+    private fun nativeErrorCode(error: Throwable): Long {
+        var cause: Throwable? = error
+        // Bound traversal even for malformed cyclic cause chains.
+        repeat(16) {
+            val current = cause ?: return 5L // EIO
+            if (current is SecurityException) return 1L // EPERM
+            if (current is ErrnoException && current.errno in 1..4095) return current.errno.toLong()
+            cause = current.cause
+        }
+        return 5L
     }
 
     override fun startDNS(id: String, token: String, host: String, timeoutMillis: Long): Long {
