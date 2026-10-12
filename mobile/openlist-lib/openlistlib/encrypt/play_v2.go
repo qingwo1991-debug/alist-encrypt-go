@@ -486,7 +486,75 @@ func (o *PlayOrchestrator) streamViaRedirect(ctx context.Context, w http.Respons
 	o.ServeRedirect(w, req)
 }
 
+// playbackTiming starts at the playback handler boundary, before metadata work.
+// It measures bytes accepted by the HTTP writer, not headers or player frames.
+type playbackTiming struct {
+	started            time.Time
+	streamStarted      time.Time
+	headerLatencyMs    float64
+	firstByteLatencyMs float64
+	bytesWritten       int64
+	status             int
+}
+
+type playbackTimingKey struct{}
+
+type playbackTimingWriter struct {
+	http.ResponseWriter
+	timing *playbackTiming
+}
+
+func (w *playbackTimingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *playbackTimingWriter) WriteHeader(status int) {
+	w.ResponseWriter.WriteHeader(status)
+	if w.timing.status == 0 && (status >= 200 || status == http.StatusSwitchingProtocols) {
+		w.timing.status = status
+	}
+}
+
+func (w *playbackTimingWriter) Write(data []byte) (int, error) {
+	if w.timing.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(data)
+	if n > 0 && w.timing.status >= 200 && w.timing.status < 300 {
+		w.timing.bytesWritten += int64(n)
+		if w.timing.firstByteLatencyMs == 0 {
+			w.timing.firstByteLatencyMs = time.Since(w.timing.started).Seconds() * 1000
+		}
+	}
+	return n, err
+}
+
+// Advertise http.Flusher only when the original writer supports it.
+type playbackTimingFlusher struct{ *playbackTimingWriter }
+
+func (w *playbackTimingFlusher) Flush() {
+	if w.timing.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.ResponseWriter.(http.Flusher).Flush()
+}
+
+func withPlaybackTiming(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, *http.Request, *playbackTiming) {
+	if r == nil {
+		return w, r, nil
+	}
+	if timing, ok := r.Context().Value(playbackTimingKey{}).(*playbackTiming); ok {
+		return w, r, timing
+	}
+	timing := &playbackTiming{started: time.Now()}
+	writer := &playbackTimingWriter{ResponseWriter: w, timing: timing}
+	var wrapped http.ResponseWriter = writer
+	if _, ok := w.(http.Flusher); ok {
+		wrapped = &playbackTimingFlusher{writer}
+	}
+	return wrapped, r.WithContext(context.WithValue(r.Context(), playbackTimingKey{}, timing)), timing
+}
+
 func (o *PlayOrchestrator) ServePlayback(w http.ResponseWriter, r *http.Request) {
+	w, r, _ = withPlaybackTiming(w, r)
 	if o == nil || o.proxy == nil {
 		http.Error(w, "play orchestrator unavailable", http.StatusInternalServerError)
 		return
@@ -1028,6 +1096,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 
 	// 墙钟起点：用于统计本次流式写出的时长（近似播放时长）。
 	streamWallStart := time.Now()
+	if timing, ok := r.Context().Value(playbackTimingKey{}).(*playbackTiming); ok {
+		timing.streamStarted = streamWallStart
+	}
 
 	// Do not let failures from one signed cloud URL trip the process-wide
 	// control-plane breaker. A newly selected video may use a healthy provider,
@@ -1684,8 +1755,11 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	if cache := p.decryptedBlockCache; cache != nil {
 		streamSource = newDecryptedCacheReader(decryptReader, cache, p.decryptedCacheBaseKey(info, meta), streamStart)
 	}
-	// 响应头就绪时刻：首帧可观测（播放器感知的"首帧前卡顿"≈这里减去请求发起）。
-	headersReadyAt := time.Now()
+	// Preserve the existing per-strategy pre-header latency, independent of
+	// handler-entry-to-first-body-write latency (not player first-frame timing).
+	if timing, ok := r.Context().Value(playbackTimingKey{}).(*playbackTiming); ok {
+		timing.headerLatencyMs = time.Since(streamWallStart).Seconds() * 1000
+	}
 	w.WriteHeader(statusCode)
 
 	firstByteWriter := &firstByteTimingWriter{dst: w, proxy: p, started: streamWallStart, hasRange: hasRange}
@@ -1722,20 +1796,14 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	}
 	log.Debugf("V2 redirect stream copy complete: url=%s strategy=%s written=%d status=%d",
 		safeURLForLog(info.RedirectURL), strategy, written, statusCode)
-	// 播放统计：记录一次真实播放（有字节写出）。
-	if written > 0 && o.proxy != nil && o.proxy.localStore != nil {
-		displayPath := displayPathFromPlaybackRequest(r, info)
-		provider := info.Provider
-		if provider == "" {
-			provider = ProviderKey(info.RedirectURL, "")
-		}
-		o.proxy.recordPlaybackStats(displayPath, provider, written, fileSize, written == expectedLength, "", time.Since(streamWallStart).Seconds(), startPos, float64(headersReadyAt.Sub(streamWallStart).Milliseconds()), bytesPerSecondToMbps(float64(written)/time.Since(streamWallStart).Seconds()))
-	}
+	// Production stats are recorded once by ServeRedirect, including partial writes.
 
 	return &StreamOutcome{StatusCode: statusCode}
 }
 
 func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request) {
+	var timing *playbackTiming
+	w, r, timing = withPlaybackTiming(w, r)
 	if o == nil || o.proxy == nil || r == nil || r.URL == nil {
 		http.Error(w, "play orchestrator unavailable", http.StatusInternalServerError)
 		return
@@ -1763,7 +1831,34 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		rejectUnsupportedV3Playback(w)
 		return
 	}
-	fileSize := o.resolveFileSize(r.Context(), r, info)
+	// Register before resolve so metadata/prework is included in the measurement.
+	fileSize := int64(0)
+	statsEnabled, statsCompleted, cacheHit := false, false, false
+	defer func() {
+		if !statsEnabled || timing == nil || timing.bytesWritten <= 0 {
+			return
+		}
+		provider := info.Provider
+		if provider == "" {
+			provider = ProviderKey(info.RedirectURL, "")
+		}
+		// Preserve the existing streaming-duration/rate scope; only first byte
+		// includes all handler metadata/prework.
+		duration, mbps := float64(0), float64(0)
+		if !timing.streamStarted.IsZero() {
+			duration = time.Since(timing.streamStarted).Seconds()
+		}
+		if duration > 0 {
+			mbps = bytesPerSecondToMbps(float64(timing.bytesWritten) / duration)
+		}
+		if cacheHit {
+			duration, mbps = 0, 0
+		}
+		o.proxy.recordPlaybackStats(displayPathFromPlaybackRequest(r, info), provider,
+			timing.bytesWritten, fileSize, statsCompleted, "", duration,
+			rangeStartFromRequest(r), timing.headerLatencyMs, mbps, timing.firstByteLatencyMs)
+	}()
+	fileSize = o.resolveFileSize(r.Context(), r, info)
 	decodeDisabled := r.URL.Query().Get("decode") == "0"
 	if decodeDisabled {
 		fileSize = redirectRawFileSize(info, fileSize)
@@ -1897,18 +1992,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
 				w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
 				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(data)
+				statsEnabled, cacheHit = true, true
+				n, writeErr := w.Write(data)
+				statsCompleted = writeErr == nil && n == len(data)
 				log.Debugf("V2 play: served %d bytes from decrypted block cache start=%d end=%d", len(data), start, end)
-				// 播放统计：缓存命中也是一次有效播放。
-				if len(data) > 0 && o.proxy != nil && o.proxy.localStore != nil {
-					displayPath := displayPathFromPlaybackRequest(r, info)
-					provider := info.Provider
-					if provider == "" {
-						provider = ProviderKey(info.RedirectURL, "")
-					}
-					// 缓存命中写出几乎瞬时，时长按 0 记：seek 语义由会话聚合的 seekCount 表达。
-					o.proxy.recordPlaybackStats(displayPath, provider, int64(len(data)), fileSize, true, "", 0, start, 0, 0)
-				}
 				return
 			}
 		}
@@ -1943,7 +2030,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		if info.ContentVersion == ContentVersionV1 && info.FileSize > 0 {
 			attemptSize = info.FileSize
 		}
+		statsEnabled = !decodeDisabled
 		outcome := o.proxyDownloadDecryptWithStrategy(w, r, key, info, attemptSize, strategy)
+		statsCompleted = outcome != nil && outcome.Err == nil
 		if outcome == nil {
 			return &StreamOutcome{Err: fmt.Errorf("empty stream outcome"), FailureReason: "stream_error", Retryable: true}
 		}
@@ -2112,6 +2201,7 @@ func (p *ProxyServer) handlePlayResolve(w http.ResponseWriter, r *http.Request) 
 }
 
 func (p *ProxyServer) handlePlayStream(w http.ResponseWriter, r *http.Request) {
+	w, r, _ = withPlaybackTiming(w, r)
 	token := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/play/stream/"))
 	if token == "" {
 		http.Error(w, "invalid token", http.StatusBadRequest)
@@ -2142,5 +2232,6 @@ func (p *ProxyServer) handlePlayStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *ProxyServer) handleWebDAVV2(w http.ResponseWriter, r *http.Request) {
+	w, r, _ = withPlaybackTiming(w, r)
 	newPlayOrchestrator(p).ServePlayback(w, remapRequestPath(r, "/dav2", "/dav"))
 }

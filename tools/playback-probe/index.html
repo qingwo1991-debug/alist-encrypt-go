@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Standalone playback frame probe</title>
+  <style>
+    body { max-width: 960px; margin: 2rem auto; padding: 0 1rem; font: 16px system-ui; }
+    input[type=url] { width: min(95%, 750px); }
+    input, select, button { padding: .5rem; margin: .3rem; }
+    video { display: block; width: 100%; max-height: 480px; background: #111; margin: 1rem 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #eee; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>真实视频帧测试 / Playback probe</h1>
+  <p>独立工具，不修改生产 WebView/externalplayer。仅播放您输入且已获授权的 HTTP(S) URL；不会自动遍历或重复请求媒体。</p>
+  <p>帧指标仅使用 requestVideoFrameCallback 的 presentationTime（提交 compositor，而非物理屏幕显示）。不支持 API 时明确 unsupported，playing/loadeddata 不计为渲染。</p>
+  <label>授权播放 URL <input id="url" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-authorized-host/video.mp4"></label>
+  <div>
+    <label>本次样本缓存标签 <select id="condition"><option value="cold">cold（用户自行确保冷缓存）</option><option value="warm">warm</option><option value="consecutive">consecutive</option></select></label>
+    <button id="open">Open + play（一个首帧样本）</button>
+    <button id="stop">Stop</button>
+  </div>
+  <div>
+    <label>Seek 秒数 <input id="target" type="number" min="0" step="0.1" value="10"></label>
+    <button id="seek">Seek + play（一个 seek 样本）</button>
+    <button id="download">Download JSON</button>
+  </div>
+  <p>每次点击记录一个样本；连续样本请逐次点击。默认 15 秒超时，seek 目标容差 ±0.25 秒。native controls 可辅助观看，但原生拖动不创建测量样本。不要在计时期间用原生 controls seek。</p>
+  <video id="video" controls playsinline preload="none"></video>
+  <p id="status" role="status">等待用户操作。</p>
+  <pre id="results">No samples</pre>
+  <script type="module" src="./ui.mjs"></script>
+</body>
+</html>

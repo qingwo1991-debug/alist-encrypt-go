@@ -332,6 +332,7 @@ func initLocalSchema(db *sql.DB) error {
             content_type TEXT NOT NULL DEFAULT '',
             seek_count INTEGER NOT NULL DEFAULT 0,
             header_latency_ms REAL NOT NULL DEFAULT 0,
+            first_byte_latency_ms REAL NOT NULL DEFAULT 0,
             mbps REAL NOT NULL DEFAULT 0
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_playback_stats_played_at ON playback_stats(played_at);`,
@@ -386,6 +387,7 @@ func migrateLocalSchema(db *sql.DB) error {
 		`ALTER TABLE local_media_size ADD COLUMN upstream_fetched_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE playback_stats ADD COLUMN seek_count INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE playback_stats ADD COLUMN header_latency_ms REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE playback_stats ADD COLUMN first_byte_latency_ms REAL NOT NULL DEFAULT 0`,
 		`ALTER TABLE playback_stats ADD COLUMN mbps REAL NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
@@ -1409,18 +1411,19 @@ func (s *localStore) SetMeta(key, value string) error {
 
 // PlaybackStatsRecord 一次播放会话（多条 Range 流式请求合并后落库）。
 type PlaybackStatsRecord struct {
-	ID              string  `json:"id"`
-	Path            string  `json:"path"`
-	Provider        string  `json:"provider"`
-	BytesServed     int64   `json:"bytes_served"`
-	TotalBytes      int64   `json:"total_bytes"`
-	DurationSecs    float64 `json:"duration_secs"`
-	PlayedAt        int64   `json:"played_at"` // Unix 秒
-	Completed       bool    `json:"completed"`
-	ContentType     string  `json:"content_type,omitempty"`
-	SeekCount       int     `json:"seek_count"`                  // 会话内快进/快退次数
-	HeaderLatencyMs float64 `json:"header_latency_ms,omitempty"` // 会话首个请求的响应头延迟（首帧可观测），毫秒；0 表示未测量
-	Mbps            float64 `json:"mbps,omitempty"`              // 会话内峰值下行速率（MiB/s）；0 表示未测量
+	ID                 string  `json:"id"`
+	Path               string  `json:"path"`
+	Provider           string  `json:"provider"`
+	BytesServed        int64   `json:"bytes_served"`
+	TotalBytes         int64   `json:"total_bytes"`
+	DurationSecs       float64 `json:"duration_secs"`
+	PlayedAt           int64   `json:"played_at"` // Unix 秒
+	Completed          bool    `json:"completed"`
+	ContentType        string  `json:"content_type,omitempty"`
+	SeekCount          int     `json:"seek_count"`                      // 会话内快进/快退次数
+	HeaderLatencyMs    float64 `json:"header_latency_ms,omitempty"`     // 策略响应头就绪延迟，毫秒；不是播放器首帧
+	FirstByteLatencyMs float64 `json:"first_byte_latency_ms,omitempty"` // handler 入口到首个成功 2xx body write，毫秒；0=未测量
+	Mbps               float64 `json:"mbps,omitempty"`                  // 会话内峰值下行速率（MiB/s）；0 表示未测量
 }
 
 // DeletionStatsRecord 一次文件删除。
@@ -1528,9 +1531,9 @@ func (s *localStore) AppendPlayback(rec PlaybackStatsRecord) error {
 		completed = 1
 	}
 	if _, err := s.db.Exec(`INSERT OR IGNORE INTO playback_stats
-        (id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type, seek_count, header_latency_ms, mbps)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		rec.ID, rec.Path, rec.Provider, rec.BytesServed, rec.TotalBytes, rec.DurationSecs, rec.PlayedAt, completed, rec.ContentType, rec.SeekCount, rec.HeaderLatencyMs, rec.Mbps); err != nil {
+        (id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type, seek_count, header_latency_ms, first_byte_latency_ms, mbps)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.Path, rec.Provider, rec.BytesServed, rec.TotalBytes, rec.DurationSecs, rec.PlayedAt, completed, rec.ContentType, rec.SeekCount, rec.HeaderLatencyMs, rec.FirstByteLatencyMs, rec.Mbps); err != nil {
 		return err
 	}
 	return s.pruneStatsIfNeeded()
@@ -1584,7 +1587,7 @@ func (s *localStore) ListPlaybackStats(limit int) ([]PlaybackStatsRecord, error)
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := s.db.Query(`SELECT id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type, seek_count, header_latency_ms, mbps
+	rows, err := s.db.Query(`SELECT id, path, provider, bytes_served, total_bytes, duration_secs, played_at, completed, content_type, seek_count, header_latency_ms, first_byte_latency_ms, mbps
         FROM playback_stats ORDER BY played_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1594,7 +1597,7 @@ func (s *localStore) ListPlaybackStats(limit int) ([]PlaybackStatsRecord, error)
 	for rows.Next() {
 		var rec PlaybackStatsRecord
 		var completed int
-		if err := rows.Scan(&rec.ID, &rec.Path, &rec.Provider, &rec.BytesServed, &rec.TotalBytes, &rec.DurationSecs, &rec.PlayedAt, &completed, &rec.ContentType, &rec.SeekCount, &rec.HeaderLatencyMs, &rec.Mbps); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Path, &rec.Provider, &rec.BytesServed, &rec.TotalBytes, &rec.DurationSecs, &rec.PlayedAt, &completed, &rec.ContentType, &rec.SeekCount, &rec.HeaderLatencyMs, &rec.FirstByteLatencyMs, &rec.Mbps); err != nil {
 			return nil, err
 		}
 		rec.Completed = completed == 1

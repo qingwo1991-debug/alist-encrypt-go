@@ -26,7 +26,7 @@
             <div class="kv-row"><span>服务版本</span><strong>{{ buildInfo.version || '-' }}</strong></div>
             <div class="kv-row"><span>前端集成</span><strong>{{ buildInfo.embedded_web_ui ? '已内嵌' : '未内嵌' }}</strong></div>
             <div class="kv-row"><span>管理模式</span><strong>{{ buildInfo.management_mode || '-' }}</strong></div>
-            <div class="kv-row"><span>运行时长</span><strong>{{ uptime || '-' }}</strong></div>
+            <div class="kv-row"><span>运行时长</span><strong>{{ runtime.uptime || '-' }}</strong></div>
           </div>
         </section>
 
@@ -96,10 +96,11 @@
 
         <el-tabs v-model="statsTab" class="pb-tabs">
           <el-tab-pane label="播放记录" name="playback">
+            <p class="ff-chart-sub">正文首字节为服务端 handler 开始至首次成功正文写入；响应头为上游请求至头就绪。均非播放器真实首帧。缺字段表示未测量，不以响应头补齐；显式 0 保留，后端须省略未知值。</p>
             <div class="ff-chart-row">
               <div class="ff-chart-card">
                 <div class="ff-chart-title">
-                  首帧耗时 <span class="ff-chart-sub">header_latency_ms · p50 {{ p50Latency }}ms · p95 {{ p95Latency }}ms</span>
+                  服务端正文首字节 <span class="ff-chart-sub">first_byte_latency_ms · p50 {{ p50Latency }}ms · p95 {{ p95Latency }}ms</span>
                 </div>
                 <canvas ref="latencyCanvas" class="ff-canvas" width="560" height="120" />
               </div>
@@ -116,8 +117,11 @@
               <el-table-column label="时长" width="90">
                 <template #default="{ row }">{{ fmtDuration(row.duration_secs) }}</template>
               </el-table-column>
-              <el-table-column label="首帧ms" width="80" align="right">
-                <template #default="{ row }">{{ row.header_latency_ms ? Math.round(row.header_latency_ms) : '-' }}</template>
+              <el-table-column label="正文首字节ms" width="130" align="right">
+                <template #default="{ row }">{{ formatLatency(row, 'first_byte_latency_ms') }}</template>
+              </el-table-column>
+              <el-table-column label="上游响应头ms" width="130" align="right">
+                <template #default="{ row }">{{ formatLatency(row, 'header_latency_ms') }}</template>
               </el-table-column>
               <el-table-column label="MiB/s" width="80" align="right">
                 <template #default="{ row }">{{ row.mbps ? row.mbps.toFixed(1) : '-' }}</template>
@@ -151,6 +155,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { clearPlaybackStatsReq, getBuildInfoReq, getPlaybackStatsReq, getStatsReq } from '@/api/user'
+import { formatLatency, latencySeriesFor, percentile, playbackTimestamp } from '@/utils/playback-metrics'
 
 const buildInfo = reactive({})
 const runtime = reactive({
@@ -167,22 +172,18 @@ const statsTab = ref('playback')
 const playbacks = ref([])
 const deletions = ref([])
 
-// 首帧/速率曲线（canvas 自绘，零外部依赖）
+// 正文首字节/速率曲线（canvas 自绘，零外部依赖）
 const latencyCanvas = ref(null)
 const mbpsCanvas = ref(null)
 
-// 取有首帧记录的播放事件，按时间升序
-const latencySeries = computed(() => {
-  const rows = (playbacks.value || []).filter(r => r.header_latency_ms > 0)
-  rows.sort((a, b) => new Date(a.played_at) - new Date(b.played_at))
-  return rows.map(r => ({ t: new Date(r.played_at), v: r.header_latency_ms })).slice(-200)
-})
+// 正文首字节独立统计，不回退到上游响应头；历史记录缺字段即未知。
+const latencySeries = computed(() => latencySeriesFor(playbacks.value))
 const mbpsSeries = computed(() => {
-  const rows = (playbacks.value || []).filter(r => r.mbps > 0)
-  rows.sort((a, b) => new Date(a.played_at) - new Date(b.played_at))
-  return rows.map(r => ({ t: new Date(r.played_at), v: r.mbps })).slice(-200)
+  const rows = (playbacks.value || []).filter(r => r.mbps > 0 && playbackTimestamp(r.played_at) !== null)
+  rows.sort((a, b) => playbackTimestamp(a.played_at) - playbackTimestamp(b.played_at))
+  return rows.map(r => ({ t: new Date(playbackTimestamp(r.played_at)), v: r.mbps })).slice(-200)
 })
-// p50/p95 of first-frame latency
+// p50/p95 of server body-first-byte latency (latest 200 measured samples)
 const p50Latency = computed(() => percentile(latencySeries.value.map(s => s.v), 0.5))
 const p95Latency = computed(() => percentile(latencySeries.value.map(s => s.v), 0.95))
 const peakMbps = computed(() => {
@@ -190,24 +191,19 @@ const peakMbps = computed(() => {
   return vs.length ? Math.max(...vs).toFixed(1) : '-'
 })
 
-const percentile = (arr, q) => {
-  if (!arr.length) return '-'
-  const sorted = [...arr].sort((a, b) => a - b)
-  const idx = Math.min(sorted.length - 1, Math.round(q * (sorted.length - 1)))
-  return Math.round(sorted[idx])
-}
-
 const drawSeries = (canvas, series, opts) => {
-  if (!canvas || !series.length) return
+  if (!canvas) return
   const ctx = canvas.getContext('2d')
+  if (!ctx) return
   const W = canvas.width, H = canvas.height
   const padL = 52, padR = 12, padT = 12, padB = 20
   ctx.clearRect(0, 0, W, H)
+  if (!series.length) return
 
   // 值域
   let maxV = 0
   for (const s of series) if (s.v > maxV) maxV = s.v
-  if (maxV <= 0) return
+  if (maxV <= 0) maxV = 1
   // 取整到好看的上界（1/2/5 步长）
   const niceCeil = (v) => {
     if (v <= 0) return 1
@@ -309,7 +305,7 @@ const loadPlaybackStats = async () => {
 
 const exportingStats = ref(false)
 
-// 播放数据变化后重绘首帧/速率曲线（nextTick 保证 canvas 已挂载）
+// 播放数据变化后重绘正文首字节/速率曲线（nextTick 保证 canvas 已挂载）
 watch([latencySeries, mbpsSeries], async () => {
   await nextTick()
   drawSeries(latencyCanvas.value, latencySeries.value, { color: '#409eff', unit: 'ms', labelColor: 'rgba(64,158,255,0.95)' })
@@ -410,7 +406,9 @@ const fmtSince = (secs) => {
 
 const fmtTime = (ts) => {
   if (!ts) return '-'
-  const d = new Date(Number(ts) * 1000)
+  const timestamp = playbackTimestamp(ts)
+  if (timestamp === null) return '-'
+  const d = new Date(timestamp)
   if (Number.isNaN(d.getTime())) return String(ts)
   const p = (v) => String(v).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`

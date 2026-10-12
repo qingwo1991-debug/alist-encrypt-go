@@ -244,7 +244,7 @@ func (p *ProxyServer) clearPlaybackMetaCaches(originalURL string) {
 //
 // 内部先喂给会话聚合器：同一路径活跃窗口内的多条请求合并为一条落库，
 // 避免导出时一次播放产生几十条 seek 噪声。
-func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string, durationSecs float64, rangeStart int64, headerLatencyMs, mbps float64) {
+func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesServed, totalBytes int64, completed bool, contentType string, durationSecs float64, rangeStart int64, headerLatencyMs, mbps float64, firstByteLatencyMs ...float64) {
 	if p == nil || p.localStore == nil || bytesServed <= 0 {
 		return
 	}
@@ -255,7 +255,7 @@ func (p *ProxyServer) recordPlaybackStats(displayPath, provider string, bytesSer
 		durationSecs = 0
 	}
 	p.ensurePlaybackSessionTracker().record(
-		displayPath, provider, contentType, bytesServed, totalBytes, durationSecs, completed, rangeStart, headerLatencyMs, mbps,
+		displayPath, provider, contentType, bytesServed, totalBytes, durationSecs, completed, rangeStart, headerLatencyMs, mbps, firstByteLatencyMs...,
 	)
 }
 
