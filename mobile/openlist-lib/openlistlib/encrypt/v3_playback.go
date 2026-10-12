@@ -152,6 +152,16 @@ func v3PlaybackFailure(w http.ResponseWriter, status int, err error, unsatisfied
 	return &V3PlaybackError{Err: err, ResponseStarted: true, StatusCode: status, NoLearning: true}
 }
 
+// Admission failures are terminal resource errors, never signed-URL refresh
+// signals. Use the common failure writer to remove stale success headers.
+func v3PlaybackKDFFailure(w http.ResponseWriter, err error) error {
+	status := http.StatusBadGateway
+	if errors.Is(err, core.ErrV3KDFBusy) {
+		status = http.StatusServiceUnavailable
+	}
+	return v3PlaybackFailure(w, status, err)
+}
+
 // v3PlaybackRequest preserves origin credential isolation on every redirect.
 // The configured stream transport supplies its body-idle timeout; the request
 // context, not a total client timeout, owns the lifetime of a media stream.
@@ -386,12 +396,14 @@ func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Requ
 	// Prepare and authenticate the cold tail before committing a cached prefix.
 	// One HTTP body covers all remaining records; no per-record HTTP regression.
 	tailStart := start + prefixBytes
-	// Charge the record plus both small streaming buffers before KDF or body IO.
+	// Preserve fast overload rejection without holding any record reservation
+	// while a request waits for KDF admission. Actual ownership is acquired only
+	// after successful derivation, before allocating records or reading bodies.
 	memory := int64(meta.ChunkSize) + 16 + (64 << 10)
 	if !v3PlaybackMemory.TryAcquire(memory) {
 		return fail(http.StatusServiceUnavailable, errors.New("v3: playback memory budget exhausted"))
 	}
-	defer v3PlaybackMemory.Release(memory)
+	v3PlaybackMemory.Release(memory)
 	cipherStart, cipherEnd := core.V3ChunkWindow(tailStart, end, chunk)
 	upstreamStarted := time.Now()
 	resp, err := p.v3PlaybackRequest(r, info, fmt.Sprintf("bytes=%d-%d", cipherStart, cipherEnd))
@@ -438,7 +450,18 @@ func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Requ
 	if timing != nil {
 		timing.headerLatencyMs = time.Since(upstreamStarted).Seconds() * 1000
 	}
-	cipher, err := core.NewV3ChunkCipher(core.DeriveV3Key(info.PasswdInfo.Password, meta.NonceField, meta.KDFIterations), meta.NonceField)
+	keyBytes, err := core.DeriveV3KeyContext(r.Context(), info.PasswdInfo.Password, meta.NonceField, meta.KDFIterations, core.V3KDFForeground)
+	if err != nil {
+		return v3PlaybackKDFFailure(w, err)
+	}
+	if err := r.Context().Err(); err != nil {
+		return v3PlaybackKDFFailure(w, err)
+	}
+	if !v3PlaybackMemory.TryAcquire(memory) {
+		return fail(http.StatusServiceUnavailable, errors.New("v3: playback memory budget exhausted"))
+	}
+	defer v3PlaybackMemory.Release(memory)
+	cipher, err := core.NewV3ChunkCipher(keyBytes, meta.NonceField)
 	if err != nil {
 		return fail(http.StatusBadGateway, err)
 	}

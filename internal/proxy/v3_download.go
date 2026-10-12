@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	stdErrors "errors"
 	"fmt"
 	"io"
 	"math"
@@ -27,6 +29,22 @@ func writeV3ResourceFailure(w http.ResponseWriter, err error, reason errors.Fail
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	return &StreamOutcome{Err: err, FailureReason: reason, NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
+}
+
+// v3KDFPlaybackFailure keeps service admission/cancellation terminal and out of
+// provider learning. A canceled client gets no new HTTP response; busy admission
+// clears uncommitted success headers and returns an empty retry-after 503.
+func v3KDFPlaybackFailure(w http.ResponseWriter, req *http.Request, err error) *StreamOutcome {
+	if canceled := req.Context().Err(); canceled != nil {
+		return &StreamOutcome{Err: canceled, FailureReason: errors.ReasonClientDisconnect, NoLearning: true}
+	}
+	if stdErrors.Is(err, context.Canceled) || stdErrors.Is(err, context.DeadlineExceeded) {
+		return &StreamOutcome{Err: err, FailureReason: errors.ReasonClientDisconnect, NoLearning: true}
+	}
+	if stdErrors.Is(err, encryption.ErrV3KDFBusy) {
+		return writeV3ResourceFailure(w, err, "v3_kdf_busy")
+	}
+	return writeV3ResourceFailure(w, err, "v3_kdf_failed")
 }
 
 // v3FallbackCipherDiscard counts header bytes and complete authenticated records
@@ -204,12 +222,20 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	if recordBytes > v3RecordBudgetBytes {
 		return writeV3ResourceFailure(w, errors.NewDecryptionError("v3 chunk exceeds playback memory budget"), "bad_v3_metadata")
 	}
+	// A queued KDF waiter owns no record lease or body buffer. Geometry and
+	// fallback admission remain above this point, before CPU/transport work.
+	key, err := encryption.DeriveV3KeyContext(req.Context(), passwdInfo.Password, nonce, meta.KDFIterations, encryption.V3KDFForeground)
+	if err != nil {
+		return v3KDFPlaybackFailure(w, req, err)
+	}
+	if err := req.Context().Err(); err != nil {
+		return v3KDFPlaybackFailure(w, req, err)
+	}
 	release, ok := s.acquireV3Memory(recordBytes)
 	if !ok {
 		return writeV3ResourceFailure(w, errors.NewProxyError("v3 playback memory budget exhausted"), "resource_exhausted")
 	}
 	defer release()
-	key := encryption.DeriveV3Key(passwdInfo.Password, nonce, meta.KDFIterations)
 	v3Cipher, err := encryption.NewV3ChunkCipher(key, nonce)
 	if err != nil {
 		result.Err = errors.NewDecryptionErrorWithCause("v3: create chunk cipher", err)

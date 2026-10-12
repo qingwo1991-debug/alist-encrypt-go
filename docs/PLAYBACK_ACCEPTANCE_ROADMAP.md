@@ -12,8 +12,8 @@
 | --- | --- | --- | --- |
 | 1 | 可重复故障上游、准确指标与播放测量 | 工程交付完成，真机未测 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
 | 2 | 移动端共享 V3 核心 | 工程交付与 main 发布完成，真机未测 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
-| 3 | V3 小块配置、认证缓存、受控回退 | 实施中，待云端验证 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
-| 4 | 切集兴趣调度与有界 KDF | 未开始 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
+| 3 | V3 小块配置、认证缓存、受控回退 | 工程交付与 main 发布完成，真机未测 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
+| 4 | 切集兴趣调度与有界 KDF | 实施中，Draft PR #70 云端验证 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
 | 5 | 驱动取消、控制面路由、原生选网 | 未开始 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
 | 6 | 非 UI 文件写入、统计锁外、同步维护 | 未开始 | 文件逐字节正确、取消与隔离、资源稳定、源码覆盖冲突检测 |
 | 7 | 完整云端及真机验收矩阵 | 未开始 | main 全绿、发布产物；设备测试通过或明确标注待人工验证 |
@@ -36,18 +36,27 @@
 - 修复正常 fs/get 重复播放的 V3 metadata 降级、响应前一次签名 URL 刷新、disabled/raw 表示、DAV 选定目标重新确认和 request 内 metadata 复用。warm cache key 补齐算法字段；云端另发现调度 FIFO 在扫描中释放 provider slot 的生产问题，采用原子释放修复，保留严格 FIFO 断言并在云端连续运行 32 次通过。
 - 真机首帧和弱网收益仍未验证；后续认证缓存、KDF 排队、路由平台桥和目录生命周期按阶段 3–6 实施。
 
-## 阶段 3 实施与验证入口（尚未完成）
+## 阶段 3 实施与云端证据
 
-- 新文件 CLI/API/UI 增加 opt-in 1 MiB V3 chunk；省略/0 保留 16 MiB，最大 32 MiB，V2 和旧文件读写不会继承新文件配置。UI focused tests 8/8 本地通过，Go 实测仍待云端。
+- [PR #69](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/69) 经独立审查补修后，全绿合并至 main `0d47488`。最终 [Actions 38203768488](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38203768488) 包括根/共享/移动测试及竞态、故障/放大验收、MySQL、Web、Flutter、Docker、三 ABI binding 全部成功；main [Actions 38204243215](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38204243215) 完整 AAR/APK 与核心发布成功，版本 [v2026.10.12.375](https://github.com/qingwo1991-debug/alist-encrypt-go/releases/tag/v2026.10.12.375)。
+
+- 新文件 CLI/API/UI 增加 opt-in 1 MiB V3 chunk；省略/0 保留 16 MiB，最大 32 MiB，V2 和旧文件读写不会继承新文件配置。UI focused tests 8/8 本地通过，新增 Go 回归已在上述云端通过。
 - 共享整 record 认证缓存采用不可变 lease 与 resident/pinned/inflight 加权预算；root/mobile 各 64 MiB，与既有 256 MiB 传输 record admission 分开计数。无可信 revision 时 identity 保留完整 URL，不能宣称签名轮换复用。
-- 预备 root/mobile warm tiny seek 和 bounded prefix + 单个冷 tail HTTP 连接；首个冷 record 认证后才提交缓存前缀。root 的 Full/Chunked discard budget 在取正文/KDF/成功响应之前终止，不对超预算窗口换 URL 再下载。
-- GitHub Actions 将输出 V3 1 MiB/16 MiB 冷/热 tiny seek 的下载放大报告；仅衡量上游与客户端正文读写字节和请求，不等同 TCP 流量或播放器渲染延迟。
+- root/mobile 实现 warm tiny seek 和 bounded prefix + 单个冷 tail HTTP 连接；首个冷 record 认证后才提交缓存前缀。root 的 Full/Chunked discard budget 在取正文/KDF/成功响应之前终止，不对超预算窗口换 URL 再下载。
+- 云端放大报告：同样 4096 字节 tiny seek，1 MiB/16 MiB chunk 的冷请求分别读取 1,048,592 / 16,777,232 字节（整认证 record 加 16 字节 tag），同块另一区间的热请求均零上游请求、零正文读取。fixture KDF iterations=1，只比较正文放大，不衡量生产 KDF CPU 或 TCP/播放器延迟。
+- 审查补修：4096 条目上限包括 resident、reserved 和 evicted-but-pinned；移动 scope 保守绑定完整原始/存储请求头，custom provider token 和 representation selector 不得跨身份复用。
+
+## 阶段 4 当前实施（尚未完成）
+
+- [Draft PR #70](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/70) 接入固定 worker、有界队列及可取消等待的 V3 KDF service，保留原 256 项/sliding TTL/copy 缓存；不创建逐 flight/waiter 的 goroutine。已启动的 PBKDF2 不可抢占，最后 waiter 取消也不会提前释放真实 CPU slot。
+- root/mobile context-aware foreground 派生成功后才持有 record buffer admission；HEAD 和整 record 热命中保持零 KDF。speculative admission 为前台留 queue/waiter 名额；尚未启动的 queued promotion 在最后 foreground 引用撤销后恢复 speculative，运行中的分类保持不变。
+- 可信 session/provider/scope/generation 调度及鉴权 explicit-intent API 正在实施；不凭 IP、Range 或猜集识别用户会话，不将 generation context 挂到活跃 HTTP media 请求。云端初始编译信号不是阶段完成证据。
 
 ## 评分与硬性门槛
 
 - 播放正确性/跨端一致性：25；首帧/拖动/切集：25；网络隔离/恢复：20；资源性能：15；代码质量/验证：15。
 - 错误明文、下载损坏、无界等待、持续资源泄漏任一存在，不满足接近满分验收。
-- 验证支持能力，而不是将明确拒绝等同完整支持；PR #66 的移动 V3 基线为 415，阶段 2 正在验证共享认证读取，尚未据此声明所有入口已通过验收。
+- 验证支持能力，而不是将明确拒绝等同完整支持；PR #66 的移动 V3 基线为 415，阶段 2 已通过移动共享认证读取的云端入口回归，仍不能据此声称所有真机播放器已通过验收。
 - 实际媒体首帧需播放器渲染事件；服务端响应头和正文首字节只代表相应传输阶段。
 - 时间阈值先记录分网络档位基线，再定义可实现的验收阈值；不能以大于物理带宽的速度作为门禁。
 

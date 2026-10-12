@@ -65,11 +65,10 @@ var (
 
 	// v3KeyCache stores per-container AES-256-GCM keys. Unlike V2, the V3
 	// nonce is part of the PBKDF2 salt, so the nonce and iteration count must
-	// participate in the cache key. A bounded cache plus singleflight prevents
-	// concurrent Range/seek requests from repeating the 600K-round derivation.
-	v3KeyCache           = make(map[string]*cacheEntry[[]byte])
-	v3KeyCacheMu         sync.Mutex
-	v3KeyDerivationGroup singleflight.Group
+	// participate in the cache key. The bounded KDF service owns same-key
+	// flights and fixed workers; V2 retains its separate singleflight group.
+	v3KeyCache   = make(map[string]*cacheEntry[[]byte])
+	v3KeyCacheMu sync.Mutex
 )
 
 const (
