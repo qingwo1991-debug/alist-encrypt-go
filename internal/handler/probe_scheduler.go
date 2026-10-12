@@ -37,7 +37,9 @@ type ProbeScheduler struct {
 	workerWG  sync.WaitGroup
 	stopOnce  sync.Once
 
-	queue chan probeItem
+	interests     map[playbackSessionKey]*playbackSession
+	interestTasks map[string]*playbackInterestTask
+	queue         chan probeItem
 	// queueMu protects bounded deferred work and event-driven dispatch. The
 	// channel remains the admission queue; workers never wait on a busy provider.
 	queueMu  sync.Mutex
@@ -119,6 +121,7 @@ type probeItem struct {
 	authHeaders http.Header
 	source      string
 	queuedAt    time.Time
+	interest    *playbackInterestTask
 }
 
 const (
@@ -523,11 +526,23 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		for len(ps.queue) > 0 {
 			ps.waiting = append(ps.waiting, <-ps.queue)
 		}
-		// Foreground first-frame and next-episode warmups use the same high
-		// source. Preserve FIFO within each class; skip busy providers entirely.
-		for _, high := range []bool{true, false} {
+		ps.prunePlaybackInterestsLocked(time.Now())
+		for i := 0; i < len(ps.waiting); {
+			item := ps.waiting[i]
+			if item.interest != nil && item.interest.ctx.Err() != nil {
+				ps.finishPlaybackInterestLocked(item.interest)
+				copy(ps.waiting[i:], ps.waiting[i+1:])
+				ps.waiting[len(ps.waiting)-1] = probeItem{}
+				ps.waiting = ps.waiting[:len(ps.waiting)-1]
+				continue
+			}
+			i++
+		}
+		// Preserve legacy FIFO within its original classes. Explicit speculative
+		// work never precedes foreground or ordinary directory work.
+		for _, priority := range []int{0, 1, 2} {
 			for i, item := range ps.waiting {
-				if (item.source == probeSourceFirstFrame) != high {
+				if ps.playbackItemPriorityLocked(item) != priority {
 					continue
 				}
 				provider, _ := splitProvider(ProviderKey(item.file.TargetURL, item.file.DisplayPath))
@@ -590,10 +605,16 @@ func (ps *ProbeScheduler) Stop() {
 			ps.waiting = append(ps.waiting, <-ps.queue)
 		}
 		for _, item := range ps.waiting {
-			ps.clearCooldownForFile(item.file)
-			ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+			if item.interest != nil {
+				ps.finishPlaybackInterestLocked(item.interest)
+			} else {
+				ps.clearCooldownForFile(item.file)
+				ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+			}
 		}
 		ps.waiting = nil
+		ps.interests = nil
+		ps.interestTasks = nil
 		ps.queueMu.Unlock()
 		// 最终落盘，确保退出前保留最新计数与 warm 状态。
 		ps.persistSnapshot()
@@ -640,7 +661,15 @@ func (ps *ProbeScheduler) runItem(item probeItem) {
 func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	defer ps.releaseProviderSlot(sem)
 	ps.ensureRecordState()
-	defer ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+	if item.interest != nil {
+		defer ps.finishPlaybackInterest(item.interest)
+	} else {
+		defer ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+	}
+	probeCtx := ps.playbackItemContext(item)
+	if probeCtx.Err() != nil {
+		return
+	}
 	atomic.AddUint64(&ps.runningCount, 1)
 	startedAt := time.Now()
 	ps.recordRunning(item, startedAt)
@@ -658,7 +687,7 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 		}
 		timer := time.NewTimer(delay)
 		select {
-		case <-ps.done():
+		case <-probeCtx.Done():
 			if !timer.Stop() {
 				<-timer.C
 			}
@@ -669,11 +698,24 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	}
 
 	// Fallback to configured scan credentials if no user auth available
-	authHeaders, authMode := ps.ensureAuth(item.authHeaders)
+	var authHeaders http.Header
+	var authMode string
+	if item.interest != nil {
+		// Trusted work never invokes legacy context-less login callbacks.
+		var authErr error
+		authHeaders, authMode, authErr = ps.ensurePlaybackInterestAuth(probeCtx, item.authHeaders)
+		if authErr != nil {
+			return
+		}
+	} else {
+		authHeaders, authMode = ps.ensureAuth(item.authHeaders)
+	}
 
 	resultState := probeExecutionResult{}
-	probeCtx := ps.probeContext()
 	result := ps.resolver.ResolveSingle(probeCtx, item.file, authHeaders)
+	if probeCtx.Err() != nil {
+		return
+	}
 	if result.Error == nil && result.Size > 0 {
 		ps.fileDAO.SetFileSize(item.file.DisplayPath, result.Size, 24*time.Hour)
 		resultState.resolvedSize = result.Size
@@ -692,13 +734,13 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			stalenessThreshold = time.Duration(minutes) * time.Minute
 		}
 	}
-	if ps.rawURLFetcher != nil {
+	if ps.rawURLFetcher != nil && item.interest == nil {
 		if rawURL := ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath, authHeaders); rawURL != "" {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 		}
 	}
-	if ps.rawURLFetcher == nil && ps.cfg != nil {
+	if (ps.rawURLFetcher == nil || item.interest != nil) && ps.cfg != nil {
 		// Fallback: use built-in raw_url fetcher via alist fs/get
 		alistURL := ps.cfg.GetAlistURL()
 		rawURLResult := fetchRawURL(probeCtx, alistURL, item.file.DisplayPath, item.file.EncryptedPath, authHeaders, ps.fileDAO, stalenessThreshold)
@@ -711,7 +753,7 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 				// Persist confirmed V1/V2/V3 metadata, including V3 record geometry
 				// and KDF parameters. Requiring Confirmed guards against caching a
 				// truncated or failed probe as a confirmed legacy file.
-				if inspected.Confirmed && meta.PlainSize > 0 {
+				if probeCtx.Err() == nil && inspected.Confirmed && meta.PlainSize > 0 {
 					cached := &dao.FileInfo{
 						Path:              item.file.DisplayPath,
 						EncryptedPath:     item.file.EncryptedPath,
@@ -748,6 +790,9 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			ps.invalidateJWTCache()
 		}
 	}
+	if probeCtx.Err() != nil {
+		return
+	}
 	// Probe Range capability against the URL a real player will hit. The alist
 	// /d/ or /dav/ front-end responds 401/302 and does not itself serve Range, so
 	// probing it teaches nothing and leaves files_range_probed at zero. Prefer
@@ -763,6 +808,9 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	if ps.stream != nil && ps.stream.ProbeRangeCompatibility(probeCtx, probeTargetURL, authHeaders, item.file.CompatStorageKey) {
 		resultState.rangeProbed = true
 		atomic.AddUint64(&ps.filesRangeProbed, 1)
+	}
+	if probeCtx.Err() != nil {
+		return
 	}
 	usefulWarmArtifact := resultState.rawURLFetched || resultState.rangeProbed || (resultState.resolvedSize > 0 && item.file.PropfindSize <= 0)
 	status := probeStatusSuccess
@@ -1617,9 +1665,13 @@ func (ps *ProbeScheduler) invalidateJWTCache() {
 }
 
 func fetchAlistJWT(alistURL, username, password string) string {
+	return fetchAlistJWTContext(context.Background(), alistURL, username, password)
+}
+
+func fetchAlistJWTContext(ctx context.Context, alistURL, username, password string) string {
 	loginURL := alistURL + "/api/auth/login"
 	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
-	req, err := http.NewRequest(http.MethodPost, loginURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, bytes.NewReader(body))
 	if err != nil {
 		return ""
 	}
@@ -1700,6 +1752,9 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		return rawURLFetchResult{FailureReason: errors.FailureReason("raw_url_fetch:" + err.Error()), Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	defer resp.Body.Close()
+	if ctx.Err() != nil {
+		return rawURLFetchResult{FailureReason: "interest_canceled"}
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
 		fileDAO.InvalidateRawURLForScope(displayPath, rawURLAuthScope(authHeaders))
 		return rawURLFetchResult{
@@ -1721,6 +1776,9 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	}
 	if result.Code != 200 || result.Data.RawURL == "" {
 		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLEmpty, Source: rawURLSourceFromAPIPath(apiPath)}
+	}
+	if ctx.Err() != nil {
+		return rawURLFetchResult{FailureReason: "interest_canceled"}
 	}
 	fileDAO.Set(&dao.FileInfo{
 		Path:              displayPath,
