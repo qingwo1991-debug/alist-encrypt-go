@@ -33,13 +33,6 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
 	cbGate := s.circuitBreakerFor(targetURL)
-	if !cbGate.Allow() {
-		return &StreamOutcome{
-			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
-			Retryable:     true,
-			FailureReason: "circuit_open",
-		}
-	}
 
 	rangeHeader := r.Header.Get("Range")
 	meta := contentMetaFromContext(r.Context(), passwdInfo, fileSize)
@@ -47,16 +40,24 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 		fileSize = meta.PlainSize
 	}
 	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
-	rangeSkipped := strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey)
 
-	if rangeSkipped {
-		return &StreamOutcome{
-			Err:           errors.NewProxyError("range unsupported"),
-			Retryable:     true,
-			FailureReason: "range_unsupported",
+	r, upstreamClientRange, cachePlan := prepareV3Cache(r, targetURL, passwdInfo, meta, rangeHeader, compatStorageKey, strategy)
+	if cachePlan != nil {
+		defer cachePlan.release()
+		if cachePlan.tailStart > cachePlan.end {
+			return serveV3Cache(w, r, cachePlan, fileSize)
 		}
 	}
 	if outcome, ok := s.tryServeDecryptedCache(w, r, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey); ok {
+		return outcome
+	}
+	if !cbGate.Allow() {
+		return &StreamOutcome{Err: errors.NewProxyError("upstream temporarily unavailable (circuit open)"), Retryable: true, FailureReason: "circuit_open"}
+	}
+	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey) {
+		return &StreamOutcome{Err: errors.NewProxyError("range unsupported"), Retryable: true, FailureReason: "range_unsupported"}
+	}
+	if outcome := s.checkV3FallbackBudget(w, r, meta, fileSize, rangeHeader, strategy); outcome != nil {
 		return outcome
 	}
 
@@ -70,7 +71,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	}
 	applyStrategyHeaders(req, strategy)
 	if strategy == StreamStrategyRange {
-		upstreamRange := buildUpstreamRangeHeader(rangeHeader, meta)
+		upstreamRange := buildUpstreamRangeHeader(upstreamClientRange, meta)
 		req.Header.Set("Range", upstreamRange)
 		log.Info().
 			Str("category", "playback").
@@ -148,13 +149,6 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 // ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
 	cbGate := s.circuitBreakerFor(targetURL)
-	if !cbGate.Allow() {
-		return &StreamOutcome{
-			Err:           errors.NewProxyError("upstream temporarily unavailable (circuit open)"),
-			Retryable:     true,
-			FailureReason: "circuit_open",
-		}
-	}
 
 	rangeHeader := req.Header.Get("Range")
 	meta := contentMetaFromContext(req.Context(), passwdInfo, fileSize)
@@ -162,19 +156,28 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 		fileSize = meta.PlainSize
 	}
 	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
-	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey) {
-		return &StreamOutcome{
-			Err:           errors.NewProxyError("range unsupported"),
-			Retryable:     true,
-			FailureReason: "range_unsupported",
+	req, upstreamClientRange, cachePlan := prepareV3Cache(req, targetURL, passwdInfo, meta, rangeHeader, compatStorageKey, strategy)
+	if cachePlan != nil {
+		defer cachePlan.release()
+		if cachePlan.tailStart > cachePlan.end {
+			return serveV3Cache(w, req, cachePlan, fileSize)
 		}
 	}
 	if outcome, ok := s.tryServeDecryptedCache(w, req, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey); ok {
 		return outcome
 	}
+	if !cbGate.Allow() {
+		return &StreamOutcome{Err: errors.NewProxyError("upstream temporarily unavailable (circuit open)"), Retryable: true, FailureReason: "circuit_open"}
+	}
+	if strategy == StreamStrategyRange && rangeHeader != "" && s.shouldSkipRange(targetURL, compatStorageKey) {
+		return &StreamOutcome{Err: errors.NewProxyError("range unsupported"), Retryable: true, FailureReason: "range_unsupported"}
+	}
+	if outcome := s.checkV3FallbackBudget(w, req, meta, fileSize, rangeHeader, strategy); outcome != nil {
+		return outcome
+	}
 	applyStrategyHeaders(req, strategy)
 	if strategy == StreamStrategyRange {
-		upstreamRange := buildUpstreamRangeHeader(rangeHeader, meta)
+		upstreamRange := buildUpstreamRangeHeader(upstreamClientRange, meta)
 		req.Header.Set("Range", upstreamRange)
 		log.Info().
 			Str("category", "playback").
@@ -234,7 +237,7 @@ func applyStrategyHeaders(req *http.Request, strategy StreamStrategy) {
 }
 
 func (s *StreamProxy) tryServeDecryptedCache(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader, compatStorageKey string) (*StreamOutcome, bool) {
-	if s == nil || s.blockCache == nil || req == nil || req.Method != http.MethodGet || rangeHeader == "" || fileSize <= 0 {
+	if meta.IsV3() || s == nil || s.blockCache == nil || req == nil || req.Method != http.MethodGet || rangeHeader == "" || fileSize <= 0 {
 		return nil, false
 	}
 	if meta.PlainSize > 0 {

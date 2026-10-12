@@ -28,17 +28,13 @@ func TestV3ResourceFailureClearsEarlierFallbackHeaders(t *testing.T) {
 		return req.WithContext(WithContentMeta(req.Context(), meta))
 	}
 	rr := httptest.NewRecorder()
-	first := sp.ProxyDownloadDecryptWithStrategy(rr, makeRequest(), "http://upstream.test/file", passwd, meta.PlainSize, StreamStrategyChunked)
-	if first.FailureReason != "chunked_seek_too_large" || first.ResponseStarted || rr.Header().Get("Content-Range") == "" {
-		t.Fatalf("expected uncommitted range headers from failed Chunked: %+v %v", first, rr.Header())
-	}
-	release, ok := sp.acquireV3Memory(v3RecordBudgetBytes)
-	if !ok {
-		t.Fatal("failed to reserve empty memory budget")
-	}
-	defer release()
-	last := sp.ProxyDownloadDecryptWithStrategy(rr, makeRequest(), "http://upstream.test/file", passwd, meta.PlainSize, StreamStrategyFull)
-	if rr.Code != 503 || !last.ResponseStarted || last.FailureReason != "resource_exhausted" || last.Retryable || rr.Body.Len() != 0 {
+	// Simulate uncommitted headers from an earlier failed strategy. Both V3
+	// fallback strategies must now stop at the same pre-fetch resource gate.
+	rr.Header().Set("Content-Range", "bytes 127-190/260")
+	rr.Header().Set("ETag", "stale-etag")
+	rr.Header().Set("Last-Modified", "stale-date")
+	last := sp.ProxyDownloadDecryptWithStrategy(rr, makeRequest(), "http://upstream.test/file", passwd, meta.PlainSize, StreamStrategyChunked)
+	if rr.Code != 503 || !last.ResponseStarted || last.FailureReason != v3SeekBudgetExceeded || last.Retryable || !last.NoLearning || rr.Body.Len() != 0 {
 		t.Fatalf("terminal response=%+v code=%d body=%d", last, rr.Code, rr.Body.Len())
 	}
 	for _, name := range []string{"Content-Range", "Content-Type", "ETag", "Accept-Ranges", "Last-Modified"} {

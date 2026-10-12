@@ -20,64 +20,67 @@ import (
 
 // EncryptTask represents a single file encryption/decryption task.
 type EncryptTask struct {
-	ID         string    `json:"id"`
-	Operation  string    `json:"operation"` // "enc" or "dec"
-	EncType    string    `json:"encType"`
-	SrcPath    string    `json:"srcPath"`
-	DstPath    string    `json:"dstPath"`
-	EncName    bool      `json:"encName"`
-	V3         bool      `json:"v3"` // enc: write V3 chunked AEAD containers
-	TotalFiles int       `json:"totalFiles"`
-	DoneFiles  int       `json:"doneFiles"`
-	TotalBytes int64     `json:"totalBytes"`
-	DoneBytes  int64     `json:"doneBytes"`
-	Status     string    `json:"status"` // "running", "done", "error"
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	mu         sync.RWMutex
-	cancel     chan struct{}
+	ID          string    `json:"id"`
+	Operation   string    `json:"operation"` // "enc" or "dec"
+	EncType     string    `json:"encType"`
+	SrcPath     string    `json:"srcPath"`
+	DstPath     string    `json:"dstPath"`
+	EncName     bool      `json:"encName"`
+	V3          bool      `json:"v3"`          // enc: write V3 chunked AEAD containers
+	V3ChunkSize int64     `json:"v3ChunkSize"` // 0 preserves default 16 MiB
+	TotalFiles  int       `json:"totalFiles"`
+	DoneFiles   int       `json:"doneFiles"`
+	TotalBytes  int64     `json:"totalBytes"`
+	DoneBytes   int64     `json:"doneBytes"`
+	Status      string    `json:"status"` // "running", "done", "error"
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	mu          sync.RWMutex
+	cancel      chan struct{}
 }
 
 // EncryptTaskView is an immutable snapshot used by status APIs. Keeping API
 // serialization separate from the live task prevents races with the worker.
 type EncryptTaskView struct {
-	ID         string    `json:"id"`
-	Operation  string    `json:"operation"`
-	EncType    string    `json:"encType"`
-	SrcPath    string    `json:"srcPath"`
-	DstPath    string    `json:"dstPath"`
-	EncName    bool      `json:"encName"`
-	V3         bool      `json:"v3"`
-	TotalFiles int       `json:"totalFiles"`
-	DoneFiles  int       `json:"doneFiles"`
-	TotalBytes int64     `json:"totalBytes"`
-	DoneBytes  int64     `json:"doneBytes"`
-	Status     string    `json:"status"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID          string    `json:"id"`
+	Operation   string    `json:"operation"`
+	EncType     string    `json:"encType"`
+	SrcPath     string    `json:"srcPath"`
+	DstPath     string    `json:"dstPath"`
+	EncName     bool      `json:"encName"`
+	V3          bool      `json:"v3"`
+	V3ChunkSize int64     `json:"v3ChunkSize"`
+	TotalFiles  int       `json:"totalFiles"`
+	DoneFiles   int       `json:"doneFiles"`
+	TotalBytes  int64     `json:"totalBytes"`
+	DoneBytes   int64     `json:"doneBytes"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 func (t *EncryptTask) snapshot() EncryptTaskView {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return EncryptTaskView{
-		ID:         t.ID,
-		Operation:  t.Operation,
-		EncType:    t.EncType,
-		SrcPath:    t.SrcPath,
-		DstPath:    t.DstPath,
-		EncName:    t.EncName,
-		V3:         t.V3,
-		TotalFiles: t.TotalFiles,
-		DoneFiles:  t.DoneFiles,
-		TotalBytes: t.TotalBytes,
-		DoneBytes:  t.DoneBytes,
-		Status:     t.Status,
-		Error:      t.Error,
-		CreatedAt:  t.CreatedAt,
-		UpdatedAt:  t.UpdatedAt,
+		ID:          t.ID,
+		Operation:   t.Operation,
+		EncType:     t.EncType,
+		SrcPath:     t.SrcPath,
+		DstPath:     t.DstPath,
+		EncName:     t.EncName,
+		V3:          t.V3,
+		V3ChunkSize: t.V3ChunkSize,
+		TotalFiles:  t.TotalFiles,
+		DoneFiles:   t.DoneFiles,
+		TotalBytes:  t.TotalBytes,
+		DoneBytes:   t.DoneBytes,
+		Status:      t.Status,
+		Error:       t.Error,
+		CreatedAt:   t.CreatedAt,
+		UpdatedAt:   t.UpdatedAt,
 	}
 }
 
@@ -127,14 +130,15 @@ func generateTaskID() string {
 // HandleEncryptFile starts a background encryption/decryption task on local files.
 func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Password  string `json:"password"`
-		EncType   string `json:"encType"`
-		Operation string `json:"operation"`  // "enc" or "dec"
-		SrcPath   string `json:"folderPath"` // match old API field name
-		DstPath   string `json:"outPath"`
-		EncName   bool   `json:"encName"`
-		V3        bool   `json:"v3"` // enc: use V3 chunked AEAD container (kept for compat)
-		V2        bool   `json:"v2"` // enc: explicitly write the legacy V2 container (default: V3)
+		Password    string `json:"password"`
+		EncType     string `json:"encType"`
+		Operation   string `json:"operation"`  // "enc" or "dec"
+		SrcPath     string `json:"folderPath"` // match old API field name
+		DstPath     string `json:"outPath"`
+		EncName     bool   `json:"encName"`
+		V3          bool   `json:"v3"`          // enc: use V3 chunked AEAD container (kept for compat)
+		V2          bool   `json:"v2"`          // enc: explicitly write the legacy V2 container (default: V3)
+		V3ChunkSize *int64 `json:"v3ChunkSize"` // enc V3 only: bytes; omitted/0 keeps 16 MiB
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondAPIError(w, 500, "Invalid request")
@@ -148,6 +152,19 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 
 	if req.Operation != "enc" && req.Operation != "dec" {
 		RespondAPIError(w, 500, "operation must be 'enc' or 'dec'")
+		return
+	}
+
+	chunkSize := int64(0)
+	if req.V3ChunkSize != nil {
+		chunkSize = *req.V3ChunkSize
+		if req.Operation != "enc" || req.V2 {
+			RespondAPIError(w, 400, "v3ChunkSize is only supported for V3 encryption")
+			return
+		}
+	}
+	if err := validateLocalV3ChunkSize(chunkSize); err != nil {
+		RespondAPIError(w, 400, err.Error())
 		return
 	}
 
@@ -192,7 +209,7 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if info.Size() == 0 {
+		if req.Operation == "dec" && info.Size() == 0 {
 			return nil
 		}
 		files = append(files, path)
@@ -213,19 +230,20 @@ func HandleEncryptFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task := &EncryptTask{
-		ID:         generateTaskID(),
-		Operation:  req.Operation,
-		EncType:    req.EncType,
-		SrcPath:    req.SrcPath,
-		DstPath:    req.DstPath,
-		EncName:    req.EncName,
-		V3:         req.V3,
-		TotalFiles: len(files),
-		TotalBytes: totalBytes,
-		Status:     "running",
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
-		cancel:     make(chan struct{}),
+		ID:          generateTaskID(),
+		Operation:   req.Operation,
+		EncType:     req.EncType,
+		SrcPath:     req.SrcPath,
+		DstPath:     req.DstPath,
+		EncName:     req.EncName,
+		V3:          req.V3,
+		V3ChunkSize: chunkSize,
+		TotalFiles:  len(files),
+		TotalBytes:  totalBytes,
+		Status:      "running",
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		cancel:      make(chan struct{}),
 	}
 
 	encryptTaskStore.Add(task)
@@ -361,7 +379,7 @@ func runEncryptTask(task *EncryptTask, files []string, password string) {
 		}
 		fileSize := fileInfo.Size()
 
-		if err := processFile(filePath, outTemp, password, task.EncType, fileSize, task.Operation, task.V3); err != nil {
+		if err := processFile(filePath, outTemp, password, task.EncType, fileSize, task.Operation, task.V3, task.V3ChunkSize); err != nil {
 			setEncryptTaskError(task, fmt.Sprintf("process %s: %v", filePath, err))
 			return
 		}
@@ -404,7 +422,28 @@ func setEncryptTaskError(task *EncryptTask, message string) {
 	task.mu.Unlock()
 }
 
-func processFile(src, dst, password, encType string, fileSize int64, operation string, v3 bool) (retErr error) {
+func validateLocalV3ChunkSize(chunkSize int64) error {
+	if chunkSize < 0 || chunkSize > 32*1024*1024 {
+		return fmt.Errorf("v3ChunkSize must be 0 (default 16 MiB) or positive integer bytes up to 33554432 (32 MiB)")
+	}
+	return nil
+}
+
+// Optional chunk argument preserves existing internal callers. Geometry is used
+// only to create new containers; existing files are always read from their header.
+func processFile(src, dst, password, encType string, fileSize int64, operation string, v3 bool, chunks ...int64) (retErr error) {
+	chunkSize := int64(0)
+	if len(chunks) > 0 {
+		chunkSize = chunks[0]
+	}
+	if operation == "enc" {
+		if err := validateLocalV3ChunkSize(chunkSize); err != nil {
+			return err
+		}
+		if !v3 && chunkSize != 0 {
+			return fmt.Errorf("v3ChunkSize is only supported for V3 encryption")
+		}
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open src: %w", err)
@@ -426,7 +465,7 @@ func processFile(src, dst, password, encType string, fileSize int64, operation s
 		if v3 {
 			// V3 chunked AEAD: the whole file is a self-contained container
 			// (header + fixed-width chunk records + trailer).
-			ce, err := encryption.NewV3ContentEncryptor(0)
+			ce, err := encryption.NewV3ContentEncryptor(chunkSize)
 			if err != nil {
 				return fmt.Errorf("create v3 cipher: %w", err)
 			}
@@ -452,17 +491,15 @@ func processFile(src, dst, password, encType string, fileSize int64, operation s
 	// Decrypt: V3 containers self-identify by magic, so sniff before the
 	// V1/V2 header heuristic and skip encType guessing.
 	var reader io.Reader
-	if v3 {
-		if _, err := in.Seek(0, io.SeekStart); err != nil {
-			return fmt.Errorf("rewind: %w", err)
-		}
-		if sniffed, err := encryption.V3DetectFromFile(in); err != nil {
-			return fmt.Errorf("sniff container: %w", err)
-		} else if sniffed {
-			reader, err = encryption.NewV3ReadSeekerDecoder(in, fileSize, password)
-			if err != nil {
-				return fmt.Errorf("open v3 container: %w", err)
-			}
+	if _, err := in.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind: %w", err)
+	}
+	if sniffed, err := encryption.V3DetectFromFile(in); err != nil {
+		return fmt.Errorf("sniff container: %w", err)
+	} else if sniffed {
+		reader, err = encryption.NewV3ReadSeekerDecoder(in, fileSize, password)
+		if err != nil {
+			return fmt.Errorf("open v3 container: %w", err)
 		}
 	}
 	if reader == nil {
