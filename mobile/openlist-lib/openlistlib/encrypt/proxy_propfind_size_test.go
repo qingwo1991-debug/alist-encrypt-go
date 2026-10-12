@@ -61,22 +61,38 @@ func mxV2Data(t *testing.T, plain []byte) ([]byte, ContentMeta) {
 func TestMXWebDAVPropfindColdDepthZeroTailRoundTrip(t *testing.T) {
 	plain := bytes.Repeat([]byte("real-tail-payload"), 64)
 	data, _ := mxV2Data(t, plain)
-	var probes atomic.Int32
+	var probes, fileGETs atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dav/enc/movie.mp4" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method == "PROPFIND" {
 			w.Header().Set("Content-Type", "application/xml")
 			w.WriteHeader(207)
 			io.WriteString(w, mxPropfindXML("/dav/enc/movie.mp4", int64(len(data)), false))
 			return
 		}
-		probes.Add(1)
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected file method: %s", r.Method)
+			http.Error(w, "unexpected file method", http.StatusMethodNotAllowed)
+			return
+		}
+		fileGETs.Add(1)
+		if r.Header.Get("Range") == "bytes=0-47" {
+			probes.Add(1)
+		}
 		http.ServeContent(w, r, "movie.mp4", time.Time{}, bytes.NewReader(data))
 	}))
 	defer upstream.Close()
 	u, _ := url.Parse(upstream.URL)
 	host, port, _ := net.SplitHostPort(u.Host)
 	portNum, _ := strconv.Atoi(port)
-	p, err := NewProxyServer(&ProxyConfig{AlistHost: host, AlistPort: portNum, EncryptPaths: []*EncryptPath{{Path: "/enc/*", Password: "mx-password", EncType: EncTypeAESCTR, Enable: true, EncName: false}}})
+	p, err := NewProxyServer(&ProxyConfig{
+		AlistHost: host, AlistPort: portNum,
+		ProviderCatalogEnabled: false, ProviderCatalogTTLMinutes: 1, ProviderCatalogBootstrapOnStart: false,
+		EncryptPaths: []*EncryptPath{{Path: "/enc/*", Password: "mx-password", EncType: EncTypeAESCTR, Enable: true, EncName: false}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,8 +114,8 @@ func TestMXWebDAVPropfindColdDepthZeroTailRoundTrip(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)
 	}
 	length := mxXMLLength(t, body)
-	if length != int64(len(plain)) || probes.Load() != 1 {
-		t.Fatalf("length=%d want=%d probes=%d", length, len(plain), probes.Load())
+	if length != int64(len(plain)) || probes.Load() != 1 || fileGETs.Load() != 1 {
+		t.Fatalf("length=%d want=%d headerProbes=%d fileGETs=%d", length, len(plain), probes.Load(), fileGETs.Load())
 	}
 	// MX's suffix-start derived from the actual advertised XML must return real
 	// plaintext tail, not cipherEOF-12 (which is beyond plainEOF).
