@@ -15,8 +15,8 @@
 | 3 | V3 小块配置、认证缓存、受控回退 | 工程交付与 main 发布完成，真机未测 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
 | 4 | 切集兴趣调度与有界 KDF | 工程交付与 main 发布完成，真机未测 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
 | 5 | 驱动取消、控制面路由、原生选网 | 工程交付与 main 发布完成，真机未测 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
-| 6 | 非 UI 文件写入、统计锁外、同步维护 | 实施中，异步定位写与 overlay 门禁已实现，生命周期待收口及云端验证 | 文件逐字节正确、取消与隔离、资源稳定、源码覆盖冲突检测 |
-| 7 | 完整云端及真机验收矩阵 | 未开始 | main 全绿、发布产物；设备测试通过或明确标注待人工验证 |
+| 6 | 非 UI 文件写入、统计锁外、同步维护 | 工程交付与 main 发布完成，真机未测 | 文件逐字节正确、取消与隔离、资源稳定、源码覆盖冲突检测 |
+| 7 | 完整云端及真机验收矩阵 | 验收交付文档已编写，待云端与 main 发布收口；设备待人工验证 | main 全绿、发布产物；设备测试通过或明确标注待人工验证 |
 
 每阶段完成时填写 PR、最终提交、Actions 链接和残留项，不提前标记。
 
@@ -68,6 +68,14 @@
 - 合并 main `64aab3c` 后 Actions `38224427891` 全绿，发布 `v2026.10.12.388`，包含跨平台二进制、Docker、三 ABI AAR/APK。临时阶段五分支已删除。
 - 实际新 driver factory 集成仅 MEGA；其他全局 Resty 驱动不宣称已迁移。原生 DNS/socket、API/OEM/VPN 转换仍需真机验证。实现与能力边界详见 `NATIVE_ROUTING_ACCEPTANCE.md`。
 
+## 阶段 6 实施与云端证据
+
+- PR #72 最终 `d8ebcad` Actions `38228847370` 全绿并合并 main `780e221`；main Actions `38230426917` 全绿，发布 `v2026.10.12.392`（跨平台、Docker、三 ABI AAR/APK），阶段六临时分支已删除。
+- 实例统一生命周期 context 与准入 fence，未 Start/监听失败也清理构造资源；catalog/range/meta/目录预热/预取真正取消并 join，HTTP handler 实际退出后才关闭 SQLite。启动备份纳入 store 自有 join，并发 Close 等同一次真实完成；关闭前刷新播放 session。备份主文件复制仍为 best-effort，不声称在线 WAL 一致性。
+- Flutter 下载完整异步 seek/write 事务串行化，最多四笔 pending 私有缓冲区；取消时等待真实写入与全部 worker，之后才关文件/删除/fallback。通知与回调入口同步预约文件路径避免尚未创建文件时重名。完整 10 MiB + 7 bytes 交错字节验证保持。
+- 26 个上游维护路径 pristine 固定指纹、新文件冲突、tag/commit 变更拒绝与 actual/src 一致性门禁已通过；覆盖边界见 `mobile/openlist-lib/scripts/SOURCE_OVERLAY.md`。统计锁外持久化已有实现保留，未重复重构。
+- 工程与设备验收分层矩阵、指标语义和签收门槛见 `PLAYBACK_FINAL_ACCEPTANCE.md`。
+
 ## 已确定的实现约束
 
 ### 移动共享 V3
@@ -76,13 +84,13 @@
 
 ### 后台目录生命周期（阶段 1 云端竞态新增证据）
 
-首阶段缓存路由测试在构建 ProxyServer 后替换/关闭 localStore 时暴露 provider catalog 后台刷新与 localStore 关闭的竞态。缓存计时 fixture 应禁用无关后台任务，但生产目录刷新采用 context.Background 且缺少 shutdown join 的现状仍需阶段 6 明确修复，不以隔离测试宣称该生命周期已解决。证据：`provider_catalog.go` 的 async refresh 和 `local_integration.go` 的 closeLocalStore。
+首阶段缓存路由测试在构建 ProxyServer 后替换/关闭 localStore 时暴露 provider catalog 后台刷新与 localStore 关闭的竞态。缓存计时 fixture 应禁用无关后台任务，而不是以隔离测试宣称生产生命周期已解决。阶段 6 PR #72 已将 catalog 的真实 HTTP context、后台准入及 join 纳入实例生命周期，localStore 初始化先于消费者，关闭时不再清空公开指针，并等待后台与 handler 实际完成。上述原始缺口已通过真实取消/关库顺序回归修复；设备资源稳态仍待人工验证。
 
 ### Android 与驱动
 
 支持式 socket 绑定应通过平台 Network API，不能把 network handle 推算成 SO_MARK。路由决定必须不可变、DNS 与 socket 同网络、连接池按路由隔离；不能依靠全局 host hint。API 及权限不支持时明示 default-only。HTTP proxy bypass 不等于 VPN/TUN bypass。
 
-MEGA 依赖虽有 SetClient，但其 session poller、重试等待和 WaitEvents 缺少取消生命周期。真实解决需要可审查固定版本的 context/Close 改造，不能用遗弃 goroutine 的假超时，也不能仅注入 RoundTripper 就声称完整取消。
+原始 MEGA 依赖虽有 SetClient，但缺少 session poller、重试等待和 WaitEvents 的取消生命周期。阶段 5 已以保留原模块身份/license/源码的固定 fork 实现真实 context/Close、取消退避、poller join，并接入固定 driver client；不能把这项已完成的实现归为未解决，也不能据此声称所有驱动或真实账号/OEM/VPN 已验收。
 
 ## 真机验收记录要求
 
