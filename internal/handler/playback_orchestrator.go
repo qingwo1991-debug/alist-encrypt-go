@@ -707,7 +707,11 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 		if fallbackSize > 0 && info.Size > 0 && info.Size != fallbackSize {
 			return false
 		}
-		if _, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); !complete {
+		encType := ""
+		if req.PasswdInfo != nil {
+			encType = req.PasswdInfo.EncType
+		}
+		if _, complete := cachedPlaybackMeta(info, encType); !complete {
 			log.Info().
 				Str("category", "playback").
 				Str("consumer_scenario", req.ConsumerScenario).

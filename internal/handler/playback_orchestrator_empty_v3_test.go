@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -46,9 +47,9 @@ func TestExecuteDecryptPlaybackCachedEmptyV3(t *testing.T) {
 			{http.MethodGet, "bytes=0-0", http.StatusRequestedRangeNotSatisfiable},
 		} {
 			t.Run(fmt.Sprintf("fixed=%v/%s/range=%s", fixed, tc.method, tc.rangeHeader), func(t *testing.T) {
-				var hits int
+				var hits atomic.Int64
 				srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					hits++
+					hits.Add(1)
 					// Empty plaintext ranges must not be translated into a bogus
 					// ciphertext chunk request: there is no record in this file.
 					w.Header().Set("Content-Type", "application/octet-stream")
@@ -76,8 +77,8 @@ func TestExecuteDecryptPlaybackCachedEmptyV3(t *testing.T) {
 					PasswdInfo:  &config.PasswdInfo{Password: "pw", EncType: "aesctr", Enable: true},
 					InitialSize: int64(len(body)),
 				})
-				if hits != 1 || rr.Code != tc.status || rr.Body.Len() != 0 {
-					t.Fatalf("hits=%d status=%d body=%q, want one request/status%d/no appended JSON", hits, rr.Code, rr.Body.Bytes(), tc.status)
+				if hits.Load() != 1 || rr.Code != tc.status || rr.Body.Len() != 0 {
+					t.Fatalf("hits=%d status=%d body=%q, want one request/status%d/no appended JSON", hits.Load(), rr.Code, rr.Body.Bytes(), tc.status)
 				}
 				if tc.status == http.StatusOK && rr.Header().Get("Content-Length") != "0" {
 					t.Fatalf("empty Content-Length=%q", rr.Header().Get("Content-Length"))

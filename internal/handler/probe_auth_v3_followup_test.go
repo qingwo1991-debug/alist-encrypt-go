@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -28,15 +29,15 @@ func TestV3FollowupAuthFailureTriesNextProbeVariant(t *testing.T) {
 	}
 	for _, failedRange := range []string{"bytes=32-47", fmt.Sprintf("bytes=%d-%d", container.Len()-16, container.Len()-1)} {
 		t.Run(failedRange, func(t *testing.T) {
-			var rejected, authenticated int
+			var rejected, authenticated atomic.Int64
 			srv := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Range") == failedRange && r.Header.Get("Authorization") != "Bearer good" {
-					rejected++
+					rejected.Add(1)
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
 				if r.Header.Get("Authorization") == "Bearer good" {
-					authenticated++
+					authenticated.Add(1)
 				}
 				var start, end int
 				if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil || start < 0 || end < start || end >= container.Len() {
@@ -57,8 +58,8 @@ func TestV3FollowupAuthFailureTriesNextProbeVariant(t *testing.T) {
 				statuses = append(statuses, result.StatusCode)
 				return result
 			})
-			if !got.Confirmed || !got.Meta.IsV3() || got.Meta.PlainSize != 237 || rejected != 1 || authenticated != 3 || len(statuses) != 2 || statuses[0] != http.StatusForbidden {
-				t.Fatalf("auth retry failed: result=%+v rejected=%d authenticated=%d statuses=%v range=%s", got, rejected, authenticated, statuses, strings.TrimSpace(failedRange))
+			if !got.Confirmed || !got.Meta.IsV3() || got.Meta.PlainSize != 237 || rejected.Load() != 1 || authenticated.Load() != 3 || len(statuses) != 2 || statuses[0] != http.StatusForbidden {
+				t.Fatalf("auth retry failed: result=%+v rejected=%d authenticated=%d statuses=%v range=%s", got, rejected.Load(), authenticated.Load(), statuses, strings.TrimSpace(failedRange))
 			}
 		})
 	}
