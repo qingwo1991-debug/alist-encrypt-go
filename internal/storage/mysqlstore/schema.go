@@ -48,6 +48,8 @@ func (s *Store) ensureSchema(ctx context.Context) error {
   content_version INT NOT NULL DEFAULT 0,
   header_len BIGINT NOT NULL DEFAULT 0,
   nonce_field VARBINARY(64) NULL,
+  chunk_size INT UNSIGNED NOT NULL DEFAULT 0,
+  kdf_iterations INT UNSIGNED NOT NULL DEFAULT 0,
   etag VARCHAR(255) NULL,
   content_type VARCHAR(128) NULL,
   status_code INT NOT NULL,
@@ -184,6 +186,8 @@ func (s *Store) migrateSchema(ctx context.Context) error {
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN content_version INT NOT NULL DEFAULT 0", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN header_len BIGINT NOT NULL DEFAULT 0", TableName("file_meta")),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN nonce_field VARBINARY(64) NULL", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN chunk_size INT UNSIGNED NOT NULL DEFAULT 0", TableName("file_meta")),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN kdf_iterations INT UNSIGNED NOT NULL DEFAULT 0", TableName("file_meta")),
 	}
 	for _, m := range migrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
@@ -280,15 +284,17 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 		return nil
 	}
 	query := fmt.Sprintf(`INSERT INTO %s
-	  (key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, etag, content_type, status_code, raw_url, raw_url_auth_scope, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
+	  (key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, status_code, raw_url, raw_url_auth_scope, sign, last_accessed, updated_at, upstream_fetched_at, is_active)
   VALUES %s
   ON DUPLICATE KEY UPDATE
     encrypted_path=IF(VALUES(encrypted_path) <> '', VALUES(encrypted_path), encrypted_path),
     name=IF(VALUES(name) <> '', VALUES(name), name),
-    size=IF(content_version = 2 AND VALUES(content_version) = 0 AND header_len > 0 AND (VALUES(size) = ciphertext_size OR VALUES(size) = size + header_len), size, VALUES(size)),
-    ciphertext_size=IF(VALUES(ciphertext_size) > 0, VALUES(ciphertext_size), ciphertext_size),
+    size=IF(VALUES(content_version) = 0 AND (VALUES(nonce_field) IS NULL OR LENGTH(VALUES(nonce_field)) = 0 OR VALUES(nonce_field) <=> nonce_field) AND ((content_version = 2 AND header_len > 0 AND (VALUES(size) = ciphertext_size OR VALUES(size) = size + header_len)) OR (content_version = 3 AND ciphertext_size > 0 AND VALUES(size) = ciphertext_size)), size, VALUES(size)),
+    ciphertext_size=IF((VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0 AND NOT (VALUES(nonce_field) <=> nonce_field)) OR (VALUES(content_version) > 0 AND VALUES(content_version) <> content_version), VALUES(ciphertext_size), IF(VALUES(ciphertext_size) > 0, VALUES(ciphertext_size), ciphertext_size)),
+    header_len=IF((VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0 AND NOT (VALUES(nonce_field) <=> nonce_field)) OR (VALUES(content_version) > 0 AND VALUES(content_version) <> content_version), VALUES(header_len), IF(VALUES(header_len) > 0, VALUES(header_len), header_len)),
+    chunk_size=IF((VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0 AND NOT (VALUES(nonce_field) <=> nonce_field)) OR (VALUES(content_version) > 0 AND VALUES(content_version) <> content_version), VALUES(chunk_size), IF(VALUES(chunk_size) > 0, VALUES(chunk_size), chunk_size)),
+    kdf_iterations=IF((VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0 AND NOT (VALUES(nonce_field) <=> nonce_field)) OR (VALUES(content_version) > 0 AND VALUES(content_version) <> content_version), VALUES(kdf_iterations), IF(VALUES(kdf_iterations) > 0, VALUES(kdf_iterations), kdf_iterations)),
     content_version=IF(VALUES(content_version) > 0, VALUES(content_version), content_version),
-    header_len=IF(VALUES(header_len) > 0, VALUES(header_len), header_len),
     nonce_field=IF(VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0, VALUES(nonce_field), nonce_field),
     etag=VALUES(etag),
     content_type=VALUES(content_type),
@@ -299,9 +305,9 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
     last_accessed=VALUES(last_accessed),
     updated_at=VALUES(updated_at),
     upstream_fetched_at=IF(VALUES(upstream_fetched_at) IS NOT NULL, VALUES(upstream_fetched_at), upstream_fetched_at),
-	    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(20, len(records)))
+	    is_active=VALUES(is_active)`, TableName("file_meta"), buildPlaceholders(22, len(records)))
 
-	args := make([]interface{}, 0, len(records)*20)
+	args := make([]interface{}, 0, len(records)*22)
 	now := time.Now()
 	for _, record := range records {
 		lastAccessed := record.LastAccessed
@@ -327,6 +333,8 @@ func (s *Store) upsertFileMeta(ctx context.Context, records []FileMetaRecord) er
 			record.ContentVersion,
 			record.HeaderLen,
 			record.NonceField,
+			record.ChunkSize,
+			record.KDFIterations,
 			record.ETag,
 			record.ContentType,
 			record.StatusCode,

@@ -22,7 +22,7 @@
           </div>
         </div>
         <div class="page-actions">
-          <el-button type="primary" @click="saveAlistConfig">保存服务配置</el-button>
+          <el-button type="primary" :loading="savingConfig" :disabled="savingConfig" @click="saveAlistConfig">保存服务配置</el-button>
         </div>
       </div>
 
@@ -97,7 +97,7 @@
         </el-collapse>
 
         <div class="footer-actions">
-          <el-button type="primary" @click="saveAlistConfig">保存服务配置</el-button>
+          <el-button type="primary" :loading="savingConfig" :disabled="savingConfig" @click="saveAlistConfig">保存服务配置</el-button>
         </div>
 
         <el-dialog v-model="dialogFolderFormVisible" title="获取文件夹密文" style="min-width: 320px">
@@ -143,12 +143,14 @@
   </div>
 </template>
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { decodeFoldNameReq, encodeFoldNameReq, getAlistConfigReq, saveAlistConfigReq } from '@/api/user'
 import { Delete } from '@element-plus/icons-vue'
 import { createPasswordRule, hasEnabledRuleWithoutPassword } from '@/utils/password-rules'
 
+let disposed = false
+const savingConfig = ref(false)
 const labelPosition = ref('right')
 const dialogFolderFormVisible = ref(false)
 const activeName = ref('encode')
@@ -189,16 +191,19 @@ const checkFoldName = (item) => {
 
 const encodeFoldName = async () => {
   const res = await encodeFoldNameReq(folderForm)
+  if (disposed) return
   folderForm.folderNameEnc = `${folderForm.folderName}_${res.data.folderNameEnc}`
 }
 
 const decodeFoldName = async () => {
   const res = await decodeFoldNameReq(folderForm)
+  if (disposed) return
   folderForm.folderPasswd = res.data.folderPasswd
   folderForm.folderEncType = res.data.folderEncType
 }
 
 const saveAlistConfig = async () => {
+  if (disposed || savingConfig.value) return
   if (hasEnabledRuleWithoutPassword(alistConfigForm.passwdList)) {
     ElMessage.error('已启用的密码规则必须填写密码')
     return
@@ -213,17 +218,20 @@ const saveAlistConfig = async () => {
         .join(',')
     }
   }
-  let res
+  savingConfig.value = true
   try {
-    res = await saveAlistConfigReq(alistConfigForm)
+    const res = await saveAlistConfigReq(alistConfigForm)
+    if (!disposed) ElMessage.success(res.msg)
   } catch {
     return
+  } finally {
+    savingConfig.value = false
   }
-  ElMessage.success(res.msg)
 }
 
 onMounted(async () => {
   const res = await getAlistConfigReq()
+  if (disposed) return
   for (const passwdInfo of res.data.passwdList) {
     passwdInfo.id = Math.random()
     if (Array.isArray(passwdInfo.encPath)) {
@@ -234,6 +242,7 @@ onMounted(async () => {
   }
   Object.assign(alistConfigForm, res.data)
 })
+onUnmounted(() => { disposed = true })
 </script>
 
 <style scoped lang="scss">

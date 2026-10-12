@@ -1013,7 +1013,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 				}
 				meta := h.contentMetaOrProbe(r, rawURL, originalPath, filePath, ciphertextSize, passwdInfo)
 				fileSize := ciphertextSize
-				if meta.IsV2() && meta.PlainSize > 0 {
+				if (meta.IsV2() || meta.IsV3()) && meta.PlainSize >= 0 {
 					fileSize = meta.PlainSize
 					data["size"] = float64(fileSize)
 				}
@@ -1030,6 +1030,8 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 					ContentVersion:  meta.Version,
 					HeaderLen:       meta.HeaderLen,
 					NonceField:      append([]byte(nil), meta.NonceField...),
+					ChunkSize:       meta.ChunkSize,
+					KDFIterations:   meta.KDFIterations,
 					IsDir:           false,
 					RawURL:          rawURL,
 					RawURLAuthScope: rawURLAuthScope(r.Header),
@@ -1237,6 +1239,7 @@ func (h *AlistHandler) contentMetaOrProbe(r *http.Request, rawURL, displayPath, 
 	if h != nil && h.fileDAO != nil && passwdInfo != nil {
 		if info, ok := h.fileDAO.Get(displayPath); ok && info != nil && info.ContentVersion > 0 {
 			if (info.ContentVersion != encryption.ContentVersionV2 || len(info.NonceField) == 16) &&
+				(info.ContentVersion != encryption.ContentVersionV3 || (len(info.NonceField) == 16 && info.ChunkSize > 0 && info.KDFIterations > 0)) &&
 				(ciphertextSize <= 0 || info.CiphertextSize <= 0 || info.CiphertextSize == ciphertextSize) {
 				log.Info().
 					Str("category", "fsget").
@@ -1253,6 +1256,8 @@ func (h *AlistHandler) contentMetaOrProbe(r *http.Request, rawURL, displayPath, 
 					PlainSize:      info.Size,
 					CiphertextSize: info.CiphertextSize,
 					NonceField:     append([]byte(nil), info.NonceField...),
+					ChunkSize:      info.ChunkSize,
+					KDFIterations:  info.KDFIterations,
 				}
 			}
 		}
@@ -1287,6 +1292,9 @@ func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, e
 }
 
 func contentVersionLabel(meta encryption.ContentMeta) string {
+	if meta.IsV3() {
+		return "V3"
+	}
 	if meta.IsV2() {
 		return "V2"
 	}

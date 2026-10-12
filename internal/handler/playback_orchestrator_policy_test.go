@@ -88,6 +88,24 @@ func TestPlaybackOutcomeServedAcceptsPlayerCancellationAfterBytes(t *testing.T) 
 	}
 }
 
+func TestPlaybackOutcomeServedRejectsStartedFailures(t *testing.T) {
+	for _, reason := range []interr.FailureReason{"upstream_truncated", "decrypt_validation_failed", "network_error", "stream_error"} {
+		for _, written := range []int64{0, 4096} {
+			result := &proxy.StreamOutcome{
+				Err: errors.New("stream failed"), FailureReason: reason, Retryable: true,
+				ResponseStarted: true, BytesWritten: written,
+			}
+			if playbackOutcomeServed(result) {
+				t.Fatalf("started %s (%d bytes) must not be reported as success", reason, written)
+			}
+			result.Err = nil
+			if playbackOutcomeServed(result) {
+				t.Fatalf("started %s without error must not be reported as success", reason)
+			}
+		}
+	}
+}
+
 func TestPlaybackOutcomeServedRejectsFailureReasonWithoutError(t *testing.T) {
 	result := &proxy.StreamOutcome{FailureReason: "upstream_4xx", NoLearning: true}
 	if playbackOutcomeServed(result) {

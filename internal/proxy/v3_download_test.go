@@ -180,9 +180,10 @@ func TestInspectEncryptedContentRecognizesV3(t *testing.T) {
 		if len(meta.NonceField) != 16 {
 			t.Fatalf("nonce len=%d, want 16", len(meta.NonceField))
 		}
-		// Stream-written V3 containers keep the plaintext size in the trailer,
-		// not in the 48-byte header; the probe only certifies the version,
-		// nonce, chunk size and ciphertext size.
+		// Streaming containers require the EOF trailer before size is confirmed.
+		if meta.PlainSize != int64(len(payload)) {
+			t.Fatalf("plaintext size=%d, want %d", meta.PlainSize, len(payload))
+		}
 		if meta.CiphertextSize != int64(len(container)) {
 			t.Fatalf("ciphertext size=%d, want %d", meta.CiphertextSize, len(container))
 		}

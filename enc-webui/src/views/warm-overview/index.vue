@@ -17,11 +17,11 @@
       <!-- 4 关键指标 -->
       <div class="warm-hero-grid">
         <div class="warm-hero-card">
-          <div class="warm-hero-card__label">预热文件总数</div>
+          <div class="warm-hero-card__label">活跃预热文件</div>
           <div class="warm-hero-card__value">{{ sched.unique_warmed_files ?? '-' }}</div>
           <div class="warm-hero-card__meta">
-            去重口径 · 真实被预热的文件数
-            <template v-if="new24h > 0"> · 近 24h 新增 <strong style="color: var(--el-color-primary)">{{ new24h }}</strong></template>
+            保留窗口内去重 · 最多 10,000 个 / 7 天，非历史总数
+            <template v-if="new24h > 0"> · 近 24h 活跃 <strong style="color: var(--el-color-primary)">{{ new24h }}</strong></template>
           </div>
         </div>
         <div class="warm-hero-card">
@@ -87,7 +87,7 @@
           </div>
         </div>
         <div class="table-scroll">
-          <el-table :data="filteredWarm" size="small" max-height="480" empty-text="暂无预热明细">
+          <el-table :data="paginatedWarm" size="small" max-height="480" empty-text="暂无预热明细">
             <el-table-column label="文件名" min-width="200" show-overflow-tooltip>
               <template #default="{ row }">{{ row.file_name || row.display_path }}</template>
             </el-table-column>
@@ -107,6 +107,13 @@
             </el-table-column>
             <el-table-column prop="source" label="来源" width="110" show-overflow-tooltip />
           </el-table>
+          <el-pagination
+            v-if="filteredWarm.length > pageSize"
+            v-model:current-page="currentPage"
+            :page-size="pageSize"
+            :total="filteredWarm.length"
+            layout="total, prev, pager, next"
+          />
         </div>
       </section>
     </div>
@@ -114,28 +121,56 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { getStatsReq } from '@/api/user'
 
 const sched = reactive({})
 const loading = ref(false)
 const stateFilter = ref('')
+const currentPage = ref(1)
+const pageSize = 50
 let timer = null
+let disposed = false
+let inFlight = null
+const abortController = new AbortController()
 
-const fetchStats = async () => {
-  try {
-    const res = await getStatsReq({ reqLoading: false })
-    const data = res?.data || {}
-    Object.assign(sched, data.probe_scheduler || {})
-  } catch {
-    /* silent */
-  }
+const fetchStats = () => {
+  if (disposed || document.hidden) return Promise.resolve()
+  if (inFlight) return inFlight
+  inFlight = (async () => {
+    try {
+      const res = await getStatsReq({ reqLoading: false, signal: abortController.signal })
+      if (disposed) return
+      const data = res?.data || {}
+      Object.assign(sched, data.probe_scheduler || {})
+    } catch {
+      /* silent; retry on the next poll */
+    }
+  })().finally(() => { inFlight = null })
+  return inFlight
 }
 
 const loadAll = async () => {
+  if (disposed || loading.value || document.hidden) return
   loading.value = true
-  await fetchStats()
-  loading.value = false
+  try {
+    await fetchStats()
+  } finally {
+    if (!disposed) loading.value = false
+  }
+}
+
+const schedulePoll = () => {
+  if (disposed) return
+  timer = window.setTimeout(async () => {
+    timer = null
+    await fetchStats()
+    schedulePoll()
+  }, 8000)
+}
+
+const onVisibilityChange = () => {
+  if (!document.hidden) fetchStats()
 }
 
 const warmStateCounts = computed(() => sched.warm_state_counts || {})
@@ -205,6 +240,15 @@ const filteredWarm = computed(() => {
   return states.filter(s => s.state === stateFilter.value)
 })
 
+const paginatedWarm = computed(() => {
+  const start = (currentPage.value - 1) * pageSize
+  return filteredWarm.value.slice(start, start + pageSize)
+})
+watch(stateFilter, () => { currentPage.value = 1 })
+watch(() => filteredWarm.value.length, (length) => {
+  currentPage.value = Math.min(currentPage.value, Math.max(1, Math.ceil(length / pageSize)))
+})
+
 const stateTagType = (state) => {
   if (state === 'ready') return 'success'
   if (state === 'stale') return 'warning'
@@ -220,12 +264,17 @@ const fmtTime = (ts) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-onMounted(() => {
-  fetchStats()
-  timer = window.setInterval(() => fetchStats(), 8000)
+onMounted(async () => {
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  await fetchStats()
+  schedulePoll()
 })
 onUnmounted(() => {
-  if (timer) window.clearInterval(timer)
+  disposed = true
+  abortController.abort()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  if (timer !== null) window.clearTimeout(timer)
+  timer = null
 })
 </script>
 

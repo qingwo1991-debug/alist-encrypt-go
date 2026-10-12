@@ -430,6 +430,8 @@ func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
 			ContentVersion:    info.ContentVersion,
 			HeaderLen:         info.HeaderLen,
 			NonceField:        append([]byte(nil), info.NonceField...),
+			ChunkSize:         info.ChunkSize,
+			KDFIterations:     info.KDFIterations,
 			RawURL:            info.RawURL,
 			RawURLAuthScope:   info.RawURLAuthScope,
 			Sign:              info.Sign,

@@ -17,6 +17,7 @@ vi.mock('@/api/user', () => ({
   saveSchemeConfigReq: vi.fn(),
   validateScanConfigReq: vi.fn()
 }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ path: '/setting-alist/index' }), useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('element-plus', () => {
   const ElMessage = vi.fn()
   ElMessage.error = vi.fn()
@@ -33,6 +34,7 @@ import {
   getSchemeConfigReq,
   getStatsReq,
   saveAlistConfigReq,
+  saveProxyRoutingConfigReq,
   saveSchemeConfigReq
 } from '@/api/user'
 import { ElMessage } from 'element-plus'
@@ -57,7 +59,12 @@ const elementStubs = {
 }
 
 let wrapper
-let setIntervalSpy
+const deferred = () => {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
 
 const mountSettings = async () => {
   wrapper = mount(AlistSettings, { global: { stubs: elementStubs } })
@@ -67,7 +74,9 @@ const mountSettings = async () => {
 
 describe('Alist password rule defaults', () => {
   beforeEach(() => {
-    setIntervalSpy = vi.spyOn(window, 'setInterval').mockReturnValue(1)
+    vi.useFakeTimers()
+    saveProxyRoutingConfigReq.mockReset()
+    saveProxyRoutingConfigReq.mockResolvedValue({ msg: 'saved' })
     getAlistConfigReq.mockReset()
     getAlistConfigReq.mockResolvedValue({ data: { passwdList: [] } })
     getSchemeConfigReq.mockReset()
@@ -89,7 +98,66 @@ describe('Alist password rule defaults', () => {
   afterEach(() => {
     wrapper?.unmount()
     wrapper = undefined
-    setIntervalSpy.mockRestore()
+    vi.useRealTimers()
+  })
+
+  it.each(['config', 'scheme', 'dictionary', 'routing', 'stats'])('does not start a late poll after unmount during %s load', async (stage) => {
+    const request = deferred()
+    const mocks = { config: getAlistConfigReq, scheme: getSchemeConfigReq, dictionary: getProxyDomainDictionaryReq, routing: getProxyRoutingConfigReq, stats: getStatsReq }
+    mocks[stage].mockReturnValueOnce(request.promise)
+    const setup = await mountSettings()
+    const previousHost = setup.alistConfigForm.serverHost
+    wrapper.unmount()
+    wrapper = undefined
+    request.resolve({ data: { passwdList: [], serverHost: 'late-host', providers: [] } })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(setup.alistConfigForm.serverHost).toBe(previousHost)
+    if (stage === 'stats') expect(getStatsReq.mock.calls[0][0].signal.aborted).toBe(true)
+  })
+
+  it('serializes slow polling and manual refresh and clears pending polls on unmount', async () => {
+    const setup = await mountSettings()
+    const request = deferred()
+    getStatsReq.mockReturnValueOnce(request.promise)
+    await vi.advanceTimersByTimeAsync(10000)
+    const manual = setup.refreshProbeStats(false)
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(getStatsReq).toHaveBeenCalledTimes(2)
+    request.resolve({ data: {} })
+    await manual
+    await flushPromises()
+    expect(vi.getTimerCount()).toBe(1)
+    wrapper.unmount()
+    wrapper = undefined
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps polling after an initial stats failure', async () => {
+    getStatsReq.mockRejectedValueOnce(new Error('offline'))
+    await mountSettings()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(getStatsReq).toHaveBeenCalledTimes(2)
+  })
+
+  it('holds the shared save lock through both Alist and scheme saves and releases on failure', async () => {
+    const setup = await mountSettings()
+    const request = deferred()
+    saveSchemeConfigReq.mockReturnValueOnce(request.promise)
+    const first = setup.saveAlistConfig()
+    await flushPromises()
+    await setup.saveAlistConfig()
+    await setup.saveProxyRouting()
+    expect(saveAlistConfigReq).toHaveBeenCalledTimes(1)
+    expect(saveProxyRoutingConfigReq).not.toHaveBeenCalled()
+    request.resolve({ data: {} })
+    await first
+    saveAlistConfigReq.mockRejectedValueOnce(new Error('failed'))
+    await setup.saveAlistConfig()
+    expect(setup.savingConfig).toBe(false)
+    await setup.saveProxyRouting()
+    expect(saveProxyRoutingConfigReq).toHaveBeenCalledTimes(1)
   })
 
   it('creates new rules blank and disabled', async () => {

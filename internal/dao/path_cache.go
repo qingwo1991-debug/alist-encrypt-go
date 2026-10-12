@@ -20,9 +20,11 @@ type PathEntry struct {
 	Name              string // Display filename
 	Size              int64  // File size
 	CiphertextSize    int64  // Upstream ciphertext size
-	ContentVersion    int    // 1 legacy, 2 header-based
-	HeaderLen         int64  // Header bytes for v2
-	NonceField        []byte // V2 nonce field for direct decrypt reuse
+	ContentVersion    int    // 1 legacy, 2 stream cipher, 3 chunked AEAD
+	HeaderLen         int64  // Container header bytes
+	NonceField        []byte // Container nonce for direct decrypt reuse
+	ChunkSize         uint32 // V3 plaintext bytes per record
+	KDFIterations     uint32 // V3 per-container key derivation parameters
 	IsDir             bool   // Is directory
 	RawURL            string // Cached upstream direct URL
 	RawURLAuthScope   string // Irreversible Authorization+Cookie scope for RawURL

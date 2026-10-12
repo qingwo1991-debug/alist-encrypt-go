@@ -18,9 +18,11 @@ type V3StreamReader struct {
 	cipher    *V3ChunkCipher
 	chunkSize int64
 	r         io.Reader
-	idx       int64 // next expected chunk index (for per-chunk nonce/AAD binding)
-	skip      int64 // plaintext bytes to skip before yielding
-	limit     int64 // max plaintext bytes to yield; -1 == until EOF
+	idx       int64  // next expected chunk index (for per-chunk nonce/AAD binding)
+	skip      int64  // plaintext bytes to skip before yielding
+	limit     int64  // max plaintext bytes to yield; -1 == until EOF
+	record    []byte // one allocation; refill only after rbuf has been consumed
+	err       error  // terminal failures must not skip a failed record
 	rbuf      []byte
 	boff      int
 }
@@ -50,6 +52,9 @@ func (p *V3StreamReader) Read(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
+	if p.err != nil {
+		return 0, p.err
+	}
 	if p.limit == 0 {
 		return 0, io.EOF
 	}
@@ -70,16 +75,17 @@ func (p *V3StreamReader) Read(b []byte) (int, error) {
 		if recordLen <= 0 {
 			return 0, io.EOF
 		}
-		rec := make([]byte, recordLen)
-		if _, err := io.ReadFull(p.r, rec); err != nil {
-			if err == io.EOF {
-				return 0, io.EOF
-			}
-			return 0, err
+		if p.record == nil {
+			p.record = make([]byte, recordLen)
 		}
-		pt, err := p.cipher.Open(uint64(p.idx), rec)
+		if _, err := io.ReadFull(p.r, p.record); err != nil {
+			p.err = err
+			return 0, p.err
+		}
+		pt, err := p.cipher.open(p.record[:0], uint64(p.idx), p.record)
 		if err != nil {
-			return 0, fmt.Errorf("%w: chunk %d error: %v", errV3TagMismatch, p.idx, err)
+			p.err = fmt.Errorf("v3: chunk %d: %w", p.idx, err)
+			return 0, p.err
 		}
 		p.idx++
 		p.rbuf = pt

@@ -100,20 +100,38 @@ func (c *V3ChunkCipher) chunkNonce(index uint64) []byte {
 // Seal encrypts a single plaintext chunk (any length up to v3MaxChunkSize) and
 // returns the ciphertext plus the 16-byte GCM tag.
 func (c *V3ChunkCipher) Seal(index uint64, plaintext []byte) ([]byte, error) {
+	return c.seal(nil, index, plaintext)
+}
+
+// seal permits exact overlap (plaintext[:0]) with capacity for the tag.
+// Public Seal/Open retain their independently owned output semantics.
+func (c *V3ChunkCipher) seal(dst []byte, index uint64, plaintext []byte) ([]byte, error) {
+	if index > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("v3: chunk index exceeds nonce space: %d", index)
+	}
 	if len(plaintext) > v3MaxChunkSize {
 		return nil, fmt.Errorf("v3: chunk too large: %d bytes", len(plaintext))
 	}
-	return c.aead.Seal(nil, c.chunkNonce(index), plaintext, nil), nil
+	return c.aead.Seal(dst, c.chunkNonce(index), plaintext, nil), nil
 }
 
 // Open authenticates and decrypts a chunk ciphertext (the input must be
 // plaintextLen + 16 bytes). A non-nil error means the chunk failed
 // authentication or was the wrong size.
 func (c *V3ChunkCipher) Open(index uint64, data []byte) ([]byte, error) {
+	return c.open(nil, index, data)
+}
+
+// open permits exact overlap (data[:0]). On authentication failure its buffer
+// must not be exposed; AEAD.Open may overwrite it even when returning an error.
+func (c *V3ChunkCipher) open(dst []byte, index uint64, data []byte) ([]byte, error) {
+	if index > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("v3: chunk index exceeds nonce space: %d", index)
+	}
 	if uint64(len(data)) < v3TagSize || uint64(len(data)) > v3MaxChunkSize+v3TagSize {
 		return nil, fmt.Errorf("v3: invalid chunk ciphertext length %d", len(data))
 	}
-	pt, err := c.aead.Open(nil, c.chunkNonce(index), data, nil)
+	pt, err := c.aead.Open(dst, c.chunkNonce(index), data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w at chunk %d", errV3TagMismatch, index)
 	}
