@@ -184,6 +184,69 @@ func TestV3RedirectEmptyAndRaw(t *testing.T) {
 	}
 }
 
+func TestV3RedirectDisabledEncryptionRaw(t *testing.T) {
+	data, meta := v3RedirectFixture(t, []byte("disabled encryption raw"), false)
+	for _, known := range []bool{false, true} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Range") == "bytes=0-47" {
+				t.Error("disabled encryption must not probe V3")
+			}
+			start, end, has, err := parseSingleRange(r.Header.Get("Range"), int64(len(data)))
+			if err != nil {
+				writeRangeNotSatisfiable(w, int64(len(data)))
+				return
+			}
+			if !has {
+				start, end = 0, int64(len(data)-1)
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+			if has {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+				w.WriteHeader(206)
+			}
+			if r.Method != http.MethodHead {
+				_, _ = w.Write(data[start : end+1])
+			}
+		}))
+		p := &ProxyServer{config: &ProxyConfig{StreamEngineVersion: 2}, localStore: &localStore{}, streamClient: upstream.Client()}
+		p.ensureRuntimeCaches()
+		info := &RedirectInfo{RedirectURL: upstream.URL, OriginalURL: "/enc/raw", FileSize: int64(len(data)), PasswdInfo: &EncryptPath{Enable: false, EncType: EncTypeAESCTR, Password: "wrong-password"}}
+		if known {
+			info.ContentVersion = meta.Version
+			info.FileSize = meta.PlainSize
+			info.CiphertextSize = meta.CiphertextSize
+			info.HeaderLen = meta.HeaderLen
+			info.NonceField = meta.NonceField
+			info.ChunkSize = meta.ChunkSize
+			info.KDFIterations = meta.KDFIterations
+		}
+		p.storeRedirectCache("disabled", info)
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			for _, suffix := range []bool{false, true} {
+				req := httptest.NewRequest(method, "http://proxy.local/redirect/disabled", nil)
+				want, status := data, 200
+				if suffix {
+					req.Header.Set("Range", "bytes=-7")
+					want = data[len(data)-7:]
+					status = 206
+				}
+				rec := httptest.NewRecorder()
+				newPlayOrchestrator(p).ServeRedirect(rec, req)
+				if rec.Code != status || rec.Header().Get("Content-Length") != strconv.Itoa(len(want)) {
+					t.Fatalf("known=%v %s suffix=%v status=%d headers=%v", known, method, suffix, rec.Code, rec.Header())
+				}
+				if method == http.MethodGet && !bytes.Equal(rec.Body.Bytes(), want) {
+					t.Fatal("disabled ciphertext altered")
+				}
+				if method == http.MethodHead && rec.Body.Len() != 0 {
+					t.Fatal("disabled HEAD body")
+				}
+			}
+		}
+		upstream.Close()
+	}
+}
+
 func TestV3PlaybackCacheRequiresCompleteExactURL(t *testing.T) {
 	data, meta := v3RedirectFixture(t, []byte("cache identity"), true)
 	cached := &FileInfo{ContentVersion: ContentVersionV3, Size: meta.PlainSize, CiphertextSize: int64(len(data)), HeaderLen: meta.HeaderLen, NonceField: meta.NonceField, ChunkSize: meta.ChunkSize, KDFIterations: meta.KDFIterations, RawURL: "https://cdn.local/object?sign=one"}

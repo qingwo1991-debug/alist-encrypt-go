@@ -1198,7 +1198,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	// Do not let failures from one signed cloud URL trip the process-wide
 	// control-plane breaker. A newly selected video may use a healthy provider,
 	// and request cancellation already bounds abandoned seek attempts.
-	decodeDisabled := r.URL.Query().Get("decode") == "0"
+	decodeDisabled := !shouldDecryptRedirect(r, info)
 	if decodeDisabled {
 		fileSize = redirectRawFileSize(info, fileSize)
 	}
@@ -1972,7 +1972,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		info = o.proxy.persistPlaybackContentMeta(key, info, meta)
 	}
 	fileSize = o.resolveFileSize(r.Context(), r, info)
-	decodeDisabled := r.URL.Query().Get("decode") == "0"
+	decodeDisabled := !shouldDecryptRedirect(r, info)
 	if decodeDisabled {
 		fileSize = redirectRawFileSize(info, fileSize)
 	}

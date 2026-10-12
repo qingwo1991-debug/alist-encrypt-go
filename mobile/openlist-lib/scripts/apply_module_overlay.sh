@@ -57,6 +57,11 @@ apply_overlay() {
         -require=golang.org/x/sync@v0.20.0 \
         -require=golang.org/x/sys@v0.45.0 \
         -require=golang.org/x/mobile@v0.0.0-20250606033058-a2a15c67f36f \
+        -require=golang.org/x/net@v0.53.0 \
+        -require=golang.org/x/mod@v0.35.0 \
+        -require=golang.org/x/term@v0.43.0 \
+        -require=golang.org/x/text@v0.37.0 \
+        -require=golang.org/x/tools@v0.44.0 \
         -replace="github.com/alist-encrypt-go/shared/encryptcore=$relative"
     # Preserve the destination permissions and avoid replacing identical files.
     if ! cmp -s "$SUM_TEMP" "$module_dir/go.sum"; then
