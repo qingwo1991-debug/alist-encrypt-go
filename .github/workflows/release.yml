@@ -178,7 +178,12 @@ jobs:
           bash mobile/openlist-lib/scripts/apply_module_overlay.sh
           bash mobile/openlist-lib/scripts/apply_module_overlay.sh
           for module in mobile/openlist-lib mobile/openlist-lib/src; do
-            GOWORK=off go -C "$module" list -mod=readonly -m all
+            if ! GOWORK=off go -C "$module" list -mod=readonly -m all; then
+              # Diagnose in the disposable runner only; never accept an automatically rewritten graph.
+              GOWORK=off go -C "$module" list -mod=mod -m all || true
+              git diff -- "$module/go.mod" "$module/go.sum"
+              exit 1
+            fi
             shared_dir=$(GOWORK=off go -C "$module" list -mod=readonly -m -f '{{.Replace.Dir}}' github.com/alist-encrypt-go/shared/encryptcore)
             test "$(realpath "$module/$shared_dir")" = "$GITHUB_WORKSPACE/shared/encryptcore"
           done
