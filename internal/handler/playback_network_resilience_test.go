@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,12 +22,25 @@ import (
 func TestResilienceProactiveSlowHTTPRefreshNeverBlocks(t *testing.T) {
 	entered := make(chan struct{})
 	canceled := make(chan struct{})
+	abort := make(chan struct{})
 	server := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Consume the POST body so net/http resumes reading the connection
+		// and can observe the client's cancellation. Flush headers to put the
+		// refresh in the response-body read, without completing its JSON body.
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
 		close(entered)
-		<-r.Context().Done()
-		close(canceled)
+		select {
+		case <-r.Context().Done():
+			close(canceled)
+		case <-abort:
+			// Independent teardown escape hatch: a failed cancellation
+			// assertion must not deadlock httptest.Server.Close.
+		}
 	}))
 	defer server.Close()
+	defer close(abort)
 	cfg := config.DefaultConfig()
 	u, err := url.Parse(server.URL)
 	if err != nil {

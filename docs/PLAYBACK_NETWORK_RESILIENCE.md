@@ -30,8 +30,10 @@ A passing CI suite is not a measured Android first-frame or VPN compatibility re
 - Mobile network changes invalidate idle connections and stale routing hints;
   unsupported raw socket binding falls back to the system-selected route.
 - Flutter downloading performs each offset seek/write atomically, bounds active
-  tasks and cancels sibling ranges after the first failure. Header/body stalls
-  may move to another source without cancelling the user's entire task.
+  tasks (2) and queued tasks (32), and cancels sibling ranges after the first
+  failure. Header/body stalls may move to another source without cancelling the
+  user's entire task. Attempt/body/queue cancellation subscriptions are released
+  at lifecycle end, including when a caller reuses a long-lived token.
 - Upstream src overlays survive init_openlist.sh re-cloning and are tested in
   both the embedded module and source copy.
 
