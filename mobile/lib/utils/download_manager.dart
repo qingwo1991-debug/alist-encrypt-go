@@ -133,6 +133,9 @@ class DownloadManager {
       _runningTransfers++;
       return;
     }
+    if (_transferQueue.length >= _maxQueuedDownloads) {
+      throw StateError('Download queue is full (32 pending transfers)');
+    }
     final waiter = Completer<void>();
     _transferQueue.add(waiter);
     final admitted = await Future.any<bool>([
@@ -487,6 +490,8 @@ class DownloadManager {
     // Each batch seeks and writes synchronously, with no await or callback
     // between them. await-for yields between batches, so seeking only once
     // (even synchronously) would let another chunk move the shared cursor.
+    // Tradeoff: synchronous disk IO briefly occupies the UI isolate. Moving
+    // this off-isolate requires genuine positional IO or an owned writer.
     var received = 0;
     await for (final bytes in _readBody(responseBody, cancelToken)) {
       _throwIfCancelled(cancelToken);

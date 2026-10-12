@@ -175,6 +175,46 @@ void main() {
     await download('after'); // Cancellation did not leak or over-release slots.
   });
 
+  test('queue rejects transfer 33 without a request or slot leak', () async {
+    final ready = Completer<void>();
+    final release = Completer<void>();
+    var heads = 0;
+    DownloadManager.networkClientForTesting.httpClientAdapter =
+        _Adapter((options, _) async {
+      if (options.method == 'HEAD') {
+        if (++heads == 2) ready.complete();
+        await release.future;
+        return _head(1);
+      }
+      return ResponseBody.fromString('x', 200);
+    });
+    final first = download('bounded-first');
+    final second = download('bounded-second');
+    await ready.future;
+    final tokens = List.generate(32, (_) => CancelToken());
+    final cancellations = <Future<void>>[];
+    for (var index = 0; index < tokens.length; index++) {
+      cancellations.add(expectLater(
+        download('pending-$index', token: tokens[index]),
+        throwsA(isA<DioException>()),
+      ));
+    }
+    await expectLater(download('overflow'), throwsA(isA<StateError>()));
+    expect(heads, 2); // Rejection happens before any network or slot ownership.
+    for (final token in tokens) {
+      token.cancel('clear bounded queue');
+    }
+    await Future.wait(cancellations);
+    // Removing all queued waiters permits new admission while both slots run.
+    final admitted = download('new-pending');
+    expect(heads, 2);
+    release.complete();
+    await Future.wait([first, second, admitted]);
+    expect(heads, 3);
+    await download('after-overflow');
+    expect(heads, 4);
+  });
+
   test('idle first mirror advances and cancels its body subscription', () async {
     DownloadManager.idleBudget = const Duration(milliseconds: 20);
     final hanging = StreamController<Uint8List>();
