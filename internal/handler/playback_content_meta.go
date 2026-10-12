@@ -31,7 +31,7 @@ func cachedPlaybackMeta(info *dao.FileInfo, encType string) (encryption.ContentM
 		if meta.PlainSize == 0 && !emptyPlaybackV3Meta(meta) {
 			return encryption.ContentMeta{}, false
 		}
-		return meta, meta.HeaderLen == encryption.V3HeaderSize && len(meta.NonceField) == encryption.V3NonceFieldLen() && meta.ChunkSize > 0 && meta.ChunkSize <= 1<<30 && meta.KDFIterations > 0 && meta.CiphertextSize > 0
+		return meta, meta.HeaderLen == encryption.V3HeaderSize && int64(len(meta.NonceField)) == encryption.V3NonceFieldLen() && meta.ChunkSize > 0 && meta.ChunkSize <= 1<<30 && meta.KDFIterations > 0 && meta.CiphertextSize > 0
 	default:
 		return encryption.ContentMeta{}, false
 	}
@@ -39,6 +39,6 @@ func cachedPlaybackMeta(info *dao.FileInfo, encType string) (encryption.ContentM
 
 func emptyPlaybackV3Meta(meta encryption.ContentMeta) bool {
 	return meta.IsV3() && meta.PlainSize == 0 && meta.HeaderLen == encryption.V3HeaderSize &&
-		len(meta.NonceField) == encryption.V3NonceFieldLen() && meta.ChunkSize > 0 && meta.ChunkSize <= 1<<30 &&
+		int64(len(meta.NonceField)) == encryption.V3NonceFieldLen() && meta.ChunkSize > 0 && meta.ChunkSize <= 1<<30 &&
 		(meta.CiphertextSize == meta.HeaderLen || meta.CiphertextSize == meta.HeaderLen+16)
 }

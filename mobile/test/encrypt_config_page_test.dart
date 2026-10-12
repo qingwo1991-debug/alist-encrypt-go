@@ -69,6 +69,10 @@ void main() {
     NativeBridge.encryptProxy = originalProxy;
   });
 
+  Finder saveButton() => find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == '保存',
+      );
+
   Future<void> showPage(WidgetTester tester) async {
     await tester.pumpWidget(const MaterialApp(home: EncryptConfigPage()));
     await tester.pump();
@@ -87,7 +91,7 @@ void main() {
   testWidgets('save is disabled while loading', (tester) async {
     proxy.configRequest = Completer<String>();
     await showPage(tester);
-    final save = tester.widget<IconButton>(find.byTooltip('保存'));
+    final save = tester.widget<IconButton>(saveButton());
     expect(save.onPressed, isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     proxy.configRequest!.complete('{}');
@@ -98,16 +102,16 @@ void main() {
     await showPage(tester);
     proxy.hostSave = Completer<void>();
     proxy.failHost = true;
-    final save = tester.widget<IconButton>(find.byTooltip('保存')).onPressed!;
+    final save = tester.widget<IconButton>(saveButton()).onPressed!;
     save();
     save();
     await tester.pump();
     expect(proxy.hostSaves, 1);
-    expect(tester.widget<IconButton>(find.byTooltip('保存')).onPressed, isNull);
+    expect(tester.widget<IconButton>(saveButton()).onPressed, isNull);
     proxy.hostSave!.complete();
     await tester.pumpAndSettle();
     expect(proxy.portSaves, 1);
-    expect(tester.widget<IconButton>(find.byTooltip('保存')).onPressed, isNotNull);
+    expect(tester.widget<IconButton>(saveButton()).onPressed, isNotNull);
     save();
     await tester.pumpAndSettle();
     expect(proxy.hostSaves, 2);
@@ -116,7 +120,7 @@ void main() {
   testWidgets('dispose during save stops remaining controller-dependent sections', (tester) async {
     await showPage(tester);
     proxy.hostSave = Completer<void>();
-    tester.widget<IconButton>(find.byTooltip('保存')).onPressed!();
+    tester.widget<IconButton>(saveButton()).onPressed!();
     await tester.pumpWidget(const SizedBox.shrink());
     proxy.hostSave!.complete();
     await tester.pump();

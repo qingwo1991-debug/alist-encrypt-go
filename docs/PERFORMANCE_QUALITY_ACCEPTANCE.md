@@ -34,6 +34,8 @@ is not proof of production throughput or an absence of defects.
 Use an `agent/*` branch and a Draft PR against `main`. Do not invoke the release
 workflow manually merely for validation. The PR matrix runs Go, shared-core,
 mobile Go, both Web UIs, Flutter analysis/tests and the container build.
+A separate MySQL 8.4 service validates V3 UPSERT replacement semantics,
+size-only updates (including empty V3) and old-schema migration on a real database.
 
 The concurrency/performance job additionally runs the selected Go data-path
 packages with the race detector and publishes network-free benchmark output

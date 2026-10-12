@@ -9,7 +9,7 @@ import (
 )
 
 func TestCachedPlaybackMetaPreservesV3Parameters(t *testing.T) {
-	info := &dao.FileInfo{Size: 12345, CiphertextSize: 16448, ContentVersion: encryption.ContentVersionV3, HeaderLen: encryption.V3HeaderSize, NonceField: bytes.Repeat([]byte{7}, 16), ChunkSize: 4096, KDFIterations: 1234}
+	info := &dao.FileInfo{Size: 12345, CiphertextSize: encryption.V3CiphertextSize(12345, 4096), ContentVersion: encryption.ContentVersionV3, HeaderLen: encryption.V3HeaderSize, NonceField: bytes.Repeat([]byte{7}, 16), ChunkSize: 4096, KDFIterations: 1234}
 	meta, ok := cachedPlaybackMeta(info, "aesctr")
 	if !ok || meta.ChunkSize != 4096 || meta.KDFIterations != 1234 || meta.PlainSize != info.Size {
 		t.Fatalf("complete V3 metadata lost: %+v, ok=%v", meta, ok)

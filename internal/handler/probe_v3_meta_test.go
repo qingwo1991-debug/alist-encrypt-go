@@ -92,4 +92,17 @@ func TestProbeSchedulerPersistsV3CompleteContentMeta(t *testing.T) {
 	if rawRequests.Load() == 0 {
 		t.Fatal("built-in content inspection was not exercised")
 	}
+	if ps.needsContentMeta(file) {
+		t.Fatal("complete warmed V3 should retain cooldown")
+	}
+	legacy := *got
+	legacy.Path = "/v3/old-cache.mp4"
+	legacy.ChunkSize, legacy.KDFIterations = 0, 0
+	if err := fileDAO.Set(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	file.DisplayPath = legacy.Path
+	if !ps.needsContentMeta(file) {
+		t.Fatal("incomplete old V3 must bypass cooldown for parameter repair")
+	}
 }

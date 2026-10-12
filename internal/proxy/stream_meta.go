@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -168,6 +169,7 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 			if len(prefix) < int(encryption.V3HeaderSize) {
 				prefix, err = s.probeV3Tail(ctx, currentURL, currentAuth, prefix, meta.CiphertextSize)
 				if err != nil {
+					result.StatusCode = v3ProbeFailureStatus(err)
 					return result
 				}
 			}
@@ -177,7 +179,11 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 			}
 			if parsed.PlainSize == 0 && parsed.CiphertextSize != parsed.HeaderLen {
 				trailer, trailerErr := s.probeV3Range(ctx, currentURL, currentAuth, meta.CiphertextSize-16, meta.CiphertextSize-1, meta.CiphertextSize)
-				if trailerErr != nil || len(trailer) != 16 || string(trailer[:4]) != "V3E4" || binary.BigEndian.Uint32(trailer[4:8]) != 0 {
+				if trailerErr != nil {
+					result.StatusCode = v3ProbeFailureStatus(trailerErr)
+					return result
+				}
+				if len(trailer) != 16 || string(trailer[:4]) != "V3E4" || binary.BigEndian.Uint32(trailer[4:8]) != 0 {
 					return result
 				}
 				parsed.PlainSize = int64(binary.BigEndian.Uint64(trailer[8:16]))
@@ -229,6 +235,24 @@ func (s *StreamProxy) probeV3Tail(ctx context.Context, targetURL string, authHea
 	return append(append([]byte(nil), prefix...), tail...), nil
 }
 
+// v3ProbeError preserves the follow-up response status for auth negotiation.
+// A transport failure has status zero, not the successful prefix's stale 206.
+type v3ProbeError struct {
+	status int
+	err    error
+}
+
+func (e *v3ProbeError) Error() string { return e.err.Error() }
+func (e *v3ProbeError) Unwrap() error { return e.err }
+
+func v3ProbeFailureStatus(err error) int {
+	var probeErr *v3ProbeError
+	if errors.As(err, &probeErr) {
+		return probeErr.status
+	}
+	return 0
+}
+
 // probeV3Range never accepts a full-body response or reads beyond the tiny
 // requested window. Header completion and EOF probing retain the caller's
 // cancellation/deadline and the configured HTTP client's request timeout.
@@ -248,26 +272,29 @@ func (s *StreamProxy) probeV3Range(ctx context.Context, targetURL string, authHe
 		return nil, err
 	}
 	defer resp.Body.Close()
+	failure := func(err error) ([]byte, error) {
+		return nil, &v3ProbeError{status: resp.StatusCode, err: err}
+	}
 	actual, valid := parseContentRange(resp.Header.Get("Content-Range"))
 	if resp.StatusCode != http.StatusPartialContent || !valid || !actual.TotalKnown || actual.Start != start || actual.End != end || actual.Total != total {
-		return nil, fmt.Errorf("v3 probe: upstream did not return the exact requested range")
+		return failure(fmt.Errorf("v3 probe: upstream did not return the exact requested range"))
 	}
 	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		return nil, fmt.Errorf("v3 probe: encoded range response")
+		return failure(fmt.Errorf("v3 probe: encoded range response"))
 	}
 	length := end - start + 1
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		n, parseErr := strconv.ParseInt(cl, 10, 64)
 		if parseErr != nil || n != length {
-			return nil, fmt.Errorf("v3 probe: incorrect content length")
+			return failure(fmt.Errorf("v3 probe: incorrect content length"))
 		}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, length+1))
 	if err != nil {
-		return nil, fmt.Errorf("v3 probe: read body: %w", err)
+		return failure(fmt.Errorf("v3 probe: read body: %w", err))
 	}
 	if int64(len(body)) != length {
-		return nil, fmt.Errorf("v3 probe: short or oversized body")
+		return failure(fmt.Errorf("v3 probe: short or oversized body"))
 	}
 	return body, nil
 }

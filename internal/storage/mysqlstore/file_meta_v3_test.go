@@ -118,8 +118,15 @@ func TestV3FileMetaSQLColumnsAndRoundTrip(t *testing.T) {
 	if a[10].Value != int64(4096) || a[11].Value != int64(1234) || a[32].Value != int64(8192) || a[33].Value != int64(2345) {
 		t.Fatalf("misaligned parameters: %+v", a)
 	}
-	if strings.Index(q, "chunk_size=IF") > strings.Index(q, "nonce_field=IF") {
-		t.Fatal("nonce updated before replacement parameter guard")
+	replacementGuard := "(VALUES(nonce_field) IS NOT NULL AND LENGTH(VALUES(nonce_field)) > 0 AND NOT (VALUES(nonce_field) <=> nonce_field)) OR (VALUES(content_version) > 0 AND VALUES(content_version) <> content_version)"
+	for _, column := range []string{"ciphertext_size", "header_len", "chunk_size", "kdf_iterations"} {
+		assignment := column + "=IF(" + replacementGuard + ", VALUES(" + column + "), IF(VALUES(" + column + ") > 0, VALUES(" + column + "), " + column + "))"
+		if !strings.Contains(q, assignment) {
+			t.Fatalf("%s does not reset missing values for a replacement container", column)
+		}
+		if strings.Index(q, column+"=IF") > strings.Index(q, "nonce_field=IF") || strings.Index(q, column+"=IF") > strings.Index(q, "content_version=IF") {
+			t.Fatalf("nonce/version updated before %s replacement guard", column)
+		}
 	}
 	got, ok, err := s.GetFileMeta(ctx, "provider", "/plain")
 	if err != nil || !ok || got.ChunkSize != 4096 || got.KDFIterations != 1234 {

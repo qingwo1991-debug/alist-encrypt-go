@@ -65,7 +65,7 @@ func (b unreadV3ProbeBody) Close() error { return nil }
 
 func TestV3TrailerProbeFailuresAreNotConfirmed(t *testing.T) {
 	container, _ := buildV3Container(t, "pw", 73, bytes.Repeat([]byte("abc"), 79))
-	for _, mode := range []string{"status", "ignored-range", "short", "wrong-window", "changed-total", "magic", "geometry", "overflow", "cancel", "header-ignored-range"} {
+	for _, mode := range []string{"status", "ignored-range", "short", "wrong-window", "changed-total", "magic", "geometry", "overflow", "cancel", "header-ignored-range", "header-forbidden", "header-unauthorized", "trailer-unauthorized"} {
 		t.Run(mode, func(t *testing.T) {
 			sp := NewStreamProxy(config.DefaultConfig())
 			ctx, cancel := context.WithCancel(context.Background())
@@ -75,6 +75,13 @@ func TestV3TrailerProbeFailuresAreNotConfirmed(t *testing.T) {
 				calls++
 				if calls == 2 && mode == "header-ignored-range" {
 					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: unreadV3ProbeBody{t}, Request: r}, nil
+				}
+				if calls == 2 && (mode == "header-forbidden" || mode == "header-unauthorized") {
+					status := http.StatusForbidden
+					if mode == "header-unauthorized" {
+						status = http.StatusUnauthorized
+					}
+					return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("rejected")), Request: r}, nil
 				}
 				if calls < 3 {
 					if calls == 2 && mode == "cancel" {
@@ -95,6 +102,8 @@ func TestV3TrailerProbeFailuresAreNotConfirmed(t *testing.T) {
 				switch mode {
 				case "status":
 					resp.StatusCode = http.StatusForbidden
+				case "trailer-unauthorized":
+					resp.StatusCode = http.StatusUnauthorized
 				case "ignored-range":
 					resp.StatusCode = http.StatusOK
 					resp.Body = unreadV3ProbeBody{t}
@@ -121,6 +130,20 @@ func TestV3TrailerProbeFailuresAreNotConfirmed(t *testing.T) {
 			result := sp.inspectEncryptedContentResult(ctx, "http://upstream.test/file", nil, &config.PasswdInfo{Enable: true, EncType: "aesctr"}, 0)
 			if result.Confirmed {
 				t.Fatalf("failed %s probe incorrectly confirmed: %+v", mode, result)
+			}
+			wantStatus := http.StatusPartialContent
+			switch mode {
+			case "status", "header-forbidden":
+				wantStatus = http.StatusForbidden
+			case "header-unauthorized", "trailer-unauthorized":
+				wantStatus = http.StatusUnauthorized
+			case "ignored-range", "header-ignored-range":
+				wantStatus = http.StatusOK
+			case "cancel":
+				wantStatus = 0
+			}
+			if result.StatusCode != wantStatus {
+				t.Fatalf("%s status=%d want follow-up status %d", mode, result.StatusCode, wantStatus)
 			}
 		})
 	}

@@ -474,7 +474,7 @@ func preserveV2FileMetaRecord(existing *mysqlstore.FileMetaRecord, incoming *mys
 	if len(incoming.NonceField) == 0 && len(existing.NonceField) > 0 {
 		incoming.NonceField = append([]byte(nil), existing.NonceField...)
 	}
-	if incoming.Size == existing.CiphertextSize && existing.Size > 0 {
+	if incoming.Size == existing.CiphertextSize && (existing.Size > 0 || (existing.ContentVersion == encryption.ContentVersionV3 && existing.Size == 0)) {
 		incoming.Size = existing.Size
 	}
 	if incoming.EncryptedPath == "" {

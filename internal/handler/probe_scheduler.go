@@ -882,7 +882,15 @@ func (ps *ProbeScheduler) needsContentMeta(file FileItem) bool {
 	// the next listing re-probes and persists the meta, letting fs/get reuse it
 	// instead of re-probing on every click. Files whose raw fetch itself keeps
 	// failing keep their ordinary cooldown to avoid retry storms.
-	return info.ContentVersion <= 0 && strings.TrimSpace(info.RawURL) != ""
+	if strings.TrimSpace(info.RawURL) == "" {
+		return false
+	}
+	encType := ""
+	if file.PasswdInfo != nil {
+		encType = file.PasswdInfo.EncType
+	}
+	_, complete := cachedPlaybackMeta(info, encType)
+	return !complete
 }
 
 func (ps *ProbeScheduler) hasSuccessfulWarm(displayPath string) bool {
