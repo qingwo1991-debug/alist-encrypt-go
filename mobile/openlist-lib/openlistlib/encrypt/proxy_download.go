@@ -77,6 +77,7 @@ type legacyContentMetaIdentity struct {
 	encryption    *EncryptPath
 	authorization string
 	cookie        string
+	userAgent     string
 }
 
 type legacyContentMetaCache struct {
@@ -103,7 +104,7 @@ func (p *ProxyServer) inspectLegacyContentMeta(ctx context.Context, target strin
 		cache.mu.Lock()
 		defer cache.mu.Unlock()
 	}
-	key := legacyContentMetaIdentity{target, encPath, headers.Get("Authorization"), headers.Get("Cookie")}
+	key := legacyContentMetaIdentity{target, encPath, headers.Get("Authorization"), headers.Get("Cookie"), headers.Get("User-Agent")}
 	if cache != nil {
 		if meta, ok := cache.entries[key]; ok {
 			return meta, true
