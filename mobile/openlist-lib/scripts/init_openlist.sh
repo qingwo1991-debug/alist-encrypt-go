@@ -25,6 +25,10 @@ echo "OpenList pinned upstream - ${TAG_NAME}"
 
 cd "$OPENLIST_LIB_DIR"
 
+# Refuse an upgrade or divergent patched copies BEFORE any destructive sync.
+# Pristine fingerprints are checked separately against a private fresh clone.
+python3 "$SCRIPT_DIR/verify_source_overlay.py" --tag "$TAG_NAME" --check-mirrors || exit 1
+
 # Backup local compatibility patches before syncing upstream sources.
 if [ -f ./internal/model/file.go ]; then
     mkdir -p ./.codex-backup/internal/model
@@ -54,7 +58,7 @@ if [ -f "$PLAYBACK_PATCH_MANIFEST" ]; then
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         case "$rel" in
-            internal/*|pkg/singleflight/*|server/*|drivers/google_drive/*|drivers/onedrive/*|drivers/mega/*) ;;
+            internal/*|pkg/singleflight/*|pkg/utils/*|server/*|drivers/google_drive/*|drivers/onedrive/*|drivers/mega/*) ;;
             *) echo "Invalid playback patch path: $rel" >&2; exit 1 ;;
         esac
         if [ -f "./$rel" ]; then
@@ -67,25 +71,22 @@ if [ -f "$PLAYBACK_PATCH_MANIFEST" ]; then
     done < "$PLAYBACK_PATCH_MANIFEST"
 fi
 
-# Clean up any previous source
-rm -rf ./src
-
+# Keep the previous src and build tree untouched on clone/fingerprint failure.
+# Never fingerprint patched copies as though they were pristine upstream.
+SOURCE_STAGE="$(mktemp -d "$OPENLIST_LIB_DIR/.source-stage.XXXXXX")" || exit 1
+trap 'rm -rf "$SOURCE_STAGE"' EXIT
 unset GIT_WORK_TREE
-git clone --branch "$TAG_NAME" https://github.com/OpenListTeam/OpenList.git ./src || exit 1
-rm -rf ./src/.git
+git clone --depth 1 --branch "$TAG_NAME" "$GIT_REPO" "$SOURCE_STAGE/upstream" || exit 1
+CLONED_COMMIT="$(git -C "$SOURCE_STAGE/upstream" rev-parse HEAD)" || exit 1
+python3 "$SCRIPT_DIR/verify_source_overlay.py" --tag "$TAG_NAME" \
+    --commit "$CLONED_COMMIT" --upstream-root "$SOURCE_STAGE/upstream" \
+    --overlay-root "$OPENLIST_LIB_DIR/.codex-backup/playback" || exit 1
+rm -rf "$SOURCE_STAGE/upstream/.git"
+rm -rf ./src || exit 1
+mv "$SOURCE_STAGE/upstream" ./src || exit 1
 
-echo "Checking cloned source structure:"
+echo "Checking verified source structure:"
 ls -la ./src/
-
-# Restore the overlay to source before copying packages, keeping source/review
-# and the build tree identical even when init_openlist re-clones upstream.
-if [ -f "$PLAYBACK_PATCH_MANIFEST" ]; then
-    while IFS= read -r rel; do
-        [ -n "$rel" ] || continue
-        mkdir -p "./src/$(dirname "$rel")"
-        cp "./.codex-backup/playback/$rel" "./src/$rel" || exit 1
-    done < "$PLAYBACK_PATCH_MANIFEST"
-fi
 
 # Copy go.mod and go.sum from OpenList source
 if [ -f ./src/go.mod ]; then

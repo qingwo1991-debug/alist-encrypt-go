@@ -38,13 +38,21 @@ func (p *ProxyServer) initLocalStore() {
 }
 
 func (p *ProxyServer) closeLocalStore() {
-	if p == nil || p.localStore == nil {
+	if p == nil {
+		return
+	}
+	p.sealLifetime()
+	p.lifetime().background.Wait()
+	p.lifetime().handlers.Wait()
+	p.FlushPlaybackSessions()
+	if p.localStore == nil {
 		return
 	}
 	if err := p.localStore.Close(); err != nil {
 		log.Warnf("[%s] Local store close failed: %v", internal.TagCache, err)
 	}
-	p.localStore = nil
+	// The published pointer remains immutable. Admission is sealed and owned
+	// workers/handlers are joined before Close; readers never race pointer clearing.
 }
 
 func (p *ProxyServer) localKeyFromURLs(providerURL, originalURL string) (string, string, string, bool) {

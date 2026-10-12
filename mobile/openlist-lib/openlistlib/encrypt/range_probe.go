@@ -128,8 +128,7 @@ func (p *ProxyServer) startRangeProbeLoop() {
 		}
 	}
 
-	p.rangeProbeWG.Add(1)
-	go p.rangeProbeLoop()
+	p.goBackground(func(ctx context.Context) { p.rangeProbeLoopContext(ctx) })
 
 	p.rangeProbeMu.Lock()
 	keys := make([]string, 0, len(p.rangeProbeTargets))
@@ -156,11 +155,10 @@ func (p *ProxyServer) stopRangeProbeLoop() {
 	}
 	p.rangeProbeQueue = nil
 	p.rangeProbeMu.Unlock()
-	p.rangeProbeWG.Wait()
 }
 
-func (p *ProxyServer) rangeProbeLoop() {
-	defer p.rangeProbeWG.Done()
+func (p *ProxyServer) rangeProbeLoop() { p.rangeProbeLoopContext(p.backgroundContext()) }
+func (p *ProxyServer) rangeProbeLoopContext(ctx context.Context) {
 	defer recoverBackgroundTask("range_probe_loop")
 	ticker := time.NewTicker(rangeProbeBatchInterval)
 	defer ticker.Stop()
@@ -173,6 +171,8 @@ func (p *ProxyServer) rangeProbeLoop() {
 			return
 		}
 		select {
+		case <-ctx.Done():
+			return
 		case <-done:
 			return
 		case key := <-queue:
@@ -275,7 +275,7 @@ func (p *ProxyServer) probeRangeCapability(targetURL string) (bool, error) {
 	if timeout <= 0 {
 		timeout = 1500 * time.Millisecond
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(p.backgroundContext(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {

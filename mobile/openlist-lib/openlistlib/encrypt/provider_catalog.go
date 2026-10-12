@@ -147,15 +147,19 @@ func (p *ProxyServer) refreshProviderCatalogAsync(srcHeaders http.Header, force 
 	p.catalogRefreshing = true
 	p.routingMu.Unlock()
 	headers := cloneRoutingHeaders(srcHeaders)
-	go func() {
+	if !p.goBackground(func(ctx context.Context) {
 		defer recoverBackgroundTask("provider_catalog_refresh")
 		defer func() {
 			p.routingMu.Lock()
 			p.catalogRefreshing = false
 			p.routingMu.Unlock()
 		}()
-		p.refreshProviderCatalogWithRuntime(context.Background(), headers, runtime)
-	}()
+		p.refreshProviderCatalogWithRuntime(ctx, headers, runtime)
+	}) {
+		p.routingMu.Lock()
+		p.catalogRefreshing = false
+		p.routingMu.Unlock()
+	}
 }
 
 func (p *ProxyServer) maybeRefreshProviderCatalog(srcHeaders http.Header) {
@@ -214,7 +218,13 @@ func (p *ProxyServer) refreshProviderCatalogWithRuntime(ctx context.Context, src
 	}
 	p.routingMu.RUnlock()
 
+	if ctx.Err() != nil {
+		return
+	}
 	driverNames, degradedDriverNames := p.fetchAdminDriverNamesWithRuntime(ctx, srcHeaders, runtime)
+	if ctx.Err() != nil {
+		return
+	}
 	for _, driver := range driverNames {
 		appendEntry(driver, "", providerSourceDriverNames)
 	}

@@ -127,6 +127,10 @@ type ProxyServer struct {
 	dbExportToken       string
 	dbExportTokenExpiry time.Time
 	runtimeCachesOnce   sync.Once
+	lifecycleOnce       sync.Once
+	lifecycle           *proxyLifecycle
+	cleanupStopOnce     sync.Once
+	metaStopOnce        sync.Once
 }
 
 func (s *ProxyServer) ensureRuntimeCaches() {
@@ -531,10 +535,10 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	trackNetworkTransport(streamTransport, true)
 	server.rebuildEncryptPathIndex()
 
-	// 启动缓存清理协程
+	// Publish the immutable store before any background consumer starts.
+	server.initLocalStore()
 	server.startCacheCleanup()
 	server.initSizeMap()
-	server.initLocalStore()
 	server.initProviderCatalog()
 	server.initRangeCompat()
 	server.startRangeProbeLoop()
@@ -549,9 +553,15 @@ func (p *ProxyServer) Start() error {
 		return errors.New("proxy server is nil")
 	}
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
+	cleanupOnFailure := false
+	defer func() {
+		p.mutex.Unlock()
+		if cleanupOnFailure {
+			_ = p.Stop()
+		}
+	}()
 
-	if p.running || p.stopping {
+	if p.running || p.stopping || p.lifetimeClosed() {
 		return errors.New("proxy server is already running")
 	}
 
@@ -623,7 +633,7 @@ func (p *ProxyServer) Start() error {
 	}
 	server := &http.Server{
 		Addr:              bindAddr,
-		Handler:           internal.TraceMiddleware(mux),
+		Handler:           p.guardHandlers(internal.TraceMiddleware(mux)),
 		ReadHeaderTimeout: 10 * time.Second, // 防慢连接 header 攻击
 		ReadTimeout:       0,                // 上传/流式场景允许长时间读 body
 		WriteTimeout:      0,                // 下载流允许长连接写出
@@ -632,13 +642,22 @@ func (p *ProxyServer) Start() error {
 	}
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
+		cleanupOnFailure = true
 		return fmt.Errorf("listen on %s: %w", server.Addr, err)
 	}
 
 	p.server = server
 	p.running = true
 	proxyPort := p.config.ProxyPort
-	prewarmConfiguredV2KeysAsync(p.config)
+	prewarmSpecs := collectV2KeyPrewarmSpecs(p.config)
+	p.goBackground(func(ctx context.Context) {
+		for _, spec := range prewarmSpecs {
+			if ctx.Err() != nil {
+				return
+			}
+			_ = cachedV2Key(spec.password, spec.salt, spec.keyLen)
+		}
+	})
 	warmEncryptedRootDirsAsync(p, p.config)
 	go func() {
 		log.Infof("[%s] Encrypt proxy server starting on port %d (listen=%s)", internal.TagServer, proxyPort, bindAddr)
@@ -674,11 +693,13 @@ func (p *ProxyServer) Stop() error {
 		return err
 	}
 
-	if !p.running {
+	if p.lifetimeClosed() && p.stopDone != nil {
+		err := p.stopErr
 		p.mutex.Unlock()
-		return nil
+		return err
 	}
 	p.stopping = true
+	p.sealLifetime()
 	p.stopErr = nil
 	p.stopDone = make(chan struct{})
 	done := p.stopDone
@@ -694,10 +715,7 @@ func (p *ProxyServer) Stop() error {
 	p.stopCacheCleanup()
 	p.stopRangeProbeLoop()
 	p.stopDBExportSyncLoop()
-	if p.sizeMapDone != nil {
-		close(p.sizeMapDone)
-		p.sizeMapDone = nil
-	}
+	p.lifetime().background.Wait()
 
 	var stopErr error
 	if server != nil {
@@ -705,9 +723,13 @@ func (p *ProxyServer) Stop() error {
 		if err := server.Shutdown(ctx); err != nil {
 			log.Errorf("[%s] Error shutting down proxy server: %v", internal.TagServer, err)
 			stopErr = err
+			// Shutdown does not close active connections on deadline. Close really
+			// cancels their request contexts; handlers still must finish before DB close.
+			_ = server.Close()
 		}
 		cancel()
 	}
+	p.lifetime().handlers.Wait()
 
 	routePool.RetireRouteTransports()
 	trackNetworkTransport(transport, false)
@@ -914,7 +936,15 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	trackNetworkTransport(streamTransport, true)
 
 	if p.IsRunning() {
-		prewarmConfiguredV2KeysAsync(workingConfig)
+		specs := collectV2KeyPrewarmSpecs(workingConfig)
+		p.goBackground(func(ctx context.Context) {
+			for _, spec := range specs {
+				if ctx.Err() != nil {
+					return
+				}
+				_ = cachedV2Key(spec.password, spec.salt, spec.keyLen)
+			}
+		})
 	}
 	if oldTransport != nil && oldTransport != transport {
 		oldTransport.CloseIdleConnections()

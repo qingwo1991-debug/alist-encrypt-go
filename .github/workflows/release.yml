@@ -178,6 +178,8 @@ jobs:
           set -euo pipefail
           bash -n mobile/openlist-lib/scripts/apply_module_overlay.sh
           bash -n mobile/openlist-lib/scripts/init_openlist.sh
+          python3 mobile/openlist-lib/scripts/test_source_overlay.py
+          python3 mobile/openlist-lib/scripts/verify_source_overlay.py --check-mirrors
           # Emit checksum evidence for newly selected transitive modules; the
           # readonly overlay check below still rejects unreviewed checksum drift.
           GOWORK=off go -C mobile/openlist-lib mod download -json golang.org/x/net@v0.53.0 golang.org/x/term@v0.43.0
@@ -236,7 +238,7 @@ jobs:
       - name: Race-check mobile network and readiness regressions
         working-directory: mobile/openlist-lib
         run: |
-          go test -race -mod=readonly -timeout 10m -run 'Test(DualNetwork|Native|NetworkBridge|RouteTransport|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession|V3|MobileV3)' ./openlistlib ./openlistlib/encrypt ./internal/op ./pkg/singleflight
+          go test -race -mod=readonly -timeout 10m -run 'Test(ProxyLifecycle|DualNetwork|Native|NetworkBridge|RouteTransport|DriverRoute|ProviderCatalog|MetaSync|RangeProbe|NativePhysical|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession|V3|MobileV3)' ./openlistlib ./openlistlib/encrypt ./internal/op ./pkg/singleflight
 
       - name: Test synchronized upstream source copy
         working-directory: mobile/openlist-lib/src

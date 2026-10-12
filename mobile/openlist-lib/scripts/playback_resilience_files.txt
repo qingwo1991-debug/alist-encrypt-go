@@ -18,3 +18,9 @@ drivers/onedrive/util.go
 drivers/onedrive/context_test.go
 drivers/mega/driver.go
 drivers/mega/context_test.go
+drivers/mega/util.go
+drivers/mega/new_context_test.go
+internal/net/driver_client.go
+internal/net/driver_client_test.go
+pkg/utils/io.go
+pkg/utils/new_retry_context_test.go

@@ -52,6 +52,37 @@ void main() {
     );
   }
 
+  test('pending downloads reserve distinct paths before files exist', () async {
+    final originalPath = '${directory.path}/pending.bin';
+    final reserved = <String>[];
+    try {
+      final first = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      reserved.add(first);
+      final second = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      reserved.add(second);
+      final third = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      reserved.add(third);
+      expect(first, originalPath);
+      expect(second, '${directory.path}/pending_1.bin');
+      expect(third, '${directory.path}/pending_2.bin');
+      expect(await File(first).exists(), isFalse);
+      expect(await File(second).exists(), isFalse);
+      DownloadManager.releaseDownloadPathForTesting(first);
+      final reused = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      reserved.add(reused);
+      expect(reused, originalPath);
+      await File(reused).writeAsString('existing download');
+      DownloadManager.releaseDownloadPathForTesting(reused);
+      final next = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      reserved.add(next);
+      expect(next, '${directory.path}/pending_3.bin');
+    } finally {
+      for (final path in reserved.toSet()) {
+        DownloadManager.releaseDownloadPathForTesting(path);
+      }
+    }
+  });
+
   test('four streams interleave batches with exact bytes at every offset',
       () async {
     const size = 10 * 1024 * 1024 + 7; // Uneven last chunk as well.
@@ -84,8 +115,8 @@ void main() {
       if (ack != null && !ack.isCompleted) ack.complete();
     });
     await ready.future;
-    // Acknowledgements come after the production synchronous write. This
-    // forces exact alternation rather than relying on scheduler timing.
+    // Acknowledgements come after the owned asynchronous seek/write finishes.
+    // This forces exact alternation rather than relying on scheduler timing.
     for (final order in [<int>[0, 1, 2, 3], <int>[3, 1, 0, 2]]) {
       for (final index in order) {
         final start = index * (size ~/ 4);
@@ -133,8 +164,18 @@ void main() {
         'content-range': ['bytes $start-${start + size ~/ 4 - 1}/$size'],
       });
     });
-    final result = download('fallback', token: user);
+    final written = Completer<void>();
+    var progressEvents = 0;
+    final result = download('fallback', token: user, progress: (_, __) {
+      if (++progressEvents == 3) written.complete();
+    });
     await ready.future;
+    // Three simultaneous producers exercise queued async positional writes
+    // before the fourth fails. Fallback must join them and truncate residue.
+    for (var index = 1; index < 4; index++) {
+      streams[index].add(Uint8List.fromList([index, index + 1]));
+    }
+    await written.future;
     await streams[0].close(); // EOF before expected length; others hang.
     await result.timeout(const Duration(seconds: 2));
     expect(user.isCancelled, isFalse);

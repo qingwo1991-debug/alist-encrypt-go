@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -145,9 +146,21 @@ func (p *ProxyServer) prefetchEncryptedSubDirs(parentCtx context.Context, reqDat
 	}
 
 	sem := make(chan struct{}, encryptedPrefetchConcurrency)
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for _, dirPath := range uniq {
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-parentCtx.Done():
+			return
+		}
+		if parentCtx.Err() != nil {
+			<-sem
+			return
+		}
+		wg.Add(1)
 		go func(targetPath string) {
+			defer wg.Done()
 			defer func() { <-sem }()
 
 			payload := make(map[string]interface{}, len(reqData)+1)

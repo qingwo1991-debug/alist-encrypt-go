@@ -681,7 +681,7 @@ func (p *ProxyServer) handleFsList(w http.ResponseWriter, r *http.Request) {
 	rewriteOK = true
 	if parentEncPath != nil && len(prefetchDirs) > 0 {
 		headers := r.Header.Clone()
-		go p.prefetchEncryptedSubDirs(context.Background(), reqData, prefetchDirs, headers)
+		p.goBackground(func(ctx context.Context) { p.prefetchEncryptedSubDirs(ctx, reqData, prefetchDirs, headers) })
 	}
 }
 

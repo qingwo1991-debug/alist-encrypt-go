@@ -70,7 +70,7 @@ func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 		return
 	}
 
-	go func() {
+	p.goBackground(func(ctx context.Context) {
 		alistURL := p.getAlistURL()
 		ready := waitForAlistReady(p, alistURL)
 		if !ready {
@@ -79,8 +79,16 @@ func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 		sem := make(chan struct{}, dirWarmConcurrency)
 		var wg sync.WaitGroup
 		for _, root := range roots {
+			if ctx.Err() != nil {
+				break
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			}
 			wg.Add(1)
-			sem <- struct{}{}
 			go func(root string) {
 				defer wg.Done()
 				defer func() { <-sem }()
@@ -92,7 +100,7 @@ func warmEncryptedRootDirsAsync(p *ProxyServer, config *ProxyConfig) {
 			}(root)
 		}
 		wg.Wait()
-	}()
+	})
 }
 
 func warmOneRootDir(p *ProxyServer, alistURL, root string) {
@@ -115,7 +123,7 @@ func warmOneRootDir(p *ProxyServer, alistURL, root string) {
 		davPath += "/"
 	}
 	target := alistURL + davPath
-	ctx, cancel := context.WithTimeout(context.Background(), dirWarmTimeout)
+	ctx, cancel := context.WithTimeout(p.backgroundContext(), dirWarmTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", target, bytes.NewReader([]byte(dirWarmPropfindBody)))
@@ -167,7 +175,7 @@ func waitForAlistReady(p *ProxyServer, alistURL string) bool {
 	client := &http.Client{Timeout: 800 * time.Millisecond}
 	deadline := time.Now().Add(alistReadyWaitTimeout)
 	for {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, alistURL+"/ping", nil)
+		req, err := http.NewRequestWithContext(p.backgroundContext(), http.MethodGet, alistURL+"/ping", nil)
 		if err != nil {
 			return false
 		}
@@ -181,7 +189,11 @@ func waitForAlistReady(p *ProxyServer, alistURL string) bool {
 		if time.Now().After(deadline) {
 			return false
 		}
-		time.Sleep(250 * time.Millisecond)
+		select {
+		case <-p.backgroundContext().Done():
+			return false
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 }
 

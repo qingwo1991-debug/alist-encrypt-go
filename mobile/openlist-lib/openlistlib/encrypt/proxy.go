@@ -1116,18 +1116,22 @@ func (p *ProxyServer) initSizeMap() {
 	p.loadSizeMap()
 	if p.sizeMapDone == nil {
 		p.sizeMapDone = make(chan struct{})
-		go p.sizeMapLoop()
+		p.goBackground(func(ctx context.Context) { p.sizeMapLoopContext(ctx, p.sizeMapDone) })
 	}
 }
 
-func (p *ProxyServer) sizeMapLoop() {
+func (p *ProxyServer) sizeMapLoop() { p.sizeMapLoopContext(p.backgroundContext(), p.sizeMapDone) }
+func (p *ProxyServer) sizeMapLoopContext(ctx context.Context, done <-chan struct{}) {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			p.flushSizeMap(false)
-		case <-p.sizeMapDone:
+		case <-ctx.Done():
+			p.flushSizeMap(true)
+			return
+		case <-done:
 			p.flushSizeMap(true)
 			return
 		}
