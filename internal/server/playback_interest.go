@@ -19,7 +19,7 @@ import (
 
 type playbackInterestScheduler interface {
 	AdvancePlaybackInterest(string, string, string, uint64, string) (bool, error)
-	EnqueuePlaybackInterest(string, string, string, uint64, handler.FileItem, http.Header, int64, handler.WarmKind) error
+	EnqueuePlaybackInterestWithConfig(string, string, string, uint64, handler.FileItem, http.Header, int64, handler.WarmKind, config.AlistServer) error
 }
 type playbackInterestFiles interface {
 	Get(string) (*dao.FileInfo, bool)
@@ -109,7 +109,7 @@ func playbackInterestHandler(cfg *config.Config, files playbackInterestFiles, sc
 			}
 			// Server login JWT is never a provider credential. No client credentials
 			// cross this boundary; provider-auth resolution belongs to the scheduler.
-			err = scheduler.EnqueuePlaybackInterest(scope, input.Session, provider, input.Generation, item, http.Header{}, sizes[i], kind)
+			err = scheduler.EnqueuePlaybackInterestWithConfig(scope, input.Session, provider, input.Generation, item, http.Header{}, sizes[i], kind, snapshot)
 			if err != nil {
 				rejected++
 			} else {

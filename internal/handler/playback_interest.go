@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/alist-encrypt-go/internal/config"
 )
 
 // WarmKind distinguishes explicit current-target metadata work from cancellable
@@ -51,6 +53,7 @@ type playbackInterestTask struct {
 	refs       map[playbackSessionKey]playbackTaskReference
 	foreground bool // Metadata priority only; all trusted warm tasks remain speculative relative to live HTTP.
 	finished   bool
+	alist      config.AlistServer // Immutable origin/credential/routing snapshot at admission.
 }
 
 func validPlaybackSession(scope, session, provider string, generation uint64, target string) bool {
@@ -101,13 +104,17 @@ func (ps *ProbeScheduler) AdvancePlaybackInterest(scope, session, provider strin
 	return true, nil
 }
 
-func playbackInterestTaskKey(scope, provider string, file FileItem, auth http.Header) string {
+func playbackInterestTaskKey(scope, provider string, file FileItem, auth http.Header, snapshots ...config.AlistServer) string {
+	if len(snapshots) == 0 {
+		snapshots = []config.AlistServer{{}}
+	}
 	// JSON map keys are sorted; all headers are conservatively scope-bound, including
 	// custom provider credentials. No plaintext credential appears in registry keys.
 	b, _ := json.Marshal(struct {
 		Scope, Provider, Path, URL, Encrypted, Compat string
 		Auth                                          http.Header
-	}{scope, provider, file.DisplayPath, file.TargetURL, file.EncryptedPath, file.CompatStorageKey, auth})
+		Config                                        []config.AlistServer
+	}{scope, provider, file.DisplayPath, file.TargetURL, file.EncryptedPath, file.CompatStorageKey, auth, snapshots})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
@@ -116,6 +123,25 @@ func playbackInterestTaskKey(scope, provider string, file FileItem, auth http.He
 // its transfer. Every admitted task uses the scheduler's fixed workers and real
 // cancellable request context, not a detached goroutine or media-request context.
 func (ps *ProbeScheduler) EnqueuePlaybackInterest(scope, session, provider string, generation uint64, file FileItem, auth http.Header, reportedSize int64, kind WarmKind) error {
+	var alist config.AlistServer
+	if ps != nil && ps.cfg != nil {
+		alist = ps.cfg.AlistServerSnapshot()
+	}
+	return ps.EnqueuePlaybackInterestWithConfig(scope, session, provider, generation, file, auth, reportedSize, kind, alist)
+}
+
+// EnqueuePlaybackInterestWithConfig binds execution to the exact configuration
+// snapshot used by the authenticated caller to validate the intent's origin.
+func (ps *ProbeScheduler) EnqueuePlaybackInterestWithConfig(scope, session, provider string, generation uint64, file FileItem, auth http.Header, reportedSize int64, kind WarmKind, alist config.AlistServer) error {
+	// Detach nested slices/maps too: the caller may reuse or mutate its snapshot.
+	encoded, err := json.Marshal(alist)
+	if err != nil {
+		return ErrPlaybackInterestInvalid
+	}
+	var bound config.AlistServer
+	if json.Unmarshal(encoded, &bound) != nil {
+		return ErrPlaybackInterestInvalid
+	}
 	if ps == nil || !ps.enabled || ps.queue == nil {
 		return ErrPlaybackInterestStopped
 	}
@@ -138,7 +164,7 @@ func (ps *ProbeScheduler) EnqueuePlaybackInterest(scope, session, provider strin
 	if kind == WarmForeground && file.DisplayPath != s.target {
 		return ErrPlaybackInterestInvalid
 	}
-	key := playbackInterestTaskKey(scope, provider, file, auth)
+	key := playbackInterestTaskKey(scope, provider, file, auth, bound)
 	if existing, ok := s.refs[key]; ok {
 		s.touched = time.Now()
 		if kind == WarmForeground {
@@ -181,7 +207,7 @@ func (ps *ProbeScheduler) EnqueuePlaybackInterest(scope, session, provider strin
 		return ErrPlaybackInterestCapacity
 	}
 	ctx, cancel := context.WithTimeout(ps.probeContext(), playbackInterestTTL)
-	task = &playbackInterestTask{key: key, ctx: ctx, cancel: cancel, refs: map[playbackSessionKey]playbackTaskReference{sk: {generation, kind}}, foreground: kind == WarmForeground}
+	task = &playbackInterestTask{key: key, ctx: ctx, cancel: cancel, refs: map[playbackSessionKey]playbackTaskReference{sk: {generation, kind}}, foreground: kind == WarmForeground, alist: bound}
 	ps.interestTasks[key] = task
 	s.refs[key] = task
 	s.touched = time.Now()
@@ -259,7 +285,7 @@ func (ps *ProbeScheduler) playbackItemContext(item probeItem) context.Context {
 
 // ensurePlaybackInterestAuth uses configured provider credentials, never the
 // enc-api JWT. Login is a real task-context HTTP request, not an abandoned call.
-func (ps *ProbeScheduler) ensurePlaybackInterestAuth(ctx context.Context, headers http.Header) (http.Header, string, error) {
+func (ps *ProbeScheduler) ensurePlaybackInterestAuth(ctx context.Context, headers http.Header, snapshots ...config.AlistServer) (http.Header, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
@@ -270,10 +296,12 @@ func (ps *ProbeScheduler) ensurePlaybackInterestAuth(ctx context.Context, header
 	if headers.Get("Authorization") != "" || headers.Get("Cookie") != "" {
 		return headers, "request", nil
 	}
-	if ps.cfg == nil {
-		return headers, "none", nil
+	var alist config.AlistServer
+	if len(snapshots) > 0 {
+		alist = snapshots[0]
+	} else if ps.cfg != nil {
+		alist = ps.cfg.AlistServerSnapshot()
 	}
-	alist := ps.cfg.AlistServerSnapshot()
 	if raw := strings.TrimSpace(alist.ScanAuthHeader); raw != "" {
 		headers.Set("Authorization", raw)
 		return headers, "scan_header", nil
@@ -282,7 +310,7 @@ func (ps *ProbeScheduler) ensurePlaybackInterestAuth(ctx context.Context, header
 	if username == "" || password == "" {
 		return headers, "none", nil
 	}
-	origin := ps.cfg.GetAlistURL()
+	origin := config.BuildAlistURL(alist)
 	scope := sha256.Sum256([]byte(origin + "\x00" + username + "\x00" + password))
 	ps.jwtMu.Lock()
 	token := ""

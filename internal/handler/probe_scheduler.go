@@ -703,7 +703,7 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	if item.interest != nil {
 		// Trusted work never invokes legacy context-less login callbacks.
 		var authErr error
-		authHeaders, authMode, authErr = ps.ensurePlaybackInterestAuth(probeCtx, item.authHeaders)
+		authHeaders, authMode, authErr = ps.ensurePlaybackInterestAuth(probeCtx, item.authHeaders, item.interest.alist)
 		if authErr != nil {
 			return
 		}
@@ -712,7 +712,14 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	}
 
 	resultState := probeExecutionResult{}
-	result := ps.resolver.ResolveSingle(probeCtx, item.file, authHeaders)
+	resolver := ps.resolver
+	if item.interest != nil {
+		boundCfg := config.DefaultConfig()
+		boundCfg.AlistServer = item.interest.alist
+		resolver = NewFileSizeResolver(boundCfg, ps.fileDAO, ps.metaStore, 1, MinMetaSize(boundCfg), RedirectMaxHops(boundCfg))
+		defer resolver.client.CloseIdleConnections()
+	}
+	result := resolver.ResolveSingle(probeCtx, item.file, authHeaders)
 	if probeCtx.Err() != nil {
 		return
 	}
@@ -729,10 +736,14 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	// Pre-fetch raw_url so WebDAV first-play is zero-latency.
 	// Check staleness: don't re-fetch if raw_url is still fresh.
 	stalenessThreshold := 30 * time.Minute
-	if ps.cfg != nil {
-		if minutes := ps.cfg.AlistServerSnapshot().UpstreamStalenessMinutes; minutes > 0 {
-			stalenessThreshold = time.Duration(minutes) * time.Minute
-		}
+	var boundAlist config.AlistServer
+	if item.interest != nil {
+		boundAlist = item.interest.alist
+	} else if ps.cfg != nil {
+		boundAlist = ps.cfg.AlistServerSnapshot()
+	}
+	if minutes := boundAlist.UpstreamStalenessMinutes; minutes > 0 {
+		stalenessThreshold = time.Duration(minutes) * time.Minute
 	}
 	if ps.rawURLFetcher != nil && item.interest == nil {
 		if rawURL := ps.rawURLFetcher(item.file.DisplayPath, item.file.EncryptedPath, authHeaders); rawURL != "" {
@@ -740,9 +751,10 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 		}
 	}
-	if (ps.rawURLFetcher == nil || item.interest != nil) && ps.cfg != nil {
-		// Fallback: use built-in raw_url fetcher via alist fs/get
-		alistURL := ps.cfg.GetAlistURL()
+	if (ps.rawURLFetcher == nil || item.interest != nil) && (ps.cfg != nil || item.interest != nil && boundAlist.ServerHost != "") {
+		// Fallback: use built-in raw_url fetcher via alist fs/get. Trusted work
+		// uses its admission snapshot, never later configured credentials/origin.
+		alistURL := config.BuildAlistURL(boundAlist)
 		rawURLResult := fetchRawURL(probeCtx, alistURL, item.file.DisplayPath, item.file.EncryptedPath, authHeaders, ps.fileDAO, stalenessThreshold)
 		if rawURLResult.RawURL != "" {
 			resultState.rawURLFetched = true

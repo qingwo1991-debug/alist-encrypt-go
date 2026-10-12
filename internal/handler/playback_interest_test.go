@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -161,12 +162,18 @@ func TestPlaybackInterestCapacityTTLAndStop(t *testing.T) {
 func TestPlaybackInterestConfiguredLoginIsActuallyCanceled(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	canceled := make(chan struct{}, 1)
+	stop := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
 		entered <- struct{}{}
-		<-r.Context().Done()
-		canceled <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			canceled <- struct{}{}
+		case <-stop:
+		}
 	}))
-	defer srv.Close()
+	defer func() { close(stop); srv.CloseClientConnections(); srv.Close() }()
 	u, _ := url.Parse(srv.URL)
 	port, _ := strconv.Atoi(u.Port())
 	cfg := config.LoadFromBaseDir(t.TempDir())
@@ -204,15 +211,99 @@ func TestPlaybackInterestConfiguredLoginIsActuallyCanceled(t *testing.T) {
 		t.Fatal("real login request did not observe cancellation")
 	}
 }
+func TestPlaybackInterestExecutionUsesAdmissionConfig(t *testing.T) {
+	requestsA := make(chan string, 8)
+	requestsB := make(chan string, 8)
+	handler := func(record chan string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			record <- r.Header.Get("Authorization")
+			if r.Method == http.MethodHead {
+				w.Header().Set("Content-Length", "65536")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"code":404,"data":{}}`)
+		})
+	}
+	a := httptest.NewServer(handler(requestsA))
+	defer a.Close()
+	b := httptest.NewServer(handler(requestsB))
+	defer b.Close()
+	snapshot := func(raw, token string) config.AlistServer {
+		u, _ := url.Parse(raw)
+		p, _ := strconv.Atoi(u.Port())
+		return config.AlistServer{ServerHost: u.Hostname(), ServerPort: p, ScanAuthHeader: token}
+	}
+	boundA, boundB := snapshot(a.URL, "provider-A"), snapshot(b.URL, "provider-B")
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	if err := cfg.UpdateAlistServer(boundA); err != nil {
+		t.Fatal(err)
+	}
+	ps := interestTestScheduler(t, 8)
+	ps.cfg = cfg
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ps.fileDAO = dao.NewFileDAO(store)
+	interestAdvance(t, ps, "one", 1, "/A")
+	fileA := interestTestFile("/A")
+	fileA.TargetURL = a.URL + "/A"
+	if err := ps.EnqueuePlaybackInterestWithConfig("verified", "sessionone", "provider", 1, fileA, nil, 0, WarmForeground, boundA); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.UpdateAlistServer(boundB); err != nil {
+		t.Fatal(err)
+	}
+	item, sem, ok := ps.nextReadyItem()
+	if !ok {
+		t.Fatal("missing bound A")
+	}
+	ps.runClaimedItem(item, sem)
+	if len(requestsA) == 0 || len(requestsB) != 0 {
+		t.Fatal("queued A task consulted later B origin")
+	}
+	for len(requestsA) > 0 {
+		if token := <-requestsA; token != "provider-A" {
+			t.Fatalf("A received wrong configuration credential %q", token)
+		}
+	}
+	interestAdvance(t, ps, "one", 2, "/B")
+	fileB := interestTestFile("/B")
+	fileB.TargetURL = b.URL + "/B"
+	if err := ps.EnqueuePlaybackInterestWithConfig("verified", "sessionone", "provider", 2, fileB, nil, 0, WarmForeground, boundB); err != nil {
+		t.Fatal(err)
+	}
+	item, sem, ok = ps.nextReadyItem()
+	if !ok {
+		t.Fatal("missing bound B")
+	}
+	ps.runClaimedItem(item, sem)
+	if len(requestsB) == 0 || len(requestsA) != 0 {
+		t.Fatal("new B task reused A origin")
+	}
+	for len(requestsB) > 0 {
+		if token := <-requestsB; token != "provider-B" {
+			t.Fatalf("B received wrong configuration credential %q", token)
+		}
+	}
+}
 func TestPlaybackInterestActiveCancellationJoinsRealTransfer(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	canceled := make(chan struct{}, 1)
+	stop := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
 		entered <- struct{}{}
-		<-r.Context().Done()
-		canceled <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			canceled <- struct{}{}
+		case <-stop:
+		}
 	}))
-	defer srv.Close()
+	defer func() { close(stop); srv.CloseClientConnections(); srv.Close() }()
 	ps := interestTestScheduler(t, 8)
 	cfg := config.DefaultConfig()
 	store, err := storage.NewStore(t.TempDir())

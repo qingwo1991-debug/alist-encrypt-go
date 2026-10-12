@@ -27,12 +27,17 @@ type interestTestScheduler struct {
 	target                     string
 	kinds                      []handler.WarmKind
 	headers                    []http.Header
+	configs                    []config.AlistServer
+	advanceHook                func()
 }
 
 func (s *interestTestScheduler) AdvancePlaybackInterest(scope, session, provider string, generation uint64, target string) (bool, error) {
 	s.advanceCalls++
 	s.scope = scope
 	s.provider = provider
+	if s.advanceHook != nil {
+		s.advanceHook()
+	}
 	if s.err != nil {
 		return false, s.err
 	}
@@ -47,10 +52,11 @@ func (s *interestTestScheduler) AdvancePlaybackInterest(scope, session, provider
 	s.target = target
 	return advanced, nil
 }
-func (s *interestTestScheduler) EnqueuePlaybackInterest(scope, session, provider string, generation uint64, file handler.FileItem, headers http.Header, size int64, kind handler.WarmKind) error {
+func (s *interestTestScheduler) EnqueuePlaybackInterestWithConfig(scope, session, provider string, generation uint64, file handler.FileItem, headers http.Header, size int64, kind handler.WarmKind, alist config.AlistServer) error {
 	s.enqueueCalls++
 	s.kinds = append(s.kinds, kind)
 	s.headers = append(s.headers, headers.Clone())
+	s.configs = append(s.configs, alist)
 	return s.errorEnqueue
 }
 func interestTestRouter(t *testing.T) (*gin.Engine, string, *config.Config, *interestTestScheduler, interestTestFiles) {
@@ -186,5 +192,30 @@ func TestPlaybackInterestScopeBindsVerifiedTokenAndConfiguration(t *testing.T) {
 	interestTestRequest(r, token, body)
 	if s.scope == initial {
 		t.Fatal("configuration credential rotation shared scope")
+	}
+}
+
+func TestPlaybackInterestPinsValidatedConfigThroughAdmission(t *testing.T) {
+	r, token, cfg, s, _ := interestTestRouter(t)
+	cfg.AlistServer.ScanAuthHeader = "provider-A"
+	body := `{"session":"p","generation":1,"path":"/current.mp4","speculativePaths":["/next.mp4"]}`
+	if rr := interestTestRequest(r, token, body); rr.Code != http.StatusAccepted {
+		t.Fatal(rr.Body.String())
+	}
+	scopeA := s.scope
+	// Simulate configuration rotation after validation/scope creation but before
+	// enqueue. This isolated fixture has no background workers or disk mutation.
+	s.advanceHook = func() {
+		cfg.AlistServer.ScanAuthHeader = "provider-B"
+		cfg.AlistServer.ServerHost = "rotated.invalid"
+	}
+	rr := interestTestRequest(r, token, body)
+	if rr.Code != http.StatusAccepted || s.scope != scopeA {
+		t.Fatalf("scope drift status=%d", rr.Code)
+	}
+	for _, bound := range s.configs[len(s.configs)-2:] {
+		if bound.ScanAuthHeader != "provider-A" || bound.ServerHost == "rotated.invalid" {
+			t.Fatal("enqueue authentication/origin drifted from the validated snapshot")
+		}
 	}
 }
