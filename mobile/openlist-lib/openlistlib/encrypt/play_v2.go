@@ -494,6 +494,8 @@ type playbackTiming struct {
 	headerLatencyMs    float64
 	firstByteLatencyMs float64
 	bytesWritten       int64
+	rangeStart         int64 // actual parsed plaintext start, including suffix ranges
+	totalBytes         int64 // final normalized plaintext representation size
 	status             int
 }
 
@@ -1759,6 +1761,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	// handler-entry-to-first-body-write latency (not player first-frame timing).
 	if timing, ok := r.Context().Value(playbackTimingKey{}).(*playbackTiming); ok {
 		timing.headerLatencyMs = time.Since(streamWallStart).Seconds() * 1000
+		timing.rangeStart, timing.totalBytes = startPos, fileSize
 	}
 	w.WriteHeader(statusCode)
 
@@ -1855,8 +1858,8 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			duration, mbps = 0, 0
 		}
 		o.proxy.recordPlaybackStats(displayPathFromPlaybackRequest(r, info), provider,
-			timing.bytesWritten, fileSize, statsCompleted, "", duration,
-			rangeStartFromRequest(r), timing.headerLatencyMs, mbps, timing.firstByteLatencyMs)
+			timing.bytesWritten, timing.totalBytes, statsCompleted, "", duration,
+			timing.rangeStart, timing.headerLatencyMs, mbps, timing.firstByteLatencyMs)
 	}()
 	fileSize = o.resolveFileSize(r.Context(), r, info)
 	decodeDisabled := r.URL.Query().Get("decode") == "0"
@@ -1993,6 +1996,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 				w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
 				w.WriteHeader(http.StatusPartialContent)
 				statsEnabled, cacheHit = true, true
+				timing.rangeStart, timing.totalBytes = start, fileSize
 				n, writeErr := w.Write(data)
 				statsCompleted = writeErr == nil && n == len(data)
 				log.Debugf("V2 play: served %d bytes from decrypted block cache start=%d end=%d", len(data), start, end)
