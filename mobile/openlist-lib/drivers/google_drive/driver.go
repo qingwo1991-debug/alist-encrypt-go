@@ -20,9 +20,6 @@ type GoogleDrive struct {
 	AccessToken            string
 	ServiceAccountFile     int
 	ServiceAccountFileList []string
-	// refreshTokenCtx 绑定 Init 传入的超时 ctx：无梯子/网络不可达时
-	// token 刷新能在 3s 内失败，而不是挂在 resty 30s×3 重试上拖住启动。
-	refreshTokenCtx context.Context
 }
 
 func (d *GoogleDrive) Config() driver.Config {
@@ -37,8 +34,7 @@ func (d *GoogleDrive) Init(ctx context.Context) error {
 	if d.ChunkSize == 0 {
 		d.ChunkSize = 5
 	}
-	d.refreshTokenCtx = ctx
-	return d.refreshToken()
+	return d.refreshToken(ctx)
 }
 
 func (d *GoogleDrive) Drop(ctx context.Context) error {
@@ -46,7 +42,7 @@ func (d *GoogleDrive) Drop(ctx context.Context) error {
 }
 
 func (d *GoogleDrive) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	files, err := d.getFiles(dir.GetID())
+	files, err := d.getFiles(ctx, dir.GetID())
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +147,7 @@ func (d *GoogleDrive) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 	}
 	if e.Error.Code != 0 {
 		if e.Error.Code == 401 {
-			err = d.refreshToken()
+			err = d.refreshToken(ctx)
 			if err != nil {
 				return err
 			}

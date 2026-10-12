@@ -8,6 +8,7 @@ package singleflight // import "golang.org/x/sync/singleflight"
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -54,7 +55,8 @@ func newPanicError(v any) error {
 
 // call is an in-flight or completed singleflight.Do call
 type call[T any] struct {
-	wg sync.WaitGroup
+	wg   sync.WaitGroup
+	done chan struct{}
 
 	// These fields are written once before the WaitGroup is done
 	// and are only read after the WaitGroup is done.
@@ -105,11 +107,46 @@ func (g *Group[T]) Do(key string, fn func() (T, error)) (v T, err error, shared 
 		}
 		return c.val, c.err, true
 	}
-	c := new(call[T])
+	c := &call[T]{done: make(chan struct{})}
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
 
+	g.doCall(c, key, fn)
+	return c.val, c.err, c.dups > 0
+}
+
+// DoContext is Do with cancellation-aware duplicate waiters. The first caller
+// executes fn synchronously and owns its work context; a duplicate cancelling
+// does not cancel or forget the shared operation. No goroutine is created to
+// disguise a function that does not honor its context.
+func (g *Group[T]) DoContext(ctx context.Context, key string, fn func() (T, error)) (v T, err error, shared bool) {
+	if err := ctx.Err(); err != nil {
+		return v, err, false
+	}
+	g.mu.Lock()
+	if g.m == nil {
+		g.m = make(map[string]*call[T])
+	}
+	if c, ok := g.m[key]; ok {
+		c.dups++
+		g.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return v, ctx.Err(), true
+		case <-c.done:
+		}
+		if e, ok := c.err.(*panicError); ok {
+			panic(e)
+		} else if c.err == errGoexit {
+			runtime.Goexit()
+		}
+		return c.val, c.err, true
+	}
+	c := &call[T]{done: make(chan struct{})}
+	c.wg.Add(1)
+	g.m[key] = c
+	g.mu.Unlock()
 	g.doCall(c, key, fn)
 	return c.val, c.err, c.dups > 0
 }
@@ -130,7 +167,7 @@ func (g *Group[T]) DoChan(key string, fn func() (T, error)) <-chan Result[T] {
 		g.mu.Unlock()
 		return ch
 	}
-	c := &call[T]{chans: []chan<- Result[T]{ch}}
+	c := &call[T]{done: make(chan struct{}), chans: []chan<- Result[T]{ch}}
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
@@ -156,6 +193,7 @@ func (g *Group[T]) doCall(c *call[T], key string, fn func() (T, error)) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		c.wg.Done()
+		close(c.done)
 		if g.m[key] == c {
 			delete(g.m, key)
 		}

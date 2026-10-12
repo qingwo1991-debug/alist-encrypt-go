@@ -15,6 +15,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/httputil"
 )
 
 // Client wraps http.Client with connection pooling and HTTP/2 support
@@ -353,9 +354,22 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				Str("url", req.URL.String()).
 				Msg("H2C connection used")
 		}
-		return resp, err
+		return withBodyIdleDeadline(resp), err
 	}
-	return c.Client.Do(req)
+	resp, err := c.Client.Do(req)
+	return withBodyIdleDeadline(resp), err
+}
+
+// This is a progress deadline, deliberately not a total video duration limit.
+// A stalled CDN must release its playback slot while healthy long streams and
+// slow player writes remain unrestricted.
+const streamBodyIdleTimeout = 30 * time.Second
+
+func withBodyIdleDeadline(resp *http.Response) *http.Response {
+	if resp != nil && resp.Body != nil {
+		resp.Body = httputil.NewIdleBody(resp.Body, streamBodyIdleTimeout)
+	}
+	return resp
 }
 
 // isBackendRequest checks if the request is to the Alist backend

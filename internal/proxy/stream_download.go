@@ -88,7 +88,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	// Retry transient network errors with jittered exponential backoff
 	var resp *http.Response
 	var doErr error
-	_ = s.retrier.Do(r.Context(), func() error {
+	retryErr := s.retrier.Do(r.Context(), func() error {
 		resp, doErr = s.client.Do(req)
 		if doErr != nil {
 			if backoff.IsTransient(doErr) {
@@ -103,16 +103,26 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 		}
 		return nil
 	})
+	// Cancellation during backoff supersedes the previous attempt's error.
+	// In particular, a player seek after a 503 must not poison the breaker.
+	if r.Context().Err() != nil {
+		doErr = r.Context().Err()
+	} else if retryErr != nil {
+		doErr = retryErr
+	}
 	if doErr != nil {
-		reason, retryable := classifyStreamError(doErr)
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		reason, _ := classifyStreamError(doErr)
 		// Seeking cancels the in-flight request; classifyStreamError labels it
 		// client_disconnect. That is a client-side event, not an upstream
 		// failure, so it must not trip the per-host circuit breaker (otherwise
 		// a seek-heavy player trips the breaker and breaks all HTTP playback).
-		if reason != "client_disconnect" {
+		if reason != "client_disconnect" && r.Context().Err() == nil {
 			cbGate.RecordFailure()
 		}
-		return &StreamOutcome{Err: errors.NewProxyErrorWithCause("failed to fetch", doErr), FailureReason: reason, Retryable: retryable}
+		return streamFetchErrorOutcome(doErr)
 	}
 	if isRedirectStatus(resp.StatusCode) {
 		cbGate.RecordSuccess()
@@ -623,8 +633,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
 		readerToStream = newDecryptedCacheReader(readerToStream, s.blockCache, baseKey, sniffOffset)
 	}
-	// 首帧可观测性：写出响应头之前记录上游+破解准备总耗时。播放器感知的
-	// "首帧前卡顿" = request → 第一个响应字节，这里精确覆盖到 WriteHeader 前。
+	// Preparation after the upstream response was obtained; excludes resolve,
+	// probe, retries and upstream headers. End-to-end first body byte is recorded
+	// independently by the handler and must not be inferred from this metric.
 	result.HeaderLatency = time.Since(streamStart)
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true

@@ -14,6 +14,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ContentVersionV3 is recognized only to reject unsupported containers. Mobile
+// playback and uploads still implement V1/V2, not the V3 AEAD container format.
+const ContentVersionV3 = 3
+
+const unsupportedV3Playback = "unsupported V3 encrypted content: mobile playback supports V1/V2 only"
+
 func uploadMetaKey(target string) string {
 	parsed, err := url.Parse(target)
 	if err != nil {
@@ -167,13 +173,23 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 			return meta, false
 		}
 		prefix, err := io.ReadAll(io.LimitReader(resp.Body, ContentHeaderSize()))
-		if err != nil {
-			log.Infof("[v2-inspect] failed to read prefix bytes: target=%s err=%v", safeURLForLog(currentURL), err)
-			return meta, false
-		}
 		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
 			meta.CiphertextSize = total
 			meta.PlainSize = total
+		}
+		// Root's V3 container has a 48-byte header, but its six-byte magic is
+		// sufficient to reject it. Never send a recognized unsupported format
+		// through the V2 parser (which would conclude legacy) or fallback probes.
+		if len(prefix) >= 6 && string(prefix[:6]) == "V3GCM3" {
+			return ContentMeta{
+				EncType:        normalizeContentEncType(encType),
+				Version:        ContentVersionV3,
+				CiphertextSize: meta.CiphertextSize,
+			}, true
+		}
+		if err != nil {
+			log.Infof("[v2-inspect] failed to read prefix bytes: target=%s err=%v", safeURLForLog(currentURL), err)
+			return meta, false
 		}
 		expectedPrefix := ContentHeaderSize()
 		if meta.CiphertextSize > 0 && meta.CiphertextSize < expectedPrefix {

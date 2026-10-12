@@ -38,7 +38,7 @@ func newTestAggregator() (*serverPlaybackSessionAggregator, *testPlaybackWriter)
 func TestServerPlaybackSessionMergesRangeRequests(t *testing.T) {
 	a, w := newTestAggregator()
 	// 首帧：0 位置，2MB（连续段，不计 seek）
-	a.record(PlaybackEvent{Path: "/a.mp4", Provider: "cdn", BytesServed: 2 << 20, TotalBytes: 10 << 20, DurationSecs: 3.0, Completed: true})
+	a.record(PlaybackEvent{Path: "/a.mp4", Provider: "cdn", BytesServed: 2 << 20, TotalBytes: 10 << 20, DurationSecs: 3.0, Completed: true, HeaderLatencyMs: 10, FirstByteLatencyMs: 123})
 	// 两次 seek：位置 > 0，量小
 	a.record(PlaybackEvent{Path: "/a.mp4", Provider: "cdn", BytesServed: 256 << 10, TotalBytes: 10 << 20, DurationSecs: 1.0, Completed: true, RangeStart: 30 << 20})
 	a.record(PlaybackEvent{Path: "/a.mp4", Provider: "cdn", BytesServed: 256 << 10, TotalBytes: 10 << 20, DurationSecs: 1.0, Completed: true, RangeStart: 70 << 20})
@@ -58,6 +58,9 @@ func TestServerPlaybackSessionMergesRangeRequests(t *testing.T) {
 	}
 	if rec.SeekCount != 2 {
 		t.Errorf("seek_count = %d, want 2", rec.SeekCount)
+	}
+	if rec.FirstByteLatencyMs != 123 || rec.HeaderLatencyMs != 10 {
+		t.Fatalf("first byte and preparation metrics lost or conflated: %+v", rec)
 	}
 	if rec.DurationSecs != 5.0 {
 		t.Errorf("duration_secs = %f, want 5.0", rec.DurationSecs)

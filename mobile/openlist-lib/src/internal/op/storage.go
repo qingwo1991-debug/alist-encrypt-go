@@ -48,25 +48,46 @@ func GetStorageByMountPath(mountPath string) (driver.Driver, error) {
 func CreateStorage(ctx context.Context, storage model.Storage) (uint, error) {
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+	log.Infof(
+		"[mobile_storage_create] normalized mount_path=%s driver=%s remark=%s",
+		storage.MountPath,
+		storage.Driver,
+		storage.Remark,
+	)
 	var err error
 	// check driver first
 	driverName := storage.Driver
 	driverNew, err := GetDriver(driverName)
 	if err != nil {
+		log.Warnf("[mobile_storage_create] get driver failed driver=%s err=%v", driverName, err)
 		return 0, errors.WithMessage(err, "failed get driver new")
 	}
 	storageDriver := driverNew()
 	// insert storage to database
 	err = db.CreateStorage(&storage)
 	if err != nil {
+		log.Warnf("[mobile_storage_create] db create failed mount_path=%s err=%v", storage.MountPath, err)
 		return storage.ID, errors.WithMessage(err, "failed create storage in database")
 	}
 	// already has an id
 	err = initStorage(ctx, storage, storageDriver)
 	go callStorageHooks("add", storageDriver)
 	if err != nil {
+		log.Warnf(
+			"[mobile_storage_create] init failed id=%d mount_path=%s driver=%s err=%v",
+			storage.ID,
+			storage.MountPath,
+			storage.Driver,
+			err,
+		)
 		return storage.ID, errors.Wrap(err, "failed init storage but storage is already created")
 	}
+	log.Infof(
+		"[mobile_storage_create] initialized id=%d mount_path=%s driver=%s",
+		storage.ID,
+		storage.MountPath,
+		storage.Driver,
+	)
 	log.Debugf("storage id=%d mount_path=%s driver=%s is created", storage.ID, storage.MountPath, storage.Driver)
 	return storage.ID, nil
 }
@@ -78,7 +99,11 @@ func LoadStorage(ctx context.Context, storage model.Storage) error {
 	driverName := storage.Driver
 	driverNew, err := GetDriver(driverName)
 	if err != nil {
-		return errors.WithMessage(err, "failed get driver new")
+		err = errors.WithMessage(err, "failed get driver new")
+		readiness.Lock()
+		readiness.mounts[storage.MountPath] = &storageReadiness{err: err}
+		readiness.Unlock()
+		return err
 	}
 	storageDriver := driverNew()
 
@@ -96,11 +121,20 @@ func getCurrentGoroutineStack() string {
 
 // initStorage initialize the driver and store to storagesMap
 func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
+	state := beginStorageLoad(ctx, storage.MountPath)
+	defer func() {
+		readiness.Lock()
+		if readiness.mounts[storage.MountPath] == state {
+			state.pending, state.err = false, err
+		}
+		readiness.Unlock()
+	}()
 	storageDriver.SetStorage(storage)
 	driverStorage := storageDriver.GetStorage()
 	defer func() {
-		if err := recover(); err != nil {
-			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", err, getCurrentGoroutineStack())
+		if recovered := recover(); recovered != nil {
+			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", recovered, getCurrentGoroutineStack())
+			err = errors.New(errInfo)
 			log.Errorf("panic init storage: %s", errInfo)
 			driverStorage.SetStatus(errInfo)
 			MustSaveDriverStorage(storageDriver)
@@ -141,9 +175,16 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 		}
 	}
 	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil {
 		err = storageDriver.Init(ctx)
 	}
-	storagesMap.Store(driverStorage.MountPath, storageDriver)
+	// A non-cooperative driver may finish after its deadline. Never publish that
+	// completion as WORK. This is not a substitute for transport cancellation.
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		if IsUseOnlineAPI(storageDriver) {
 			driverStorage.SetStatus(utils.SanitizeHTML(err.Error()))
@@ -154,6 +195,8 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 	} else {
 		driverStorage.SetStatus(WORK)
 	}
+	// Publish only after its final status is set.
+	storagesMap.Store(driverStorage.MountPath, storageDriver)
 	MustSaveDriverStorage(storageDriver)
 	return err
 }
@@ -220,6 +263,7 @@ func DisableStorage(ctx context.Context, id uint) error {
 		return errors.WithMessage(err, "failed update storage in db")
 	}
 	storagesMap.Delete(storage.MountPath)
+	removeStorageReadiness(storage.MountPath)
 	go callStorageHooks("del", storageDriver)
 	return nil
 }
@@ -248,6 +292,7 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	if oldStorage.MountPath != storage.MountPath {
 		// mount path renamed, need to drop the storage
 		storagesMap.Delete(oldStorage.MountPath)
+		removeStorageReadiness(oldStorage.MountPath)
 		Cache.DeleteDirectoryTree(storageDriver, "/")
 		Cache.InvalidateStorageDetails(storageDriver)
 	}
@@ -282,6 +327,7 @@ func DeleteStorageById(ctx context.Context, id uint) error {
 		}
 		// delete the storage in the memory
 		storagesMap.Delete(storage.MountPath)
+		removeStorageReadiness(storage.MountPath)
 		Cache.DeleteDirectoryTree(storageDriver, "/")
 		Cache.InvalidateStorageDetails(storageDriver)
 		go callStorageHooks("del", storageDriver)
@@ -456,6 +502,17 @@ var balanceMap generic_sync.MapOf[string, int]
 func GetBalancedStorage(path string) driver.Driver {
 	path = utils.FixAndCleanPath(path)
 	storages := getStoragesByPath(path)
+	ready := storages[:0]
+	for _, storage := range storages {
+		if storageMountReadyError(storage.GetStorage().MountPath) != nil {
+			continue
+		}
+		if storage.Config().CheckStatus && storage.GetStorage().Status != WORK {
+			continue
+		}
+		ready = append(ready, storage)
+	}
+	storages = ready
 	storageNum := len(storages)
 	switch storageNum {
 	case 0:
@@ -486,7 +543,7 @@ func GetStorageDetails(ctx context.Context, storage driver.Driver, refresh ...bo
 			return ret, nil
 		}
 	}
-	details, err, _ := detailsG.Do(storage.GetStorage().MountPath, func() (*model.StorageDetails, error) {
+	details, err, _ := detailsG.DoContext(ctx, storage.GetStorage().MountPath, func() (*model.StorageDetails, error) {
 		ret, err := wd.GetDetails(ctx)
 		if err != nil {
 			return nil, err

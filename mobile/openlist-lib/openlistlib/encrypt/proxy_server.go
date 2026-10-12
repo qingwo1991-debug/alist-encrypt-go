@@ -277,6 +277,14 @@ func (p *ProxyServer) streamClientSnapshot() *http.Client {
 	return client
 }
 
+func streamHeaderBudget(config *ProxyConfig) time.Duration {
+	budget := time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600))*time.Second + 2*time.Second
+	if budget > mobileStreamResponseHeaderTimeout {
+		return mobileStreamResponseHeaderTimeout
+	}
+	return budget
+}
+
 // NewProxyServer 创建代理服务器
 func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	if config == nil {
@@ -398,7 +406,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 	// 双网络（可选）：若开关开启且拿到双 fwmark，DialContext 按 host 绑定网络。
 	// 开关关闭时 newDualNetworkDialer 返回 base.DialContext，零行为变化。
-	if dualDialer := newDualNetworkDialer(baseDialer); dualDialer != nil {
+	if dualDialer := newDualNetworkDialer(baseDialer); config.EnableDualNetwork && dualDialer != nil {
 		upstreamDial = dualDialer
 	}
 	transport.DialContext = preferIPv4DialContext(upstreamDial)
@@ -411,11 +419,7 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	// 一分钟+。手机网络环境复杂（如 4G/WiFi 切换、CDN 节点抖动），这里把
 	// 响应头等待收紧到一个移动端合理窗口，超时由既有的幂等重试/rawURL 失效
 	// 回退机制接管，让播放器快速获得失败决定权，而不是死等。
-	streamTimeoutBudget := upstreamTimeout + 2*time.Second
-	if maxStream := mobileStreamResponseHeaderTimeout; streamTimeoutBudget > maxStream {
-		streamTimeoutBudget = maxStream
-	}
-	streamTransport.ResponseHeaderTimeout = streamTimeoutBudget
+	streamTransport.ResponseHeaderTimeout = streamHeaderBudget(config)
 
 	// 配置 HTTP/2 over TLS 支持
 	if err := http2.ConfigureTransport(transport); err != nil {
@@ -472,7 +476,9 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	if h2cTransport != nil {
 		httpClient.Transport = h2cTransport
 		probeClient.Transport = h2cTransport
-		streamClient.Transport = h2cTransport
+		// Keep streaming on the bounded-header transport; h2c has no equivalent
+		// ResponseHeaderTimeout and must not bypass the mobile startup budget.
+		streamClient.Transport = streamTransport
 	} else {
 		httpClient.Transport = transport
 		probeClient.Transport = transport
@@ -515,7 +521,9 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 	httpClient.Transport = &instrumentedRoundTripper{base: httpClient.Transport, stats: &server.controlHTTPStats}
 	probeClient.Transport = &instrumentedRoundTripper{base: probeClient.Transport, stats: &server.probeHTTPStats}
-	streamClient.Transport = &instrumentedRoundTripper{base: streamClient.Transport, stats: &server.streamHTTPStats}
+	streamClient.Transport = &streamIdleRoundTripper{base: &instrumentedRoundTripper{base: streamClient.Transport, stats: &server.streamHTTPStats}, timeout: mobileStreamReadIdleTimeout}
+	trackNetworkTransport(transport, true)
+	trackNetworkTransport(streamTransport, true)
 	server.rebuildEncryptPathIndex()
 
 	// 启动缓存清理协程
@@ -695,6 +703,8 @@ func (p *ProxyServer) Stop() error {
 		cancel()
 	}
 
+	trackNetworkTransport(transport, false)
+	trackNetworkTransport(streamTransport, false)
 	// 关闭 HTTP Transport 的连接池，确保重启时没有残留连接
 	if transport != nil {
 		transport.CloseIdleConnections()
@@ -819,6 +829,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		streamBufferSize.Store(int64(effectiveKB * 1024))
 	}
 	workingConfig := cloneProxyConfig(config)
+	invalidateNetworkRouting()
 
 	p.mutex.Lock()
 	if p.stopping {
@@ -846,7 +857,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		upstreamDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return baseDialer.DialContext(ctx, network, addr)
 		}
-		if dualDialer := newDualNetworkDialer(baseDialer); dualDialer != nil {
+		if dualDialer := newDualNetworkDialer(baseDialer); config.EnableDualNetwork && dualDialer != nil {
 			upstreamDial = dualDialer
 		}
 		transport.DialContext = preferIPv4DialContext(upstreamDial)
@@ -854,8 +865,11 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	streamTransport := oldStreamTransport
 	if oldStreamTransport != nil {
 		streamTransport = oldStreamTransport.Clone()
-		streamTransport.ResponseHeaderTimeout = time.Duration(clampSeconds(config.UpstreamTimeoutSeconds, 60, 5, 600))*time.Second + 2*time.Second
+		streamTransport.ResponseHeaderTimeout = streamHeaderBudget(config)
 		streamTransport.Proxy = newProxyResolver(config)
+		if transport != nil {
+			streamTransport.DialContext = transport.DialContext
+		}
 	}
 
 	controlBase := http.RoundTripper(transport)
@@ -864,7 +878,6 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	if p.h2cTransport != nil {
 		controlBase = p.h2cTransport
 		probeBase = p.h2cTransport
-		streamBase = p.h2cTransport
 	}
 	noRedirect := func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -882,11 +895,15 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.streamClient = &http.Client{
 		Timeout:       0,
 		CheckRedirect: noRedirect,
-		Transport:     &instrumentedRoundTripper{base: streamBase, stats: &p.streamHTTPStats},
+		Transport:     &streamIdleRoundTripper{base: &instrumentedRoundTripper{base: streamBase, stats: &p.streamHTTPStats}, timeout: mobileStreamReadIdleTimeout},
 	}
 	p.transport = transport
 	p.streamTransport = streamTransport
 	p.mutex.Unlock()
+	trackNetworkTransport(oldTransport, false)
+	trackNetworkTransport(oldStreamTransport, false)
+	trackNetworkTransport(transport, true)
+	trackNetworkTransport(streamTransport, true)
 
 	if p.IsRunning() {
 		prewarmConfiguredV2KeysAsync(workingConfig)

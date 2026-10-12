@@ -13,7 +13,8 @@ import (
 )
 
 // StorageInitTimeout 单个存储启动初始化超时时间。
-// 移动端/国内直连时国外盘无法访问，设置超时隔离（3s），防止拖死启动流程及整体门闩。
+// 只有消费 context 的驱动能在此预算内退出；未配合的驱动不伪装成已隔离。
+// 请求按挂载就绪状态处理，不依赖整体初始化门闩。
 const StorageInitTimeout = 3 * time.Second
 
 func LoadStorages() {
@@ -21,10 +22,11 @@ func LoadStorages() {
 	if err != nil {
 		utils.Log.Fatalf("failed get enabled storages: %+v", err)
 	}
+	op.PrepareStorageLoads(storages)
 	go func(storages []model.Storage) {
 		// 并行加载：每个盘一个 goroutine，并带超时 context 隔离。
-		// 单个盘 Init（如国外盘连不上）最多超时 3s，不会拖死整个服务；
-		// 所有盘加载完成后（或超时后）发送 StoragesLoaded 信号。
+		// 合作驱动在 3s 预算耗尽后退出；不为未消费 ctx 的驱动启动额外逃逸 goroutine。
+		// 所有实际初始化调用返回后发送 StoragesLoaded 信号。
 		var wg sync.WaitGroup
 		for i := range storages {
 			wg.Add(1)

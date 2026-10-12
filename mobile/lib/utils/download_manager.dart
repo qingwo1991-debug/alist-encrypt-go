@@ -1,8 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:developer';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:get/get.dart' as getx;
@@ -110,7 +110,246 @@ class DownloadTask {
 
 class DownloadManager {
   static const String _downloadDirPrefKey = 'download_directory_path';
-  static final Dio _dio = Dio();
+  static final Dio _dio = Dio(BaseOptions(
+    connectTimeout: const Duration(seconds: 10),
+    receiveTimeout: const Duration(seconds: 20),
+    sendTimeout: const Duration(seconds: 20),
+  ));
+  @visibleForTesting
+  static Duration headerBudget = const Duration(seconds: 20);
+  @visibleForTesting
+  static Duration idleBudget = const Duration(seconds: 20);
+  // At most two transfers (eight range requests) across all entry points.
+  static int _runningTransfers = 0;
+  // Bound pending work as well as sockets: bursts must not accumulate an
+  // unlimited number of suspended transfers and their callbacks/tokens.
+  static const int _maxQueuedDownloads = 32;
+  static final List<Completer<void>> _transferQueue = [];
+
+  @visibleForTesting
+  static int cancellationSubscriptions = 0;
+  static final Expando<StreamSubscription<DioException>> _bodyCancellation =
+      Expando<StreamSubscription<DioException>>();
+  static final Expando<CancelToken> _bodyAttempts = Expando<CancelToken>();
+
+  static StreamSubscription<DioException>? _listenForCancellation(
+    CancelToken? token, void Function(DioException) onCancel,
+  ) {
+    if (token == null) return null;
+    cancellationSubscriptions++;
+    return token.whenCancel.asStream().listen(onCancel);
+  }
+
+  static Future<void> _detachCancellation(
+    StreamSubscription<DioException>? subscription,
+  ) async {
+    if (subscription == null) return;
+    await subscription.cancel();
+    cancellationSubscriptions--;
+  }
+
+  static Future<void> _detachBodyCancellation(ResponseBody body) async {
+    final subscription = _bodyCancellation[body];
+    _bodyCancellation[body] = null;
+    _bodyAttempts[body] = null;
+    await _detachCancellation(subscription);
+  }
+
+  static Future<void> _acquireTransfer(CancelToken? token) async {
+    _throwIfCancelled(token);
+    if (_runningTransfers < 2) {
+      _runningTransfers++;
+      return;
+    }
+    if (_transferQueue.length >= _maxQueuedDownloads) {
+      throw StateError('Download queue is full (32 pending transfers)');
+    }
+    final waiter = Completer<void>();
+    _transferQueue.add(waiter);
+    final cancelled = Completer<bool>();
+    final subscription = _listenForCancellation(token, (_) {
+      if (!cancelled.isCompleted) cancelled.complete(false);
+    });
+    try {
+      final admitted = await Future.any<bool>([
+        waiter.future.then((_) => true),
+        if (token != null) cancelled.future,
+      ]);
+      if (!admitted || token?.isCancelled == true) {
+        // An admitted waiter owns a slot, even if cancellation won the race.
+        if (!_transferQueue.remove(waiter)) _releaseTransfer();
+        _throwIfCancelled(token);
+      }
+    } finally {
+      await _detachCancellation(subscription);
+    }
+  }
+
+  static void _releaseTransfer() {
+    if (_transferQueue.isNotEmpty) {
+      _transferQueue.removeAt(0).complete();
+    } else {
+      _runningTransfers--;
+    }
+  }
+
+  // A separate attempt token bounds time to headers without cancelling the
+  // caller's token: mirror fallback must remain usable after a timeout.
+  static Future<Response<T>> _requestHeaders<T>(
+    String url, {
+    required bool head,
+    required CancelToken? cancelToken,
+    required Options options,
+  }) async {
+    _throwIfCancelled(cancelToken);
+    final attempt = CancelToken();
+    final subscription = _listenForCancellation(
+      cancelToken, (error) => attempt.cancel(error),
+    );
+    var handedToBody = false;
+    var timedOut = false;
+    final timer = Timer(headerBudget, () {
+      timedOut = true;
+      attempt.cancel('download header budget exceeded');
+    });
+    try {
+      final response = await _dio.request<T>(
+        url,
+        cancelToken: attempt,
+        options: options.copyWith(method: head ? 'HEAD' : 'GET'),
+      );
+      final data = response.data;
+      if (data is ResponseBody) {
+        // Stream responses outlive their headers. Transfer ownership until
+        // body EOF/error/cancel/discard, not merely until this request returns.
+        _bodyAttempts[data] = attempt;
+        if (subscription != null) {
+          _bodyCancellation[data] = subscription;
+          handedToBody = true;
+        }
+      }
+      return response;
+    } catch (error) {
+      _throwIfCancelled(cancelToken);
+      if (timedOut) throw TimeoutException('download header budget exceeded');
+      rethrow;
+    } finally {
+      timer.cancel();
+      if (!handedToBody) await _detachCancellation(subscription);
+    }
+  }
+
+  @visibleForTesting
+  static Dio get networkClientForTesting => _dio;
+
+  /// Runs the same bounded transfer pipeline without UI/platform directory IO.
+  @visibleForTesting
+  static Future<void> downloadToPathForTesting({
+    required String url,
+    List<String>? urls,
+    required String filePath,
+    CancelToken? cancelToken,
+    required void Function(int received, int total) onProgress,
+  }) =>
+      _downloadToPath(
+        url: url,
+        urls: urls,
+        filePath: filePath,
+        cancelToken: cancelToken,
+        onProgress: onProgress,
+      );
+
+  static Future<void> _downloadToPath({
+    required String url,
+    List<String>? urls,
+    required String filePath,
+    CancelToken? cancelToken,
+    required void Function(int received, int total) onProgress,
+  }) async {
+    await _acquireTransfer(cancelToken);
+    try {
+      _throwIfCancelled(cancelToken);
+      final candidates = (urls != null && urls.isNotEmpty) ? urls : [url];
+      final multiOk = await _downloadMultiThread(
+        url: candidates.first,
+        chunkUrls: candidates,
+        filePath: filePath,
+        cancelToken: cancelToken,
+        onProgress: onProgress,
+      );
+      if (multiOk) return;
+      Object? lastError;
+      for (final candidate in candidates) {
+        _throwIfCancelled(cancelToken);
+        try {
+          await _downloadSingle(
+            candidate,
+            filePath,
+            cancelToken,
+            onProgress,
+          );
+          _throwIfCancelled(cancelToken);
+          return;
+        } catch (error) {
+          _throwIfCancelled(cancelToken);
+          lastError = error;
+        }
+      }
+      throw lastError ?? StateError('All fallback download URLs failed');
+    } finally {
+      _releaseTransfer();
+    }
+  }
+
+  static Future<void> _downloadSingle(
+    String url,
+    String filePath,
+    CancelToken? token,
+    void Function(int received, int total) onProgress,
+  ) async {
+    final response = await _requestHeaders<ResponseBody>(
+      url,
+      head: false,
+      cancelToken: token,
+      options: Options(
+        responseType: ResponseType.stream,
+        headers: {'Accept-Encoding': 'identity'},
+      ),
+    );
+    final body = response.data!;
+    final total = int.tryParse(
+      response.headers.value(Headers.contentLengthHeader) ?? '',
+    ) ?? -1;
+    RandomAccessFile? file;
+    var reading = false;
+    try {
+      await File(filePath).parent.create(recursive: true);
+      file = await File(filePath).open(mode: FileMode.write);
+      var received = 0;
+      reading = true;
+      await for (final bytes in _readBody(body, token)) {
+        _throwIfCancelled(token);
+        file.writeFromSync(bytes);
+        received += bytes.length;
+        onProgress(received, total);
+      }
+      _throwIfCancelled(token);
+      if (total >= 0 && received != total) {
+        throw StateError('incomplete download: $received/$total');
+      }
+    } catch (_) {
+      await file?.close();
+      file = null;
+      try {
+        await File(filePath).delete();
+      } catch (_) {}
+      rethrow;
+    } finally {
+      if (!reading) await _discardResponseBody(body);
+      await file?.close();
+    }
+  }
+
   static final Map<String, DownloadTask> _activeTasks = {};
   static final List<DownloadTask> _completedTasks = [];
   static const int _downloadThreads = 4;
@@ -174,10 +413,58 @@ class DownloadManager {
     }
   }
 
+  static Stream<List<int>> _readBody(
+    ResponseBody body, CancelToken? token,
+  ) async* {
+    final iterator = StreamIterator(body.stream);
+    Completer<bool>? pending;
+    final subscription = _listenForCancellation(token, (error) {
+      final waiter = pending;
+      if (waiter != null && !waiter.isCompleted) waiter.completeError(error);
+    });
+    try {
+      while (true) {
+        _throwIfCancelled(token);
+        final waiter = Completer<bool>();
+        pending = waiter;
+        iterator.moveNext().then((hasNext) {
+          if (!waiter.isCompleted) waiter.complete(hasNext);
+        }, onError: (Object error, StackTrace stack) {
+          if (!waiter.isCompleted) waiter.completeError(error, stack);
+        });
+        final hasNext = await waiter.future.timeout(idleBudget);
+        pending = null;
+        if (!hasNext) break;
+        _throwIfCancelled(token);
+        yield iterator.current;
+      }
+    } catch (error) {
+      // Dio wraps ResponseBody streams. Cancelling only the outer iterator
+      // need not abort the adapter's underlying response; cancel its private
+      // attempt too, while keeping the caller token usable for mirror retry.
+      _bodyAttempts[body]?.cancel(error);
+      rethrow;
+    } finally {
+      pending = null;
+      _bodyAttempts[body]?.cancel('download body reader finished');
+      try {
+        await iterator.cancel();
+      } finally {
+        await _detachCancellation(subscription);
+        await _detachBodyCancellation(body);
+      }
+    }
+  }
+
   static Future<void> _discardResponseBody(ResponseBody? body) async {
     if (body == null) return;
-    final subscription = body.stream.listen((_) {});
-    await subscription.cancel();
+    _bodyAttempts[body]?.cancel('discard download response');
+    final subscription = body.stream.listen((_) {}, onError: (Object _) {});
+    try {
+      await subscription.cancel();
+    } finally {
+      await _detachBodyCancellation(body);
+    }
   }
 
   static Future<void> _downloadChunk({
@@ -210,8 +497,9 @@ class DownloadManager {
       _throwIfCancelled(cancelToken);
       final candidate = candidates[i];
       try {
-        final response = await _dio.get<ResponseBody>(
+        final response = await _requestHeaders<ResponseBody>(
           candidate,
+          head: false,
           cancelToken: cancelToken,
           options: Options(
             headers: headers,
@@ -255,6 +543,7 @@ class DownloadManager {
           'content-range=${response.headers.value('content-range')}',
         );
       } catch (e) {
+        _throwIfCancelled(cancelToken);
         lastError = e;
         log('分片 ${chunk.index} 源 $candidate 失败，重试下一个源: $e');
       }
@@ -266,31 +555,24 @@ class DownloadManager {
           );
     }
 
-    // 直接以字节偏移写入最终目标文件，不再先落盘 part-NN。
-    // 使用外层共享的写句柄：先达到 chunk.start 再同步写；Dart 单线程下
-    // setPosition+writeFromSync 属于同步块，期间不会被其它分片打断，
-    // 因此各分片按偏移写入互不覆盖，合并阶段整体消除。
+    // Each batch seeks and writes synchronously, with no await or callback
+    // between them. await-for yields between batches, so seeking only once
+    // (even synchronously) would let another chunk move the shared cursor.
+    // Tradeoff: synchronous disk IO briefly occupies the UI isolate. Moving
+    // this off-isolate requires genuine positional IO or an owned writer.
     var received = 0;
-    try {
-      raf.setPosition(chunk.start);
-      final stream = responseBody.stream.map((bytes) {
-        _throwIfCancelled(cancelToken);
-        received += bytes.length;
-        if (received > chunk.length) {
-          throw StateError(
-            'range body exceeded expected length for '
-            'bytes=${chunk.start}-${chunk.end}',
-          );
-        }
-        onReceived(received);
-        return bytes;
-      });
-      await for (final bytes in stream) {
-        raf.writeFromSync(bytes);
+    await for (final bytes in _readBody(responseBody, cancelToken)) {
+      _throwIfCancelled(cancelToken);
+      if (received + bytes.length > chunk.length) {
+        throw StateError(
+          'range body exceeded expected length for '
+          'bytes=${chunk.start}-${chunk.end}',
+        );
       }
-    } catch (e) {
-      // 句柄由外层统一关闭；此处仅抛给 Future.wait 触发整段失败回退。
-      rethrow;
+      raf.setPositionSync(chunk.start + received);
+      raf.writeFromSync(bytes);
+      received += bytes.length;
+      onReceived(received);
     }
 
     _throwIfCancelled(cancelToken);
@@ -366,8 +648,8 @@ class DownloadManager {
       // 显示初始通知
       await NotificationManager.showDownloadProgressNotification();
       
-      // 执行下载：优先多线程，失败回退单线程
-      final multiOk = await _downloadMultiThread(
+      // The common pipeline bounds tasks, headers and idle body reads.
+      await _downloadToPath(
         url: url,
         filePath: filePath,
         cancelToken: cancelToken,
@@ -382,29 +664,6 @@ class DownloadManager {
           log('下载进度(多线程): ${(task.progress * 100).toStringAsFixed(1)}%');
         },
       );
-
-      if (!multiOk) {
-        log('多线程下载未适用或失败，回退到单线程下载');
-        await _dio.download(
-          url,
-          filePath,
-          cancelToken: cancelToken,
-          onReceiveProgress: (received, total) {
-            if (task.status == DownloadStatus.cancelled) return;
-
-            task.receivedBytes = received;
-            task.totalBytes = total;
-            if (total > 0) {
-              task.progress = received / total;
-            }
-
-            // 更新通知进度
-            NotificationManager.showDownloadProgressNotification();
-
-            log('下载进度: ${(task.progress * 100).toStringAsFixed(1)}%');
-          },
-        );
-      }
 
       // 下载完成
       task.status = DownloadStatus.completed;
@@ -509,9 +768,9 @@ class DownloadManager {
 
     try {
       // 执行下载：优先多线程，失败回退单线程
-      final multiOk = await _downloadMultiThread(
+      await _downloadToPath(
         url: primaryUrl,
-        chunkUrls: (urls != null && urls.length > 1) ? urls : null,
+        urls: urls,
         filePath: filePath,
         cancelToken: cancelToken,
         onProgress: (received, total) {
@@ -522,41 +781,6 @@ class DownloadManager {
           onProgress(progress, received, total);
         },
       );
-
-      if (!multiOk) {
-        final fallbackUrls = (urls != null && urls.isNotEmpty) ? urls : [url];
-        bool singleOk = false;
-        Object? lastErr;
-
-        for (final downloadCandidate in fallbackUrls) {
-          try {
-            await _dio.download(
-              downloadCandidate,
-              filePath,
-              cancelToken: cancelToken,
-              onReceiveProgress: (received, total) {
-                double progress = 0.0;
-                if (total > 0) {
-                  progress = received / total;
-                }
-                onProgress(progress, received, total);
-              },
-            );
-            singleOk = true;
-            break;
-          } catch (e) {
-            lastErr = e;
-            if (e is DioException && e.type == DioExceptionType.cancel) {
-              rethrow;
-            }
-            log('单线程从 $downloadCandidate 下载失败，尝试下一个镜像源: $e');
-          }
-        }
-
-        if (!singleOk) {
-          throw lastErr ?? Exception('All fallback download URLs failed');
-        }
-      }
 
       // 下载完成
       onComplete(filePath);
@@ -586,13 +810,18 @@ class DownloadManager {
     required void Function(int received, int total) onProgress,
   }) async {
     RandomAccessFile? raf;
+    final siblings = CancelToken();
+    final subscription = _listenForCancellation(
+      cancelToken, (error) => siblings.cancel(error),
+    );
     try {
       // HEAD 始终用首选 URL（最快源），确定 content-length/accept-ranges/etag。
       final headUrl = (chunkUrls != null && chunkUrls.isNotEmpty)
           ? chunkUrls.first
           : url;
-      final headResp = await _dio.head(
+      final headResp = await _requestHeaders<dynamic>(
         headUrl,
+        head: true,
         cancelToken: cancelToken,
         options: Options(
           headers: {'Accept-Encoding': 'identity'},
@@ -638,7 +867,7 @@ class DownloadManager {
           chunk: chunk,
           totalBytes: contentLength,
           ifRange: ifRange,
-          cancelToken: cancelToken,
+          cancelToken: siblings,
           onReceived: (received) {
             receivedPerChunk[chunk.index] = received;
             final totalReceived = receivedPerChunk.fold<int>(
@@ -647,7 +876,12 @@ class DownloadManager {
             );
             onProgress(totalReceived, contentLength);
           },
-        );
+        ).catchError((Object error, StackTrace stack) {
+          // Cancel siblings immediately, but still join them before closing
+          // the shared handle. Never cancel the user's fallback token.
+          siblings.cancel(error);
+          Error.throwWithStackTrace(error, stack);
+        });
       }));
 
       // Future.wait 默认（eagerError=false）等所有分片完成后再抛错，
@@ -680,6 +914,8 @@ class DownloadManager {
       }
       log('多线程下载失败，将回退到单线程: $e');
       return false;
+    } finally {
+      await _detachCancellation(subscription);
     }
   }
 

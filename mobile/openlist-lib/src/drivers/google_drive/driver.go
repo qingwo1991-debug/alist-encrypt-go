@@ -34,7 +34,7 @@ func (d *GoogleDrive) Init(ctx context.Context) error {
 	if d.ChunkSize == 0 {
 		d.ChunkSize = 5
 	}
-	return d.refreshToken()
+	return d.refreshToken(ctx)
 }
 
 func (d *GoogleDrive) Drop(ctx context.Context) error {
@@ -42,7 +42,7 @@ func (d *GoogleDrive) Drop(ctx context.Context) error {
 }
 
 func (d *GoogleDrive) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	files, err := d.getFiles(dir.GetID())
+	files, err := d.getFiles(ctx, dir.GetID())
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (d *GoogleDrive) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 	}
 	if e.Error.Code != 0 {
 		if e.Error.Code == 401 {
-			err = d.refreshToken()
+			err = d.refreshToken(ctx)
 			if err != nil {
 				return err
 			}

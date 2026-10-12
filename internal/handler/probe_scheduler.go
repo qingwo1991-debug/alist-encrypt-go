@@ -37,7 +37,12 @@ type ProbeScheduler struct {
 	workerWG  sync.WaitGroup
 	stopOnce  sync.Once
 
-	queue    chan probeItem
+	queue chan probeItem
+	// queueMu protects bounded deferred work and event-driven dispatch. The
+	// channel remains the admission queue; workers never wait on a busy provider.
+	queueMu  sync.Mutex
+	waiting  []probeItem
+	wake     chan struct{}
 	workers  int
 	cooldown time.Duration
 	minDelay time.Duration
@@ -377,21 +382,30 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 		return
 	}
 
+	ps.queueMu.Lock()
 	select {
 	case <-ps.done():
+		ps.queueMu.Unlock()
 		ps.releaseProbeReservation(key, reservedAt, true)
 		return
-	case ps.queue <- probeItem{file: file, authHeaders: authHeaders.Clone(), source: source, queuedAt: time.Now()}:
-		atomic.AddUint64(&ps.enqueuedTotal, 1)
-		atomic.AddUint64(&ps.filesQueuedTotal, 1)
-		ps.recordTerminal(file, source, probeStatusQueued, reportedSize, probeExecutionResult{})
 	default:
+	}
+	// Deferred items retain their reservation and consume the original queue
+	// capacity. New admissions must never evict accepted probes.
+	if len(ps.queue)+len(ps.waiting) >= cap(ps.queue) {
+		ps.queueMu.Unlock()
 		ps.releaseProbeReservation(key, reservedAt, true)
 		atomic.AddUint64(&ps.droppedTotal, 1)
 		atomic.AddUint64(&ps.filesSkippedTotal, 1)
 		ps.recordTerminal(file, source, probeStatusDropped, reportedSize, probeExecutionResult{})
 		return
 	}
+	ps.queue <- probeItem{file: file, authHeaders: authHeaders.Clone(), source: source, queuedAt: time.Now()}
+	atomic.AddUint64(&ps.enqueuedTotal, 1)
+	atomic.AddUint64(&ps.filesQueuedTotal, 1)
+	ps.recordTerminal(file, source, probeStatusQueued, reportedSize, probeExecutionResult{})
+	ps.notifyDispatchLocked()
+	ps.queueMu.Unlock()
 }
 
 func (ps *ProbeScheduler) Stats() map[string]interface{} {
@@ -401,10 +415,12 @@ func (ps *ProbeScheduler) Stats() map[string]interface{} {
 	ps.ensureRecordState()
 	queueLen := 0
 	queueCap := 0
+	ps.queueMu.Lock()
 	if ps.queue != nil {
-		queueLen = len(ps.queue)
+		queueLen = len(ps.queue) + len(ps.waiting)
 		queueCap = cap(ps.queue)
 	}
+	ps.queueMu.Unlock()
 	warm := ps.copyWarmStates()
 	var consumed uint64
 	for _, state := range warm {
@@ -481,15 +497,77 @@ func (ps *ProbeScheduler) shouldProbeRange(file FileItem, size int64) bool {
 	return ps.stream.ShouldBackgroundProbeRange(file.TargetURL, file.CompatStorageKey)
 }
 
-func (ps *ProbeScheduler) worker() {
+// notifyDispatchLocked broadcasts admission/slot-release events to idle workers.
+// A generation channel prevents lost wakeups without timers or busy polling.
+func (ps *ProbeScheduler) notifyDispatchLocked() {
+	if ps.wake != nil {
+		close(ps.wake)
+	}
+	ps.wake = make(chan struct{})
+}
+
+func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 	for {
+		ps.queueMu.Lock()
+		if ps.wake == nil {
+			ps.wake = make(chan struct{})
+		}
 		select {
 		case <-ps.done():
-			return
-		case item := <-ps.queue:
-			ps.runItem(item)
+			ps.queueMu.Unlock()
+			return probeItem{}, nil, false
+		default:
+		}
+		// Admission and draining share the lock, so queue + waiting stays bounded
+		// by the configured capacity, even when all providers are occupied.
+		for len(ps.queue) > 0 {
+			ps.waiting = append(ps.waiting, <-ps.queue)
+		}
+		// Foreground first-frame and next-episode warmups use the same high
+		// source. Preserve FIFO within each class; skip busy providers entirely.
+		for _, high := range []bool{true, false} {
+			for i, item := range ps.waiting {
+				if (item.source == probeSourceFirstFrame) != high {
+					continue
+				}
+				provider, _ := splitProvider(ProviderKey(item.file.TargetURL, item.file.DisplayPath))
+				sem := ps.getProviderSem(provider)
+				select {
+				case sem <- struct{}{}:
+					copy(ps.waiting[i:], ps.waiting[i+1:])
+					ps.waiting[len(ps.waiting)-1] = probeItem{}
+					ps.waiting = ps.waiting[:len(ps.waiting)-1]
+					ps.queueMu.Unlock()
+					return item, sem, true
+				default:
+				}
+			}
+		}
+		wake := ps.wake
+		ps.queueMu.Unlock()
+		select {
+		case <-ps.done():
+			return probeItem{}, nil, false
+		case <-wake:
 		}
 	}
+}
+
+func (ps *ProbeScheduler) worker() {
+	for {
+		item, sem, ok := ps.nextReadyItem()
+		if !ok {
+			return
+		}
+		ps.runClaimedItem(item, sem)
+	}
+}
+
+func (ps *ProbeScheduler) releaseProviderSlot(sem chan struct{}) {
+	<-sem
+	ps.queueMu.Lock()
+	ps.notifyDispatchLocked()
+	ps.queueMu.Unlock()
 }
 
 // Stop cancels queued and active background probes and waits for workers to
@@ -503,6 +581,18 @@ func (ps *ProbeScheduler) Stop() {
 			ps.cancel()
 		}
 		ps.workerWG.Wait()
+		// No worker can claim another item after cancellation. Release queued
+		// reservations as well, so shutdown retains no auth headers or files.
+		ps.queueMu.Lock()
+		for len(ps.queue) > 0 {
+			ps.waiting = append(ps.waiting, <-ps.queue)
+		}
+		for _, item := range ps.waiting {
+			ps.clearCooldownForFile(item.file)
+			ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+		}
+		ps.waiting = nil
+		ps.queueMu.Unlock()
 		// 最终落盘，确保退出前保留最新计数与 warm 状态。
 		ps.persistSnapshot()
 	})
@@ -522,32 +612,37 @@ func (ps *ProbeScheduler) done() <-chan struct{} {
 	return nil
 }
 
+// runItem supports direct callers; scheduler workers already claim a ready
+// provider slot. Bound direct-call waiting too, and permit retry on expiry.
 func (ps *ProbeScheduler) runItem(item probeItem) {
+	provider, _ := splitProvider(ProviderKey(item.file.TargetURL, item.file.DisplayPath))
+	sem := ps.getProviderSem(provider)
+	startedAt := time.Now()
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	reason := errors.FailureReason("")
+	select {
+	case <-ps.done():
+		reason = "scheduler_stopped"
+	case <-timer.C:
+		reason = "provider_wait_timeout"
+	case sem <- struct{}{}:
+		ps.runClaimedItem(item, sem)
+		return
+	}
+	ps.finishRecord(item, startedAt, probeStatusFailed, probeExecutionResult{failureReason: reason})
+	atomic.AddUint64(&ps.filesFailedTotal, 1)
+	ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+}
+
+func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
+	defer ps.releaseProviderSlot(sem)
 	ps.ensureRecordState()
 	defer ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
 	atomic.AddUint64(&ps.runningCount, 1)
 	startedAt := time.Now()
 	ps.recordRunning(item, startedAt)
 	defer atomic.AddUint64(&ps.runningCount, ^uint64(0))
-
-	providerKey := ProviderKey(item.file.TargetURL, item.file.DisplayPath)
-	providerHost, _ := splitProvider(providerKey)
-	sem := ps.getProviderSem(providerHost)
-	if sem == nil {
-		ps.finishRecord(item, startedAt, probeStatusFailed, probeExecutionResult{failureReason: "provider_semaphore_unavailable"})
-		atomic.AddUint64(&ps.filesFailedTotal, 1)
-		return
-	}
-
-	// Workers wait for their provider slot. Dropping here permanently loses an
-	// item that was already marked as seen for the full cooldown window.
-	select {
-	case <-ps.done():
-		ps.finishRecord(item, startedAt, probeStatusFailed, probeExecutionResult{failureReason: "scheduler_stopped"})
-		return
-	case sem <- struct{}{}:
-	}
-	defer func() { <-sem }()
 
 	// Only delay files that were already successfully warmed. A directory
 	// listing populates the size cache before the first warmup, so using size

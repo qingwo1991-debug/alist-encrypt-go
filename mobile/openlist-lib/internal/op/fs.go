@@ -28,6 +28,12 @@ func List(ctx context.Context, storage driver.Driver, path string, args model.Li
 }
 
 func list(ctx context.Context, storage driver.Driver, path string, args model.ListArgs, resultValidator func([]model.Obj) error) ([]model.Obj, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := StorageReadyError(utils.GetFullPath(storage.GetStorage().MountPath, path)); err != nil {
+		return nil, err
+	}
 	if storage.Config().CheckStatus && storage.GetStorage().Status != WORK {
 		return nil, errors.WithMessagef(errs.StorageNotInit, "storage status: %s", storage.GetStorage().Status)
 	}
@@ -48,7 +54,7 @@ func list(ctx context.Context, storage driver.Driver, path string, args model.Li
 		}
 	}
 
-	objs, err, _ := listG.Do(key, func() ([]model.Obj, error) {
+	objs, err, _ := listG.DoContext(ctx, key, func() ([]model.Obj, error) {
 		dir, err := GetUnwrap(ctx, storage, path)
 		if err != nil {
 			return nil, errors.WithMessage(err, "failed get dir")
@@ -60,6 +66,9 @@ func list(ctx context.Context, storage driver.Driver, path string, args model.Li
 		files, err := storage.List(ctx, dir, args)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to list objs")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		// warp obj name
 		wrapObjsName(storage, files)
@@ -193,7 +202,7 @@ func Get(ctx context.Context, storage driver.Driver, path string, excludeTempObj
 
 	if !dirCacheExists || refreshList {
 		var obj model.Obj
-		list(ctx, storage, dir, model.ListArgs{Refresh: refreshList}, func(objs []model.Obj) error {
+		_, err := list(ctx, storage, dir, model.ListArgs{Refresh: refreshList}, func(objs []model.Obj) error {
 			for _, f := range objs {
 				if f.GetName() == name {
 					if excludeTemp && model.ObjHasMask(f, model.Temp) {
@@ -205,6 +214,9 @@ func Get(ctx context.Context, storage driver.Driver, path string, excludeTempObj
 			}
 			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
 		if obj != nil {
 			return obj, nil
 		}
@@ -270,7 +282,7 @@ func Link(ctx context.Context, storage driver.Driver, path string, args model.Li
 		return ol, nil
 	}
 	for {
-		ol, err, _ := linkG.Do(key+"/"+typeKey, fn)
+		ol, err, _ := linkG.DoContext(ctx, key+"/"+typeKey, fn)
 		if err != nil {
 			return nil, nil, err
 		}

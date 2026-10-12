@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path"
@@ -47,7 +48,9 @@ type decryptPlaybackRequest struct {
 	FirstFrameFallbacks   *uint64
 	WarmupEnqueueCount    *uint64
 
-	StatsRecorder StatsRecorder
+	StatsRecorder      StatsRecorder
+	FirstBodyByteCount *uint64
+	FirstBodyByteNanos *uint64
 }
 
 // StatsRecorder 播放统计的记录接口。为 nil 时不记录（保持零开销）。
@@ -59,7 +62,8 @@ type StatsRecorder interface {
 
 func executeDecryptPlayback(req decryptPlaybackRequest) {
 	w := req.ResponseWriter
-	r := req.Request
+	r := withPlaybackRequestStart(req.Request)
+	req.Request = r
 	alist := config.AlistServer{}
 	if req.Config != nil {
 		alist = req.Config.AlistServerSnapshot()
@@ -166,6 +170,21 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if initialPlaybackHint && req.FirstFrameCount != nil {
 		atomic.AddUint64(req.FirstFrameCount, 1)
 	}
+	var firstByteLatency time.Duration
+	// Observe the actual accepted body write, not headers or a synthetic
+	// StreamOutcome. Next-episode work must start while a long GET is live.
+	w = &playbackFirstByteWriter{ResponseWriter: w, request: r, onFirstByte: func(elapsed time.Duration) {
+		firstByteLatency = elapsed
+		if req.FirstBodyByteCount != nil {
+			atomic.AddUint64(req.FirstBodyByteCount, 1)
+		}
+		if req.FirstBodyByteNanos != nil {
+			atomic.AddUint64(req.FirstBodyByteNanos, uint64(elapsed))
+		}
+		if initialPlaybackHint {
+			maybeEnqueueNextEpisodeWarmup(req, authHeaders)
+		}
+	}}
 	lastUpstreamStatus := 0
 	responseStarted := false
 	// ResponseStarted is a terminal transport boundary, not evidence of success.
@@ -185,22 +204,38 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		log.Error().Err(result.Err).Str("path", req.Path).Str("failure", reason.String()).Msg(req.FailureLogMsg + " (response already started)")
 		if req.StatsRecorder != nil {
 			req.StatsRecorder.RecordPlayback(PlaybackEvent{
-				Path:            req.FileItem.DisplayPath,
-				Provider:        req.ProviderKey,
-				BytesServed:     result.BytesWritten,
-				TotalBytes:      size,
-				DurationSecs:    result.WallDuration.Seconds(),
-				PlayedAt:        time.Now(),
-				Completed:       false,
-				ContentType:     result.ContentType,
-				RangeStart:      rangeStartFromHeader(r.Header.Get("Range")),
-				HeaderLatencyMs: float64(result.HeaderLatency.Milliseconds()),
-				Mbps:            bytesPerSecToMbps(result.BytesPerSecond),
+				Path:               req.FileItem.DisplayPath,
+				Provider:           req.ProviderKey,
+				BytesServed:        result.BytesWritten,
+				TotalBytes:         size,
+				DurationSecs:       result.WallDuration.Seconds(),
+				PlayedAt:           time.Now(),
+				Completed:          false,
+				ContentType:        result.ContentType,
+				RangeStart:         rangeStartFromHeader(r.Header.Get("Range")),
+				HeaderLatencyMs:    float64(result.HeaderLatency.Milliseconds()),
+				FirstByteLatencyMs: float64(firstByteLatency) / float64(time.Millisecond),
+				Mbps:               bytesPerSecToMbps(result.BytesPerSecond),
 			})
 		}
 		return true
 	}
 
+	recordServed := func(result *proxy.StreamOutcome, size int64, provider string) {
+		if req.StatsRecorder == nil {
+			return
+		}
+		req.StatsRecorder.RecordPlayback(PlaybackEvent{
+			Path: req.FileItem.DisplayPath, Provider: provider,
+			BytesServed: result.BytesWritten, TotalBytes: size,
+			DurationSecs: result.WallDuration.Seconds(), PlayedAt: time.Now(),
+			Completed:   result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
+			ContentType: result.ContentType, RangeStart: rangeStartFromHeader(r.Header.Get("Range")),
+			HeaderLatencyMs:    float64(result.HeaderLatency.Milliseconds()),
+			FirstByteLatencyMs: float64(firstByteLatency) / float64(time.Millisecond),
+			Mbps:               bytesPerSecToMbps(result.BytesPerSecond),
+		})
+	}
 	trySingle := func(size int64) (bool, errors.FailureReason, error) {
 		log.Info().
 			Str("category", "playback").
@@ -234,21 +269,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 			}
 			maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, result.ExpectedBytes)
-			if req.StatsRecorder != nil {
-				req.StatsRecorder.RecordPlayback(PlaybackEvent{
-					Path:            req.FileItem.DisplayPath,
-					Provider:        req.ProviderKey,
-					BytesServed:     result.BytesWritten,
-					TotalBytes:      size,
-					DurationSecs:    result.WallDuration.Seconds(),
-					PlayedAt:        time.Now(),
-					Completed:       result.FailureReason == "" && result.BytesWritten >= result.ExpectedBytes,
-					ContentType:     result.ContentType,
-					RangeStart:      rangeStartFromHeader(r.Header.Get("Range")),
-					HeaderLatencyMs: float64(result.HeaderLatency.Milliseconds()),
-					Mbps:            bytesPerSecToMbps(result.BytesPerSecond),
-				})
-			}
+			recordServed(result, size, req.ProviderKey)
 			return true, "", nil
 		}
 
@@ -293,6 +314,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 						req.Probe.RecordConsumerHit(fallbackFile, req.ConsumerScenario)
 					}
 					maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
+					recordServed(fallback, size, fallbackProvider)
 					return true, "", nil
 				}
 				if finishStartedFailure(fallback, strategy, size) {
@@ -344,6 +366,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
 				maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
+				recordServed(fallback, size, req.ProviderKey)
 				return true, "", nil
 			}
 			if finishStartedFailure(fallback, fallbackStrategy, size) {
@@ -376,6 +399,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
 				maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
+				recordServed(fallback, size, req.ProviderKey)
 				return true, "", nil
 			}
 			if finishStartedFailure(fallback, proxy.StreamStrategyFull, size) {
@@ -409,6 +433,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 					req.Probe.RecordConsumerHit(req.FileItem, req.ConsumerScenario)
 				}
 				maybeEnqueueFirstFrameWarmup(req, authHeaders, initialPlaybackHint, size, fallback.ExpectedBytes)
+				recordServed(fallback, size, req.ProviderKey)
 				return true, "", nil
 			}
 			if finishStartedFailure(fallback, proxy.StreamStrategyFull, size) {
@@ -531,6 +556,51 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	RespondHTTPErrorWithStatus(w, "Decryption failed: "+lastFailure.String(), http.StatusBadGateway)
 }
 
+type playbackRequestStartKey struct{}
+
+func withPlaybackRequestStart(r *http.Request) *http.Request {
+	if _, ok := r.Context().Value(playbackRequestStartKey{}).(time.Time); ok {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), playbackRequestStartKey{}, time.Now()))
+}
+
+type playbackFirstByteWriter struct {
+	http.ResponseWriter
+	request     *http.Request
+	status      int
+	observed    bool
+	onFirstByte func(time.Duration)
+}
+
+func (w *playbackFirstByteWriter) WriteHeader(status int) {
+	if status >= 200 && w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *playbackFirstByteWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	if !w.observed && n > 0 && err == nil && w.status >= 200 && w.status < 300 &&
+		w.request.Method == http.MethodGet && w.request.Context().Err() == nil {
+		w.observed = true
+		start, _ := w.request.Context().Value(playbackRequestStartKey{}).(time.Time)
+		if !start.IsZero() && w.onFirstByte != nil {
+			w.onFirstByte(time.Since(start))
+		}
+	}
+	return n, err
+}
+
+func (w *playbackFirstByteWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *playbackFirstByteWriter) Flush() {
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
 // playbackResponseWriter tracks the passthrough path, which returns only an
 // error rather than a StreamOutcome. Unwrap preserves ResponseController access
 // to the underlying writer's optional interfaces.
@@ -552,6 +622,10 @@ func (w *playbackResponseWriter) Write(p []byte) (int, error) {
 }
 
 func (w *playbackResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *playbackResponseWriter) Flush() {
+	w.started = true
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
 
 // playbackOutcomeServed treats a player cancel after response bytes were sent
 // as a completed handoff. Seeking naturally cancels the previous HTTP request;
@@ -653,8 +727,8 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	// result. This caps cold-path probe latency at ~one upstream round trip
 	// instead of the serial rawURL → /dav → /d chain (2-3s on stale URLs),
 	// which is the dominant first-frame / seek latency for unprobed files.
-	result, confirmedCandidate := probeCandidateCandidates(req.Config, candidateURLs, authVariants, func(candidateURL string, headers http.Header) proxy.ContentInspectionResult {
-		return req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), candidateURL, headers, req.PasswdInfo, fallbackSize)
+	result, confirmedCandidate := probeCandidateCandidatesContext(req.Request.Context(), req.Config, candidateURLs, authVariants, func(ctx context.Context, candidateURL string, headers http.Header) proxy.ContentInspectionResult {
+		return req.StreamProxy.InspectEncryptedContentResult(ctx, candidateURL, headers, req.PasswdInfo, fallbackSize)
 	})
 	meta := result.Meta
 	if meta.EncType == "" {
@@ -841,7 +915,6 @@ func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.H
 		reportedSize = expectedBytes
 	}
 	req.Probe.EnqueueWithSource(req.FileItem, authHeaders, reportedSize, probeSourceFirstFrame)
-	maybeEnqueueNextEpisodeWarmup(req, authHeaders)
 	if req.WarmupEnqueueCount != nil {
 		atomic.AddUint64(req.WarmupEnqueueCount, 1)
 	}

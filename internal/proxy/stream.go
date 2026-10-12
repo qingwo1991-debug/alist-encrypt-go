@@ -84,6 +84,7 @@ type StreamProxy struct {
 	uploadMetaMu     sync.Mutex
 	uploadMeta       map[string]uploadMetaEntry
 	blockCache       *decryptedBlockCache
+	v3Memory         *v3MemoryBudget
 	streamLimiter    chan struct{}
 	activeStreams    int64
 	rejectedStreams  uint64
@@ -98,7 +99,7 @@ type StreamOutcome struct {
 	BytesWritten    int64
 	ExpectedBytes   int64
 	WallDuration    time.Duration // 流式写出墙钟时长（统计播放时长近似）
-	HeaderLatency   time.Duration // 请求发起→响应头就绪（首帧延迟近似）
+	HeaderLatency   time.Duration // response preparation after upstream headers; not first-frame latency
 	BytesPerSecond  float64       // BytesWritten / WallDuration，avg 下行速率
 	ResponseStarted bool
 	StatusCode      int
@@ -144,6 +145,7 @@ func NewStreamProxy(cfg *config.Config) *StreamProxy {
 		retrier:       retrier,
 		uploadMeta:    make(map[string]uploadMetaEntry),
 		blockCache:    newDecryptedBlockCacheFromConfig(cfg),
+		v3Memory:      &v3MemoryBudget{},
 		streamLimiter: make(chan struct{}, maxActiveStreams),
 	}
 }

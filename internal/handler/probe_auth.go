@@ -1,8 +1,12 @@
 package handler
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -265,6 +269,10 @@ func isProbeAuthFailure(statusCode int) bool {
 }
 
 func probeCandidateWithAuth(cfg *config.Config, candidate string, authVariants []http.Header, inspect func(http.Header) proxy.ContentInspectionResult) proxy.ContentInspectionResult {
+	return probeCandidateWithAuthLazy(cfg, candidate, authVariants, inspect, func() http.Header { return lazyProbeJWTHeader(cfg) })
+}
+
+func probeCandidateWithAuthLazy(cfg *config.Config, candidate string, authVariants []http.Header, inspect func(http.Header) proxy.ContentInspectionResult, lazyJWT func() http.Header) proxy.ContentInspectionResult {
 	if inspect == nil {
 		return proxy.ContentInspectionResult{}
 	}
@@ -326,7 +334,7 @@ func probeCandidateWithAuth(cfg *config.Config, candidate string, authVariants [
 	if !unauthorized || !isAlistProbeTarget(cfg, candidate) {
 		return last
 	}
-	jwtHeaders := lazyProbeJWTHeader(cfg)
+	jwtHeaders := lazyJWT()
 	if jwtHeaders == nil {
 		return last
 	}
@@ -368,6 +376,22 @@ func probeCandidateCandidates(
 	authVariants []http.Header,
 	inspector func(candidateURL string, headers http.Header) proxy.ContentInspectionResult,
 ) (proxy.ContentInspectionResult, string) {
+	if inspector == nil {
+		return proxy.ContentInspectionResult{}, ""
+	}
+	return probeCandidateCandidatesContext(context.Background(), cfg, candidates, authVariants,
+		func(_ context.Context, candidate string, headers http.Header) proxy.ContentInspectionResult {
+			return inspector(candidate, headers)
+		})
+}
+
+// Context-aware production callers share one budget across primary, fallback,
+// auth retries and login. Confirmation cancels the entire fallback wave.
+func probeCandidateCandidatesContext(parent context.Context, cfg *config.Config, candidates []string, authVariants []http.Header,
+	inspector func(context.Context, string, http.Header) proxy.ContentInspectionResult,
+) (proxy.ContentInspectionResult, string) {
+	ctx, cancel := context.WithTimeout(parent, contentProbeTotalBudget)
+	defer cancel()
 	if inspector == nil || len(candidates) == 0 {
 		return proxy.ContentInspectionResult{}, ""
 	}
@@ -388,15 +412,28 @@ func probeCandidateCandidates(
 		unique = unique[:maxProbeParallelCandidates]
 	}
 
+	if len(unique) == 0 || ctx.Err() != nil {
+		return proxy.ContentInspectionResult{}, ""
+	}
+	inspectCandidate := func(candidate string) proxy.ContentInspectionResult {
+		return probeCandidateWithAuthLazy(cfg, candidate, authVariants, func(headers http.Header) proxy.ContentInspectionResult {
+			if ctx.Err() != nil {
+				return proxy.ContentInspectionResult{}
+			}
+			return inspector(ctx, candidate, headers)
+		}, func() http.Header { return lazyProbeJWTHeaderContext(ctx, cfg) })
+	}
 	// Stage 1: probe the primary candidate. When it confirms, this is the only
 	// upstream probe — identical to the old serial path's common success case.
 	primary := unique[0]
-	primaryResult := probeCandidateWithAuth(cfg, primary, authVariants,
-		func(headers http.Header) proxy.ContentInspectionResult { return inspector(primary, headers) })
+	primaryResult := inspectCandidate(primary)
+	if ctx.Err() != nil {
+		return proxy.ContentInspectionResult{}, primary
+	}
 	if primaryResult.Confirmed {
 		return primaryResult, primary
 	}
-	if len(unique) == 1 {
+	if len(unique) == 1 || ctx.Err() != nil {
 		return primaryResult, primary
 	}
 
@@ -411,15 +448,19 @@ func probeCandidateCandidates(
 	for _, candidate := range fallbacks {
 		candidate := candidate
 		go func() {
-			res := probeCandidateWithAuth(cfg, candidate, authVariants,
-				func(headers http.Header) proxy.ContentInspectionResult { return inspector(candidate, headers) })
+			res := inspectCandidate(candidate)
 			results <- probeOutcome{result: res, candidate: candidate}
 		}()
 	}
 	for i := 0; i < len(fallbacks); i++ {
-		outcome := <-results
-		if outcome.result.Confirmed {
-			return outcome.result, outcome.candidate
+		select {
+		case <-ctx.Done():
+			return primaryResult, primary
+		case outcome := <-results:
+			if outcome.result.Confirmed && ctx.Err() == nil {
+				cancel()
+				return outcome.result, outcome.candidate
+			}
 		}
 	}
 	// No fallback confirmed: return the primary result.
@@ -430,3 +471,62 @@ func probeCandidateCandidates(
 // probes issued for one file lookup during the fallback stage.
 // 3 = the primary rawURL plus the /dav and /d candidates.
 const maxProbeParallelCandidates = 3
+const contentProbeTotalBudget = 8 * time.Second
+
+// The legacy JWT singleflight uses an uncancellable fetcher; context-aware
+// playback must not wait on it. A login belongs to this candidate's budget.
+func lazyProbeJWTHeaderContext(ctx context.Context, cfg *config.Config) http.Header {
+	alistURL, username, password, ok := configuredProbeJWTCredentials(cfg)
+	if !ok || ctx.Err() != nil {
+		return nil
+	}
+	token, cached := lookupCachedProbeJWTForCredentials(alistURL, username, password)
+	if !cached {
+		body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, alistURL+"/api/auth/login", bytes.NewReader(body))
+		if err != nil {
+			return nil
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := (&http.Client{Timeout: contentProbeTotalBudget}).Do(req)
+		if err != nil {
+			return nil
+		}
+		defer resp.Body.Close()
+		var payload struct {
+			Code int `json:"code"`
+			Data struct {
+				Token string `json:"token"`
+			} `json:"data"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload) != nil || ctx.Err() != nil {
+			return nil
+		}
+		if payload.Code == 200 {
+			token = strings.TrimSpace(payload.Data.Token)
+		}
+		now := time.Now()
+		ttl := probeJWTCacheTTL
+		if token == "" {
+			ttl = probeJWTNegativeCacheTTL
+		}
+		key := probeJWTCacheKey(alistURL, username, password)
+		probeJWTState.Lock()
+		if len(probeJWTState.entries) >= probeJWTCacheMax {
+			var oldest [sha256.Size]byte
+			var oldestAt time.Time
+			for k, entry := range probeJWTState.entries {
+				if oldestAt.IsZero() || entry.lastUsed.Before(oldestAt) {
+					oldest, oldestAt = k, entry.lastUsed
+				}
+			}
+			delete(probeJWTState.entries, oldest)
+		}
+		probeJWTState.entries[key] = probeJWTCacheEntry{token: token, expiresAt: now.Add(ttl), lastUsed: now}
+		probeJWTState.Unlock()
+	}
+	if token == "" || ctx.Err() != nil {
+		return nil
+	}
+	return http.Header{"Authorization": []string{token}}
+}
