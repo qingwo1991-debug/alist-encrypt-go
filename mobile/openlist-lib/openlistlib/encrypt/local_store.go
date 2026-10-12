@@ -46,6 +46,8 @@ type prewarmMeta struct {
 	contentVersion    int
 	headerLen         int64
 	nonceField        []byte
+	chunkSize         uint32
+	kdfIterations     uint32
 	rawURL            string
 	sign              string
 	upstreamFetchedAt int64
@@ -64,6 +66,8 @@ type storeRecord struct {
 	contentVersion int
 	headerLen      int64
 	nonceField     []byte
+	chunkSize      uint32
+	kdfIterations  uint32
 	encryptedPath  string
 	accessedAt     time.Time
 	prewarm        *prewarmMeta
@@ -89,11 +93,22 @@ type LocalSizeRecord struct {
 	ContentVersion    int    `json:"content_version,omitempty"`
 	HeaderLen         int64  `json:"header_len,omitempty"`
 	NonceField        []byte `json:"nonce_field,omitempty"`
+	ChunkSize         uint32 `json:"chunk_size,omitempty"`
+	KDFIterations     uint32 `json:"kdf_iterations,omitempty"`
 	RawURL            string `json:"raw_url,omitempty"`
 	Sign              string `json:"sign,omitempty"`
 	UpstreamFetchedAt int64  `json:"upstream_fetched_at,omitempty"`
 	LastAccessed      int64  `json:"last_accessed"`
 	UpdatedAt         int64  `json:"updated_at"`
+}
+
+func localRecordContentMeta(rec LocalSizeRecord) ContentMeta {
+	return ContentMeta{Version: rec.ContentVersion, HeaderLen: rec.HeaderLen, PlainSize: rec.Size,
+		CiphertextSize: rec.CiphertextSize, NonceField: cloneNonceField(rec.NonceField), ChunkSize: rec.ChunkSize, KDFIterations: rec.KDFIterations}
+}
+
+func validEmptyV3LocalRecord(rec LocalSizeRecord) bool {
+	return rec.Size == 0 && rec.ContentVersion == ContentVersionV3 && ValidateV3ContentMeta(localRecordContentMeta(rec)) == nil
 }
 
 type LocalStrategyRecord struct {
@@ -253,6 +268,8 @@ func initLocalSchema(db *sql.DB) error {
             content_version INTEGER NOT NULL DEFAULT 0,
             header_len INTEGER NOT NULL DEFAULT 0,
             nonce_field BLOB NULL,
+            chunk_size INTEGER NOT NULL DEFAULT 0,
+            kdf_iterations INTEGER NOT NULL DEFAULT 0,
             raw_url TEXT NOT NULL DEFAULT '',
             sign TEXT NOT NULL DEFAULT '',
             upstream_fetched_at INTEGER NOT NULL DEFAULT 0,
@@ -363,7 +380,7 @@ func initLocalSchema(db *sql.DB) error {
 	            updated_at INTEGER NOT NULL
 	        );`,
 		`INSERT INTO local_db_meta (key, value, updated_at)
-	        VALUES ('schema_version', '6', strftime('%s','now'))
+	        VALUES ('schema_version', '7', strftime('%s','now'))
 	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
@@ -382,6 +399,8 @@ func migrateLocalSchema(db *sql.DB) error {
 		`ALTER TABLE local_media_size ADD COLUMN content_version INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE local_media_size ADD COLUMN header_len INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE local_media_size ADD COLUMN nonce_field BLOB NULL`,
+		`ALTER TABLE local_media_size ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE local_media_size ADD COLUMN kdf_iterations INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE local_media_size ADD COLUMN raw_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE local_media_size ADD COLUMN sign TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE local_media_size ADD COLUMN upstream_fetched_at INTEGER NOT NULL DEFAULT 0`,
@@ -462,7 +481,7 @@ func (s *localStore) GetFileMeta(key string) (*LocalSizeRecord, bool) {
 	if s == nil || s.db == nil || key == "" {
 		return nil, false
 	}
-	row := s.db.QueryRow(`SELECT provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at
+	row := s.db.QueryRow(`SELECT provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, raw_url, sign, upstream_fetched_at, last_accessed, updated_at
 		FROM local_media_size WHERE key = ?`, key)
 	var rec LocalSizeRecord
 	rec.Key = key
@@ -476,6 +495,8 @@ func (s *localStore) GetFileMeta(key string) (*LocalSizeRecord, bool) {
 		&rec.ContentVersion,
 		&rec.HeaderLen,
 		&rec.NonceField,
+		&rec.ChunkSize,
+		&rec.KDFIterations,
 		&rec.RawURL,
 		&rec.Sign,
 		&rec.UpstreamFetchedAt,
@@ -547,6 +568,27 @@ func (s *localStore) AddSizeV2Meta(key, providerHost, originalPath, encryptedPat
 	})
 }
 
+// AddContentMeta persists confirmed content geometry, including empty V3.
+// Callers must finish a streaming trailer probe before supplying V3 metadata.
+func (s *localStore) AddContentMeta(key, providerHost, originalPath, encryptedPath string, meta ContentMeta, accessedAt time.Time) {
+	if s == nil || key == "" || providerHost == "" || originalPath == "" {
+		return
+	}
+	if meta.IsV3() {
+		if ValidateV3ContentMeta(meta) != nil {
+			return
+		}
+	} else if meta.PlainSize <= 0 {
+		return
+	}
+	if GetNetworkState() == NetworkStateOffline {
+		return
+	}
+	s.enqueue(storeRecord{kind: recordKindSizeV2, key: key, providerHost: providerHost, originalPath: originalPath,
+		encryptedPath: encryptedPath, size: meta.PlainSize, ciphertextSize: meta.CiphertextSize, contentVersion: meta.Version,
+		headerLen: meta.HeaderLen, nonceField: cloneNonceField(meta.NonceField), chunkSize: meta.ChunkSize, kdfIterations: meta.KDFIterations, accessedAt: accessedAt})
+}
+
 // AddFullMeta 记录带完整元数据的文件观测（名称、加密路径、密文尺寸、头长度、
 // 随机数等）。与 AddSize 走同一张 local_media_size 表，靠 key 冲突后逐列覆盖
 // 已有信息。供目录列表预热/探测等"已知更多元数据"的写入路径使用。
@@ -559,6 +601,13 @@ func (s *localStore) AddFullMeta(key, providerHost, originalPath string, size in
 	}
 	if meta == nil {
 		meta = &prewarmMeta{}
+	}
+	if meta.contentVersion == ContentVersionV3 {
+		confirmed := ContentMeta{Version: meta.contentVersion, HeaderLen: meta.headerLen, PlainSize: size,
+			CiphertextSize: meta.ciphertextSize, NonceField: meta.nonceField, ChunkSize: meta.chunkSize, KDFIterations: meta.kdfIterations}
+		if ValidateV3ContentMeta(confirmed) != nil {
+			return
+		}
 	}
 	s.enqueue(storeRecord{
 		kind:         recordKindFullMeta,
@@ -687,18 +736,20 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 	}()
 
 	insertSize, err := tx.Prepare(`INSERT INTO local_media_size
-        (key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, raw_url, sign, upstream_fetched_at, last_accessed, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
         provider_host=excluded.provider_host,
         original_path=excluded.original_path,
-        encrypted_path=excluded.encrypted_path,
-        name=excluded.name,
-        size=excluded.size,
-        ciphertext_size=excluded.ciphertext_size,
-        content_version=excluded.content_version,
-        header_len=excluded.header_len,
-        nonce_field=excluded.nonce_field,
+        encrypted_path=CASE WHEN excluded.encrypted_path != '' THEN excluded.encrypted_path ELSE local_media_size.encrypted_path END,
+        name=CASE WHEN excluded.name != '' THEN excluded.name ELSE local_media_size.name END,
+        size=CASE WHEN excluded.content_version > 0 OR local_media_size.content_version = 0 THEN excluded.size ELSE local_media_size.size END,
+        ciphertext_size=CASE WHEN excluded.content_version > 0 THEN excluded.ciphertext_size ELSE local_media_size.ciphertext_size END,
+        content_version=CASE WHEN excluded.content_version > 0 THEN excluded.content_version ELSE local_media_size.content_version END,
+        header_len=CASE WHEN excluded.content_version > 0 THEN excluded.header_len ELSE local_media_size.header_len END,
+        nonce_field=CASE WHEN excluded.content_version > 0 THEN excluded.nonce_field ELSE local_media_size.nonce_field END,
+        chunk_size=CASE WHEN excluded.content_version > 0 THEN excluded.chunk_size ELSE local_media_size.chunk_size END,
+        kdf_iterations=CASE WHEN excluded.content_version > 0 THEN excluded.kdf_iterations ELSE local_media_size.kdf_iterations END,
         raw_url=excluded.raw_url,
         sign=excluded.sign,
         upstream_fetched_at=excluded.upstream_fetched_at,
@@ -742,7 +793,7 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 			}
 			if _, err := insertSize.Exec(
 				record.key, record.providerHost, record.originalPath, encryptedPath, name,
-				record.size, ciphertextSize, contentVersion, headerLen, nonceField, "", "", 0, ts, ts,
+				record.size, ciphertextSize, contentVersion, headerLen, nonceField, record.chunkSize, record.kdfIterations, "", "", 0, ts, ts,
 			); err != nil {
 				return err
 			}
@@ -756,6 +807,7 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 			var ciphertextSize, headerLen int64
 			var contentVersion int
 			var nonce []byte
+			var chunkSize, kdfIterations uint32
 			var upstreamFetchedAt int64
 			if pm != nil {
 				encryptedPath = pm.encryptedPath
@@ -764,11 +816,12 @@ func (s *localStore) flushBatch(batch []storeRecord) error {
 				contentVersion = pm.contentVersion
 				headerLen = pm.headerLen
 				nonce = cloneNonceField(pm.nonceField)
+				chunkSize, kdfIterations = pm.chunkSize, pm.kdfIterations
 				rawURL = pm.rawURL
 				sign = pm.sign
 				upstreamFetchedAt = pm.upstreamFetchedAt
 			}
-			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, encryptedPath, name, record.size, ciphertextSize, contentVersion, headerLen, nonce, rawURL, sign, upstreamFetchedAt, ts, ts); err != nil {
+			if _, err := insertSize.Exec(record.key, record.providerHost, record.originalPath, encryptedPath, name, record.size, ciphertextSize, contentVersion, headerLen, nonce, chunkSize, kdfIterations, rawURL, sign, upstreamFetchedAt, ts, ts); err != nil {
 				return err
 			}
 		}
@@ -781,10 +834,10 @@ func (s *localStore) GetSnapshot(key string) (*LocalSizeRecord, []LocalStrategyR
 	if s == nil || s.db == nil || key == "" {
 		return nil, nil, nil
 	}
-	row := s.db.QueryRow("SELECT provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at FROM local_media_size WHERE key = ?", key)
+	row := s.db.QueryRow("SELECT provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, raw_url, sign, upstream_fetched_at, last_accessed, updated_at FROM local_media_size WHERE key = ?", key)
 	var sizeRec LocalSizeRecord
 	sizeRec.Key = key
-	if err := row.Scan(&sizeRec.ProviderHost, &sizeRec.OriginalPath, &sizeRec.EncryptedPath, &sizeRec.Name, &sizeRec.Size, &sizeRec.CiphertextSize, &sizeRec.ContentVersion, &sizeRec.HeaderLen, &sizeRec.NonceField, &sizeRec.RawURL, &sizeRec.Sign, &sizeRec.UpstreamFetchedAt, &sizeRec.LastAccessed, &sizeRec.UpdatedAt); err != nil {
+	if err := row.Scan(&sizeRec.ProviderHost, &sizeRec.OriginalPath, &sizeRec.EncryptedPath, &sizeRec.Name, &sizeRec.Size, &sizeRec.CiphertextSize, &sizeRec.ContentVersion, &sizeRec.HeaderLen, &sizeRec.NonceField, &sizeRec.ChunkSize, &sizeRec.KDFIterations, &sizeRec.RawURL, &sizeRec.Sign, &sizeRec.UpstreamFetchedAt, &sizeRec.LastAccessed, &sizeRec.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil, nil
 		}
@@ -818,13 +871,13 @@ func (s *localStore) ExportAll() (*LocalExport, error) {
 	}
 	data := &LocalExport{}
 
-	rows, err := s.db.Query("SELECT key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at FROM local_media_size")
+	rows, err := s.db.Query("SELECT key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, raw_url, sign, upstream_fetched_at, last_accessed, updated_at FROM local_media_size")
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var rec LocalSizeRecord
-		if err := rows.Scan(&rec.Key, &rec.ProviderHost, &rec.OriginalPath, &rec.EncryptedPath, &rec.Name, &rec.Size, &rec.CiphertextSize, &rec.ContentVersion, &rec.HeaderLen, &rec.NonceField, &rec.RawURL, &rec.Sign, &rec.UpstreamFetchedAt, &rec.LastAccessed, &rec.UpdatedAt); err != nil {
+		if err := rows.Scan(&rec.Key, &rec.ProviderHost, &rec.OriginalPath, &rec.EncryptedPath, &rec.Name, &rec.Size, &rec.CiphertextSize, &rec.ContentVersion, &rec.HeaderLen, &rec.NonceField, &rec.ChunkSize, &rec.KDFIterations, &rec.RawURL, &rec.Sign, &rec.UpstreamFetchedAt, &rec.LastAccessed, &rec.UpdatedAt); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -874,18 +927,20 @@ func (s *localStore) Import(data *LocalExport) error {
 	}()
 
 	insertSize, err := tx.Prepare(`INSERT INTO local_media_size
-        (key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, raw_url, sign, upstream_fetched_at, last_accessed, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (key, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, raw_url, sign, upstream_fetched_at, last_accessed, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
         provider_host=excluded.provider_host,
         original_path=excluded.original_path,
-        encrypted_path=excluded.encrypted_path,
-        name=excluded.name,
-        size=excluded.size,
-        ciphertext_size=excluded.ciphertext_size,
-        content_version=excluded.content_version,
-        header_len=excluded.header_len,
-        nonce_field=excluded.nonce_field,
+        encrypted_path=CASE WHEN excluded.encrypted_path != '' THEN excluded.encrypted_path ELSE local_media_size.encrypted_path END,
+        name=CASE WHEN excluded.name != '' THEN excluded.name ELSE local_media_size.name END,
+        size=CASE WHEN excluded.content_version > 0 OR local_media_size.content_version = 0 THEN excluded.size ELSE local_media_size.size END,
+        ciphertext_size=CASE WHEN excluded.content_version > 0 THEN excluded.ciphertext_size ELSE local_media_size.ciphertext_size END,
+        content_version=CASE WHEN excluded.content_version > 0 THEN excluded.content_version ELSE local_media_size.content_version END,
+        header_len=CASE WHEN excluded.content_version > 0 THEN excluded.header_len ELSE local_media_size.header_len END,
+        nonce_field=CASE WHEN excluded.content_version > 0 THEN excluded.nonce_field ELSE local_media_size.nonce_field END,
+        chunk_size=CASE WHEN excluded.content_version > 0 THEN excluded.chunk_size ELSE local_media_size.chunk_size END,
+        kdf_iterations=CASE WHEN excluded.content_version > 0 THEN excluded.kdf_iterations ELSE local_media_size.kdf_iterations END,
         raw_url=excluded.raw_url,
         sign=excluded.sign,
         upstream_fetched_at=excluded.upstream_fetched_at,
@@ -916,7 +971,10 @@ func (s *localStore) Import(data *LocalExport) error {
 		if key == "" && rec.ProviderHost != "" && rec.OriginalPath != "" {
 			key = buildLocalKey(rec.ProviderHost, rec.OriginalPath)
 		}
-		if key == "" || rec.ProviderHost == "" || rec.OriginalPath == "" || rec.Size <= 0 {
+		if key == "" || rec.ProviderHost == "" || rec.OriginalPath == "" || (rec.Size <= 0 && !validEmptyV3LocalRecord(rec)) {
+			continue
+		}
+		if rec.ContentVersion == ContentVersionV3 && ValidateV3ContentMeta(localRecordContentMeta(rec)) != nil {
 			continue
 		}
 		lastAccessed := rec.LastAccessed
@@ -927,7 +985,7 @@ func (s *localStore) Import(data *LocalExport) error {
 		if updatedAt <= 0 {
 			updatedAt = now
 		}
-		if _, err := insertSize.Exec(key, rec.ProviderHost, rec.OriginalPath, rec.EncryptedPath, rec.Name, rec.Size, rec.CiphertextSize, rec.ContentVersion, rec.HeaderLen, rec.NonceField, rec.RawURL, rec.Sign, rec.UpstreamFetchedAt, lastAccessed, updatedAt); err != nil {
+		if _, err := insertSize.Exec(key, rec.ProviderHost, rec.OriginalPath, rec.EncryptedPath, rec.Name, rec.Size, rec.CiphertextSize, rec.ContentVersion, rec.HeaderLen, rec.NonceField, rec.ChunkSize, rec.KDFIterations, rec.RawURL, rec.Sign, rec.UpstreamFetchedAt, lastAccessed, updatedAt); err != nil {
 			return err
 		}
 	}

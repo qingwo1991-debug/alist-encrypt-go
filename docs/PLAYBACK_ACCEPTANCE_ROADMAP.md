@@ -10,8 +10,8 @@
 
 | 阶段 | 目标 | 当前状态 | 必须的完成证据 |
 | --- | --- | --- | --- |
-| 1 | 可重复故障上游、准确指标与播放测量 | 实施中 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
-| 2 | 移动端共享 V3 核心 | 未开始 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
+| 1 | 可重复故障上游、准确指标与播放测量 | 工程交付完成，真机未测 | 字节一致性矩阵、取消/关闭回归、结构化结果、浏览器帧测量工具；注明真机未测 |
+| 2 | 移动端共享 V3 核心 | 实施中，待云端验证 | 所有移动播放入口 V3 正确读取；现有 V1/V2 兼容；云端绑定/APK 编译 |
 | 3 | V3 小块配置、认证缓存、受控回退 | 未开始 | 下载放大与缓存收益对比；身份/版本隔离；有界资源；旧格式兼容 |
 | 4 | 切集兴趣调度与有界 KDF | 未开始 | 旧任务收敛、最终目标优先、取消等待者、不产生派生风暴 |
 | 5 | 驱动取消、控制面路由、原生选网 | 未开始 | 可取消真实传输与退避；固定路由分池；Android 平台支持桥；设备能力边界 |
@@ -26,14 +26,21 @@
 - `internal/proxy/playback_acceptance*_test.go`：V1/V2/V3 共 36 个精确正文与范围组合、6 个下载取消、12 个重定向/错误场景和 2 个元数据取消场景。`PLAYBACK_ACCEPTANCE_REPORT` 指定绝对路径输出 JSON；量化的是上游 Write 接受字节，不是 TCP 流量或播放器渲染。
 - `tools/playback-probe`：独立 HTML 工具，使用 requestVideoFrameCallback 测首帧/seek 的 compositor submission 延迟，隔离过期回调、来源与缓存标签，API 不支持时明确 unsupported。不会自动绕过授权或清理缓存；不是应用内外部播放器的测量代理。
 - 统计页面区分响应头与正文首字节，不以历史响应头代替新指标。移动重定向直读/解密缓存路径增加 handler 开始至首次成功正文写出的计时、SQLite 兼容迁移与会话保留，旧记录没有该字段即未知；legacy 路由及原密文下载未据此宣称完整播放遥测。真实渲染指标只来自测量工具/未来播放器事件。
-- Actions 添加 fault acceptance artifact 和独立 Node 测量语义测试；新增测试也作为后续构建发布依赖。当前尚待首阶段云端运行，未宣称真机测试通过。
+- Actions 添加 fault acceptance artifact 和独立 Node 测量语义测试；新增测试也作为后续构建发布依赖。首阶段 [PR #67](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/67) 全绿合并，main `2374ca3` 的 [Actions 38197844019](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38197844019) 测试、竞态、Docker、跨平台二进制、三 ABI AAR/APK 与发布全部成功。未宣称真机测试通过。
 - 后续实现设计：`docs/MOBILE_V3_IMPLEMENTATION.md`、`docs/NETWORK_ROUTING_IMPLEMENTATION.md`。
+
+## 阶段 2 当前云端证据（尚未完成）
+
+- [Draft PR #68](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/68)：接入共享 V3 header/trailer/认证 record 读取、完整 metadata 缓存及 SQLite/sync 字段；支持有界 record 内存及 Range 忽略回退，保留显式 raw 下载。
+- [Actions 38199732589](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38199732589)：受控依赖覆盖及 actual/src readonly module graph 已通过，移动 Go 编译成功；完整移动测试仍失败，不能合并。根 Go、竞态/故障基线、MySQL、两个 Web UI、Flutter 与 probe 测试通过。三 ABI binding 依赖移动测试，因此本次跳过，不是通过。
+- 独立审查补修正常 fs/get 重复播放的 V3 metadata 降级、提交响应前的一次签名 URL 刷新，以及 disabled/raw 表示；真实 API 生命周期和 URL identity 回归已添加。继续修复旧 fixture 的严格响应长度及实际选定 URL 的验证后再取得全绿证据。
+- 不宣称真机首帧、弱网收益、全入口最终通过或阶段 2 发布；后续认证缓存、KDF 排队、路由平台桥和目录生命周期仍按阶段 3–6 实施。
 
 ## 评分与硬性门槛
 
 - 播放正确性/跨端一致性：25；首帧/拖动/切集：25；网络隔离/恢复：20；资源性能：15；代码质量/验证：15。
 - 错误明文、下载损坏、无界等待、持续资源泄漏任一存在，不满足接近满分验收。
-- 验证支持能力，而不是将明确拒绝等同完整支持；移动 V3 当前基线仍返回 415。
+- 验证支持能力，而不是将明确拒绝等同完整支持；PR #66 的移动 V3 基线为 415，阶段 2 正在验证共享认证读取，尚未据此声明所有入口已通过验收。
 - 实际媒体首帧需播放器渲染事件；服务端响应头和正文首字节只代表相应传输阶段。
 - 时间阈值先记录分网络档位基线，再定义可实现的验收阈值；不能以大于物理带宽的速度作为门禁。
 

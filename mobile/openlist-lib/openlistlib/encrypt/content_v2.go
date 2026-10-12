@@ -141,6 +141,8 @@ type ContentMeta struct {
 	PlainSize      int64
 	CiphertextSize int64
 	NonceField     []byte
+	ChunkSize      uint32
+	KDFIterations  uint32
 }
 
 type uploadMetaEntry struct {
@@ -228,6 +230,9 @@ func BuildV2Header(encType EncryptionType, plainSize int64, nonceField []byte) (
 }
 
 func ParseContentHeader(encType EncryptionType, prefix []byte, ciphertextSize int64) (ContentMeta, bool, error) {
+	if meta, recognized, err := ParseV3ContentHeader(encType, prefix, ciphertextSize); recognized {
+		return meta, true, err
+	}
 	encType = normalizeContentEncType(encType)
 	meta := LegacyContentMeta(encType, ciphertextSize)
 	if len(prefix) < contentHeaderMagicLen {

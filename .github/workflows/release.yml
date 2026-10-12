@@ -75,6 +75,7 @@ jobs:
       - name: Race-check playback and cache paths
         run: |
           go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler ./internal/httputil ./internal/playbacktest
+          go test -race -mod=readonly -timeout 2m -count=32 -run '^TestProbeFairDispatchBlockedProviderDoesNotOccupyWorkers$' ./internal/handler
           (cd shared/encryptcore && go test -race -mod=readonly -timeout 10m ./...)
       - name: Record deterministic playback fault acceptance
         env:
@@ -170,6 +171,33 @@ jobs:
             mobile/openlist-lib/go.sum
             mobile/openlist-lib/src/go.sum
 
+      - name: Verify controlled shared-crypto module overlay
+        run: |
+          set -euo pipefail
+          bash -n mobile/openlist-lib/scripts/apply_module_overlay.sh
+          bash -n mobile/openlist-lib/scripts/init_openlist.sh
+          # Emit checksum evidence for newly selected transitive modules; the
+          # readonly overlay check below still rejects unreviewed checksum drift.
+          GOWORK=off go -C mobile/openlist-lib mod download -json golang.org/x/net@v0.53.0 golang.org/x/term@v0.43.0
+          bash mobile/openlist-lib/scripts/apply_module_overlay.sh
+          bash mobile/openlist-lib/scripts/apply_module_overlay.sh
+          for module in mobile/openlist-lib mobile/openlist-lib/src; do
+            if ! GOWORK=off go -C "$module" list -mod=readonly -m all; then
+              # Diagnose in the disposable runner only; never accept an automatically rewritten graph.
+              GOWORK=off go -C "$module" list -mod=mod -m all || true
+              git diff -- "$module/go.mod" "$module/go.sum"
+              exit 1
+            fi
+            shared_dir=$(GOWORK=off go -C "$module" list -mod=readonly -m -f '{{.Replace.Dir}}' github.com/alist-encrypt-go/shared/encryptcore)
+            case "$shared_dir" in
+              /*) resolved_shared=$(realpath "$shared_dir") ;;
+              *) resolved_shared=$(realpath "$module/$shared_dir") ;;
+            esac
+            printf 'Shared module: %s -> %s\n' "$shared_dir" "$resolved_shared"
+            test "$resolved_shared" = "$GITHUB_WORKSPACE/shared/encryptcore"
+          done
+          git diff --exit-code -- mobile/openlist-lib/go.mod mobile/openlist-lib/go.sum mobile/openlist-lib/src/go.mod mobile/openlist-lib/src/go.sum
+
       - name: Test mobile Go library
         working-directory: mobile/openlist-lib
         run: |
@@ -195,7 +223,7 @@ jobs:
       - name: Race-check mobile network and readiness regressions
         working-directory: mobile/openlist-lib
         run: |
-          go test -race -mod=readonly -timeout 10m -run 'Test(DualNetwork|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession)' ./openlistlib/encrypt ./internal/op ./pkg/singleflight
+          go test -race -mod=readonly -timeout 10m -run 'Test(DualNetwork|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession|V3|MobileV3)' ./openlistlib/encrypt ./internal/op ./pkg/singleflight
 
       - name: Test synchronized upstream source copy
         working-directory: mobile/openlist-lib/src
@@ -474,6 +502,43 @@ jobs:
           name: ${{ matrix.tool_name }}
           path: ${{ matrix.tool_name }}
           if-no-files-found: error
+
+  test-mobile-aar-bind:
+    runs-on: ubuntu-latest
+    needs: [test-mobile-go]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: mobile/openlist-lib/go.sum
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify Android binding with shared crypto
+        working-directory: mobile/openlist-lib/scripts
+        env:
+          GOWORK: 'off'
+          GOFLAGS: '-mod=readonly'
+        run: |
+          set -euo pipefail
+          bash ./init_gomobile.sh
+          bash ./gobind.sh release ${{ matrix.abi }}
+          git diff --exit-code -- ../go.mod ../go.sum ../src/go.mod ../src/go.sum
 
   build-mobile-aar:
     runs-on: ubuntu-latest

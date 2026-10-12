@@ -2,6 +2,7 @@ package encrypt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,10 +14,6 @@ import (
 
 	log "github.com/sirupsen/logrus"
 )
-
-// ContentVersionV3 is recognized only to reject unsupported containers. Mobile
-// playback and uploads still implement V1/V2, not the V3 AEAD container format.
-const ContentVersionV3 = 3
 
 const unsupportedV3Playback = "unsupported V3 encrypted content: mobile playback supports V1/V2 only"
 
@@ -101,6 +98,9 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 	if client == nil {
 		return meta, false
 	}
+	probeClient := *client
+	probeClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &probeClient
 	currentURL := target
 	currentAuth := authHeaders
 	if !isInternalAlistTarget(currentURL, p.getAlistURL()) {
@@ -115,7 +115,7 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 			log.Infof("[v2-inspect] request creation failed: err=%v", err)
 			return meta, false
 		}
-		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", ContentHeaderSize()-1))
+		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", V3HeaderSize-1))
 		req.Header.Set("Accept-Encoding", "identity")
 		if currentAuth != nil {
 			if auth := currentAuth.Get("Authorization"); auth != "" {
@@ -165,27 +165,62 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 			log.Debugf("[v2-inspect] following redirect hop=%d target=%s", hop+1, safeURLForLog(currentURL))
 			continue
 		}
-		defer resp.Body.Close()
 		if resp.StatusCode >= http.StatusBadRequest {
+			resp.Body.Close()
 			// Use Debugf for error statuses — 401/403 on internal probe paths (like /d/) is expected
 			// when the proxy lacks alist auth credentials. These are not actionable errors.
 			log.Debugf("[v2-inspect] upstream returned error status: target=%s status=%d", safeURLForLog(currentURL), resp.StatusCode)
 			return meta, false
 		}
-		prefix, err := io.ReadAll(io.LimitReader(resp.Body, ContentHeaderSize()))
-		if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 {
-			meta.CiphertextSize = total
-			meta.PlainSize = total
+		// A 200 ignores Range: consume only the header and close immediately.
+		// A 206 gets one extra byte to detect an overlong tiny range response.
+		readLimit := int64(V3HeaderSize)
+		if resp.StatusCode == http.StatusPartialContent {
+			readLimit++
 		}
-		// Root's V3 container has a 48-byte header, but its six-byte magic is
-		// sufficient to reject it. Never send a recognized unsupported format
-		// through the V2 parser (which would conclude legacy) or fallback probes.
+		prefix, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+		resp.Body.Close()
+		interval, rangeOK := parseContentRange(resp.Header.Get("Content-Range"))
+		if rangeOK && interval.TotalKnown {
+			meta.CiphertextSize = interval.Total
+		} else if resp.StatusCode == http.StatusOK {
+			meta.CiphertextSize = resp.ContentLength
+		} else {
+			meta.CiphertextSize = 0
+		}
+		meta.PlainSize = meta.CiphertextSize
+		validResponse := inspectHeaderResponseValid(resp, interval, rangeOK, int64(len(prefix)))
 		if len(prefix) >= 6 && string(prefix[:6]) == "V3GCM3" {
-			return ContentMeta{
-				EncType:        normalizeContentEncType(encType),
-				Version:        ContentVersionV3,
-				CiphertextSize: meta.CiphertextSize,
-			}, true
+			// The bool means recognized here, even on failure: returning false
+			// would let URL fallback reinterpret a damaged V3 object as legacy.
+			invalid := ContentMeta{EncType: normalizeContentEncType(encType), Version: ContentVersionV3, CiphertextSize: meta.CiphertextSize}
+			if err != nil || !validResponse {
+				return invalid, true
+			}
+			parsed, recognized, parseErr := ParseV3ContentHeader(encType, prefix, meta.CiphertextSize)
+			if errors.Is(parseErr, ErrV3ResourceLimit) {
+				// Preserve bounded parameters so the route can report the typed
+				// local resource error without attempting KDF or provider learning.
+				return parsed, true
+			}
+			if !recognized || parseErr != nil {
+				return invalid, true
+			}
+			if parsed.PlainSize == 0 && parsed.CiphertextSize > V3HeaderSize {
+				trailer, tailErr := inspectV3Trailer(inspectCtx, client, currentURL, currentAuth, authHeaders.Get("User-Agent"), prefix, parsed.CiphertextSize)
+				if tailErr != nil {
+					return invalid, true
+				}
+				parsed, parseErr = CompleteV3ContentMeta(parsed, trailer)
+			}
+			if parseErr != nil || ValidateV3ContentMeta(parsed) != nil {
+				return invalid, true
+			}
+			atomic.AddUint64(&p.probeV2Success, 1)
+			return parsed, true
+		}
+		if !validResponse {
+			return meta, false
 		}
 		if err != nil {
 			log.Infof("[v2-inspect] failed to read prefix bytes: target=%s err=%v", safeURLForLog(currentURL), err)
@@ -218,6 +253,104 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 	return meta, false
 }
 
+// inspectHeaderResponseValid validates the representation before any format is
+// confirmed. Unknown totals and encoded bodies cannot establish container geometry.
+func inspectHeaderResponseValid(resp *http.Response, interval parsedContentRange, rangeOK bool, bytesRead int64) bool {
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return false
+	}
+	if resp.Uncompressed {
+		return false
+	}
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		if !rangeOK || !interval.TotalKnown || interval.Start != 0 || interval.End != min(int64(V3HeaderSize)-1, interval.Total-1) {
+			return false
+		}
+		expected := interval.End + 1
+		return bytesRead == expected && (resp.ContentLength < 0 || resp.ContentLength == expected)
+	case http.StatusOK:
+		total := resp.ContentLength
+		if rangeOK && interval.TotalKnown {
+			total = interval.Total
+		}
+		return total > 0 && bytesRead == min(int64(V3HeaderSize), total)
+	default:
+		return false
+	}
+}
+
+const v3InspectSpoolMaxBytes int64 = 8 << 20
+
+func inspectV3Trailer(ctx context.Context, client *http.Client, target string, auth http.Header, userAgent string, header []byte, size int64) ([]byte, error) {
+	if size < V3HeaderSize+V3TrailerSize {
+		return nil, fmt.Errorf("v3 inspect: truncated streaming container")
+	}
+	// Follow-ups use exactly the final header URL and final credentials. Do not
+	// allow the client to auto-follow another redirect with origin credentials.
+	followupClient := *client
+	followupClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	request := func(rangeValue string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept-Encoding", "identity")
+		if rangeValue != "" {
+			req.Header.Set("Range", rangeValue)
+		}
+		for _, key := range []string{"Authorization", "Cookie"} {
+			if value := auth.Get(key); value != "" {
+				req.Header.Set(key, value)
+			}
+		}
+		if userAgent != "" {
+			req.Header.Set("User-Agent", userAgent)
+		}
+		return followupClient.Do(req)
+	}
+	identity := func(resp *http.Response) bool {
+		encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding"))
+		return !resp.Uncompressed && (encoding == "" || strings.EqualFold(encoding, "identity"))
+	}
+	resp, err := request(fmt.Sprintf("bytes=%d-%d", size-V3TrailerSize, size-1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		defer resp.Body.Close()
+		interval, ok := parseContentRange(resp.Header.Get("Content-Range"))
+		if !identity(resp) || !ok || !interval.TotalKnown || interval.Total != size || interval.Start != size-V3TrailerSize || interval.End != size-1 || (resp.ContentLength >= 0 && resp.ContentLength != V3TrailerSize) {
+			return nil, fmt.Errorf("v3 inspect: invalid trailer range")
+		}
+		tail, err := io.ReadAll(io.LimitReader(resp.Body, V3TrailerSize+1))
+		if err != nil || int64(len(tail)) != V3TrailerSize {
+			return nil, fmt.Errorf("v3 inspect: incomplete or overlong trailer: %w", err)
+		}
+		return tail, nil
+	}
+	refused := identity(resp) && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable)
+	resp.Body.Close()
+	if !refused || size > v3InspectSpoolMaxBytes {
+		return nil, fmt.Errorf("v3 inspect: trailer range refused or spool budget exceeded")
+	}
+	// A 200 trailer response starts at zero, never at the requested offset.
+	// Reopen the entire small representation under an explicit total budget.
+	resp, err = request("")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !identity(resp) || (resp.ContentLength >= 0 && resp.ContentLength != size) {
+		return nil, fmt.Errorf("v3 inspect: invalid full-container response")
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, size+1))
+	if err != nil || int64(len(body)) != size || len(header) != V3HeaderSize || string(body[:min(len(body), V3HeaderSize)]) != string(header) {
+		return nil, fmt.Errorf("v3 inspect: full-container length or identity changed")
+	}
+	return append([]byte(nil), body[len(body)-V3TrailerSize:]...), nil
+}
+
 func (p *ProxyServer) inspectEncryptedContentWithFallbackConfirmed(
 	ctx context.Context,
 	target string,
@@ -226,6 +359,13 @@ func (p *ProxyServer) inspectEncryptedContentWithFallbackConfirmed(
 	ciphertextSize int64,
 	encryptedPath string,
 ) (ContentMeta, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Candidate URLs share the same metadata deadline; fallback must not
+	// multiply the per-inspection budget by the number of alternate routes.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	meta, confirmed := p.inspectEncryptedContentConfirmed(ctx, target, authHeaders, encPath, ciphertextSize)
 	if confirmed {
 		return meta, true

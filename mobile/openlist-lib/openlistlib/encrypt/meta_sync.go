@@ -79,6 +79,8 @@ type dbExportFileMetaResponseDataItem struct {
 	ContentVersion    int    `json:"ContentVersion"`
 	HeaderLen         int64  `json:"HeaderLen"`
 	NonceField        []byte `json:"NonceField"`
+	ChunkSize         uint32 `json:"ChunkSize,omitempty"`
+	KDFIterations     uint32 `json:"KDFIterations,omitempty"`
 	RawURL            string `json:"RawURL"`
 	Sign              string `json:"Sign"`
 	UpdatedAt         string `json:"UpdatedAt"`
@@ -91,9 +93,9 @@ type dbExportFileMetaResponse struct {
 	Msg  string `json:"msg"`
 	Data struct {
 		Items      []dbExportFileMetaResponseDataItem `json:"items"`
-		HasMore    bool                                `json:"has_more"`
-		NextSince  int64                               `json:"next_since"`
-		NextCursor string                              `json:"next_cursor"`
+		HasMore    bool                               `json:"has_more"`
+		NextSince  int64                              `json:"next_since"`
+		NextCursor string                             `json:"next_cursor"`
 	} `json:"data"`
 }
 
@@ -169,7 +171,16 @@ func (p *ProxyServer) buildImportedSizeRecord(item *dbExportFileMetaResponseData
 	providerHost := strings.TrimSpace(item.ProviderHost)
 	originalPath := strings.TrimSpace(item.OriginalPath)
 	key, ok := p.rebaseImportedMetaKey(providerHost, originalPath)
-	if !ok || item.Size <= 0 {
+	if !ok || item.Size < 0 {
+		return nil, false
+	}
+	if item.ContentVersion == ContentVersionV3 {
+		if ValidateV3ContentMeta(ContentMeta{Version: item.ContentVersion, HeaderLen: item.HeaderLen,
+			PlainSize: item.Size, CiphertextSize: item.CiphertextSize, NonceField: item.NonceField,
+			ChunkSize: item.ChunkSize, KDFIterations: item.KDFIterations}) != nil {
+			return nil, false
+		}
+	} else if item.Size == 0 {
 		return nil, false
 	}
 	updatedAt := parseRFC3339Unix(item.UpdatedAt, nowUnix)
@@ -185,6 +196,8 @@ func (p *ProxyServer) buildImportedSizeRecord(item *dbExportFileMetaResponseData
 		ContentVersion:    item.ContentVersion,
 		HeaderLen:         item.HeaderLen,
 		NonceField:        append([]byte(nil), item.NonceField...),
+		ChunkSize:         item.ChunkSize,
+		KDFIterations:     item.KDFIterations,
 		RawURL:            "",
 		Sign:              "",
 		UpstreamFetchedAt: 0,

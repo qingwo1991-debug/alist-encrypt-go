@@ -569,6 +569,8 @@ type RedirectInfo struct {
 	ContentVersion int          `json:"contentVersion,omitempty"`
 	HeaderLen      int64        `json:"headerLen,omitempty"`
 	NonceField     []byte       `json:"nonceField,omitempty"`
+	ChunkSize      uint32       `json:"chunkSize,omitempty"`
+	KDFIterations  uint32       `json:"kdfIterations,omitempty"`
 	OriginalURL    string       `json:"originalUrl"` // 原始请求URL
 	EncryptedPath  string       `json:"encryptedPath,omitempty"`
 	Headers        http.Header  `json:"headers"` // 原始请求头
@@ -730,6 +732,8 @@ type FileInfo struct {
 	ContentVersion int    `json:"content_version,omitempty"`
 	HeaderLen      int64  `json:"header_len,omitempty"`
 	NonceField     []byte `json:"nonce_field,omitempty"`
+	ChunkSize      uint32 `json:"chunk_size,omitempty"`
+	KDFIterations  uint32 `json:"kdf_iterations,omitempty"`
 	IsDir          bool   `json:"is_dir"`
 	Modified       string `json:"modified"`
 	Path           string `json:"path"`
@@ -3073,6 +3077,7 @@ func (p *ProxyServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleRedirectLegacy 保留历史执行链，供 V2 orchestrator 调用
 func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Request) {
+	r = withLegacyContentMetaCache(r)
 	if p.shouldFastFailUpstream() {
 		_, remain, reason := p.upstreamBackoffState()
 		retryAfter := int(remain.Seconds())
@@ -3098,6 +3103,23 @@ func (p *ProxyServer) handleRedirectLegacy(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if r.URL.Query().Get("decode") != "0" {
+		headers := info.Headers.Clone()
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		for key, values := range r.Header {
+			headers[key] = append([]string(nil), values...)
+		}
+		if p.serveLegacyV3Download(w, r, info.RedirectURL, headers, info.PasswdInfo, info.FileSize, info.EncryptedPath) {
+			return
+		}
+		if info.ContentVersion == ContentVersionV3 {
+			// Previously recognized V3 cannot fall through on a failed probe.
+			p.serveLegacyResolvedV3(w, r, info.RedirectURL, headers, info.PasswdInfo, info.EncryptedPath, ContentMeta{Version: ContentVersionV3})
+			return
+		}
+	}
 	ctx := r.Context()
 	log.Infof("%s handleRedirect: fileSize=%d, encType=%s, url=%s",
 		internal.LogPrefix(ctx, internal.TagDownload), info.FileSize, info.PasswdInfo.EncType, safeURLForLog(info.RedirectURL))
@@ -4244,6 +4266,7 @@ func (p *ProxyServer) buildRemoveNameCandidates(encPath *EncryptPath, dirPath, n
 
 // handleWebDAVLegacy 保留历史执行链，供 V2 orchestrator 调用
 func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request) {
+	r = withLegacyContentMetaCache(r)
 	ctx := r.Context()
 	if p.shouldFastFailUpstream() {
 		// 上游整体回退（最近连续失败）：目录列表优先回退历史快照，避免页面上
@@ -4285,6 +4308,9 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	encPath := p.findEncryptPath(matchPath)
 	if encPath == nil && matchPath != filePath {
 		encPath = p.findEncryptPath(filePath)
+	}
+	if r.URL.Query().Get("decode") == "0" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		encPath = nil // Explicit raw reads do not enter plaintext decryption.
 	}
 	rangeHeader := r.Header.Get("Range")
 	clientRangeHeader := rangeHeader
@@ -4729,67 +4755,54 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			req.Header.Set("Destination", newDest)
 		}
 	}
+	// Resolve V3 before translating plaintext ranges or allowing unknown-size
+	// passthrough. HEAD needs the same authoritative plaintext metadata as GET.
+	if handled, confirmed := p.inspectLegacyV3Download(w, r, targetURL, r.Header, encPath, 0, targetURLPath); handled {
+		return
+	} else if !confirmed {
+		if usingRawURL {
+			// Refresh expired signed URLs without ever treating a failed probe
+			// as legacy content. Only confirmed candidates may stream.
+			stale := targetURL
+			p.markRawURLFailure(stale)
+			fresh, _ := p.resolveEncryptedRawURLViaFsGet(r.Context(), r.Header, targetURLPath)
+			if fresh != "" && fresh != stale && fresh != internalTargetURL {
+				handled, freshConfirmed := p.inspectLegacyV3Download(w, r, fresh, r.Header, encPath, 0, targetURLPath)
+				if handled {
+					return
+				}
+				if freshConfirmed {
+					targetURL = fresh
+					cachePlaybackTarget(fresh)
+				} else {
+					p.markRawURLFailure(fresh)
+					targetURL = internalTargetURL
+				}
+			} else {
+				targetURL = internalTargetURL
+			}
+			usingRawURL = targetURL != internalTargetURL
+			nextURL, parseErr := url.Parse(targetURL)
+			if parseErr != nil {
+				_ = v3PlaybackFailure(w, http.StatusBadGateway, parseErr)
+				return
+			}
+			req.URL = nextURL
+			applyPlaybackOriginCredentials(req.Header, r.Header, targetURL, p.getAlistURL())
+			if p.serveLegacyV3Download(w, r, targetURL, r.Header, encPath, 0, targetURLPath) {
+				return
+			}
+		} else {
+			_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
+			return
+		}
+	}
 	if r.Method == "GET" && clientRangeHeader != "" {
 		if encPath != nil {
-			// Check file cache before probing upstream
-			var meta ContentMeta
-			cachedFound := false
-			for _, cacheKey := range []string{filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
-				if cacheKey == "" {
-					continue
-				}
-				if cached, ok := p.loadFileCache(cacheKey); ok && cached.ContentVersion > 0 {
-					if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
-						meta = ContentMeta{
-							EncType:        EncryptionType(encPath.EncType),
-							Version:        ContentVersionV2,
-							HeaderLen:      cached.HeaderLen,
-							PlainSize:      cached.Size,
-							CiphertextSize: cached.CiphertextSize,
-							NonceField:     cloneNonceField(cached.NonceField),
-						}
-					} else {
-						meta = LegacyContentMeta(EncryptionType(encPath.EncType), 0)
-					}
-					cachedFound = true
-					break
-				}
-			}
-			if !cachedFound {
-				inspectHeaders := r.Header
-				if !isInternalAlistTarget(targetURL, p.getAlistURL()) {
-					inspectHeaders = r.Header.Clone()
-					inspectHeaders.Del("Authorization")
-					inspectHeaders.Del("Cookie")
-				}
-				meta = p.inspectEncryptedContent(r.Context(), targetURL, inspectHeaders, encPath, 0)
-				// Cache the inspection result for future requests
-				if filePath != "" {
-					cacheInfo := &FileInfo{
-						Name:           path.Base(filePath),
-						Size:           meta.PlainSize,
-						CiphertextSize: meta.CiphertextSize,
-						ContentVersion: meta.Version,
-						HeaderLen:      meta.HeaderLen,
-						NonceField:     cloneNonceField(meta.NonceField),
-						IsDir:          false,
-						Path:           filePath,
-					}
-					p.storeFileCache(filePath, cacheInfo)
-					if strings.HasPrefix(filePath, "/dav/") {
-						noDav := strings.TrimPrefix(filePath, "/dav")
-						p.storeFileCache(noDav, &FileInfo{
-							Name:           cacheInfo.Name,
-							Size:           cacheInfo.Size,
-							CiphertextSize: cacheInfo.CiphertextSize,
-							ContentVersion: cacheInfo.ContentVersion,
-							HeaderLen:      cacheInfo.HeaderLen,
-							NonceField:     cloneNonceField(cacheInfo.NonceField),
-							IsDir:          false,
-							Path:           noDav,
-						})
-					}
-				}
+			meta, confirmed := p.inspectLegacyContentMeta(r.Context(), targetURL, r.Header, encPath, 0)
+			if !confirmed {
+				_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
+				return
 			}
 			upstreamRangeHeader = buildUpstreamRangeHeader(upstreamRangeHeader, meta)
 		}
@@ -5078,6 +5091,13 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	defer resp.Body.Close()
+
+	// Refresh/filename retries can select a different object from the initial
+	// probe. Confirm that exact target before copying headers or reading any body;
+	// this also covers HEAD, unknown size and stale V2 file-cache metadata.
+	if p.serveLegacyV3Download(w, r, targetURL, r.Header, encPath, 0, targetURLPath) {
+		return
+	}
 
 	// Rewrite only successful PROPFIND metadata. Error bodies may be plain text,
 	// not XML; preserve their status (or the existing stale-list fallback).
@@ -5372,26 +5392,15 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			log.Infof("WebDAV decrypt: path=%s range=%q content-range=%q content-length=%q fileSize=%d start=%d",
 				filePath, clientRangeHeader, resp.Header.Get("Content-Range"), resp.Header.Get("Content-Length"), fileSize, startPos)
 
-			meta := LegacyContentMeta(EncryptionType(encPath.EncType), fileSize)
-			if cached, ok := p.loadFileCache(filePath); ok && cached != nil && cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
-				meta = ContentMeta{
-					EncType:        EncryptionType(encPath.EncType),
-					Version:        cached.ContentVersion,
-					HeaderLen:      cached.HeaderLen,
-					PlainSize:      cached.Size,
-					CiphertextSize: cached.CiphertextSize,
-					NonceField:     cloneNonceField(cached.NonceField),
-				}
-			} else {
-				encProbePath := targetURLPath
-				if strings.HasPrefix(encProbePath, "/dav") {
-					encProbePath = strings.TrimPrefix(encProbePath, "/dav")
-				}
-				// The probe helper strips private credentials from external CDN
-				// requests and keeps this original header set for authenticated
-				// internal /dav fallback probes.
-				metaHeaders := r.Header
-				meta = p.inspectEncryptedContentWithFallback(r.Context(), targetURL, metaHeaders, encPath, fileSize, encProbePath)
+			meta, confirmed := p.inspectLegacyContentMeta(r.Context(), targetURL, r.Header, encPath, fileSize)
+			if !confirmed {
+				_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
+				return
+			}
+			if meta.IsV3() {
+				resp.Body.Close()
+				p.serveLegacyResolvedV3(w, r, targetURL, r.Header, encPath, targetURLPath, meta)
+				return
 			}
 			originalSize := fileSize
 			fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
