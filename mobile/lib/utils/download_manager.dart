@@ -126,6 +126,35 @@ class DownloadManager {
   static const int _maxQueuedDownloads = 32;
   static final List<Completer<void>> _transferQueue = [];
 
+  @visibleForTesting
+  static int cancellationSubscriptions = 0;
+  static final Expando<StreamSubscription<DioException>> _bodyCancellation =
+      Expando<StreamSubscription<DioException>>();
+  static final Expando<CancelToken> _bodyAttempts = Expando<CancelToken>();
+
+  static StreamSubscription<DioException>? _listenForCancellation(
+    CancelToken? token, void Function(DioException) onCancel,
+  ) {
+    if (token == null) return null;
+    cancellationSubscriptions++;
+    return token.whenCancel.asStream().listen(onCancel);
+  }
+
+  static Future<void> _detachCancellation(
+    StreamSubscription<DioException>? subscription,
+  ) async {
+    if (subscription == null) return;
+    await subscription.cancel();
+    cancellationSubscriptions--;
+  }
+
+  static Future<void> _detachBodyCancellation(ResponseBody body) async {
+    final subscription = _bodyCancellation[body];
+    _bodyCancellation[body] = null;
+    _bodyAttempts[body] = null;
+    await _detachCancellation(subscription);
+  }
+
   static Future<void> _acquireTransfer(CancelToken? token) async {
     _throwIfCancelled(token);
     if (_runningTransfers < 2) {
@@ -137,14 +166,22 @@ class DownloadManager {
     }
     final waiter = Completer<void>();
     _transferQueue.add(waiter);
-    final admitted = await Future.any<bool>([
-      waiter.future.then((_) => true),
-      if (token != null) token.whenCancel.then((_) => false),
-    ]);
-    if (!admitted || token?.isCancelled == true) {
-      // An admitted waiter owns a slot, even if cancellation won the race.
-      if (!_transferQueue.remove(waiter)) _releaseTransfer();
-      _throwIfCancelled(token);
+    final cancelled = Completer<bool>();
+    final subscription = _listenForCancellation(token, (_) {
+      if (!cancelled.isCompleted) cancelled.complete(false);
+    });
+    try {
+      final admitted = await Future.any<bool>([
+        waiter.future.then((_) => true),
+        if (token != null) cancelled.future,
+      ]);
+      if (!admitted || token?.isCancelled == true) {
+        // An admitted waiter owns a slot, even if cancellation won the race.
+        if (!_transferQueue.remove(waiter)) _releaseTransfer();
+        _throwIfCancelled(token);
+      }
+    } finally {
+      await _detachCancellation(subscription);
     }
   }
 
@@ -166,24 +203,39 @@ class DownloadManager {
   }) async {
     _throwIfCancelled(cancelToken);
     final attempt = CancelToken();
-    cancelToken?.whenCancel.then((error) => attempt.cancel(error));
+    final subscription = _listenForCancellation(
+      cancelToken, (error) => attempt.cancel(error),
+    );
+    var handedToBody = false;
     var timedOut = false;
     final timer = Timer(headerBudget, () {
       timedOut = true;
       attempt.cancel('download header budget exceeded');
     });
     try {
-      return await _dio.request<T>(
+      final response = await _dio.request<T>(
         url,
         cancelToken: attempt,
         options: options.copyWith(method: head ? 'HEAD' : 'GET'),
       );
+      final data = response.data;
+      if (data is ResponseBody) {
+        // Stream responses outlive their headers. Transfer ownership until
+        // body EOF/error/cancel/discard, not merely until this request returns.
+        _bodyAttempts[data] = attempt;
+        if (subscription != null) {
+          _bodyCancellation[data] = subscription;
+          handedToBody = true;
+        }
+      }
+      return response;
     } catch (error) {
       _throwIfCancelled(cancelToken);
       if (timedOut) throw TimeoutException('download header budget exceeded');
       rethrow;
     } finally {
       timer.cancel();
+      if (!handedToBody) await _detachCancellation(subscription);
     }
   }
 
@@ -366,7 +418,7 @@ class DownloadManager {
   ) async* {
     final iterator = StreamIterator(body.stream);
     Completer<bool>? pending;
-    token?.whenCancel.then((error) {
+    final subscription = _listenForCancellation(token, (error) {
       final waiter = pending;
       if (waiter != null && !waiter.isCompleted) waiter.completeError(error);
     });
@@ -386,16 +438,33 @@ class DownloadManager {
         _throwIfCancelled(token);
         yield iterator.current;
       }
+    } catch (error) {
+      // Dio wraps ResponseBody streams. Cancelling only the outer iterator
+      // need not abort the adapter's underlying response; cancel its private
+      // attempt too, while keeping the caller token usable for mirror retry.
+      _bodyAttempts[body]?.cancel(error);
+      rethrow;
     } finally {
       pending = null;
-      await iterator.cancel();
+      _bodyAttempts[body]?.cancel('download body reader finished');
+      try {
+        await iterator.cancel();
+      } finally {
+        await _detachCancellation(subscription);
+        await _detachBodyCancellation(body);
+      }
     }
   }
 
   static Future<void> _discardResponseBody(ResponseBody? body) async {
     if (body == null) return;
-    final subscription = body.stream.listen((_) {});
-    await subscription.cancel();
+    _bodyAttempts[body]?.cancel('discard download response');
+    final subscription = body.stream.listen((_) {}, onError: (Object _) {});
+    try {
+      await subscription.cancel();
+    } finally {
+      await _detachBodyCancellation(body);
+    }
   }
 
   static Future<void> _downloadChunk({
@@ -742,10 +811,9 @@ class DownloadManager {
   }) async {
     RandomAccessFile? raf;
     final siblings = CancelToken();
-    var finished = false;
-    cancelToken?.whenCancel.then((error) {
-      if (!finished) siblings.cancel(error);
-    });
+    final subscription = _listenForCancellation(
+      cancelToken, (error) => siblings.cancel(error),
+    );
     try {
       // HEAD 始终用首选 URL（最快源），确定 content-length/accept-ranges/etag。
       final headUrl = (chunkUrls != null && chunkUrls.isNotEmpty)
@@ -847,7 +915,7 @@ class DownloadManager {
       log('多线程下载失败，将回退到单线程: $e');
       return false;
     } finally {
-      finished = true;
+      await _detachCancellation(subscription);
     }
   }
 

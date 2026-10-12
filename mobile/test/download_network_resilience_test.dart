@@ -37,6 +37,7 @@ void main() {
     DownloadManager.networkClientForTesting.httpClientAdapter = original;
     DownloadManager.headerBudget = const Duration(seconds: 20);
     DownloadManager.idleBudget = const Duration(seconds: 20);
+    expect(DownloadManager.cancellationSubscriptions, 0);
     await directory.delete(recursive: true);
   });
 
@@ -218,15 +219,17 @@ void main() {
   test('idle first mirror advances and cancels its body subscription', () async {
     DownloadManager.idleBudget = const Duration(milliseconds: 20);
     final hanging = StreamController<Uint8List>();
-    var bodyCancelled = false;
-    hanging.onCancel = () { bodyCancelled = true; };
+    final bodyCancelled = Completer<void>();
+    hanging.onCancel = () { bodyCancelled.complete(); };
     DownloadManager.networkClientForTesting.httpClientAdapter =
         _Adapter((options, _) async {
       if (options.method == 'HEAD') return _head(1);
       if (options.uri.host == 'idle.invalid') {
         return ResponseBody(hanging.stream, 200);
       }
-      expect(bodyCancelled, isTrue);
+      // Dio's adapter cancellation is delivered asynchronously; require
+      // actual underlying onCancel, not just the outer iterator completing.
+      await bodyCancelled.future.timeout(const Duration(seconds: 2));
       return ResponseBody.fromString('healthy', 200);
     });
     await download('idle', urls: [
@@ -259,6 +262,23 @@ void main() {
     await expectation.timeout(const Duration(seconds: 2));
     expect(gets, 1);
     await hanging.close();
+  });
+
+  test('reused user token leaves no cancellation subscriptions after EOF',
+      () async {
+    final token = CancelToken();
+    DownloadManager.networkClientForTesting.httpClientAdapter =
+        _Adapter((options, _) async {
+      if (options.method == 'HEAD') return _head(1);
+      return ResponseBody.fromString('x', 200);
+    });
+    for (var index = 0; index < 40; index++) {
+      await download('reuse-$index', token: token);
+      expect(DownloadManager.cancellationSubscriptions, 0);
+      expect(token.isCancelled, isFalse);
+    }
+    token.cancel('after all completed');
+    expect(DownloadManager.cancellationSubscriptions, 0);
   });
 
   test('first mirror header failure falls through to next source', () async {
