@@ -162,6 +162,7 @@ jobs:
             ./drivers/mega \
             ./internal/bootstrap \
             ./internal/conf \
+            ./internal/fs \
             ./internal/op \
             ./pkg/singleflight \
             ./pkg/utils \
@@ -187,6 +188,7 @@ jobs:
             ./drivers/mega \
             ./internal/bootstrap \
             ./internal/conf \
+            ./internal/fs \
             ./internal/op \
             ./pkg/singleflight \
             ./pkg/utils \

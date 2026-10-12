@@ -14,11 +14,16 @@ import (
 
 // List files
 func list(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	meta, _ := ctx.Value(conf.MetaKey).(*model.Meta)
 	user, _ := ctx.Value(conf.UserKey).(*model.User)
 	virtualFiles := op.GetStorageVirtualFilesWithDetailsByPath(ctx, path, !args.WithStorageDetails, args.Refresh, "")
 	storage, actualPath, err := op.GetStorageAndActualPath(path)
-	if err != nil && (len(virtualFiles) == 0 || errors.Is(err, errs.StorageNotInit)) {
+	// Virtual child mounts are navigation entries, not a successful listing
+	// of this unavailable parent. Keep them discoverable independently.
+	if failStorageListing(err, len(virtualFiles)) {
 		return nil, errors.WithMessage(err, "failed get storage")
 	}
 
@@ -33,7 +38,7 @@ func list(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error)
 			if !args.NoLog {
 				log.Errorf("fs/list: %+v", err)
 			}
-			if len(virtualFiles) == 0 || errors.Is(err, errs.StorageNotInit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if failStorageListing(err, len(virtualFiles)) {
 				return nil, errors.WithMessage(err, "failed get objs")
 			}
 		}
@@ -46,6 +51,11 @@ func list(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error)
 	objs := om.Merge(_objs, virtualFiles...)
 	objs, err = filterReadableObjs(objs, user, path, meta)
 	return objs, err
+}
+
+// Cancellation is never converted to a successful virtual navigation result.
+func failStorageListing(err error, virtualCount int) bool {
+	return err != nil && (virtualCount == 0 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func filterReadableObjs(objs []model.Obj, user *model.User, reqPath string, parentMeta *model.Meta) ([]model.Obj, error) {

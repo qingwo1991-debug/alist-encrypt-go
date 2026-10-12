@@ -3,7 +3,8 @@
 ## Implemented
 
 - Startup registers pending mounts before asynchronous initialization. Storage readiness is tracked separately per mount. Ready storage and virtual ancestors do not wait for unrelated startup work.
-- Removed the repeated global 1.5-second HTTP middleware gate. Pending/failed mounts return `StorageNotInit`; filesystem listing does not turn readiness/cancellation errors into virtual-only successful lists. Virtual root remains browsable.
+- Removed the repeated global 1.5-second HTTP middleware gate. Ordinary pending/failed paths return `StorageNotInit`. When an unavailable parent contains virtual child mounts, listing returns those navigation entries so independent nested mounts remain discoverable; this is not a successful listing of the unavailable parent's contents. Cancellation is never swallowed. Virtual root remains browsable.
+- Balanced siblings at the longest matching mount prefer ready state deterministically. Round-robin selection uses only ready/status-usable siblings; if none are usable, path resolution returns `StorageNotInit` rather than selecting a failed sibling or reporting no mount.
 - Initialization checks its context before and after calling the driver, records panic as failure, and sets final status before publishing. A driver returning success after deadline cannot publish `WORK`.
 - `singleflight.DoContext` makes duplicate waiters cancellation-aware without starting extra wrapper goroutines, forgetting active keys, or cancelling the leader. List, Link and storage-detail calls use it. Shared work is leader-owned; leader cancellation can still terminate all shared results by design.
 - Management detail aggregation uses one absolute 3-second deadline derived from `Request.Context()`, passed through to detail retrieval. Reload Drop uses the same initialization budget.

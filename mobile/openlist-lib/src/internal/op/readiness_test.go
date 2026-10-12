@@ -22,6 +22,54 @@ func (d *deferredInitDriver) GetStorage() *model.Storage     { return &d.Storage
 func (d *deferredInitDriver) SetStorage(s model.Storage)     { d.Storage = s }
 func (d *deferredInitDriver) GetAddition() driver.Additional { return &d.addition }
 func (d *deferredInitDriver) Init(context.Context) error     { d.cancel(); return nil }
+func (d *deferredInitDriver) Config() driver.Config          { return driver.Config{CheckStatus: true} }
+
+func TestBalancedReadinessUsesOnlyReadySiblings(t *testing.T) {
+	const mount = "/readiness-balanced"
+	mounts := []string{mount, mount + ".balance1", mount + ".balance2"}
+	for _, m := range mounts {
+		defer removeStorageReadiness(m)
+		defer storagesMap.Delete(m)
+	}
+	PrepareStorageLoads([]model.Storage{{MountPath: mounts[0]}, {MountPath: mounts[1]}, {MountPath: mounts[2]}})
+	for _, m := range mounts {
+		d := &deferredInitDriver{Storage: model.Storage{MountPath: m}}
+		d.SetStatus(WORK)
+		storagesMap.Store(m, d)
+	}
+	readiness.Lock()
+	readiness.mounts[mounts[0]].pending = false
+	readiness.mounts[mounts[0]].err = context.DeadlineExceeded
+	readiness.mounts[mounts[2]].pending = false
+	readiness.Unlock()
+	for i := 0; i < 100; i++ {
+		if err := StorageReadyError(mount + "/file"); err != nil {
+			t.Fatal(err)
+		}
+		d, _, err := GetStorageAndActualPath(mount + "/file")
+		if err != nil || d == nil || d.GetStorage().MountPath != mounts[2] {
+			t.Fatalf("selected %v, error %v", d, err)
+		}
+	}
+	readiness.Lock()
+	readiness.mounts[mounts[1]].pending = false
+	readiness.Unlock()
+	seen := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		seen[GetBalancedStorage(mount).GetStorage().MountPath] = true
+	}
+	if len(seen) != 2 || !seen[mounts[1]] || !seen[mounts[2]] {
+		t.Fatalf("ready balance: %v", seen)
+	}
+	d, _ := storagesMap.Load(mounts[2])
+	d.GetStorage().SetStatus("failed")
+	readiness.Lock()
+	readiness.mounts[mounts[1]].pending = true
+	readiness.Unlock()
+	if _, _, err := GetStorageAndActualPath(mount); !errors.Is(err, errs.StorageNotInit) {
+		t.Fatalf("all unavailable: %v", err)
+	}
+}
 
 func TestCancelledInitCannotPublishReady(t *testing.T) {
 	const mount = "/readiness-late-init"

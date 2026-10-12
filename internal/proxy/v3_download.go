@@ -14,6 +14,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// writeV3ResourceFailure commits an empty terminal response after clearing any
+// uncommitted success headers left by an earlier strategy on the same writer.
+func writeV3ResourceFailure(w http.ResponseWriter, err error, reason errors.FailureReason) *StreamOutcome {
+	for _, name := range []string{"Content-Range", "Content-Type", "ETag", "Accept-Ranges", "Last-Modified", "Content-Disposition", "Content-Encoding", "Transfer-Encoding", "Expires", "Content-MD5", "Digest"} {
+		w.Header().Del(name)
+	}
+	w.Header().Set("Content-Length", "0")
+	w.Header().Set("Retry-After", "2")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	return &StreamOutcome{Err: err, FailureReason: reason, NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
+}
+
 // streamV3Response performs the decrypt-and-stream phase for a V3 container.
 //
 // The upstream Range built by buildUpstreamRangeHeader covers the contiguous
@@ -38,16 +51,14 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	// unbounded per-stream buffer. Reject before KDF, body reads or player data.
 	recordBytes := chunkSize + 16
 	if recordBytes > v3RecordBudgetBytes {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		return &StreamOutcome{Err: errors.NewDecryptionError("v3 chunk exceeds playback memory budget"), FailureReason: "bad_v3_metadata", NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
+		return writeV3ResourceFailure(w, errors.NewDecryptionError("v3 chunk exceeds playback memory budget"), "bad_v3_metadata")
 	}
 	if req.Method != http.MethodHead {
 		release, ok := s.acquireV3Memory(recordBytes)
 		if !ok {
 			// Commit a terminal overload response: another strategy/URL cannot
 			// lower this request's record memory and would amplify the overload.
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return &StreamOutcome{Err: errors.NewProxyError("v3 playback memory budget exhausted"), FailureReason: "resource_exhausted", NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
+			return writeV3ResourceFailure(w, errors.NewProxyError("v3 playback memory budget exhausted"), "resource_exhausted")
 		}
 		defer release()
 	}

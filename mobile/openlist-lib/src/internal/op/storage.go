@@ -502,6 +502,17 @@ var balanceMap generic_sync.MapOf[string, int]
 func GetBalancedStorage(path string) driver.Driver {
 	path = utils.FixAndCleanPath(path)
 	storages := getStoragesByPath(path)
+	ready := storages[:0]
+	for _, storage := range storages {
+		if storageMountReadyError(storage.GetStorage().MountPath) != nil {
+			continue
+		}
+		if storage.Config().CheckStatus && storage.GetStorage().Status != WORK {
+			continue
+		}
+		ready = append(ready, storage)
+	}
+	storages = ready
 	storageNum := len(storages)
 	switch storageNum {
 	case 0:

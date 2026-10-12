@@ -46,26 +46,49 @@ func StorageReadyError(path string) error {
 	readiness.RLock()
 	defer readiness.RUnlock()
 	var selected *storageReadiness
+	selectedMount := ""
 	longest := -1
 	for mount, state := range readiness.mounts {
 		actual := utils.GetActualMountPath(mount)
-		if utils.IsSubPath(actual, path) && len(actual) > longest {
-			longest, selected = len(actual), state
+		if !utils.IsSubPath(actual, path) {
+			continue
+		}
+		if len(actual) > longest {
+			longest, selected, selectedMount = len(actual), state, mount
+		} else if len(actual) == longest {
+			// A ready sibling wins; otherwise choose a stable diagnostic rather
+			// than allowing randomized map iteration to decide the response.
+			if selected.pending || selected.err != nil {
+				if (!state.pending && state.err == nil) || mount < selectedMount {
+					selected, selectedMount = state, mount
+				}
+			}
 		}
 	}
-	if selected == nil {
+	return storageStateError(selected)
+}
+
+func storageStateError(state *storageReadiness) error {
+	if state == nil {
 		return nil
 	}
-	if selected.pending && selected.ctx != nil && selected.ctx.Err() != nil {
-		return fmt.Errorf("%w: %s", errs.StorageNotInit, selected.ctx.Err())
+	if state.pending && state.ctx != nil && state.ctx.Err() != nil {
+		return fmt.Errorf("%w: %s", errs.StorageNotInit, state.ctx.Err())
 	}
-	if selected.pending {
+	if state.pending {
 		return fmt.Errorf("%w: storage is initializing", errs.StorageNotInit)
 	}
-	if selected.err != nil {
-		return fmt.Errorf("%w: %s", errs.StorageNotInit, selected.err)
+	if state.err != nil {
+		return fmt.Errorf("%w: %s", errs.StorageNotInit, state.err)
 	}
 	return nil
+}
+
+// storageMountReadyError checks an exact mount, not its balanced siblings.
+func storageMountReadyError(mount string) error {
+	readiness.RLock()
+	defer readiness.RUnlock()
+	return storageStateError(readiness.mounts[utils.FixAndCleanPath(mount)])
 }
 
 func removeStorageReadiness(mount string) {

@@ -1,5 +1,6 @@
 internal/bootstrap/storage.go
 internal/fs/list.go
+internal/fs/readiness_navigation_test.go
 internal/op/fs.go
 internal/op/path.go
 internal/op/storage.go
