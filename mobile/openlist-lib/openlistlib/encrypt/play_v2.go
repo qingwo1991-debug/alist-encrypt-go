@@ -768,6 +768,9 @@ func fileInfoContentMeta(cached *FileInfo, encType EncryptionType) (ContentMeta,
 // after a file is replaced by V2 content, while a same-URL conclusion safely
 // eliminates the repeated 32-byte format probe on every seek.
 func playbackFileInfoContentMeta(cached *FileInfo, encType EncryptionType, redirectURL string) (ContentMeta, bool) {
+	if cached != nil && cached.ContentVersion == ContentVersionV3 {
+		return ContentMeta{EncType: encType, Version: ContentVersionV3, CiphertextSize: cached.CiphertextSize}, true
+	}
 	if meta, ok := fileInfoContentMeta(cached, encType); ok {
 		return meta, true
 	}
@@ -799,6 +802,9 @@ func redirectInfoContentMeta(info *RedirectInfo) (ContentMeta, bool) {
 			return ContentMeta{}, false
 		}
 		return LegacyContentMeta(encType, size), true
+	case ContentVersionV3:
+		// Recognition is enough to reject; do not require V2 nonce or size fields.
+		return ContentMeta{EncType: encType, Version: ContentVersionV3, CiphertextSize: info.CiphertextSize}, true
 	case ContentVersionV2:
 		if len(info.NonceField) != 16 || info.HeaderLen <= 0 {
 			return ContentMeta{}, false
@@ -996,6 +1002,19 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 	return fileSize
 }
 
+// Reject before writing stream headers or learning a provider capability: this
+// is a local format limitation, not an upstream strategy failure.
+func rejectUnsupportedV3Playback(w http.ResponseWriter) *StreamOutcome {
+	http.Error(w, unsupportedV3Playback, http.StatusUnsupportedMediaType)
+	return &StreamOutcome{
+		Err:             fmt.Errorf("%s", unsupportedV3Playback),
+		FailureReason:   "unsupported_content_version",
+		Retryable:       false,
+		ResponseStarted: true,
+		StatusCode:      http.StatusUnsupportedMediaType,
+	}
+}
+
 func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1129,6 +1148,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 				fileSize,
 				encProbePath,
 			)
+			if meta.Version == ContentVersionV3 {
+				return rejectUnsupportedV3Playback(w)
+			}
 			if !metaConfirmed {
 				return &StreamOutcome{
 					Err:           fmt.Errorf("unable to confirm encrypted content metadata"),
@@ -1193,6 +1215,10 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 			log.Debugf("V2 redirect meta (inspected): url=%s clientRange=%q headerLen=%d cipherSize=%d plainSize=%d",
 				safeURLForLog(info.RedirectURL), clientRangeHeader, meta.HeaderLen, meta.CiphertextSize, meta.PlainSize)
 		}
+	}
+
+	if !decodeDisabled && meta.Version == ContentVersionV3 {
+		return rejectUnsupportedV3Playback(w)
 	}
 
 	// Always apply V2 corrections — whether meta came from inspection, cache, or pre-population.
@@ -1327,6 +1353,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		if refreshed, ok := p.refreshRedirectInfo(ctx, redirectKey, r.Header, info); ok {
 			resp.Body.Close()
 			info = refreshed
+			if !decodeDisabled && info.ContentVersion == ContentVersionV3 {
+				return rejectUnsupportedV3Playback(w)
+			}
 			resp, err = doStreamRequest(info)
 			if err != nil {
 				return &StreamOutcome{Err: err, FailureReason: "network_error", Retryable: true}
@@ -1730,6 +1759,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 	info = cloneRedirectInfo(info)
 
+	if shouldDecryptRedirect(r, info) && info.ContentVersion == ContentVersionV3 {
+		rejectUnsupportedV3Playback(w)
+		return
+	}
 	fileSize := o.resolveFileSize(r.Context(), r, info)
 	decodeDisabled := r.URL.Query().Get("decode") == "0"
 	if decodeDisabled {
@@ -1774,6 +1807,10 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			0,
 			encProbePath,
 		)
+		if meta.Version == ContentVersionV3 {
+			rejectUnsupportedV3Playback(w)
+			return
+		}
 		if confirmed && meta.IsV2() && meta.PlainSize > 0 {
 			info.ContentVersion = meta.Version
 			info.HeaderLen = meta.HeaderLen

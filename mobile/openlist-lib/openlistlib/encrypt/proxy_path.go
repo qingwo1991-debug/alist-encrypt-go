@@ -214,7 +214,9 @@ func newProxyResolverWithProbe(config *ProxyConfig, probeFn func(host string) bo
 		if config != nil {
 			pref = config.DualNetworkPreference
 		}
-		_ = resolveDualNetworkMark(req, probeInterval, pref)
+		if config.EnableDualNetwork {
+			_ = resolveDualNetworkMark(req, probeInterval, pref)
+		}
 
 		if mode != routingModeOff {
 			if action, ok := matchRoutingRules(config, provider, driver); ok {

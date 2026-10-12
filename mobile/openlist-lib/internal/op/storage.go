@@ -99,7 +99,11 @@ func LoadStorage(ctx context.Context, storage model.Storage) error {
 	driverName := storage.Driver
 	driverNew, err := GetDriver(driverName)
 	if err != nil {
-		return errors.WithMessage(err, "failed get driver new")
+		err = errors.WithMessage(err, "failed get driver new")
+		readiness.Lock()
+		readiness.mounts[storage.MountPath] = &storageReadiness{err: err}
+		readiness.Unlock()
+		return err
 	}
 	storageDriver := driverNew()
 
@@ -117,11 +121,20 @@ func getCurrentGoroutineStack() string {
 
 // initStorage initialize the driver and store to storagesMap
 func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
+	state := beginStorageLoad(ctx, storage.MountPath)
+	defer func() {
+		readiness.Lock()
+		if readiness.mounts[storage.MountPath] == state {
+			state.pending, state.err = false, err
+		}
+		readiness.Unlock()
+	}()
 	storageDriver.SetStorage(storage)
 	driverStorage := storageDriver.GetStorage()
 	defer func() {
-		if err := recover(); err != nil {
-			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", err, getCurrentGoroutineStack())
+		if recovered := recover(); recovered != nil {
+			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", recovered, getCurrentGoroutineStack())
+			err = errors.New(errInfo)
 			log.Errorf("panic init storage: %s", errInfo)
 			driverStorage.SetStatus(errInfo)
 			MustSaveDriverStorage(storageDriver)
@@ -162,9 +175,16 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 		}
 	}
 	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil {
 		err = storageDriver.Init(ctx)
 	}
-	storagesMap.Store(driverStorage.MountPath, storageDriver)
+	// A non-cooperative driver may finish after its deadline. Never publish that
+	// completion as WORK. This is not a substitute for transport cancellation.
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		if IsUseOnlineAPI(storageDriver) {
 			driverStorage.SetStatus(utils.SanitizeHTML(err.Error()))
@@ -175,6 +195,8 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 	} else {
 		driverStorage.SetStatus(WORK)
 	}
+	// Publish only after its final status is set.
+	storagesMap.Store(driverStorage.MountPath, storageDriver)
 	MustSaveDriverStorage(storageDriver)
 	return err
 }
@@ -241,6 +263,7 @@ func DisableStorage(ctx context.Context, id uint) error {
 		return errors.WithMessage(err, "failed update storage in db")
 	}
 	storagesMap.Delete(storage.MountPath)
+	removeStorageReadiness(storage.MountPath)
 	go callStorageHooks("del", storageDriver)
 	return nil
 }
@@ -269,6 +292,7 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	if oldStorage.MountPath != storage.MountPath {
 		// mount path renamed, need to drop the storage
 		storagesMap.Delete(oldStorage.MountPath)
+		removeStorageReadiness(oldStorage.MountPath)
 		Cache.DeleteDirectoryTree(storageDriver, "/")
 		Cache.InvalidateStorageDetails(storageDriver)
 	}
@@ -303,6 +327,7 @@ func DeleteStorageById(ctx context.Context, id uint) error {
 		}
 		// delete the storage in the memory
 		storagesMap.Delete(storage.MountPath)
+		removeStorageReadiness(storage.MountPath)
 		Cache.DeleteDirectoryTree(storageDriver, "/")
 		Cache.InvalidateStorageDetails(storageDriver)
 		go callStorageHooks("del", storageDriver)
@@ -507,7 +532,7 @@ func GetStorageDetails(ctx context.Context, storage driver.Driver, refresh ...bo
 			return ret, nil
 		}
 	}
-	details, err, _ := detailsG.Do(storage.GetStorage().MountPath, func() (*model.StorageDetails, error) {
+	details, err, _ := detailsG.DoContext(ctx, storage.GetStorage().MountPath, func() (*model.StorageDetails, error) {
 		ret, err := wd.GetDetails(ctx)
 		if err != nil {
 			return nil, err

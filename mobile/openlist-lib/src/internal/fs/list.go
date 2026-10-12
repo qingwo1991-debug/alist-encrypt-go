@@ -18,7 +18,7 @@ func list(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error)
 	user, _ := ctx.Value(conf.UserKey).(*model.User)
 	virtualFiles := op.GetStorageVirtualFilesWithDetailsByPath(ctx, path, !args.WithStorageDetails, args.Refresh, "")
 	storage, actualPath, err := op.GetStorageAndActualPath(path)
-	if err != nil && len(virtualFiles) == 0 {
+	if err != nil && (len(virtualFiles) == 0 || errors.Is(err, errs.StorageNotInit)) {
 		return nil, errors.WithMessage(err, "failed get storage")
 	}
 
@@ -33,7 +33,7 @@ func list(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error)
 			if !args.NoLog {
 				log.Errorf("fs/list: %+v", err)
 			}
-			if len(virtualFiles) == 0 {
+			if len(virtualFiles) == 0 || errors.Is(err, errs.StorageNotInit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, errors.WithMessage(err, "failed get objs")
 			}
 		}

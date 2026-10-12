@@ -23,7 +23,6 @@ import (
 	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/trace"
-	"golang.org/x/sync/singleflight"
 )
 
 // ProxyHandler handles proxy requests
@@ -41,8 +40,15 @@ type ProxyHandler struct {
 	sizeResolver          *FileSizeResolver
 	strategySel           *StrategySelector
 	probe                 *ProbeScheduler
-	rawURLRefreshGroup    singleflight.Group // dedupe proactive raw-URL refreshes
-	lastRawURLRefreshes   sync.Map           // displayPath|scope -> unix nano
+	rawRefreshMu          sync.Mutex
+	rawRefreshCtx         context.Context
+	rawRefreshCancel      context.CancelFunc
+	rawRefreshWG          sync.WaitGroup
+	rawRefreshActive      int
+	rawRefreshStopped     bool
+	lastRawURLRefreshes   map[string]time.Time // guarded cooldown, bounded independently of redirects
+	firstBodyByteCount    uint64
+	firstBodyByteNanos    uint64
 	finalPassthroughCount uint64
 	sizeConflictCount     uint64
 	strategyFallbackCount uint64
@@ -95,12 +101,14 @@ func (h *ProxyHandler) Stats() map[string]interface{} {
 		"strategy_cache": h.strategyCache.Stats(),
 		"size_resolver":  h.sizeResolver.Stats(),
 		"stream": map[string]interface{}{
-			"final_passthrough_count": atomic.LoadUint64(&h.finalPassthroughCount),
-			"size_conflict_count":     atomic.LoadUint64(&h.sizeConflictCount),
-			"strategy_fallback_count": atomic.LoadUint64(&h.strategyFallbackCount),
-			"first_frame_count":       atomic.LoadUint64(&h.firstFrameCount),
-			"first_frame_fallbacks":   atomic.LoadUint64(&h.firstFrameFallbacks),
-			"warmup_enqueue_count":    atomic.LoadUint64(&h.warmupEnqueueCount),
+			"final_passthrough_count":  atomic.LoadUint64(&h.finalPassthroughCount),
+			"size_conflict_count":      atomic.LoadUint64(&h.sizeConflictCount),
+			"strategy_fallback_count":  atomic.LoadUint64(&h.strategyFallbackCount),
+			"first_frame_count":        atomic.LoadUint64(&h.firstFrameCount),
+			"first_frame_fallbacks":    atomic.LoadUint64(&h.firstFrameFallbacks),
+			"warmup_enqueue_count":     atomic.LoadUint64(&h.warmupEnqueueCount),
+			"first_body_byte_count":    atomic.LoadUint64(&h.firstBodyByteCount),
+			"first_body_byte_total_ms": float64(atomic.LoadUint64(&h.firstBodyByteNanos)) / float64(time.Millisecond),
 		},
 		"probe_scheduler": func() map[string]interface{} {
 			if h.probe != nil {
@@ -161,8 +169,22 @@ func (h *ProxyHandler) Stop() {
 		return
 	}
 	h.stopCleanupOnce.Do(func() {
-		close(h.stopCleanup)
+		if h.stopCleanup != nil {
+			close(h.stopCleanup)
+		}
 	})
+	// Admission and WaitGroup.Add share this lock with Stop: no worker can
+	// enter after the cancellation boundary (including zero-value handlers).
+	h.rawRefreshMu.Lock()
+	h.rawRefreshStopped = true
+	if h.rawRefreshCancel != nil {
+		h.rawRefreshCancel()
+	}
+	h.rawRefreshMu.Unlock()
+	h.rawRefreshWG.Wait()
+	h.rawRefreshMu.Lock()
+	h.lastRawURLRefreshes = nil
+	h.rawRefreshMu.Unlock()
 }
 
 // SetSizeResolver replaces the per-handler resolver with a process-level
@@ -223,6 +245,7 @@ func (h *ProxyHandler) cleanupRedirectKeys() {
 
 // HandleRedirect handles /redirect/:key for 302 redirect decryption
 func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
+	r = withPlaybackRequestStart(r)
 	key := strings.TrimPrefix(r.URL.Path, "/redirect/")
 	if key == "" {
 		RespondHTTPErrorWithStatus(w, "Missing key", http.StatusBadRequest)
@@ -342,6 +365,8 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
 		StatsRecorder:         h.statsRecorder,
+		FirstBodyByteCount:    &h.firstBodyByteCount,
+		FirstBodyByteNanos:    &h.firstBodyByteNanos,
 	})
 }
 
@@ -487,18 +512,55 @@ func (h *ProxyHandler) maybeProactivelyRefreshRawURL(r *http.Request, displayPat
 		authHeaders.Set("Cookie", cookie)
 	}
 	dedupeKey := displayPath + "\x00" + rawScope
-	if lastNanos, ok := h.lastRawURLRefreshes.Load(dedupeKey); ok {
-		if elapsed := time.Since(time.Unix(0, lastNanos.(int64))); elapsed < proactiveRawRefreshCooldown {
-			return
+	h.enqueueRawURLRefresh(dedupeKey, func(ctx context.Context) {
+		_ = fetchRawURL(ctx, h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, 0)
+	})
+}
+
+// No queue and no goroutine per rejected request. Capacity reservation,
+// deduplication and cooldown insertion are one atomic admission decision.
+func (h *ProxyHandler) enqueueRawURLRefresh(key string, refresh func(context.Context)) bool {
+	h.rawRefreshMu.Lock()
+	defer h.rawRefreshMu.Unlock()
+	if h.rawRefreshStopped || h.rawRefreshActive >= maxProactiveRawRefreshWorkers {
+		return false
+	}
+	now := time.Now()
+	if last, ok := h.lastRawURLRefreshes[key]; ok && now.Sub(last) < proactiveRawRefreshCooldown {
+		return false
+	}
+	if h.lastRawURLRefreshes == nil {
+		h.lastRawURLRefreshes = make(map[string]time.Time)
+	}
+	for k, last := range h.lastRawURLRefreshes {
+		if now.Sub(last) >= proactiveRawRefreshCooldown {
+			delete(h.lastRawURLRefreshes, k)
 		}
 	}
-	h.lastRawURLRefreshes.Store(dedupeKey, time.Now().UnixNano())
-	h.rawURLRefreshGroup.Do(dedupeKey, func() (interface{}, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), proactiveRawURLFetchTimeout)
+	if len(h.lastRawURLRefreshes) >= maxProactiveRawRefreshKeys {
+		return false
+	}
+	if h.rawRefreshCtx == nil {
+		// Detached from individual seeks, but always cancellable by Stop.
+		h.rawRefreshCtx, h.rawRefreshCancel = context.WithCancel(context.Background())
+	}
+	h.lastRawURLRefreshes[key] = now
+	h.rawRefreshActive++
+	h.rawRefreshWG.Add(1)
+	go func() {
+		defer h.rawRefreshWG.Done()
+		defer func() {
+			h.rawRefreshMu.Lock()
+			h.rawRefreshActive--
+			h.rawRefreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(h.rawRefreshCtx, proactiveRawURLFetchTimeout)
 		defer cancel()
-		_ = fetchRawURL(ctx, h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, 0)
-		return nil, nil
-	})
+		if ctx.Err() == nil {
+			refresh(ctx)
+		}
+	}()
+	return true
 }
 
 // rawURLNeedsProactiveRefresh decides whether a currently-servable cached raw
@@ -535,7 +597,9 @@ const (
 	// many parallel Range requests of a first frame.
 	proactiveRawRefreshCooldown = 20 * time.Second
 	// proactiveRawURLFetchTimeout bounds the background upstream fetch.
-	proactiveRawURLFetchTimeout = 8 * time.Second
+	proactiveRawURLFetchTimeout   = 8 * time.Second
+	maxProactiveRawRefreshWorkers = 4
+	maxProactiveRawRefreshKeys    = 256
 )
 
 func (h *ProxyHandler) convertRedirectDisplayPath(displayPath string, passwdInfo *config.PasswdInfo) string {
@@ -590,6 +654,7 @@ func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *
 
 // HandleDownload handles /d/* and /p/* download requests with decryption
 func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	r = withPlaybackRequestStart(r)
 	displayPath := strings.TrimPrefix(r.URL.Path, "/d")
 	displayPath = strings.TrimPrefix(displayPath, "/p")
 	r = r.WithContext(proxy.WithDisplayName(r.Context(), path.Base(displayPath)))
@@ -696,6 +761,8 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		FirstFrameFallbacks:   &h.firstFrameFallbacks,
 		WarmupEnqueueCount:    &h.warmupEnqueueCount,
 		StatsRecorder:         h.statsRecorder,
+		FirstBodyByteCount:    &h.firstBodyByteCount,
+		FirstBodyByteNanos:    &h.firstBodyByteNanos,
 	})
 }
 

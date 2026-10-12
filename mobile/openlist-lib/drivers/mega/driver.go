@@ -35,8 +35,11 @@ func (d *Mega) GetAddition() driver.Additional {
 }
 
 func (d *Mega) Init(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var twoFACode = d.TwoFACode
-	d.c = mega.New()
+	client := mega.New()
 	if d.TwoFASecret != "" {
 		code, err := totp.GenerateCode(d.TwoFASecret, time.Now())
 		if err != nil {
@@ -44,7 +47,17 @@ func (d *Mega) Init(ctx context.Context) error {
 		}
 		twoFACode = code
 	}
-	return d.c.MultiFactorLogin(d.Email, d.Password, twoFACode)
+	// go-mega's login API has no context argument. Keep it synchronous: a
+	// goroutine/select wrapper would abandon, not cancel, its HTTP requests.
+	err := client.MultiFactorLogin(d.Email, d.Password, twoFACode)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		return err
+	}
+	d.c = client
+	return nil
 }
 
 func (d *Mega) Drop(ctx context.Context) error {
@@ -52,6 +65,9 @@ func (d *Mega) Drop(ctx context.Context) error {
 }
 
 func (d *Mega) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if node, ok := dir.(*MegaNode); ok {
 		nodes, err := d.c.FS.GetChildren(node.n)
 		if err != nil {
@@ -72,6 +88,9 @@ func (d *Mega) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]
 		res := make([]model.Obj, 0)
 		for _, v := range fn {
 			res = append(res, v)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		return res, nil
 	}

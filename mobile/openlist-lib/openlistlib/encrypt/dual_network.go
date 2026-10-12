@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // dualProbeAttempts 双网络 RTT 主动探测发起次数（观测用，进程内累计）。
@@ -28,10 +31,10 @@ var dualProbeAttempts atomic.Uint64
 //  4. 见 403/429/连接重置即停：立即对该 host 写负缓存，回退默认网络，不重试死磕。
 //  5. 探测失败 = 退化为现状：任何链路探不到就走现有逻辑，绝不让探测拖慢播放。
 //
-// socket 绑定：通过 net.Dialer.Control 在拨号时对 socket 调 setsockopt(SO_MARK)。
-// Android 的每个网络（WiFi/蜂窝）对应一个 fwmark（netId << 16）。Android 层把两个
-// 网络的 fwmark 算好经 gomobile 传入。若传入的 mark 为 0 或双网络未启用，则完全不
-// 改动默认拨号路径（零行为变化）。
+// socket 绑定：仅对外部可靠提供、且进程有权限设置的 Linux SO_MARK 生效。
+// Android Network handle 是 opaque，不可据此计算 fwmark；当前 Android bridge
+// 显式提供零 marks，并报告 unsupported，保持系统默认路由（含 VPN/TUN）。
+// 支持 Android 选网需要独立的 Network.bindSocket(fd) 桥，不能猜测内核 ABI。
 
 const (
 	// soMark 是 Linux 上 SO_MARK 的 socket 选项号（没有跨平台常量名）。
@@ -54,22 +57,73 @@ const (
 // dualNetworkState 保存 Android 层传入的双网络 fwmark 与开关状态。
 // 全局单例，gomobile 端 setter 写入，拨号时读取。
 type dualNetworkState struct {
-	mu      sync.RWMutex
-	enabled bool
-	wifi    uint32
-	cell    uint32
+	mu            sync.RWMutex
+	enabled       bool
+	wifi          uint32
+	cell          uint32
+	generation    uint64
+	failedMarks   map[uint32]bool
+	lastBindError string
 }
 
 var globalDualNetwork = &dualNetworkState{}
+
+// Only idle connections are retired: active video bodies retain cancellation
+// and are never forcibly closed on a connectivity notification.
+var networkTransports = struct {
+	sync.Mutex
+	items map[*http.Transport]struct{}
+}{items: make(map[*http.Transport]struct{})}
+
+func trackNetworkTransport(t *http.Transport, add bool) {
+	if t == nil {
+		return
+	}
+	networkTransports.Lock()
+	defer networkTransports.Unlock()
+	if add {
+		networkTransports.items[t] = struct{}{}
+	} else {
+		delete(networkTransports.items, t)
+	}
+}
+
+func invalidateNetworkRouting() {
+	globalDualNetwork.mu.Lock()
+	defer globalDualNetwork.mu.Unlock()
+	globalDualNetwork.generation++
+	globalDualNetwork.failedMarks = make(map[uint32]bool)
+	globalDualNetwork.lastBindError = ""
+	hostMarkHint.mu.Lock()
+	clear(hostMarkHint.hints)
+	hostMarkHint.mu.Unlock()
+	globalDualNetworkLatency.mu.Lock()
+	clear(globalDualNetworkLatency.entries)
+	clear(globalDualNetworkLatency.lastProbeAt)
+	clear(globalDualNetworkLatency.negativeHost)
+	globalDualNetworkLatency.mu.Unlock()
+	directProbeCache.Range(func(k, _ interface{}) bool { directProbeCache.Delete(k); return true })
+	networkTransports.Lock()
+	for t := range networkTransports.items {
+		t.CloseIdleConnections()
+	}
+	networkTransports.Unlock()
+}
 
 // SetEncryptDualNetworkMarks 由 gomobile 导出（经 encrypt_server.go），Android 层调用。
 // wifiFwmark/cellFwmark 为 0 表示"该网络不可绑定"。
 func SetEncryptDualNetworkMarks(wifiFwmark, cellFwmark int64, enabled bool) {
 	globalDualNetwork.mu.Lock()
-	defer globalDualNetwork.mu.Unlock()
+	changed := globalDualNetwork.enabled != enabled || globalDualNetwork.wifi != uint32(wifiFwmark) || globalDualNetwork.cell != uint32(cellFwmark)
 	globalDualNetwork.enabled = enabled
 	globalDualNetwork.wifi = uint32(wifiFwmark)
 	globalDualNetwork.cell = uint32(cellFwmark)
+	globalDualNetwork.mu.Unlock()
+	// Zero marks are also the ABI-preserving Android topology notification when
+	// per-socket binding is unsupported (WiFi A -> WiFi B has the same state).
+	if changed || (wifiFwmark == 0 && cellFwmark == 0) {
+		invalidateNetworkRouting()
+	}
 }
 
 // dualNetworkSnapshot 返回当前双网络状态的可变副本。
@@ -185,6 +239,15 @@ func (t *dualNetworkLatencyTable) recordPassive(provider, host string, rtt time.
 	if t == nil || provider == "" || host == "" || rtt <= 0 {
 		return
 	}
+	kind := "wifi"
+	switch GetNetworkState() {
+	case NetworkState4G, NetworkState5G, NetworkStateCellular:
+		kind = "cell"
+	}
+	t.recordPath(provider, host, kind, rtt)
+}
+
+func (t *dualNetworkLatencyTable) recordPath(provider, host, kind string, rtt time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.entries) >= dualNetworkMaxRTTEntries && t.entries[provider] == nil {
@@ -196,10 +259,9 @@ func (t *dualNetworkLatencyTable) recordPassive(provider, host string, rtt time.
 		t.entries[provider] = e
 	}
 	// 当前生效网络由 GetNetworkState() 判定；只更新对应槽位。
-	switch GetNetworkState() {
-	case NetworkState4G, NetworkState5G, NetworkStateCellular:
+	if kind == "cell" {
 		e.cellRTT = rtt
-	default: // wifi / 其他
+	} else {
 		e.wifiRTT = rtt
 	}
 	e.host = host
@@ -223,7 +285,11 @@ func (t *dualNetworkLatencyTable) chooseNetwork(provider, preference string) net
 	preference = normalizeDualNetworkPreference(preference)
 
 	t.mu.Lock()
-	e := t.entries[provider]
+	var e *rttEntry
+	if current := t.entries[provider]; current != nil {
+		copy := *current
+		e = &copy
+	}
 	t.mu.Unlock()
 
 	// 无任何记录：按偏好优先（默认 WiFi），交给被动测量去积累。
@@ -402,6 +468,13 @@ func probeDualNetworkAsync(provider, targetHost string, req *http.Request, probe
 	}
 	probeURL := fmt.Sprintf("%s://%s/", scheme, targetHost)
 
+	globalDualNetwork.mu.RLock()
+	generation := globalDualNetwork.generation
+	failed := globalDualNetwork.failedMarks[probePath.mark]
+	globalDualNetwork.mu.RUnlock()
+	if failed {
+		return
+	}
 	go func() {
 		start := time.Now()
 		probeReq, err := http.NewRequest(http.MethodHead, probeURL, nil)
@@ -421,28 +494,68 @@ func probeDualNetworkAsync(provider, targetHost string, req *http.Request, probe
 		}
 		resp, err := client.Do(probeReq)
 		if err != nil {
-			// 连接被重置等：可能是风控，冷却该 host。
-			globalDualNetworkLatency.markNegative(targetHost)
+			var bindErr *dualNetworkBindError
+			if errors.As(err, &bindErr) {
+				recordDualNetworkBindFailure(probePath.mark, generation, bindErr)
+				return // Never attribute a default-route probe RTT to this path.
+			}
+			globalDualNetwork.mu.RLock()
+			if generation == globalDualNetwork.generation {
+				globalDualNetworkLatency.markNegative(targetHost)
+			}
+			globalDualNetwork.mu.RUnlock()
 			return
 		}
 		defer resp.Body.Close()
 		// 见 403/429：风控，立即停手冷却。
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			globalDualNetworkLatency.markNegative(targetHost)
+			globalDualNetwork.mu.RLock()
+			if generation == globalDualNetwork.generation {
+				globalDualNetworkLatency.markNegative(targetHost)
+			}
+			globalDualNetwork.mu.RUnlock()
 			return
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			globalDualNetworkLatency.recordPassive(provider, targetHost, time.Since(start))
+			globalDualNetwork.mu.RLock()
+			if globalDualNetwork.enabled && generation == globalDualNetwork.generation {
+				globalDualNetworkLatency.recordPath(provider, targetHost, probePath.kind, time.Since(start))
+			}
+			globalDualNetwork.mu.RUnlock()
 		}
 	}()
 }
+
+func recordDualNetworkBindFailure(mark uint32, generation uint64, err error) {
+	globalDualNetwork.mu.Lock()
+	defer globalDualNetwork.mu.Unlock()
+	if generation != globalDualNetwork.generation {
+		return
+	}
+	if globalDualNetwork.failedMarks == nil {
+		globalDualNetwork.failedMarks = make(map[uint32]bool)
+	}
+	if !globalDualNetwork.failedMarks[mark] {
+		log.Warnf("[dual-network] socket binding failed; using default system route until network changes: %v", err)
+	}
+	globalDualNetwork.failedMarks[mark] = true
+	globalDualNetwork.lastBindError = err.Error()
+}
+
+var setDualNetworkSocketMark = func(fd int, mark uint32) error {
+	return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, soMark, int(mark))
+}
+
+type dualNetworkBindError struct{ err error }
+
+func (e *dualNetworkBindError) Error() string { return "SO_MARK: " + e.err.Error() }
+func (e *dualNetworkBindError) Unwrap() error { return e.err }
 
 // dualNetworkDialContext 返回一个 net.Dialer.DialContext，拨号时把 socket 绑定到指定网络。
 func dualNetworkDialContext(d *net.Dialer, path networkPath) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if d == nil {
 		d = &net.Dialer{}
 	}
-	base := d.DialContext
 	ctrl := d.Control
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialer := *d
@@ -455,17 +568,17 @@ func dualNetworkDialContext(d *net.Dialer, path networkPath) func(ctx context.Co
 			if path.mark != dualNetworkMarkNone {
 				var ctrlErr error
 				if err := c.Control(func(fd uintptr) {
-					ctrlErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soMark, int(path.mark))
+					ctrlErr = setDualNetworkSocketMark(int(fd), path.mark)
 				}); err != nil {
 					return err
 				}
 				if ctrlErr != nil {
-					return ctrlErr
+					return &dualNetworkBindError{err: ctrlErr}
 				}
 			}
 			return nil
 		}
-		return base(ctx, network, addr)
+		return dialer.DialContext(ctx, network, addr)
 	}
 }
 
@@ -501,6 +614,11 @@ func resolveDualNetworkMark(req *http.Request, probeInterval time.Duration, pref
 	if path.mark == dualNetworkMarkNone {
 		return 0
 	}
+	globalDualNetwork.mu.RLock()
+	if !globalDualNetwork.enabled || (path.mark != globalDualNetwork.wifi && path.mark != globalDualNetwork.cell) {
+		globalDualNetwork.mu.RUnlock()
+		return 0
+	}
 	hostMarkHint.mu.Lock()
 	hostMarkHint.hints[host] = path.mark
 	if len(hostMarkHint.hints) > 256 {
@@ -512,6 +630,7 @@ func resolveDualNetworkMark(req *http.Request, probeInterval time.Duration, pref
 		}
 	}
 	hostMarkHint.mu.Unlock()
+	globalDualNetwork.mu.RUnlock()
 	// 后台异步探测"另一条网络"的真实延迟（严格节流，绝不阻塞本请求）。
 	probeDualNetworkAsync(provider, host, req, probeInterval)
 	return path.mark
@@ -539,33 +658,25 @@ func newDualNetworkDialer(base *net.Dialer) func(ctx context.Context, network, a
 	if base == nil {
 		return nil
 	}
-	enabled, _, _ := dualNetworkSnapshot()
-	if !enabled {
-		return base.DialContext
-	}
-	baseCtx := base.DialContext
-	ctrl := base.Control
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		mark := hostMarkFromAddr(addr)
-		if mark == dualNetworkMarkNone {
-			return baseCtx(ctx, network, addr)
+		globalDualNetwork.mu.RLock()
+		enabled := globalDualNetwork.enabled
+		failed := globalDualNetwork.failedMarks[mark]
+		generation := globalDualNetwork.generation
+		valid := mark == globalDualNetwork.wifi || mark == globalDualNetwork.cell
+		globalDualNetwork.mu.RUnlock()
+		if !enabled || failed || !valid || mark == dualNetworkMarkNone {
+			return base.DialContext(ctx, network, addr)
 		}
-		dialer := *base
-		dialer.Control = func(network, address string, c syscall.RawConn) error {
-			if ctrl != nil {
-				if err := ctrl(network, address, c); err != nil {
-					return err
-				}
-			}
-			var ctrlErr error
-			if err := c.Control(func(fd uintptr) {
-				ctrlErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soMark, int(mark))
-			}); err != nil {
-				return err
-			}
-			return ctrlErr
+		conn, err := dualNetworkDialContext(base, networkPath{mark: mark})(ctx, network, addr)
+		var bindErr *dualNetworkBindError
+		if !errors.As(err, &bindErr) {
+			return conn, err
 		}
-		return dialer.DialContext(ctx, network, addr)
+		recordDualNetworkBindFailure(mark, generation, bindErr)
+		// Exactly one default-route attempt, under the caller's original budget.
+		return base.DialContext(ctx, network, addr)
 	}
 }
 
@@ -588,6 +699,19 @@ func randJitterN(n int) int {
 // 供 Flutter 延迟面板 / gomobile 读取。
 func GetEncryptDualNetworkStatusJson() string {
 	enabled, wifiMark, cellMark := dualNetworkSnapshot()
+	globalDualNetwork.mu.RLock()
+	lastBindError := globalDualNetwork.lastBindError
+	failedCount := len(globalDualNetwork.failedMarks)
+	globalDualNetwork.mu.RUnlock()
+	status := "disabled"
+	if wifiMark == 0 && cellMark == 0 {
+		status = "unsupported"
+	} else if enabled {
+		status = "available"
+	}
+	if failedCount > 0 {
+		status = "default-route-fallback"
+	}
 	type netInfo struct {
 		Fwmark uint32 `json:"fwmark"`
 		RttMs  int64  `json:"rtt_ms"`
@@ -595,12 +719,16 @@ func GetEncryptDualNetworkStatusJson() string {
 		Bound  bool   `json:"bound"`
 	}
 	out := struct {
-		Enabled   bool     `json:"enabled"`
-		Wifi      netInfo  `json:"wifi"`
-		Cellular  netInfo  `json:"cellular"`
-		Providers []string `json:"providers"`
+		Enabled       bool     `json:"enabled"`
+		BindingStatus string   `json:"binding_status"`
+		LastBindError string   `json:"last_bind_error,omitempty"`
+		Wifi          netInfo  `json:"wifi"`
+		Cellular      netInfo  `json:"cellular"`
+		Providers     []string `json:"providers"`
 	}{
-		Enabled: enabled,
+		Enabled:       enabled,
+		BindingStatus: status,
+		LastBindError: lastBindError,
 		Wifi: netInfo{
 			Fwmark: wifiMark,
 			Bound:  wifiMark != dualNetworkMarkNone,

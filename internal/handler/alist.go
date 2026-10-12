@@ -1279,8 +1279,8 @@ func (h *AlistHandler) inspectContentMetaWithFallback(r *http.Request, rawURL, e
 			)
 		}
 	}
-	result, confirmedCandidate := probeCandidateCandidates(h.cfg, candidates, authVariants, func(candidate string, headers http.Header) proxy.ContentInspectionResult {
-		return h.streamProxy.InspectEncryptedContentResult(r.Context(), candidate, headers, passwdInfo, ciphertextSize)
+	result, confirmedCandidate := probeCandidateCandidatesContext(r.Context(), h.cfg, candidates, authVariants, func(ctx context.Context, candidate string, headers http.Header) proxy.ContentInspectionResult {
+		return h.streamProxy.InspectEncryptedContentResult(ctx, candidate, headers, passwdInfo, ciphertextSize)
 	})
 	if result.Confirmed {
 		if result.Meta.IsV2() && result.Meta.PlainSize > 0 {

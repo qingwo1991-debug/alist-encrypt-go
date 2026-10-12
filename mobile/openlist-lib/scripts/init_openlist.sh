@@ -47,15 +47,45 @@ if [ -f ./server/static/static.go ]; then
     cp ./server/static/static.go ./.codex-backup/server/static/static.go
 fi
 
+# Preserve the reviewed playback resilience overlay, including its offline tests.
+# The manifest is intentionally narrow: never copy the entire generated tree.
+PLAYBACK_PATCH_MANIFEST="$SCRIPT_DIR/playback_resilience_files.txt"
+if [ -f "$PLAYBACK_PATCH_MANIFEST" ]; then
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        case "$rel" in
+            internal/*|pkg/singleflight/*|server/*|drivers/google_drive/*|drivers/onedrive/*|drivers/mega/*) ;;
+            *) echo "Invalid playback patch path: $rel" >&2; exit 1 ;;
+        esac
+        if [ -f "./$rel" ]; then
+            mkdir -p "./.codex-backup/playback/$(dirname "$rel")"
+            cp "./$rel" "./.codex-backup/playback/$rel" || exit 1
+        else
+            echo "Missing playback resilience patch: $rel" >&2
+            exit 1
+        fi
+    done < "$PLAYBACK_PATCH_MANIFEST"
+fi
+
 # Clean up any previous source
 rm -rf ./src
 
 unset GIT_WORK_TREE
-git clone --branch "$TAG_NAME" https://github.com/OpenListTeam/OpenList.git ./src
+git clone --branch "$TAG_NAME" https://github.com/OpenListTeam/OpenList.git ./src || exit 1
 rm -rf ./src/.git
 
 echo "Checking cloned source structure:"
 ls -la ./src/
+
+# Restore the overlay to source before copying packages, keeping source/review
+# and the build tree identical even when init_openlist re-clones upstream.
+if [ -f "$PLAYBACK_PATCH_MANIFEST" ]; then
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        mkdir -p "./src/$(dirname "$rel")"
+        cp "./.codex-backup/playback/$rel" "./src/$rel" || exit 1
+    done < "$PLAYBACK_PATCH_MANIFEST"
+fi
 
 # Copy go.mod and go.sum from OpenList source
 if [ -f ./src/go.mod ]; then

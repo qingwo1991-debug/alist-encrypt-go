@@ -30,6 +30,8 @@ type detailWithIndex struct {
 }
 
 func makeStorageResp(ctx *gin.Context, storages []model.Storage) []*StorageResp {
+	detailCtx, cancel := context.WithTimeout(ctx.Request.Context(), 3*time.Second)
+	defer cancel()
 	ret := make([]*StorageResp, len(storages))
 	detailsChan := make(chan detailWithIndex, len(storages))
 	workerCount := 0
@@ -51,7 +53,7 @@ func makeStorageResp(ctx *gin.Context, storages []model.Storage) []*StorageResp 
 		}
 		workerCount++
 		go func(dri driver.Driver, idx int) {
-			details, e := op.GetStorageDetails(ctx, dri)
+			details, e := op.GetStorageDetails(detailCtx, dri)
 			if e != nil {
 				if !errors.Is(e, errs.NotImplement) && !errors.Is(e, errs.StorageNotInit) {
 					log.Errorf("failed get %s details: %+v", dri.GetStorage().MountPath, e)
@@ -65,7 +67,7 @@ func makeStorageResp(ctx *gin.Context, storages []model.Storage) []*StorageResp 
 		case r := <-detailsChan:
 			ret[r.idx].MountDetails = r.val
 			workerCount--
-		case <-time.After(time.Second * 3):
+		case <-detailCtx.Done():
 			workerCount = 0
 		}
 	}
@@ -207,17 +209,20 @@ func LoadAllStorages(c *gin.Context) {
 		return
 	}
 	conf.ResetStoragesLoadSignal()
+	op.PrepareStorageLoads(storages)
 	go func(storages []model.Storage) {
 		var wg sync.WaitGroup
 		for _, storage := range storages {
 			wg.Add(1)
 			go func(s model.Storage) {
 				defer wg.Done()
-				if storageDriver, err := op.GetStorageByMountPath(s.MountPath); err == nil {
-					_ = storageDriver.Drop(context.Background())
-				}
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
+				if storageDriver, err := op.GetStorageByMountPath(s.MountPath); err == nil {
+					if err := storageDriver.Drop(ctx); err != nil {
+						log.Errorf("failed drop storage [%s]: %+v", s.MountPath, err)
+					}
+				}
 				if err := op.LoadStorage(ctx, s); err != nil {
 					log.Errorf("failed load storage [%s]: %+v", s.MountPath, err)
 				} else {

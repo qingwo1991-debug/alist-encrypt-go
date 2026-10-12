@@ -56,19 +56,20 @@ const (
 // 会话聚合后：同路径 30s 窗口内的多条 Range 请求合并为一条记录，
 // SeekCount 累计窗口内的 seek 次数。
 type PlaybackEvent struct {
-	ID              string    `json:"id"`
-	Path            string    `json:"path"`          // 展示路径（明文）
-	Provider        string    `json:"provider"`      // provider host（归一化）
-	BytesServed     int64     `json:"bytes_served"`  // 本次写出的解密字节数
-	TotalBytes      int64     `json:"total_bytes"`   // 文件总大小
-	DurationSecs    float64   `json:"duration_secs"` // 估计播放时长（秒）
-	PlayedAt        time.Time `json:"played_at"`
-	Completed       bool      `json:"completed"` // 是否完整写出（非客户端中断）
-	ContentType     string    `json:"content_type,omitempty"`
-	RangeStart      int64     `json:"range_start,omitempty"`       // 本请求 Range 起始位置（无 Range 为 0）
-	SeekCount       int       `json:"seek_count"`                  // 会话内快进/快退次数
-	HeaderLatencyMs float64   `json:"header_latency_ms,omitempty"` // 请求→响应头就绪，毫秒；0 表示未测量
-	Mbps            float64   `json:"mbps,omitempty"`              // 本请求平均下行速率（MiB/s），0 表示未测量
+	ID                 string    `json:"id"`
+	Path               string    `json:"path"`          // 展示路径（明文）
+	Provider           string    `json:"provider"`      // provider host（归一化）
+	BytesServed        int64     `json:"bytes_served"`  // 本次写出的解密字节数
+	TotalBytes         int64     `json:"total_bytes"`   // 文件总大小
+	DurationSecs       float64   `json:"duration_secs"` // 估计播放时长（秒）
+	PlayedAt           time.Time `json:"played_at"`
+	Completed          bool      `json:"completed"` // 是否完整写出（非客户端中断）
+	ContentType        string    `json:"content_type,omitempty"`
+	RangeStart         int64     `json:"range_start,omitempty"`           // 本请求 Range 起始位置（无 Range 为 0）
+	SeekCount          int       `json:"seek_count"`                      // 会话内快进/快退次数
+	HeaderLatencyMs    float64   `json:"header_latency_ms,omitempty"`     // 上游流请求→响应头就绪，毫秒；0 表示未测量
+	FirstByteLatencyMs float64   `json:"first_byte_latency_ms,omitempty"` // handler 请求开始→首个成功 body write（含 metadata/probe 前置工作），毫秒
+	Mbps               float64   `json:"mbps,omitempty"`                  // 本请求平均下行速率（MiB/s），0 表示未测量
 }
 
 // DeletionEvent 一次文件删除。

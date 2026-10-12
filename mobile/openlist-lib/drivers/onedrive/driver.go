@@ -40,7 +40,7 @@ func (d *Onedrive) Init(ctx context.Context) error {
 	if d.ref != nil {
 		return nil
 	}
-	return d.refreshToken()
+	return d.refreshToken(ctx)
 }
 
 func (d *Onedrive) InitReference(refStorage driver.Driver) error {
@@ -93,7 +93,7 @@ func (d *Onedrive) GetRoot(ctx context.Context) (model.Obj, error) {
 }
 
 func (d *Onedrive) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
-	files, err := d.getFiles(dir.GetPath())
+	files, err := d.getFiles(ctx, dir.GetPath())
 	if err != nil {
 		return nil, err
 	}

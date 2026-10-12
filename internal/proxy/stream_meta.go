@@ -73,6 +73,17 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Streaming clients intentionally have no overall HTTP timeout. Tiny probes
+	// need a separate wall-clock budget including body reads, redirects, and
+	// V3 header/trailer follow-ups; never restart that budget per request.
+	budget := 8 * time.Second
+	if s.cfg != nil {
+		if seconds := s.cfg.AlistServerSnapshot().RangeProbeTimeoutSeconds; seconds > 0 {
+			budget = time.Duration(seconds) * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	currentURL := strings.TrimSpace(targetURL)
 	currentAuth := authHeaders
 	maxHops := 2
@@ -255,7 +266,7 @@ func v3ProbeFailureStatus(err error) int {
 
 // probeV3Range never accepts a full-body response or reads beyond the tiny
 // requested window. Header completion and EOF probing retain the caller's
-// cancellation/deadline and the configured HTTP client's request timeout.
+// cancellation/deadline, including the inspection's single total probe budget.
 func (s *StreamProxy) probeV3Range(ctx context.Context, targetURL string, authHeaders http.Header, start, end, total int64) ([]byte, error) {
 	if start < 0 || end < start || total <= end || end-start >= encryption.V3HeaderSize {
 		return nil, fmt.Errorf("v3 probe: invalid range geometry")

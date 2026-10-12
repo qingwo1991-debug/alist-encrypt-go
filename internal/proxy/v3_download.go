@@ -34,6 +34,23 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	if chunkSize <= 0 {
 		chunkSize = encryption.V3DefaultChunkSize()
 	}
+	// The format allows large records, but playback must not allocate an
+	// unbounded per-stream buffer. Reject before KDF, body reads or player data.
+	recordBytes := chunkSize + 16
+	if recordBytes > v3RecordBudgetBytes {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return &StreamOutcome{Err: errors.NewDecryptionError("v3 chunk exceeds playback memory budget"), FailureReason: "bad_v3_metadata", NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
+	}
+	if req.Method != http.MethodHead {
+		release, ok := s.acquireV3Memory(recordBytes)
+		if !ok {
+			// Commit a terminal overload response: another strategy/URL cannot
+			// lower this request's record memory and would amplify the overload.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return &StreamOutcome{Err: errors.NewProxyError("v3 playback memory budget exhausted"), FailureReason: "resource_exhausted", NoLearning: true, StatusCode: http.StatusServiceUnavailable, ResponseStarted: true}
+		}
+		defer release()
+	}
 	nonce := meta.NonceField
 	if int64(len(nonce)) != encryption.V3NonceFieldLen() {
 		return &StreamOutcome{
@@ -137,8 +154,8 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	// Where the plaintext begins inside the upstream body:
 	// - Range strategy: body starts at the window's first chunk record, so only
 	//   the intra-chunk skip remains.
-	// - Full strategy (Range denied upstream): body is the whole container, so
-	//   discard the header and skip from the very first chunk.
+	// - Full/Chunked strategy (Range denied upstream): body is the whole
+	//   container, so discard the header and skip from the very first chunk.
 	// - Plain GET: body is the whole container, start at chunk 0.
 	firstChunk := int64(0)
 	skip := int64(0)
@@ -152,6 +169,19 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 		firstChunk = 0
 		skip = fullRequestedRange.Start
 		limit = fullRequestedRange.ContentLength()
+	case activeRange != nil && strategy == StreamStrategyChunked:
+		// applyStrategyHeaders removed upstream Range. The body still includes
+		// front matter and starts at record zero, not at the requested window.
+		maxDiscard := s.chunkedSeekMaxDiscardBytes()
+		if maxDiscard > 0 && activeRange.Start > maxDiscard {
+			return &StreamOutcome{Err: errors.NewProxyError("chunked seek offset too large"), Retryable: true, FailureReason: "chunked_seek_too_large"}
+		}
+		if err := discardBytes(resp.Body, meta.HeaderLen); err != nil {
+			result.Err = errors.NewProxyErrorWithCause("failed to discard v3 header", err)
+			return result
+		}
+		skip = activeRange.Start
+		limit = activeRange.ContentLength()
 	case activeRange != nil:
 		firstChunk = activeRange.Start / chunkSize
 		skip = activeRange.Start % chunkSize

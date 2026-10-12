@@ -29,17 +29,18 @@ const serverPlaybackSessionMaxLifetime = 2 * time.Hour
 const serverSeekRangeHintBytes = 1 << 20
 
 type serverPlaybackSession struct {
-	path            string
-	provider        string
-	contentType     string
-	startAt         time.Time
-	lastAt          time.Time
-	bytesServed     int64
-	totalBytes      int64
-	durationSecs    float64
-	seekCount       int
-	headerLatencyMs float64 // 会话首个请求的响应头延迟（首帧可观测）
-	peakMbps        float64 // 会话内峰值下行速率（MiB/s）
+	path               string
+	provider           string
+	contentType        string
+	startAt            time.Time
+	lastAt             time.Time
+	bytesServed        int64
+	totalBytes         int64
+	durationSecs       float64
+	seekCount          int
+	headerLatencyMs    float64 // stream preparation metric; not end-to-end first byte
+	firstByteLatencyMs float64 // request entry to first successful body write
+	peakMbps           float64 // 会话内峰值下行速率（MiB/s）
 }
 
 // playbackRecorderWriter 聚合器落库目标（*StatsStore 实现）。
@@ -101,6 +102,9 @@ func (a *serverPlaybackSessionAggregator) record(ev PlaybackEvent) {
 	if ev.HeaderLatencyMs > 0 && sess.headerLatencyMs == 0 {
 		sess.headerLatencyMs = ev.HeaderLatencyMs
 	}
+	if ev.FirstByteLatencyMs > 0 && sess.firstByteLatencyMs == 0 {
+		sess.firstByteLatencyMs = ev.FirstByteLatencyMs
+	}
 	if ev.Mbps > sess.peakMbps {
 		sess.peakMbps = ev.Mbps
 	}
@@ -117,18 +121,19 @@ func (a *serverPlaybackSessionAggregator) flushLocked(path string, sess *serverP
 		return
 	}
 	ev := PlaybackEvent{
-		ID:              sess.startAt.Format("20060102T150405.000000000"),
-		Path:            sess.path,
-		Provider:        sess.provider,
-		BytesServed:     sess.bytesServed,
-		TotalBytes:      sess.totalBytes,
-		DurationSecs:    sess.durationSecs,
-		PlayedAt:        sess.startAt,
-		Completed:       true,
-		ContentType:     sess.contentType,
-		SeekCount:       sess.seekCount,
-		HeaderLatencyMs: sess.headerLatencyMs,
-		Mbps:            sess.peakMbps,
+		ID:                 sess.startAt.Format("20060102T150405.000000000"),
+		Path:               sess.path,
+		Provider:           sess.provider,
+		BytesServed:        sess.bytesServed,
+		TotalBytes:         sess.totalBytes,
+		DurationSecs:       sess.durationSecs,
+		PlayedAt:           sess.startAt,
+		Completed:          true,
+		ContentType:        sess.contentType,
+		SeekCount:          sess.seekCount,
+		HeaderLatencyMs:    sess.headerLatencyMs,
+		FirstByteLatencyMs: sess.firstByteLatencyMs,
+		Mbps:               sess.peakMbps,
 	}
 	if err := a.writer.RecordPlayback(context.Background(), ev); err != nil {
 		log.Warn().Err(err).Str("path", ev.Path).Msg("failed to persist aggregated playback session")

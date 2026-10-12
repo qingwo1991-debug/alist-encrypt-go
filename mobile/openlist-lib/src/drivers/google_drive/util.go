@@ -48,7 +48,10 @@ type googleDriveServiceAccount struct {
 	// ClientX509CertURL       string `json:"client_x509_cert_url"`
 }
 
-func (d *GoogleDrive) refreshToken() error {
+func (d *GoogleDrive) refreshToken(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// 使用在线API刷新Token，无需ClientID和ClientSecret
 	if d.UseOnlineAPI && len(d.APIAddress) > 0 {
 		u := d.APIAddress
@@ -57,7 +60,7 @@ func (d *GoogleDrive) refreshToken() error {
 			AccessToken  string `json:"access_token"`
 			ErrorMessage string `json:"text"`
 		}
-		_, err := base.RestyClient.R().
+		_, err := base.RestyClient.R().SetContext(ctx).
 			SetResult(&resp).
 			SetQueryParams(map[string]string{
 				"refresh_ui": d.RefreshToken,
@@ -73,6 +76,9 @@ func (d *GoogleDrive) refreshToken() error {
 				return fmt.Errorf("failed to refresh token: %s", resp.ErrorMessage)
 			}
 			return fmt.Errorf("empty token returned from official API, a wrong refresh token may have been used")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		d.AccessToken = resp.AccessToken
 		d.RefreshToken = resp.RefreshToken
@@ -160,7 +166,7 @@ func (d *GoogleDrive) refreshToken() error {
 
 		var resp base.TokenResp
 		var e TokenError
-		res, err := base.RestyClient.R().SetResult(&resp).SetError(&e).
+		res, err := base.RestyClient.R().SetContext(ctx).SetResult(&resp).SetError(&e).
 			SetFormData(map[string]string{
 				"assertion":  assertion,
 				"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
@@ -172,6 +178,9 @@ func (d *GoogleDrive) refreshToken() error {
 		if e.Error != "" {
 			return fmt.Errorf("%s", e.Error)
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		d.AccessToken = resp.AccessToken
 		return nil
 	} else if os.IsExist(gdsaFileErr) {
@@ -180,7 +189,7 @@ func (d *GoogleDrive) refreshToken() error {
 	url := "https://www.googleapis.com/oauth2/v4/token"
 	var resp base.TokenResp
 	var e TokenError
-	res, err := base.RestyClient.R().SetResult(&resp).SetError(&e).
+	res, err := base.RestyClient.R().SetContext(ctx).SetResult(&resp).SetError(&e).
 		SetFormData(map[string]string{
 			"client_id":     d.ClientID,
 			"client_secret": d.ClientSecret,
@@ -194,11 +203,14 @@ func (d *GoogleDrive) refreshToken() error {
 	if e.Error != "" {
 		return fmt.Errorf("%s", e.Error)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d.AccessToken = resp.AccessToken
 	return nil
 }
 
-func (d *GoogleDrive) request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
+func (d *GoogleDrive) request(url string, method string, callback base.ReqCallback, resp interface{}, noRetry ...bool) ([]byte, error) {
 	req := base.RestyClient.R()
 	req.SetHeader("Authorization", "Bearer "+d.AccessToken)
 	req.SetQueryParam("includeItemsFromAllDrives", "true")
@@ -216,19 +228,19 @@ func (d *GoogleDrive) request(url string, method string, callback base.ReqCallba
 		return nil, err
 	}
 	if e.Error.Code != 0 {
-		if e.Error.Code == 401 {
-			err = d.refreshToken()
+		if e.Error.Code == 401 && !utils.IsBool(noRetry...) {
+			err = d.refreshToken(req.Context())
 			if err != nil {
 				return nil, err
 			}
-			return d.request(url, method, callback, resp)
+			return d.request(url, method, callback, resp, true)
 		}
 		return nil, fmt.Errorf("%s: %v", e.Error.Message, e.Error.Errors)
 	}
 	return res.Body(), nil
 }
 
-func (d *GoogleDrive) getFiles(id string) ([]File, error) {
+func (d *GoogleDrive) getFiles(ctx context.Context, id string) ([]File, error) {
 	pageToken := "first"
 	res := make([]File, 0)
 	for pageToken != "" {
@@ -250,7 +262,7 @@ func (d *GoogleDrive) getFiles(id string) ([]File, error) {
 			"pageToken": pageToken,
 		}
 		_, err := d.request("https://www.googleapis.com/drive/v3/files", http.MethodGet, func(req *resty.Request) {
-			req.SetQueryParams(query)
+			req.SetQueryParams(query).SetContext(ctx)
 		}, &resp)
 		if err != nil {
 			return nil, err
@@ -273,7 +285,7 @@ func (d *GoogleDrive) getFiles(id string) ([]File, error) {
 
 		// Batch get target file info (only for file shortcuts)
 		if len(shortcutTargetIds) > 0 {
-			targetFiles := d.batchGetTargetFilesInfo(shortcutTargetIds)
+			targetFiles := d.batchGetTargetFilesInfo(ctx, shortcutTargetIds)
 			// Update shortcut file info
 			for j, targetId := range shortcutTargetIds {
 				if targetFile, exists := targetFiles[targetId]; exists {
@@ -294,20 +306,23 @@ func (d *GoogleDrive) getFiles(id string) ([]File, error) {
 			}
 		}
 
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		res = append(res, resp.Files...)
 	}
 	return res, nil
 }
 
 // getTargetFileInfo gets target file details for shortcuts
-func (d *GoogleDrive) getTargetFileInfo(targetId string) (File, error) {
+func (d *GoogleDrive) getTargetFileInfo(ctx context.Context, targetId string) (File, error) {
 	var targetFile File
 	url := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s", targetId)
 	query := map[string]string{
 		"fields": FileInfoFields,
 	}
 	_, err := d.request(url, http.MethodGet, func(req *resty.Request) {
-		req.SetQueryParams(query)
+		req.SetQueryParams(query).SetContext(ctx)
 	}, &targetFile)
 	if err != nil {
 		return File{}, err
@@ -316,7 +331,7 @@ func (d *GoogleDrive) getTargetFileInfo(targetId string) (File, error) {
 }
 
 // batchGetTargetFilesInfo batch gets target file info, sequential processing to avoid concurrency complexity
-func (d *GoogleDrive) batchGetTargetFilesInfo(targetIds []string) map[string]File {
+func (d *GoogleDrive) batchGetTargetFilesInfo(ctx context.Context, targetIds []string) map[string]File {
 	if len(targetIds) == 0 {
 		return make(map[string]File)
 	}
@@ -324,7 +339,10 @@ func (d *GoogleDrive) batchGetTargetFilesInfo(targetIds []string) map[string]Fil
 	result := make(map[string]File)
 	// Sequential processing to avoid concurrency complexity
 	for _, targetId := range targetIds {
-		file, err := d.getTargetFileInfo(targetId)
+		if ctx.Err() != nil {
+			break
+		}
+		file, err := d.getTargetFileInfo(ctx, targetId)
 		if err == nil {
 			result[targetId] = file
 		}
@@ -372,7 +390,7 @@ func (d *GoogleDrive) chunkUpload(ctx context.Context, file model.FileStreamer, 
 			utils.Json.Unmarshal(bytes, &e)
 			if e.Error.Code != 0 {
 				if e.Error.Code == 401 {
-					err = d.refreshToken()
+					err = d.refreshToken(ctx)
 					if err != nil {
 						return err
 					}
@@ -401,8 +419,7 @@ func (d *GoogleDrive) getAbout(ctx context.Context) (*AboutResp, error) {
 	}
 	var resp AboutResp
 	_, err := d.request("https://www.googleapis.com/drive/v3/about", http.MethodGet, func(req *resty.Request) {
-		req.SetQueryParams(query)
-		req.SetContext(ctx)
+		req.SetQueryParams(query).SetContext(ctx)
 	}, &resp)
 	if err != nil {
 		return nil, err

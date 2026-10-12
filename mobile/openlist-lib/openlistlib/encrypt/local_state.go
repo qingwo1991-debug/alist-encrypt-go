@@ -5,11 +5,11 @@ import "sync/atomic"
 type NetworkState string
 
 const (
-	NetworkStateWiFi    NetworkState = "wifi"
-	NetworkState4G      NetworkState = "4g"
-	NetworkState5G      NetworkState = "5g"
+	NetworkStateWiFi     NetworkState = "wifi"
+	NetworkState4G       NetworkState = "4g"
+	NetworkState5G       NetworkState = "5g"
 	NetworkStateCellular NetworkState = "cellular"
-	NetworkStateOffline NetworkState = "offline"
+	NetworkStateOffline  NetworkState = "offline"
 )
 
 var currentNetworkState atomic.Value
@@ -28,7 +28,11 @@ func normalizeNetworkState(state string) NetworkState {
 }
 
 func SetNetworkState(state string) {
-	currentNetworkState.Store(normalizeNetworkState(state))
+	next := normalizeNetworkState(state)
+	previous := currentNetworkState.Swap(next)
+	if previous != next {
+		invalidateNetworkRouting()
+	}
 }
 
 func GetNetworkState() NetworkState {

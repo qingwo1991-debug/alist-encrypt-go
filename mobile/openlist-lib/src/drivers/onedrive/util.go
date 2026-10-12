@@ -61,10 +61,13 @@ func (d *Onedrive) GetMetaUrl(auth bool, path string) string {
 	}
 }
 
-func (d *Onedrive) refreshToken() error {
+func (d *Onedrive) refreshToken(ctx context.Context) error {
 	var err error
 	for i := 0; i < 3; i++ {
-		err = d._refreshToken()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err = d._refreshToken(ctx)
 		if err == nil {
 			break
 		}
@@ -72,7 +75,7 @@ func (d *Onedrive) refreshToken() error {
 	return err
 }
 
-func (d *Onedrive) _refreshToken() error {
+func (d *Onedrive) _refreshToken(ctx context.Context) error {
 	// 使用在线API刷新Token，无需ClientID和ClientSecret
 	if d.UseOnlineAPI && len(d.APIAddress) > 0 {
 		u := d.APIAddress
@@ -81,7 +84,7 @@ func (d *Onedrive) _refreshToken() error {
 			AccessToken  string `json:"access_token"`
 			ErrorMessage string `json:"text"`
 		}
-		_, err := base.RestyClient.R().
+		_, err := base.RestyClient.R().SetContext(ctx).
 			SetResult(&resp).
 			SetQueryParams(map[string]string{
 				"refresh_ui": d.RefreshToken,
@@ -98,6 +101,9 @@ func (d *Onedrive) _refreshToken() error {
 			}
 			return fmt.Errorf("empty token returned from official API, a wrong refresh token may have been used")
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		d.AccessToken = resp.AccessToken
 		d.RefreshToken = resp.RefreshToken
 		op.MustSaveDriverStorage(d)
@@ -111,7 +117,7 @@ func (d *Onedrive) _refreshToken() error {
 	url := d.GetMetaUrl(true, "") + "/common/oauth2/v2.0/token"
 	var resp base.TokenResp
 	var e TokenErr
-	_, err := base.RestyClient.R().SetResult(&resp).SetError(&e).SetFormData(map[string]string{
+	_, err := base.RestyClient.R().SetContext(ctx).SetResult(&resp).SetError(&e).SetFormData(map[string]string{
 		"grant_type":    "refresh_token",
 		"client_id":     d.ClientID,
 		"client_secret": d.ClientSecret,
@@ -127,6 +133,9 @@ func (d *Onedrive) _refreshToken() error {
 	if resp.RefreshToken == "" {
 		return errs.EmptyToken
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d.RefreshToken, d.AccessToken = resp.RefreshToken, resp.AccessToken
 	op.MustSaveDriverStorage(d)
 	return nil
@@ -134,7 +143,7 @@ func (d *Onedrive) _refreshToken() error {
 
 func (d *Onedrive) Request(url string, method string, callback base.ReqCallback, resp interface{}, noRetry ...bool) ([]byte, error) {
 	if d.ref != nil {
-		return d.ref.Request(url, method, callback, resp)
+		return d.ref.Request(url, method, callback, resp, noRetry...)
 	}
 	req := base.RestyClient.R()
 	req.SetHeader("Authorization", "Bearer "+d.AccessToken)
@@ -152,24 +161,29 @@ func (d *Onedrive) Request(url string, method string, callback base.ReqCallback,
 	}
 	if e.Error.Code != "" {
 		if e.Error.Code == "InvalidAuthenticationToken" && !utils.IsBool(noRetry...) {
-			err = d.refreshToken()
+			err = d.refreshToken(req.Context())
 			if err != nil {
 				return nil, err
 			}
-			return d.Request(url, method, callback, resp)
+			return d.Request(url, method, callback, resp, true)
 		}
 		return nil, errors.New(e.Error.Message)
 	}
 	return res.Body(), nil
 }
 
-func (d *Onedrive) getFiles(path string) ([]File, error) {
+func (d *Onedrive) getFiles(ctx context.Context, path string) ([]File, error) {
 	var res []File
 	nextLink := d.GetMetaUrl(false, path) + "/children?$top=1000&$expand=thumbnails($select=medium)&$select=id,name,size,fileSystemInfo,content.downloadUrl,file,parentReference"
 	for nextLink != "" {
 		var files Files
-		_, err := d.Request(nextLink, http.MethodGet, nil, &files)
+		_, err := d.Request(nextLink, http.MethodGet, func(req *resty.Request) {
+			req.SetContext(ctx)
+		}, &files)
 		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		res = append(res, files.Value...)

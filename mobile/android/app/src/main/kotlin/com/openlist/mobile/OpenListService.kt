@@ -265,7 +265,7 @@ class OpenListService : Service(), OpenList.Listener {
     private fun startNetworkMonitoring() {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         mConnectivityManager = connectivityManager
-
+        Log.w(TAG, "Dual-network socket selection unsupported: using default system route; no Network.bindSocket bridge installed")
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 rememberDualNetwork(network)
@@ -275,7 +275,8 @@ class OpenListService : Service(), OpenList.Listener {
 
             override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
                 rememberDualNetwork(network)
-                updateNetworkStateFromCapabilities(networkCapabilities)
+                // A non-default cellular callback must not overwrite active WiFi state.
+                updateNetworkStateFromActive()
                 pushDualNetworkMarks()
             }
 
@@ -321,31 +322,14 @@ class OpenListService : Service(), OpenList.Listener {
     }
 
     /**
-     * 计算双网络的 fwmark 并推送给 Go。
-     * Android 网络 -> fwmark = (netId << 16)，netId 取 getNetworkHandle() 的低 32 位。
-     * API < 26 无法精确取 netId，返回 0（表示不绑定），Go 侧自然退化。
+     * Network handles are opaque, not Linux fwmarks. Ordinary apps cannot
+     * reliably use SO_MARK either. Keep the existing bridge ABI fail-safe;
+     * supported per-socket selection requires a future Network.bindSocket(fd)
+     * callback with explicit FD ownership, rather than guessed mark bits.
+     * Default Android routing (including VPN/TUN) remains unchanged.
      */
     private fun pushDualNetworkMarks() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            // 低版本无法可靠取 netId，禁用绑定。
-            OpenList.setEncryptDualNetworkMarks(0L, 0L, false)
-            return
-        }
-        val wifiMark = mWifiNetwork?.let { networkFwmark(it) } ?: 0L
-        val cellMark = mCellNetwork?.let { networkFwmark(it) } ?: 0L
-        val enabled = wifiMark != 0L && cellMark != 0L
-        OpenList.setEncryptDualNetworkMarks(wifiMark, cellMark, enabled)
-    }
-
-    private fun networkFwmark(network: Network): Long {
-        return try {
-            val handle = network.getNetworkHandle()
-            val netId = (handle and 0xffffffffL)
-            (netId shl 16) and 0xffffffffL
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to compute network fwmark", e)
-            0L
-        }
+        OpenList.setEncryptDualNetworkMarks(0L, 0L, false)
     }
 
     private fun stopNetworkMonitoring() {

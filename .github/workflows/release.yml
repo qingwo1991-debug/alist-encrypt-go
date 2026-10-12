@@ -74,7 +74,7 @@ jobs:
             shared/encryptcore/go.sum
       - name: Race-check playback and cache paths
         run: |
-          go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler
+          go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler ./internal/httputil
           (cd shared/encryptcore && go test -race -mod=readonly -timeout 10m ./...)
       - name: Record network-free performance baselines
         run: |
@@ -157,9 +157,20 @@ jobs:
             ./drivers/aliyundrive_open \
             ./drivers/dropbox \
             ./drivers/quark_open \
+            ./drivers/google_drive \
+            ./drivers/onedrive \
+            ./drivers/mega \
+            ./internal/bootstrap \
+            ./internal/conf \
             ./internal/op \
+            ./pkg/singleflight \
             ./pkg/utils \
             ./server/...
+
+      - name: Race-check mobile network and readiness regressions
+        working-directory: mobile/openlist-lib
+        run: |
+          go test -race -mod=readonly -timeout 10m -run 'Test(DualNetwork|MobileStream|StreamIdle|StorageReady|DoContext)' ./openlistlib/encrypt ./internal/op ./pkg/singleflight
 
       - name: Test synchronized upstream source copy
         working-directory: mobile/openlist-lib/src
@@ -171,7 +182,13 @@ jobs:
             ./drivers/aliyundrive_open \
             ./drivers/dropbox \
             ./drivers/quark_open \
+            ./drivers/google_drive \
+            ./drivers/onedrive \
+            ./drivers/mega \
+            ./internal/bootstrap \
+            ./internal/conf \
             ./internal/op \
+            ./pkg/singleflight \
             ./pkg/utils \
             ./server/...
 

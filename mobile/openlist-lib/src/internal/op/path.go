@@ -15,6 +15,9 @@ import (
 // for path: remove the mount path prefix and join the actual root folder if exists
 func GetStorageAndActualPath(rawPath string) (storage driver.Driver, actualPath string, err error) {
 	rawPath = utils.FixAndCleanPath(rawPath)
+	if err = StorageReadyError(rawPath); err != nil {
+		return
+	}
 	storage = GetBalancedStorage(rawPath)
 	if storage == nil {
 		if rawPath == "/" {
