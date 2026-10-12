@@ -8,6 +8,26 @@ import (
 	"time"
 )
 
+func TestProxyLifecycleStopFlushesPlaybackSessions(t *testing.T) {
+	p := lifecycleTestServer(t)
+	p.ensurePlaybackSessionTracker().record("/movie.mp4", "provider", "video/mp4", 4096, 8192, 1, false, 0, 2, 3, 4)
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newLocalStore(filepath.Dir(p.config.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	rows, err := reopened.ListPlaybackStats(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("session not persisted before close: %d rows", len(rows))
+	}
+}
+
 func TestProxyLifecycleStoreBackupJoinedOnClose(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

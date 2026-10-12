@@ -238,12 +238,21 @@ func backupLocalStoreDB(dbPath string) error {
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
+	complete := false
+	defer func() {
+		_ = dst.Close()
+		if !complete {
+			_ = os.Remove(dst.Name())
+		}
+	}()
 	if _, err := io.Copy(dst, src); err != nil {
 		return err
 	}
-	// Close dst before cleanup to avoid file lock issues on Windows
-	dst.Close()
+	// Close dst before cleanup to avoid file lock issues on Windows.
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	complete = true
 	src.Close()
 
 	// Clean up old backup files, keeping only the 2 most recent.
