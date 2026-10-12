@@ -227,12 +227,28 @@ func TestResilienceNextEpisodeBeforeEOFAndFirstBytePrework(t *testing.T) {
 	sp := &liveResilienceStreamer{first: make(chan struct{}), finish: make(chan struct{}), prework: 30 * time.Millisecond}
 	stats := &startedPlaybackRecorder{}
 	done := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(sp.finish) }) }
+	defer func() {
+		release()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("playback fixture did not finish during cleanup")
+		}
+	}()
 	var count, nanos uint64
 	go func() {
 		defer close(done)
 		executeDecryptPlayback(decryptPlaybackRequest{ResponseWriter: httptest.NewRecorder(), Request: httptest.NewRequest(http.MethodGet, "/d/drama/第01集.mp4", nil), Config: cfg, Probe: ps, FileDAO: files, StreamProxy: sp, PasswdInfo: &config.PasswdInfo{}, FileItem: FileItem{DisplayPath: "/drama/第01集.mp4", EncryptedPath: "/encrypted/1"}, InitialSize: 2, StatsRecorder: stats, FirstBodyByteCount: &count, FirstBodyByteNanos: &nanos})
 	}()
-	<-sp.first
+	select {
+	case <-sp.first:
+	case <-done:
+		t.Fatal("playback returned without a first body byte")
+	case <-time.After(time.Second):
+		t.Fatal("playback fixture never reached a first body byte")
+	}
 	select {
 	case item := <-ps.queue:
 		if item.file.DisplayPath != "/drama/第02集.mp4" {
@@ -241,8 +257,12 @@ func TestResilienceNextEpisodeBeforeEOFAndFirstBytePrework(t *testing.T) {
 	default:
 		t.Error("next episode not queued before EOF")
 	}
-	close(sp.finish)
-	<-done
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("playback fixture failed to finish after EOF release")
+	}
 	if count != 1 || time.Duration(nanos) < sp.prework {
 		t.Fatalf("firstbyte count=%d elapsed=%s", count, time.Duration(nanos))
 	}
