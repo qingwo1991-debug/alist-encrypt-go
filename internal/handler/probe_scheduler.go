@@ -564,8 +564,10 @@ func (ps *ProbeScheduler) worker() {
 }
 
 func (ps *ProbeScheduler) releaseProviderSlot(sem chan struct{}) {
-	<-sem
+	// Keep availability stable throughout a dispatch scan: releasing mid-scan
+	// could skip the oldest item then claim a later item for the same provider.
 	ps.queueMu.Lock()
+	<-sem
 	ps.notifyDispatchLocked()
 	ps.queueMu.Unlock()
 }

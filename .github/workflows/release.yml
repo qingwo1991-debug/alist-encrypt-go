@@ -75,6 +75,7 @@ jobs:
       - name: Race-check playback and cache paths
         run: |
           go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler ./internal/httputil ./internal/playbacktest
+          go test -race -mod=readonly -timeout 2m -count=32 -run '^TestProbeFairDispatchBlockedProviderDoesNotOccupyWorkers$' ./internal/handler
           (cd shared/encryptcore && go test -race -mod=readonly -timeout 10m ./...)
       - name: Record deterministic playback fault acceptance
         env:
