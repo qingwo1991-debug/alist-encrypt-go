@@ -2095,11 +2095,14 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	if cache := o.proxy.decryptedBlockCache; cache != nil && !decodeDisabled && r.Method == http.MethodGet && fileSize > 0 && shouldDecryptRedirect(r, info) && info.PasswdInfo != nil {
 		if start, end, hasRange, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr == nil && hasRange {
 			meta := ContentMeta{
+				EncType:        normalizeContentEncType(EncryptionType(info.PasswdInfo.EncType)),
 				Version:        info.ContentVersion,
 				HeaderLen:      info.HeaderLen,
 				NonceField:     info.NonceField,
 				CiphertextSize: info.CiphertextSize,
 				PlainSize:      fileSize,
+				ChunkSize:      info.ChunkSize,
+				KDFIterations:  info.KDFIterations,
 			}
 			length := end - start + 1
 			if data, ok := cache.getRange(o.proxy.decryptedCacheBaseKey(info, meta), start, length); ok {
