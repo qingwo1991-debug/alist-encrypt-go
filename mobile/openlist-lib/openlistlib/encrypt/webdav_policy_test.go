@@ -253,6 +253,20 @@ func TestProcessPropfindResponseCachesResolvedRealName(t *testing.T) {
 	}
 }
 
+// Include 16 payload bytes after the unchanged 32-byte V2 header to answer the
+// strict 48-byte mixed-format metadata probe with an exact known-total 206.
+func webDAVPolicyV2Probe(t *testing.T, req *http.Request, plainSize int64, nonce []byte) *http.Response {
+	t.Helper()
+	header, err := BuildV2Header(EncTypeAESCTR, plainSize, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append(header, make([]byte, 16)...)
+	return &http.Response{StatusCode: http.StatusPartialContent, ContentLength: 48,
+		Header: http.Header{"Content-Length": {"48"}, "Content-Range": {fmt.Sprintf("bytes 0-47/%d", plainSize+32)}},
+		Body:   io.NopCloser(bytes.NewReader(body)), Request: req}
+}
+
 func TestWebDAVFullGetUsesEncryptedDAVDespiteCachedRawURL(t *testing.T) {
 	ClearShowNameCache()
 	p, err := NewProxyServer(&ProxyConfig{
@@ -362,6 +376,9 @@ func TestWebDAVFirstFrameRangeUsesCachedRawURL(t *testing.T) {
 	hitProxyAuthorization := ""
 	p.streamClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Range") == "bytes=0-47" {
+				return webDAVPolicyV2Probe(t, req, 4096, bytes.Repeat([]byte{1}, 16)), nil
+			}
 			hitURL = req.URL.String()
 			hitRange = req.Header.Get("Range")
 			hitAuthorization = req.Header.Get("Authorization")
@@ -483,6 +500,9 @@ func TestWebDAVRangeValidatesStartAndSupportsShortWindow(t *testing.T) {
 			var upstreamRange string
 			p.streamClient = &http.Client{
 				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Header.Get("Range") == "bytes=0-47" {
+						return webDAVPolicyV2Probe(t, req, contentEnc.Meta.PlainSize, contentEnc.Meta.NonceField), nil
+					}
 					upstreamRange = req.Header.Get("Range")
 					return &http.Response{
 						StatusCode: http.StatusPartialContent,
@@ -571,6 +591,9 @@ func TestWebDAVDeepSeekUsesEncryptedDAVAndShiftsV2Range(t *testing.T) {
 	hitRange := ""
 	p.streamClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Range") == "bytes=0-47" {
+				return webDAVPolicyV2Probe(t, req, 32*1024*1024, bytes.Repeat([]byte{2}, 16)), nil
+			}
 			hitURL = req.URL.String()
 			hitRange = req.Header.Get("Range")
 			return &http.Response{
@@ -771,6 +794,8 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader("expired")),
 				Request:    req,
 			}, nil
+		case req.Header.Get("Range") == "bytes=0-47" && (strings.HasPrefix(req.URL.String(), "http://alist.local:5244/dav/enc/") || req.URL.String() == "http://cdn.example/from-dav"):
+			return webDAVPolicyV2Probe(t, req, 4096, bytes.Repeat([]byte{3}, 16)), nil
 		case req.URL.String() == freshRaw:
 			return &http.Response{
 				StatusCode: http.StatusForbidden,

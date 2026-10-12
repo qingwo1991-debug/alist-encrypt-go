@@ -1,6 +1,7 @@
 package encrypt
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -69,20 +71,76 @@ func (p *ProxyServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	p.handleDownloadLegacy(w, r)
 }
 
+type legacyContentMetaCacheKey struct{}
+type legacyContentMetaIdentity struct {
+	target        string
+	encryption    *EncryptPath
+	authorization string
+	cookie        string
+}
+
+type legacyContentMetaCache struct {
+	mu      sync.Mutex
+	entries map[legacyContentMetaIdentity]ContentMeta
+}
+
+func withLegacyContentMetaCache(r *http.Request) *http.Request {
+	if _, ok := r.Context().Value(legacyContentMetaCacheKey{}).(*legacyContentMetaCache); ok {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), legacyContentMetaCacheKey{}, &legacyContentMetaCache{entries: make(map[legacyContentMetaIdentity]ContentMeta)}))
+}
+
+// Request-local confirmed metadata is shared by dispatch, range translation and
+// decryption. It is never persisted, reused across URLs/credentials, or populated
+// from an ambiguous probe. The media request retains its original lifetime.
+func (p *ProxyServer) inspectLegacyContentMeta(ctx context.Context, target string, headers http.Header, encPath *EncryptPath, size int64) (ContentMeta, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cache, _ := ctx.Value(legacyContentMetaCacheKey{}).(*legacyContentMetaCache)
+	if cache != nil {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+	}
+	key := legacyContentMetaIdentity{target, encPath, headers.Get("Authorization"), headers.Get("Cookie")}
+	if cache != nil {
+		if meta, ok := cache.entries[key]; ok {
+			return meta, true
+		}
+	}
+	meta, confirmed := p.inspectEncryptedContentConfirmed(ctx, target, headers, encPath, size)
+	if confirmed && cache != nil && (!meta.IsV3() || ValidateV3ContentMeta(meta) == nil) {
+		cache.entries[key] = meta
+	}
+	return meta, confirmed
+}
+
 // serveLegacyV3Download dispatches before legacy range translation or size-based
 // passthrough. Even an invalid recognized V3 header is terminal: the service
 // writes the failure and callers must neither retry nor fall back to V1.
 func (p *ProxyServer) serveLegacyV3Download(w http.ResponseWriter, r *http.Request, target string, headers http.Header, encPath *EncryptPath, fileSize int64, encryptedPath string) bool {
+	handled, confirmed := p.inspectLegacyV3Download(w, r, target, headers, encPath, fileSize, encryptedPath)
+	if !handled && !confirmed {
+		_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted content metadata could not be confirmed"))
+		return true
+	}
+	return handled
+}
+
+// An unconfirmed candidate has not started a response and must never be read
+// through a legacy cipher. The download attempt loop can try its next URL;
+// single-target callers fail closed via serveLegacyV3Download above.
+func (p *ProxyServer) inspectLegacyV3Download(w http.ResponseWriter, r *http.Request, target string, headers http.Header, encPath *EncryptPath, fileSize int64, encryptedPath string) (handled, confirmed bool) {
 	if encPath == nil || !encPath.Enable || r.URL.Query().Get("decode") == "0" || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
-		return false
+		return false, true
 	}
 	w, r, _ = withPlaybackTiming(w, r)
-	meta, confirmed := p.inspectEncryptedContentConfirmed(r.Context(), target, headers, encPath, fileSize)
+	meta, confirmed := p.inspectLegacyContentMeta(r.Context(), target, headers, encPath, fileSize)
 	if !confirmed && !meta.IsV3() {
 		// An unreadable or encoded prefix proves neither legacy nor V3.
 		// Never let probe failure select V1 or leak the encrypted object.
-		_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted content metadata could not be confirmed"))
-		return true
+		return false, false
 	}
 	if !meta.IsV3() {
 		// A failed re-probe must not reinterpret a previously recognized V3
@@ -94,11 +152,11 @@ func (p *ProxyServer) serveLegacyV3Download(w http.ResponseWriter, r *http.Reque
 			}
 		}
 		if !meta.IsV3() {
-			return false
+			return false, true
 		}
 	}
 	p.serveLegacyResolvedV3(w, r, target, headers, encPath, encryptedPath, meta)
-	return true
+	return true, true
 }
 
 func (p *ProxyServer) serveLegacyResolvedV3(w http.ResponseWriter, r *http.Request, target string, headers http.Header, encPath *EncryptPath, encryptedPath string, meta ContentMeta) {
@@ -116,6 +174,7 @@ func (p *ProxyServer) serveLegacyResolvedV3(w http.ResponseWriter, r *http.Reque
 
 // handleDownloadLegacy 保留历史执行链，供 V2 orchestrator 调用
 func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Request) {
+	r = withLegacyContentMetaCache(r)
 	ctx := r.Context()
 	if p.shouldFastFailUpstream() {
 		_, remain, reason := p.upstreamBackoffState()
@@ -242,23 +301,10 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 			if sendRange {
 				rangeHeader := clientRangeHeader
 				if encPath != nil {
-					// Check file cache before probing upstream
-					var meta ContentMeta
-					if cached, ok := p.loadFileCache(filePath); ok && cached != nil && cached.ContentVersion > 0 {
-						if cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
-							meta = ContentMeta{
-								EncType:        EncryptionType(encPath.EncType),
-								Version:        ContentVersionV2,
-								HeaderLen:      cached.HeaderLen,
-								PlainSize:      cached.Size,
-								CiphertextSize: cached.CiphertextSize,
-								NonceField:     cloneNonceField(cached.NonceField),
-							}
-						} else {
-							meta = LegacyContentMeta(EncryptionType(encPath.EncType), fileSize)
-						}
-					} else {
-						meta = p.inspectEncryptedContent(r.Context(), targetURL, req.Header, encPath, fileSize)
+					// Reuse authoritative request-local metadata before older caches.
+					meta, resolved := p.inspectLegacyContentMeta(r.Context(), targetURL, r.Header, encPath, fileSize)
+					if !resolved {
+						return nil, fmt.Errorf("encrypted metadata unconfirmed")
 					}
 					rangeHeader = buildUpstreamRangeHeader(clientRangeHeader, meta)
 				}
@@ -336,8 +382,14 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		if strings.TrimSpace(targetForV3) == "" {
 			targetForV3 = p.getAlistURL() + attempt.urlPath
 		}
-		if p.serveLegacyV3Download(w, r, targetForV3, r.Header, encPath, fileSize, attempt.urlPath) {
+		handled, confirmed := p.inspectLegacyV3Download(w, r, targetForV3, r.Header, encPath, fileSize, attempt.urlPath)
+		if handled {
 			return
+		}
+		if !confirmed {
+			// Expired signed URLs may precede a valid authenticated /d or /p
+			// candidate. Skip without streaming or guessing the format.
+			continue
 		}
 		req, err = buildDownloadRequest(attempt.urlPath, attempt.fullURL, attempt.sendRange)
 		if err != nil {
@@ -363,7 +415,7 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		break
 	}
 	if resp == nil {
-		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("upstream content metadata could not be confirmed"))
 		return
 	}
 	defer func() {
@@ -560,22 +612,10 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		if strings.TrimSpace(targetForMeta) == "" {
 			targetForMeta = p.getAlistURL() + actualURLPath
 		}
-		meta := LegacyContentMeta(EncryptionType(encPath.EncType), fileSize)
-		if cached, ok := p.loadFileCache(filePath); ok && cached != nil && cached.ContentVersion == ContentVersionV2 && len(cached.NonceField) == 16 {
-			meta = ContentMeta{
-				EncType:        EncryptionType(encPath.EncType),
-				Version:        cached.ContentVersion,
-				HeaderLen:      cached.HeaderLen,
-				PlainSize:      cached.Size,
-				CiphertextSize: cached.CiphertextSize,
-				NonceField:     cloneNonceField(cached.NonceField),
-			}
-		} else {
-			encProbePath := actualURLPath
-			if strings.HasPrefix(encProbePath, "/d") {
-				encProbePath = strings.TrimPrefix(encProbePath, "/d")
-			}
-			meta = p.inspectEncryptedContentWithFallback(ctx, targetForMeta, req.Header, encPath, fileSize, encProbePath)
+		meta, confirmed := p.inspectLegacyContentMeta(ctx, targetForMeta, r.Header, encPath, fileSize)
+		if !confirmed {
+			_ = v3PlaybackFailure(w, http.StatusBadGateway, fmt.Errorf("encrypted metadata unconfirmed"))
+			return
 		}
 		if meta.IsV3() {
 			resp.Body.Close()
