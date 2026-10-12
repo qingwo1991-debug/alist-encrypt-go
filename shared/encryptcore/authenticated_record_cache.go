@@ -103,12 +103,15 @@ type v3RecordEntry struct {
 
 // V3AuthenticatedRecordCache owns an immutable byte-LRU. used includes resident
 // backing allocations, evicted-but-leased backing allocations, and reservations
-// for in-progress Open. There is no extra unbounded pinned-copy budget.
+// for in-progress Open. The 4096-entry ownership cap also includes reservations
+// and evicted-but-pinned entries, not just the resident LRU. There is no extra
+// unbounded pinned-copy budget.
 // Ciphertext buffers and uncached stream record buffers are external admission.
 type V3AuthenticatedRecordCache struct {
 	mu                       sync.Mutex
 	maxBytes, used, reserved int64
-	pending                  int // entry reservations; resident + pending entries are capped at 4096
+	pending                  int
+	ownedEntries             int // resident + pending + evicted-but-pinned; capped at 4096
 	ttl                      time.Duration
 	entries                  map[v3RecordID]*v3RecordEntry
 	lru                      list.List
@@ -184,6 +187,7 @@ func (l *V3RecordLease) Release() {
 	e.refs--
 	if e.refs == 0 && e.elem == nil {
 		c.used -= e.weight
+		c.ownedEntries--
 		e.plain = nil
 	}
 }
@@ -193,6 +197,7 @@ func (c *V3AuthenticatedRecordCache) remove(e *v3RecordEntry) {
 	e.elem = nil
 	if e.refs == 0 {
 		c.used -= e.weight
+		c.ownedEntries--
 		e.plain = nil
 	}
 }
@@ -221,15 +226,16 @@ func (c *V3AuthenticatedRecordCache) reserve(n int64) bool {
 	if n <= 0 || n > c.maxBytes {
 		return false
 	}
-	for (c.used > c.maxBytes-n || len(c.entries)+c.pending >= 4096) && c.lru.Len() > 0 {
+	for (c.used > c.maxBytes-n || c.ownedEntries >= 4096) && c.lru.Len() > 0 {
 		c.remove(c.lru.Back().Value.(*v3RecordEntry))
 	}
-	if c.used > c.maxBytes-n || len(c.entries)+c.pending >= 4096 {
+	if c.used > c.maxBytes-n || c.ownedEntries >= 4096 {
 		return false
 	}
 	c.used += n
 	c.reserved += n
 	c.pending++
+	c.ownedEntries++
 	return true
 }
 
@@ -268,6 +274,7 @@ func (c *V3AuthenticatedRecordCache) Load(ctx context.Context, key V3RecordCache
 			c.used -= chunkSize
 			c.reserved -= chunkSize
 			c.pending--
+			c.ownedEntries--
 			c.mu.Unlock()
 		}
 	}()
@@ -338,7 +345,7 @@ func (c *V3AuthenticatedRecordCache) publishAuthenticated(key V3RecordCacheKey, 
 // V3RecordCacheStats allows callers/tests to verify the shared ownership cap.
 type V3RecordCacheStats struct {
 	MaxBytes, OwnedBytes, ReservedBytes, ResidentBytes, PinnedEvictedBytes int64
-	Entries                                                                int
+	Entries, OwnedEntries, ReservedEntries                                 int
 }
 
 func (c *V3AuthenticatedRecordCache) Stats() V3RecordCacheStats {
@@ -347,7 +354,7 @@ func (c *V3AuthenticatedRecordCache) Stats() V3RecordCacheStats {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := V3RecordCacheStats{MaxBytes: c.maxBytes, OwnedBytes: c.used, ReservedBytes: c.reserved, Entries: len(c.entries)}
+	s := V3RecordCacheStats{MaxBytes: c.maxBytes, OwnedBytes: c.used, ReservedBytes: c.reserved, Entries: len(c.entries), OwnedEntries: c.ownedEntries, ReservedEntries: c.pending}
 	for _, e := range c.entries {
 		s.ResidentBytes += e.weight
 	}

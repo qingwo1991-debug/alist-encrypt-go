@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -57,10 +58,33 @@ func (p *ProxyServer) v3PlaybackCacheKey(r *http.Request, info *RedirectInfo, me
 		h.Write(size[:])
 		h.Write([]byte(s))
 	}
-	field("mobile-v3-authorized-scope/v1")
-	for _, headers := range []http.Header{r.Header, info.Headers} {
-		for _, name := range []string{"Authorization", "Cookie", "Proxy-Authorization", "User-Agent"} {
-			values := headers.Values(name)
+	field("mobile-v3-authorized-scope/v2")
+	// Providers may authorize or select objects with arbitrary custom headers.
+	// Bind both source sets conservatively, even headers currently not forwarded.
+	// Range and Accept-Encoding alone are omitted: this service overwrites them
+	// with its record window and identity encoding, respectively.
+	for source, headers := range []http.Header{r.Header, info.Headers} {
+		field(strconv.Itoa(source))
+		names := make([]string, 0, len(headers))
+		for name := range headers {
+			if strings.EqualFold(name, "Range") || strings.EqualFold(name, "Accept-Encoding") {
+				continue
+			}
+			names = append(names, name)
+		}
+		// Stable canonical names with a raw-name tie break also bind malformed
+		// maps containing duplicate differently cased names without map-order races.
+		sort.Slice(names, func(i, j int) bool {
+			a, b := strings.ToLower(names[i]), strings.ToLower(names[j])
+			if a == b {
+				return names[i] < names[j]
+			}
+			return a < b
+		})
+		field(strconv.Itoa(len(names)))
+		for _, name := range names {
+			field(strings.ToLower(name))
+			values := headers[name]
 			field(strconv.Itoa(len(values)))
 			for _, value := range values {
 				field(value)

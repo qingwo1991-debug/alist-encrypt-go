@@ -94,6 +94,11 @@ func TestV3PlaybackCacheIdentityIsolation(t *testing.T) {
 			i.Headers = http.Header{"Cookie": []string{"session=stored"}}
 		}},
 		{"user-agent", func(r *http.Request, _ *RedirectInfo, _ *ContentMeta) { r.Header.Set("User-Agent", "other") }},
+		{"provider-token", func(r *http.Request, _ *RedirectInfo, _ *ContentMeta) { r.Header.Set("X-Provider-Token", "other") }},
+		{"tenant", func(r *http.Request, _ *RedirectInfo, _ *ContentMeta) { r.Header.Set("X-Tenant", "other") }},
+		{"stored-selector", func(_ *http.Request, i *RedirectInfo, _ *ContentMeta) {
+			i.Headers = http.Header{"X-Object-Selector": []string{"other"}}
+		}},
 		{"provider", func(_ *http.Request, i *RedirectInfo, _ *ContentMeta) { i.Provider = "other" }},
 		{"driver", func(_ *http.Request, i *RedirectInfo, _ *ContentMeta) { i.Driver = "other" }},
 		{"object", func(_ *http.Request, i *RedirectInfo, _ *ContentMeta) { i.EncryptedPath = "/different" }},
@@ -122,6 +127,63 @@ func TestV3PlaybackCacheIdentityIsolation(t *testing.T) {
 	info.RedirectURL = "relative/unknown"
 	if _, err := p.v3PlaybackCacheKey(request, info, meta); err == nil {
 		t.Fatal("unknown target enabled cache")
+	}
+}
+
+func TestV3PlaybackCustomProviderTokenCannotReuseAuthorizedCache(t *testing.T) {
+	data, meta := v3PlaybackFixture(t, []byte("abcdefghijklmnop"), 8, false)
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("X-Provider-Token") != "authorized-A" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 48-71/%d", len(data)))
+		w.Header().Set("Content-Length", "24")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(data[48:72])
+	}))
+	defer server.Close()
+	p := &ProxyServer{streamClient: server.Client()}
+	info := v3PlaybackInfo(server.URL)
+	r := httptest.NewRequest("GET", "http://client/", nil)
+	r.Header.Set("X-Provider-Token", "authorized-A")
+	r.Header.Set("Range", "bytes=0-1")
+	if err := p.serveV3Playback(httptest.NewRecorder(), r, info, meta); err != nil {
+		t.Fatal(err)
+	}
+	// Same URL, password and geometry but a different custom credential must
+	// reach upstream authorization rather than return A's authenticated bytes.
+	r.Header.Set("X-Provider-Token", "denied-B")
+	r.Header.Set("Range", "bytes=6-7")
+	w := httptest.NewRecorder()
+	err := p.serveV3Playback(w, r, info, meta)
+	if err == nil || w.Code != http.StatusBadGateway || w.Body.Len() != 0 || calls.Load() != 2 {
+		t.Fatalf("err=%v status=%d body=%q upstream calls=%d", err, w.Code, w.Body.Bytes(), calls.Load())
+	}
+}
+
+func TestV3PlaybackCacheScopeCanonicalHeaders(t *testing.T) {
+	_, meta := v3PlaybackFixture(t, []byte("abcdefghijklmnop"), 8, false)
+	p := &ProxyServer{}
+	info := v3PlaybackInfo("https://canonical.invalid/object")
+	a := httptest.NewRequest("GET", "http://client/", nil)
+	a.Header = http.Header{"X-Tenant": []string{"first", "second"}, "Range": []string{"bytes=0-1"}}
+	b := a.Clone(context.Background())
+	b.Header = http.Header{"x-tenant": []string{"first", "second"}, "Range": []string{"bytes=6-7"}, "Accept-Encoding": []string{"gzip"}}
+	ka, err := p.v3PlaybackCacheKey(a, info, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, err := p.v3PlaybackCacheKey(b, info, meta)
+	if err != nil || ka != kb {
+		t.Fatalf("canonical header key mismatch err=%v", err)
+	}
+	b.Header["x-tenant"] = []string{"second", "first"}
+	kc, err := p.v3PlaybackCacheKey(b, info, meta)
+	if err != nil || kc == ka {
+		t.Fatalf("header value order not scoped err=%v", err)
 	}
 }
 
