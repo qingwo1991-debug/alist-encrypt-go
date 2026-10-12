@@ -2,15 +2,12 @@ package encryption
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
-	"time"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // V3 streaming container.
@@ -39,22 +36,13 @@ var v3TrailerMagicBytes = []byte(v3TrailerMagic)
 // a container nonce. The nonce doubles as the KDF salt so every container has
 // a unique key. Iterations 0 ⇒ 600000.
 func DeriveV3Key(password string, nonce []byte, iterations uint32) []byte {
-	if iterations == 0 {
-		iterations = 600000
-	}
-	cacheKey := v3KeyCacheKey(password, nonce, iterations)
-	if key, ok := loadCachedV3Key(cacheKey, time.Now()); ok {
-		return key
-	}
-	value, _, _ := v3KeyDerivationGroup.Do(cacheKey, func() (interface{}, error) {
-		if key, ok := loadCachedV3Key(cacheKey, time.Now()); ok {
-			return key, nil
-		}
-		key := pbkdf2.Key([]byte(password), nonce, int(iterations), 32, sha256.New)
-		storeCachedV3Key(cacheKey, key, time.Now())
-		return key, nil
-	})
-	return append([]byte(nil), value.([]byte)...)
+	// Legacy callers have no error return: synchronously wait for bounded
+	// admission instead of bypassing the shared CPU/flight limits.
+	key, err := v3DefaultKDFService().key(context.Background(), password, nonce, iterations, V3KDFForeground, true)
+	if err != nil {
+		panic(err)
+	} // process-owned default service is never shut down
+	return key
 }
 
 // V3Writer emits a V3 container using the trailer layout.
