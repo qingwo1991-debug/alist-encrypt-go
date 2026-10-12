@@ -1,14 +1,15 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -448,8 +449,18 @@ func (s *MySQLFileMetaStore) Get(ctx context.Context, providerKey, originalPath 
 }
 
 func preserveV2FileMetaRecord(existing *mysqlstore.FileMetaRecord, incoming *mysqlstore.FileMetaRecord) {
-	if existing == nil || incoming == nil || existing.ContentVersion != encryption.ContentVersionV2 {
+	if existing == nil || incoming == nil || (existing.ContentVersion != encryption.ContentVersionV2 && existing.ContentVersion != encryption.ContentVersionV3) {
 		return
+	}
+	if (len(incoming.NonceField) > 0 && !bytes.Equal(incoming.NonceField, existing.NonceField)) ||
+		(incoming.ContentVersion > 0 && incoming.ContentVersion != existing.ContentVersion) {
+		return
+	}
+	if incoming.ChunkSize == 0 {
+		incoming.ChunkSize = existing.ChunkSize
+	}
+	if incoming.KDFIterations == 0 {
+		incoming.KDFIterations = existing.KDFIterations
 	}
 	if incoming.ContentVersion <= 0 {
 		incoming.ContentVersion = existing.ContentVersion

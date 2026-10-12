@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -63,7 +64,8 @@ type V3Writer struct {
 	nonce     []byte
 	cipher    *V3ChunkCipher
 
-	buf     []byte // plaintext buffered for the current chunk
+	buf     []byte // one chunk+tag allocation, reused for plaintext and ciphertext
+	err     error  // terminal: never retry a partially emitted record/nonce
 	index   uint64
 	written int64 // total plaintext accepted
 	started bool  // header already written
@@ -92,13 +94,30 @@ func NewV3Writer(w io.Writer, password string, chunkSize int64) (*V3Writer, erro
 		chunkSize: chunkSize,
 		cipher:    cipher,
 		nonce:     nonce,
-		buf:       make([]byte, 0, chunkSize),
+		buf:       make([]byte, 0, chunkSize+v3TagSize),
 	}, nil
 }
 
 // NonceField returns the container nonce (needed to re-derive the key when
 // reading).
 func (vw *V3Writer) NonceField() []byte { return append([]byte(nil), vw.nonce...) }
+
+// writeRecord never retries a short write: bytes already emitted cannot safely
+// be rolled back. All failures are sticky, including errors alongside full writes.
+func (vw *V3Writer) writeRecord(p []byte) error {
+	n, err := vw.w.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return err
+}
+
+func (vw *V3Writer) fail(err error) error {
+	if vw.err == nil {
+		vw.err = err
+	}
+	return vw.err
+}
 
 func (vw *V3Writer) ensureHeader() error {
 	if vw.started {
@@ -108,7 +127,7 @@ func (vw *V3Writer) ensureHeader() error {
 	if err != nil {
 		return err
 	}
-	if _, err := vw.w.Write(hdr); err != nil {
+	if err := vw.writeRecord(hdr); err != nil {
 		return fmt.Errorf("v3: write header: %w", err)
 	}
 	vw.started = true
@@ -120,13 +139,15 @@ func (vw *V3Writer) ensureHeader() error {
 // record is exactly chunkSize + tagSize (this is what the seek math relies
 // on). The padding is trimmed on read using the trailer's plaintext length.
 func (vw *V3Writer) flushChunk() error {
-	padded := make([]byte, vw.chunkSize)
-	copy(padded, vw.buf)
-	rec, err := vw.cipher.Seal(vw.index, padded)
+	used := len(vw.buf)
+	padded := vw.buf[:vw.chunkSize]
+	// The reused buffer contains the previous ciphertext, not zero padding.
+	clear(padded[used:])
+	rec, err := vw.cipher.seal(padded[:0], vw.index, padded)
 	if err != nil {
 		return err
 	}
-	if _, err := vw.w.Write(rec); err != nil {
+	if err := vw.writeRecord(rec); err != nil {
 		return fmt.Errorf("v3: write chunk %d: %w", vw.index, err)
 	}
 	vw.index++
@@ -136,19 +157,21 @@ func (vw *V3Writer) flushChunk() error {
 
 // Write implements io.Writer.
 func (vw *V3Writer) Write(p []byte) (int, error) {
+	if vw.err != nil {
+		return 0, vw.err
+	}
 	if vw.closed {
 		return 0, fmt.Errorf("v3: write to closed container")
 	}
 	if err := vw.ensureHeader(); err != nil {
-		return 0, err
+		return 0, vw.fail(err)
 	}
-	vw.written += int64(len(p))
-	writtenThisCall := len(p)
+	writtenThisCall := 0
 	for len(p) > 0 {
 		need := int(vw.chunkSize) - len(vw.buf)
 		if need == 0 {
 			if err := vw.flushChunk(); err != nil {
-				return 0, err
+				return writtenThisCall, vw.fail(err)
 			}
 			need = int(vw.chunkSize)
 		}
@@ -157,10 +180,12 @@ func (vw *V3Writer) Write(p []byte) (int, error) {
 			n = need
 		}
 		vw.buf = append(vw.buf, p[:n]...)
+		writtenThisCall += n
+		vw.written += int64(n)
 		p = p[n:]
 		if len(vw.buf) == int(vw.chunkSize) {
 			if err := vw.flushChunk(); err != nil {
-				return 0, err
+				return writtenThisCall, vw.fail(err)
 			}
 		}
 	}
@@ -170,23 +195,26 @@ func (vw *V3Writer) Write(p []byte) (int, error) {
 // Close flushes the final partial chunk (if any) and appends the trailer.
 // Calling Close more than once is safe.
 func (vw *V3Writer) Close() error {
+	if vw.err != nil {
+		return vw.err
+	}
 	if vw.closed {
 		return nil
 	}
 	vw.closed = true
 	if err := vw.ensureHeader(); err != nil {
-		return err
+		return vw.fail(err)
 	}
 	if len(vw.buf) > 0 {
 		if err := vw.flushChunk(); err != nil {
-			return err
+			return vw.fail(err)
 		}
 	}
 	t := make([]byte, v3TrailerLen)
 	copy(t[:v3TrailerMagicLen], v3TrailerMagicBytes)
 	binary.BigEndian.PutUint64(t[8:16], uint64(vw.written))
-	if _, err := vw.w.Write(t); err != nil {
-		return fmt.Errorf("v3: write trailer: %w", err)
+	if err := vw.writeRecord(t); err != nil {
+		return vw.fail(fmt.Errorf("v3: write trailer: %w", err))
 	}
 	return nil
 }
@@ -222,12 +250,51 @@ func ParseV3StreamHeader(b []byte) (nonce []byte, chunkSize uint64, kdf uint32, 
 }
 
 // V3Container is the random-access view of an open V3 container.
+// R must support concurrent ReadAt calls and its content must remain immutable
+// for the lifetime of this view. Do not mutate its geometry/cipher fields after
+// opening: authenticated plaintext is cached as one immutable chunk.
 type V3Container struct {
 	R         io.ReaderAt
 	Size      int64
 	ChunkSize uint64
 	PlainSize int64
 	Cipher    *V3ChunkCipher
+	cache     *v3ReadCache // pointer keeps copying the view from copying a mutex
+}
+
+type v3ReadCache struct {
+	mu    sync.Mutex // serialize misses; concurrent same-chunk reads decrypt once
+	index uint64
+	plain []byte // immutable after publication, never recycled in place
+}
+
+func (c *V3Container) readChunk(index uint64) ([]byte, error) {
+	if c.cache != nil {
+		c.cache.mu.Lock()
+		defer c.cache.mu.Unlock()
+		if c.cache.plain != nil && c.cache.index == index {
+			return c.cache.plain, nil
+		}
+	}
+	cs := int64(c.ChunkSize)
+	if cs <= 0 || cs > v3MaxChunkSize {
+		return nil, fmt.Errorf("v3: invalid chunk size %d", cs)
+	}
+	rec := make([]byte, cs+v3TagSize)
+	if n, err := c.R.ReadAt(rec, V3ChunkCipherOffset(index, cs)); n != len(rec) || err != nil {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, err
+	}
+	pt, err := c.Cipher.open(rec[:0], index, rec)
+	if err != nil {
+		return nil, err
+	}
+	if c.cache != nil {
+		c.cache.index, c.cache.plain = index, pt
+	}
+	return pt, nil
 }
 
 // OpenV3Container parses the header + trailer of a V3 container stored at ra
@@ -255,7 +322,7 @@ func OpenV3Container(ra io.ReaderAt, size int64, password string) (*V3Container,
 	if err != nil {
 		return nil, err
 	}
-	return &V3Container{R: ra, Size: size, ChunkSize: chunkSize, PlainSize: plain, Cipher: cipher}, nil
+	return &V3Container{R: ra, Size: size, ChunkSize: chunkSize, PlainSize: plain, Cipher: cipher, cache: &v3ReadCache{}}, nil
 }
 
 // ReadAt implements io.ReaderAt over the decrypted plaintext: only the chunk
@@ -272,11 +339,7 @@ func (c *V3Container) ReadAt(p []byte, off int64) (int, error) {
 	cs := int64(c.ChunkSize)
 	for total < len(p) && pos < c.PlainSize {
 		idx, inOff := V3ChunkForOffset(pos, cs)
-		rec := make([]byte, cs+v3TagSize)
-		if _, err := c.R.ReadAt(rec, V3ChunkCipherOffset(idx, cs)); err != nil {
-			return total, err
-		}
-		pt, err := c.Cipher.Open(idx, rec)
+		pt, err := c.readChunk(idx)
 		if err != nil {
 			return total, err
 		}
@@ -286,7 +349,7 @@ func (c *V3Container) ReadAt(p []byte, off int64) (int, error) {
 		}
 		n := copy(p[total:], pt[inOff:inOff+available])
 		total += n
-		pos += available
+		pos += int64(n)
 		if n == 0 {
 			break
 		}
@@ -306,16 +369,24 @@ func (c *V3Container) Sequential() io.Reader {
 }
 
 type v3SeqReader struct {
-	r     io.Reader
-	c     *V3Container
-	cs    int64
-	index uint64
-	buf   []byte
-	off   int
-	read  int64 // plaintext bytes already produced
+	r      io.Reader
+	c      *V3Container
+	cs     int64
+	index  uint64
+	buf    []byte
+	record []byte // reused only after buf has been completely consumed
+	err    error
+	off    int
+	read   int64 // plaintext bytes already produced
 }
 
 func (s *v3SeqReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if s.err != nil {
+		return 0, s.err
+	}
 	total := 0
 	for total < len(p) {
 		if s.off < len(s.buf) {
@@ -328,13 +399,17 @@ func (s *v3SeqReader) Read(p []byte) (int, error) {
 		if s.read >= s.c.PlainSize {
 			return total, io.EOF
 		}
-		rec := make([]byte, s.cs+v3TagSize)
-		if _, err := io.ReadFull(s.r, rec); err != nil {
-			return total, fmt.Errorf("v3: truncated container: %w", err)
+		if s.record == nil {
+			s.record = make([]byte, s.cs+v3TagSize)
 		}
-		pt, err := s.c.Cipher.Open(s.index, rec)
+		if _, err := io.ReadFull(s.r, s.record); err != nil {
+			s.err = fmt.Errorf("v3: truncated container: %w", err)
+			return total, s.err
+		}
+		pt, err := s.c.Cipher.open(s.record[:0], s.index, s.record)
 		if err != nil {
-			return total, err
+			s.err = err
+			return total, s.err
 		}
 		s.index++
 		if over := s.read + int64(len(pt)) - s.c.PlainSize; over > 0 {

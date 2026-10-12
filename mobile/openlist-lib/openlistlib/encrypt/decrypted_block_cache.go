@@ -52,18 +52,20 @@ func (c *decryptedBlockCache) getRange(baseKey string, start, length int64) ([]b
 		c.mu.Unlock()
 		return nil, false
 	}
-	out := make([]byte, 0, minInt64(length, c.blockSize))
+	// Published block data is immutable: replacement swaps the slice instead
+	// of reusing its backing array. Retained slices survive replacement/eviction.
+	var chunks [][]byte
 	remaining := length
 	blockStart := (start / c.blockSize) * c.blockSize
 	blockOffset := start - blockStart
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for remaining > 0 {
 		key := c.blockKey(baseKey, blockStart)
 		elem, ok := c.items[key]
 		if !ok {
 			c.missCount++
+			c.mu.Unlock()
 			return nil, false
 		}
 		entry := elem.Value.(*decryptedBlockEntry)
@@ -73,15 +75,25 @@ func (c *decryptedBlockCache) getRange(baseKey string, start, length int64) ([]b
 		}
 		if int64(len(entry.data)) < blockOffset+need {
 			c.missCount++
+			c.mu.Unlock()
 			return nil, false
 		}
-		out = append(out, entry.data[blockOffset:blockOffset+need]...)
+		chunks = append(chunks, entry.data[blockOffset:blockOffset+need])
 		c.lru.MoveToFront(elem)
 		remaining -= need
 		blockStart += c.blockSize
 		blockOffset = 0
 	}
 	c.hitCount++
+	c.mu.Unlock()
+
+	// Allocate exactly once for payload bytes and copy without holding the
+	// cache lock. Callers receive their own buffer, never the cached arrays.
+	out := make([]byte, length)
+	offset := 0
+	for _, chunk := range chunks {
+		offset += copy(out[offset:], chunk)
+	}
 	return out, true
 }
 

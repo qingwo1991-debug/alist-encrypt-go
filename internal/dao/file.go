@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/url"
 	"strings"
@@ -10,8 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/storage"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // FileInfo represents cached file information
@@ -24,6 +25,8 @@ type FileInfo struct {
 	ContentVersion    int       `json:"content_version"`
 	HeaderLen         int64     `json:"header_len"`
 	NonceField        []byte    `json:"nonce_field,omitempty"`
+	ChunkSize         uint32    `json:"chunk_size"`
+	KDFIterations     uint32    `json:"kdf_iterations"`
 	IsDir             bool      `json:"is_dir"`
 	Modified          time.Time `json:"modified"`
 	RawURL            string    `json:"raw_url"`
@@ -100,11 +103,17 @@ func mergeCachedFileSize(existing *FileInfo, incoming *FileInfo) int64 {
 	if existing == nil {
 		return incoming.Size
 	}
+	if incoming.ContentVersion == encryption.ContentVersionV3 {
+		return incoming.Size
+	}
 	if incoming.Size <= 0 {
 		return existing.Size
 	}
 	if incoming.ContentVersion == encryption.ContentVersionV2 {
 		return incoming.Size
+	}
+	if existing.ContentVersion == encryption.ContentVersionV3 && incoming.ContentVersion <= 0 && existing.Size >= 0 && existing.CiphertextSize > 0 && incoming.Size == existing.CiphertextSize {
+		return existing.Size
 	}
 	if existing.ContentVersion == encryption.ContentVersionV2 && existing.Size > 0 {
 		if existing.CiphertextSize > 0 && incoming.Size == existing.CiphertextSize {
@@ -120,6 +129,9 @@ func mergeCachedFileSize(existing *FileInfo, incoming *FileInfo) int64 {
 func mergeCachedPathSize(existing *PathEntry, incomingSize int64, isDir bool, pathHints ...string) int64 {
 	if existing == nil || incomingSize <= 0 {
 		return incomingSize
+	}
+	if existing.ContentVersion == encryption.ContentVersionV3 && existing.Size >= 0 && existing.CiphertextSize > 0 && incomingSize == existing.CiphertextSize {
+		return existing.Size
 	}
 	if existing.ContentVersion == encryption.ContentVersionV2 && existing.Size > 0 {
 		if existing.CiphertextSize > 0 && incomingSize == existing.CiphertextSize {
@@ -190,6 +202,8 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 			ContentVersion:  entry.ContentVersion,
 			HeaderLen:       entry.HeaderLen,
 			NonceField:      append([]byte(nil), entry.NonceField...),
+			ChunkSize:       entry.ChunkSize,
+			KDFIterations:   entry.KDFIterations,
 			IsDir:           entry.IsDir,
 			RawURL:          entry.RawURL,
 			RawURLAuthScope: entry.RawURLAuthScope,
@@ -228,22 +242,36 @@ func mergeMissingFields(info *FileInfo, existing *FileInfo) {
 	if info.Name == "" {
 		info.Name = existing.Name
 	}
-	if info.Size <= 0 {
-		info.Size = existing.Size
-	} else {
-		info.Size = mergeCachedFileSize(existing, info)
+	// A supplied, different nonce/version identifies a replacement container.
+	// Never fill its missing crypto parameters (or size) from the old container.
+	sameContainer := (len(info.NonceField) == 0 || bytes.Equal(info.NonceField, existing.NonceField)) &&
+		(info.ContentVersion <= 0 || existing.ContentVersion <= 0 || info.ContentVersion == existing.ContentVersion)
+	if sameContainer {
+		if info.Size <= 0 && info.ContentVersion != encryption.ContentVersionV3 {
+			info.Size = existing.Size
+		} else {
+			info.Size = mergeCachedFileSize(existing, info)
+		}
 	}
-	if info.CiphertextSize <= 0 {
+	if sameContainer && info.CiphertextSize <= 0 {
 		info.CiphertextSize = existing.CiphertextSize
 	}
-	if info.ContentVersion <= 0 {
-		info.ContentVersion = existing.ContentVersion
-	}
-	if info.HeaderLen <= 0 {
-		info.HeaderLen = existing.HeaderLen
-	}
-	if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
-		info.NonceField = append([]byte(nil), existing.NonceField...)
+	if sameContainer {
+		if info.ContentVersion <= 0 {
+			info.ContentVersion = existing.ContentVersion
+		}
+		if info.HeaderLen <= 0 {
+			info.HeaderLen = existing.HeaderLen
+		}
+		if len(info.NonceField) == 0 && len(existing.NonceField) > 0 {
+			info.NonceField = append([]byte(nil), existing.NonceField...)
+		}
+		if info.ChunkSize == 0 {
+			info.ChunkSize = existing.ChunkSize
+		}
+		if info.KDFIterations == 0 {
+			info.KDFIterations = existing.KDFIterations
+		}
 	}
 	if info.RawURL == "" {
 		info.RawURL = existing.RawURL
@@ -276,6 +304,8 @@ func (d *FileDAO) cacheInfo(info *FileInfo) {
 		ContentVersion:    info.ContentVersion,
 		HeaderLen:         info.HeaderLen,
 		NonceField:        append([]byte(nil), info.NonceField...),
+		ChunkSize:         info.ChunkSize,
+		KDFIterations:     info.KDFIterations,
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
 		RawURLAuthScope:   info.RawURLAuthScope,
@@ -361,6 +391,8 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 		ContentVersion:    info.ContentVersion,
 		HeaderLen:         info.HeaderLen,
 		NonceField:        append([]byte(nil), info.NonceField...),
+		ChunkSize:         info.ChunkSize,
+		KDFIterations:     info.KDFIterations,
 		IsDir:             info.IsDir,
 		RawURL:            info.RawURL,
 		RawURLAuthScope:   info.RawURLAuthScope,
@@ -436,6 +468,8 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 		entry.ContentVersion = existing.ContentVersion
 		entry.HeaderLen = existing.HeaderLen
 		entry.NonceField = append([]byte(nil), existing.NonceField...)
+		entry.ChunkSize = existing.ChunkSize
+		entry.KDFIterations = existing.KDFIterations
 		entry.RawURL = existing.RawURL
 		entry.RawURLAuthScope = existing.RawURLAuthScope
 		entry.Sign = existing.Sign
@@ -486,8 +520,14 @@ func (d *FileDAO) GetFileSize(path string) (int64, bool) {
 		if err := d.store.GetJSON(storage.BucketFileSize, path, &entry); err == nil && entry.Size > 0 {
 			ttl := time.Duration(alist.SizeMapTtlMinutes) * time.Minute
 			if entry.UpdatedAt.IsZero() || time.Since(entry.UpdatedAt) <= ttl {
-				cacheEntry := &PathEntry{EncryptedPath: path, DisplayPath: path, Size: entry.Size}
-				d.pathCache.Set(cacheEntry, ttl)
+				if info, ok := d.Get(path); ok {
+					entry.Size = mergeCachedFileSize(info, &FileInfo{Path: path, Size: entry.Size})
+					info.Size = entry.Size
+					d.cacheInfo(info)
+				} else {
+					cacheEntry := &PathEntry{EncryptedPath: path, DisplayPath: path, Size: entry.Size}
+					d.pathCache.Set(cacheEntry, ttl)
+				}
 				return entry.Size, true
 			}
 		}
@@ -504,9 +544,14 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 
 	// Try to update existing entry (value copy: mutate the copy, then store)
 	if entry, ok := d.pathCache.Get(path); ok {
-		size = preserveLargerMediaSize(entry.Size, size, entry.IsDir, path, entry.DisplayPath, entry.EncryptedPath, entry.Name)
+		size = mergeCachedPathSize(&entry, size, entry.IsDir, path, entry.DisplayPath, entry.EncryptedPath, entry.Name)
 		entry.Size = size
 		d.pathCache.Set(&entry, ttl)
+	} else if info, ok := d.Get(path); ok {
+		// Preserve persisted container geometry on a cold size-only update.
+		size = mergeCachedFileSize(info, &FileInfo{Path: path, Size: size})
+		info.Size = size
+		d.cacheInfo(info)
 	} else {
 		// Create minimal entry for size caching
 		cacheEntry := &PathEntry{

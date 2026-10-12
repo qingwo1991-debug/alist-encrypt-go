@@ -53,6 +53,8 @@ type FileMetaRecord struct {
 	ContentVersion    int
 	HeaderLen         int64
 	NonceField        []byte
+	ChunkSize         uint32
+	KDFIterations     uint32
 	ETag              string
 	ContentType       string
 	RawURL            string

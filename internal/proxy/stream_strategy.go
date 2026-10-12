@@ -28,6 +28,7 @@ const firstFrameWindowBytes int64 = 2 * 1024 * 1024
 // (observed as bytes=48-) without classifying ordinary seeks as startup.
 const firstFrameStartSlackBytes int64 = 1024
 const recentPlaybackHintTTL = 2 * time.Minute
+const maxRecentPlaybackHints = 1024
 
 // SelectOptimalStrategy picks the single best strategy based on cached range
 // compatibility, playback hints, and the request shape (first-frame seek etc).
@@ -88,7 +89,25 @@ func (s *StreamProxy) RecordPlaybackHint(targetURL, storageKey string, strategy 
 	if s.playbackHints == nil {
 		s.playbackHints = make(map[string]recentPlaybackHint)
 	}
-	s.playbackHints[key] = recentPlaybackHint{Strategy: strategy, UpdatedAt: time.Now()}
+	now := time.Now()
+	// Writes sweep idle keys as well as the requested key. The hard cap bounds
+	// memory even when every successful playback uses a different URL.
+	for existingKey, hint := range s.playbackHints {
+		if now.Sub(hint.UpdatedAt) > recentPlaybackHintTTL {
+			delete(s.playbackHints, existingKey)
+		}
+	}
+	s.playbackHints[key] = recentPlaybackHint{Strategy: strategy, UpdatedAt: now}
+	for len(s.playbackHints) > maxRecentPlaybackHints {
+		var oldestKey string
+		var oldestTime time.Time
+		for existingKey, hint := range s.playbackHints {
+			if oldestTime.IsZero() || hint.UpdatedAt.Before(oldestTime) {
+				oldestKey, oldestTime = existingKey, hint.UpdatedAt
+			}
+		}
+		delete(s.playbackHints, oldestKey)
+	}
 	atomic.AddUint64(&s.playbackHintHits, 1)
 	switch strategy {
 	case StreamStrategyRange:
@@ -118,9 +137,7 @@ func (s *StreamProxy) recentPlaybackStrategy(targetURL, storageKey string, profi
 	}
 	if time.Since(hint.UpdatedAt) > recentPlaybackHintTTL {
 		s.playbackHintsMu.RUnlock()
-		s.playbackHintsMu.Lock()
-		delete(s.playbackHints, key)
-		s.playbackHintsMu.Unlock()
+		s.removeExpiredPlaybackHint(key, hint)
 		return "", false
 	}
 	strategy := hint.Strategy
@@ -156,6 +173,16 @@ func (s *StreamProxy) recentPlaybackStrategy(targetURL, storageKey string, profi
 		return strategy, true
 	}
 	return "", false
+}
+
+// removeExpiredPlaybackHint only removes the snapshot observed by the reader.
+// A writer may have refreshed the hint while the reader upgraded its lock.
+func (s *StreamProxy) removeExpiredPlaybackHint(key string, observed recentPlaybackHint) {
+	s.playbackHintsMu.Lock()
+	defer s.playbackHintsMu.Unlock()
+	if current, ok := s.playbackHints[key]; ok && current == observed && time.Since(current.UpdatedAt) > recentPlaybackHintTTL {
+		delete(s.playbackHints, key)
+	}
 }
 
 // requestRangeProfile classifies a Range request.

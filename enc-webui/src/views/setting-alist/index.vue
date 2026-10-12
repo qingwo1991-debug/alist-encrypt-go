@@ -39,8 +39,8 @@
           </div>
         </div>
         <div class="page-actions">
-          <el-button type="primary" @click="saveAlistConfig">保存服务配置</el-button>
-          <el-button type="warning" @click="saveProxyRouting">保存代理分流</el-button>
+          <el-button type="primary" :loading="savingConfig" :disabled="savingConfig" @click="saveAlistConfig">保存服务配置</el-button>
+          <el-button type="warning" :loading="savingConfig" :disabled="savingConfig" @click="saveProxyRouting">保存代理分流</el-button>
           <el-button type="info" plain @click="refreshProbeStats">刷新实时数据</el-button>
         </div>
       </div>
@@ -191,12 +191,12 @@
                 <div class="metric-card">
                   <div class="metric-card__title">文件级预热</div>
                   <div class="metric-card__content">
-                    <div>独立文件: {{ probeStats.uniqueWarmedFiles ?? '-' }}（去重口径，真实文件数）</div>
+                    <div>活跃预热文件: {{ probeStats.uniqueWarmedFiles ?? '-' }}（保留窗口内去重）</div>
                     <div>发现(累计次数): {{ probeStats.filesDiscoveredTotal }}，入队(累计): {{ probeStats.filesQueuedTotal }}，成功(累计): {{ probeStats.filesSucceededTotal }}</div>
                     <div>失败(累计): {{ probeStats.filesFailedTotal }}，跳过(累计): {{ probeStats.filesSkippedTotal }}</div>
                     <div>raw_url(累计): {{ probeStats.filesRawURLFetched }}，Range(累计): {{ probeStats.filesRangeProbed }}，落库(累计): {{ probeStats.filesMetaPersisted }}</div>
                     <div>命中文件(去重): {{ probeStats.uniqueConsumerHits ?? '-' }}，命中率: {{ probeConsumerHitRate }}（命中次数累计: {{ probeStats.consumerHitTotal }}）</div>
-                    <div style="margin-top:4px;color:#909399;font-size:12px">说明：发现/入队/成功等为累计操作次数，同一文件被多轮扫描/列目录会重复计入，请以"独立文件"为准。</div>
+                    <div style="margin-top:4px;color:#909399;font-size:12px">说明：发现/入队/成功等为累计操作次数，同一文件被多轮扫描/列目录会重复计入，活跃文件仅覆盖保留窗口（最多 10,000 个 / 7 天），并非历史总数。</div>
                   </div>
                 </div>
               </div>
@@ -443,8 +443,8 @@
         </el-collapse>
 
         <div class="footer-actions">
-          <el-button type="primary" @click="saveAlistConfig">保存服务配置</el-button>
-          <el-button type="warning" @click="saveProxyRouting">保存代理分流</el-button>
+          <el-button type="primary" :loading="savingConfig" :disabled="savingConfig" @click="saveAlistConfig">保存服务配置</el-button>
+          <el-button type="warning" :loading="savingConfig" :disabled="savingConfig" @click="saveProxyRouting">保存代理分流</el-button>
         </div>
 
         <el-dialog v-model="dialogFolderFormVisible" title="获取文件夹密文" style="min-width: 320px">
@@ -517,7 +517,11 @@ const labelPosition = ref('right')
 const dialogFolderFormVisible = ref(false)
 const activeName = ref('encode')
 const expandedSections = ref(['connection', 'scan', 'password'])
-const statsRefreshTimer = ref(null)
+let statsRefreshTimer = null
+let disposed = false
+let statsRequest = null
+const statsAbortController = new AbortController()
+const savingConfig = ref(false)
 const route = useRoute()
 const router = useRouter()
 
@@ -719,16 +723,19 @@ const checkFoldName = (item) => {
 
 const encodeFoldName = async () => {
   const res = await encodeFoldNameReq(folderForm)
+  if (disposed) return
   folderForm.folderNameEnc = `${folderForm.folderName}_${res.data.folderNameEnc}`
 }
 
 const decodeFoldName = async () => {
   const res = await decodeFoldNameReq(folderForm)
+  if (disposed) return
   folderForm.folderPasswd = res.data.folderPasswd
   folderForm.folderEncType = res.data.folderEncType
 }
 
 const saveAlistConfig = async () => {
+  if (disposed || savingConfig.value) return
   if (hasEnabledRuleWithoutPassword(alistConfigForm.passwdList)) {
     ElMessage.error('已启用的密码规则必须填写密码')
     return
@@ -754,25 +761,33 @@ const saveAlistConfig = async () => {
     }
   }
 
-  let res
+  savingConfig.value = true
   try {
-    res = await saveAlistConfigReq(alistConfigForm)
-  } catch {
-    return
+    let res
+    try {
+      res = await saveAlistConfigReq(alistConfigForm)
+    } catch {
+      return
+    }
+    if (disposed) return
+    try {
+      const schemeRes = await getSchemeConfigReq()
+      if (disposed) return
+      const schemeData = schemeRes.data || {}
+      schemeData.enable_h2c = alistConfigForm.proxyH2c
+      await saveSchemeConfigReq(schemeData)
+    } catch (err) {
+      console.error('Failed to save proxy H2C setting:', err)
+    }
+    if (!disposed) ElMessage.success(res.msg)
+  } finally {
+    savingConfig.value = false
   }
-  try {
-    const schemeRes = await getSchemeConfigReq()
-    const schemeData = schemeRes.data || {}
-    schemeData.enable_h2c = alistConfigForm.proxyH2c
-    await saveSchemeConfigReq(schemeData)
-  } catch (err) {
-    console.error('Failed to save proxy H2C setting:', err)
-  }
-  ElMessage.success(res.msg)
 }
 
 const loadProxyDictionary = async () => {
   const res = await getProxyDomainDictionaryReq()
+  if (disposed) return
   const providers = (res?.data?.providers || []).map((item) => ({
     ...item,
     id: String(item.id || '').toLowerCase()
@@ -785,6 +800,7 @@ const loadProxyDictionary = async () => {
 
 const refreshProviderDictionary = async () => {
   const res = await refreshProxyDomainDictionaryReq()
+  if (disposed) return
   const providers = (res?.data?.providers || []).map((item) => ({
     ...item,
     id: String(item.id || '').toLowerCase()
@@ -795,6 +811,7 @@ const refreshProviderDictionary = async () => {
 
 const loadProxyRouting = async () => {
   const res = await getProxyRoutingConfigReq()
+  if (disposed) return
   if (res?.data) {
     Object.assign(proxyRoutingForm, {
       ...proxyRoutingForm,
@@ -806,6 +823,7 @@ const loadProxyRouting = async () => {
 }
 
 const saveProxyRouting = async () => {
+  if (disposed || savingConfig.value) return
   if (proxyRoutingForm.mode === 'rules' && !proxyRoutingForm.url) {
     ElMessage.error('规则分流模式需要填写代理地址')
     return
@@ -816,8 +834,13 @@ const saveProxyRouting = async () => {
     selected_provider_ids: proxyRoutingForm.selectedProviderIDs,
     selected_domains: collectSelectedDomains()
   }
-  const res = await saveProxyRoutingConfigReq(payload)
-  ElMessage.success(res.msg || '保存成功')
+  savingConfig.value = true
+  try {
+    const res = await saveProxyRoutingConfigReq(payload)
+    if (!disposed) ElMessage.success(res.msg || '保存成功')
+  } finally {
+    savingConfig.value = false
+  }
 }
 
 const cleanupLegacyBoltDB = async () => {
@@ -825,9 +848,11 @@ const cleanupLegacyBoltDB = async () => {
   cleanupOk.value = false
   try {
     const res = await cleanupLegacyBoltDBReq()
+    if (disposed) return
     cleanupMsg.value = res.msg || res.data?.msg || '操作完成'
     cleanupOk.value = !!(res.code === 0 || res.code === 200)
   } catch (err) {
+    if (disposed) return
     cleanupMsg.value = err?.msg || err?.message || '请求失败'
     cleanupOk.value = false
   }
@@ -835,6 +860,7 @@ const cleanupLegacyBoltDB = async () => {
 
 const validateScanConfig = async () => {
   const res = await validateScanConfigReq(alistConfigForm)
+  if (disposed) return
   scanValidationResult.value = res.data
   if (res.data?.ok) {
     ElMessage.success(res.data.message || '扫描账号可用')
@@ -843,10 +869,18 @@ const validateScanConfig = async () => {
   }
 }
 
-const refreshProbeStats = async (silent = true) => {
+const refreshProbeStats = (silent = true) => {
+  if (disposed) return Promise.resolve()
+  if (statsRequest) return statsRequest
+  statsRequest = fetchProbeStats(silent).finally(() => { statsRequest = null })
+  return statsRequest
+}
+
+const fetchProbeStats = async (silent) => {
   refreshingProbeStats.value = !silent
   try {
-    const res = await getStatsReq({ reqLoading: false })
+    const res = await getStatsReq({ reqLoading: false, signal: statsAbortController.signal })
+    if (disposed) return
   const scheduler = res?.data?.probe_scheduler || {}
   const stream = res?.data?.stream || {}
   const proxyPrefetch = res?.data?.proxy?.prefetch || {}
@@ -896,31 +930,49 @@ const refreshProbeStats = async (silent = true) => {
       ElMessage.success('实时数据已刷新')
     }
   } catch (err) {
+    if (disposed) return
     if (!silent) {
       ElMessage.error(err?.msg || err?.message || '实时数据刷新失败')
     }
     throw err
   } finally {
-    refreshingProbeStats.value = false
+    if (!disposed) refreshingProbeStats.value = false
   }
 }
 
 const triggerDirSyncScan = async () => {
+  if (disposed || scanTriggering.value) return
   scanTriggering.value = true
   try {
     const res = await runDirSyncReq()
+    if (disposed) return
     ElMessage.success(res.msg || '已触发后台预热扫描')
     await refreshProbeStats(true)
   } catch (err) {
-    ElMessage.error(err?.msg || err?.message || '触发预热扫描失败')
+    if (!disposed) ElMessage.error(err?.msg || err?.message || '触发预热扫描失败')
   } finally {
-    scanTriggering.value = false
+    if (!disposed) scanTriggering.value = false
   }
+}
+
+const scheduleStatsRefresh = () => {
+  if (disposed) return
+  statsRefreshTimer = window.setTimeout(async () => {
+    statsRefreshTimer = null
+    try {
+      await refreshProbeStats(true)
+    } catch {
+      // Retry on the next poll, without overlapping an in-flight refresh.
+    } finally {
+      scheduleStatsRefresh()
+    }
+  }, 10000)
 }
 
 onMounted(async () => {
   activeTabPath.value = route?.path || '/setting-alist/index'
   const res = await getAlistConfigReq()
+  if (disposed) return
   for (const passwdInfo of res.data.passwdList) {
     passwdInfo.id = Math.random()
     if (Array.isArray(passwdInfo.encPath)) {
@@ -932,24 +984,32 @@ onMounted(async () => {
   Object.assign(alistConfigForm, res.data)
   try {
     const schemeRes = await getSchemeConfigReq()
+    if (disposed) return
     if (schemeRes.data) {
       alistConfigForm.proxyH2c = schemeRes.data.enable_h2c || false
     }
   } catch (err) {
     console.error('Failed to load proxy H2C setting:', err)
   }
+  if (disposed) return
   await loadProxyDictionary()
+  if (disposed) return
   await loadProxyRouting()
-  await refreshProbeStats(true)
-  statsRefreshTimer.value = window.setInterval(() => {
-    refreshProbeStats(true).catch(() => {})
-  }, 10000)
+  if (disposed) return
+  try {
+    await refreshProbeStats(true)
+  } catch {
+    // A transient stats error must not disable future polling.
+  }
+  scheduleStatsRefresh()
 })
 
 onUnmounted(() => {
-  if (statsRefreshTimer.value) {
-    window.clearInterval(statsRefreshTimer.value)
-    statsRefreshTimer.value = null
+  disposed = true
+  statsAbortController.abort()
+  if (statsRefreshTimer !== null) {
+    window.clearTimeout(statsRefreshTimer)
+    statsRefreshTimer = null
   }
 })
 </script>

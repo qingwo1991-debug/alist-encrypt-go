@@ -54,6 +54,44 @@ jobs:
           # shared/encryptcore 是独立模块：单独跑它的测试套件
           cd shared/encryptcore && go test -mod=readonly ./...
 
+  test-concurrency-performance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            shared/encryptcore/go.sum
+      - name: Race-check playback and cache paths
+        run: |
+          go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler
+          (cd shared/encryptcore && go test -race -mod=readonly -timeout 10m ./...)
+      - name: Record network-free performance baselines
+        run: |
+          set -euo pipefail
+          mkdir -p performance-results
+          go version > performance-results/environment.txt
+          lscpu >> performance-results/environment.txt
+          (cd shared/encryptcore && go test -mod=readonly -run '^$' -bench 'Benchmark(V3|Playback)' -benchmem -benchtime=200ms -count=3 ./...) | tee performance-results/encryptcore.txt
+          go test -mod=readonly -run '^$' -bench 'Benchmark(Decrypted|Probe)' -benchmem -benchtime=200ms -count=3 ./internal/proxy ./internal/handler | tee performance-results/proxy-handler.txt
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-baselines
+          path: performance-results/
+          if-no-files-found: ignore
+
   test-mobile-go:
     runs-on: ubuntu-latest
     permissions:
@@ -215,7 +253,7 @@ jobs:
 
   build-docker:
     runs-on: ubuntu-latest
-    needs: [test, test-mobile-go, test-webui, test-flutter]
+    needs: [test, test-concurrency-performance, test-mobile-go, test-webui, test-flutter]
     permissions:
       contents: read
       packages: write
@@ -265,7 +303,7 @@ jobs:
 
   build-binaries:
     runs-on: ubuntu-latest
-    needs: [test, test-mobile-go, test-webui, test-flutter, version]
+    needs: [test, test-concurrency-performance, test-mobile-go, test-webui, test-flutter, version]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -362,7 +400,7 @@ jobs:
 
   build-mobile-aar:
     runs-on: ubuntu-latest
-    needs: [test, test-mobile-go, test-webui, test-flutter, version]
+    needs: [test, test-concurrency-performance, test-mobile-go, test-webui, test-flutter, version]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -431,7 +469,7 @@ jobs:
 
   build-mobile:
     runs-on: ubuntu-latest
-    needs: [test, test-mobile-go, test-webui, test-flutter, version, build-mobile-aar]
+    needs: [test, test-concurrency-performance, test-mobile-go, test-webui, test-flutter, version, build-mobile-aar]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read

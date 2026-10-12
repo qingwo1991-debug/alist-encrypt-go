@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,9 +87,8 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 		if err != nil {
 			return result
 		}
-		// Probe the legacy 32-byte header by default. Only V3 containers pay
-		// the extra 16-byte tail fetch (see v3TailAwareProbe below), so V1/V2
-		// flows keep their single-range behavior.
+		// Keep V1/V2 to one prefix range. V3 completes its 48-byte header
+		// separately, and streaming V3 also resolves its EOF size trailer.
 		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", encryption.ContentHeaderSize()-1))
 		req.Header.Set("Accept-Encoding", "identity")
 		copyProbeAuthHeaders(req, currentAuth)
@@ -128,6 +128,7 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 			probePrefixLen = int64(encryption.V3HeaderSize)
 		}
 		prefix, err := io.ReadAll(io.LimitReader(resp.Body, probePrefixLen))
+		resp.Body.Close()
 		if err != nil {
 			return result
 		}
@@ -154,22 +155,43 @@ func (s *StreamProxy) inspectEncryptedContentResult(ctx context.Context, targetU
 			result.Meta = meta
 			return result
 		}
-		parsed, ok, err := encryption.ParseFrontMatter(encType, prefix, meta.CiphertextSize)
-		if err != nil {
-			// A partial V3 prefix (magic present, header incomplete) needs the
-			// remaining 16 bytes before it can be certified. Fetch the tail and
-			// re-parse; failures keep the legacy result.
-			if encryption.IsV3Prefix(prefix) && len(prefix) < int(encryption.V3HeaderSize) {
-				tailPrefix, tailErr := s.probeV3Tail(currentURL, currentAuth, prefix)
-				if tailErr == nil && len(tailPrefix) >= int(encryption.V3HeaderSize) {
-					parsed, ok, err = encryption.ParseFrontMatter(encType, tailPrefix, meta.CiphertextSize)
-					if err == nil && ok {
-						result.Meta = parsed
-						result.Confirmed = true
-						return result
-					}
+		if encryption.IsV3Prefix(prefix) {
+			if resp.StatusCode == http.StatusPartialContent {
+				actual, valid := parseContentRange(resp.Header.Get("Content-Range"))
+				if !valid || !actual.TotalKnown || actual.Start != 0 || actual.End != int64(len(prefix))-1 || actual.Total != meta.CiphertextSize {
+					return result
+				}
+			} else if resp.StatusCode != http.StatusOK {
+				return result
+			}
+			// A recognized but incomplete V3 container is never confirmed legacy.
+			if len(prefix) < int(encryption.V3HeaderSize) {
+				prefix, err = s.probeV3Tail(ctx, currentURL, currentAuth, prefix, meta.CiphertextSize)
+				if err != nil {
+					return result
 				}
 			}
+			parsed, ok, parseErr := encryption.ParseFrontMatter(encType, prefix, meta.CiphertextSize)
+			if parseErr != nil || !ok || !validV3ProbeHeader(prefix, parsed) {
+				return result
+			}
+			if parsed.PlainSize == 0 && parsed.CiphertextSize != parsed.HeaderLen {
+				trailer, trailerErr := s.probeV3Range(ctx, currentURL, currentAuth, meta.CiphertextSize-16, meta.CiphertextSize-1, meta.CiphertextSize)
+				if trailerErr != nil || len(trailer) != 16 || string(trailer[:4]) != "V3E4" || binary.BigEndian.Uint32(trailer[4:8]) != 0 {
+					return result
+				}
+				parsed.PlainSize = int64(binary.BigEndian.Uint64(trailer[8:16]))
+				if !validV3ProbeGeometry(parsed, true) {
+					return result
+				}
+			} else if !validV3ProbeGeometry(parsed, false) {
+				return result
+			}
+			result.Meta, result.Confirmed = parsed, true
+			return result
+		}
+		parsed, ok, err := encryption.ParseFrontMatter(encType, prefix, meta.CiphertextSize)
+		if err != nil {
 			result.Meta = meta
 			return result
 		}
@@ -199,13 +221,26 @@ func (s *StreamProxy) InspectEncryptedContentResult(ctx context.Context, targetU
 // probeV3Tail completes a partial V3 header probe: it fetches the remaining
 // header bytes (48 total, 16 beyond the legacy 32) so the front matter can be
 // certified as V3. The returned slice is the full 48-byte prefix on success.
-func (s *StreamProxy) probeV3Tail(targetURL string, authHeaders http.Header, prefix []byte) ([]byte, error) {
-	req, err := httputil.NewRequest(http.MethodGet, targetURL).
-		Build()
+func (s *StreamProxy) probeV3Tail(ctx context.Context, targetURL string, authHeaders http.Header, prefix []byte, total int64) ([]byte, error) {
+	tail, err := s.probeV3Range(ctx, targetURL, authHeaders, int64(len(prefix)), encryption.V3HeaderSize-1, total)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", encryption.ContentHeaderSize(), encryption.V3HeaderSize-1))
+	return append(append([]byte(nil), prefix...), tail...), nil
+}
+
+// probeV3Range never accepts a full-body response or reads beyond the tiny
+// requested window. Header completion and EOF probing retain the caller's
+// cancellation/deadline and the configured HTTP client's request timeout.
+func (s *StreamProxy) probeV3Range(ctx context.Context, targetURL string, authHeaders http.Header, start, end, total int64) ([]byte, error) {
+	if start < 0 || end < start || total <= end || end-start >= encryption.V3HeaderSize {
+		return nil, fmt.Errorf("v3 probe: invalid range geometry")
+	}
+	req, err := httputil.NewRequest(http.MethodGet, targetURL).WithContext(ctx).Build()
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	req.Header.Set("Accept-Encoding", "identity")
 	copyProbeAuthHeaders(req, authHeaders)
 	resp, err := s.client.Do(req)
@@ -213,18 +248,52 @@ func (s *StreamProxy) probeV3Tail(targetURL string, authHeaders http.Header, pre
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("v3 tail probe: upstream status %d", resp.StatusCode)
+	actual, valid := parseContentRange(resp.Header.Get("Content-Range"))
+	if resp.StatusCode != http.StatusPartialContent || !valid || !actual.TotalKnown || actual.Start != start || actual.End != end || actual.Total != total {
+		return nil, fmt.Errorf("v3 probe: upstream did not return the exact requested range")
 	}
-	tail, err := io.ReadAll(io.LimitReader(resp.Body, int64(encryption.V3HeaderSize)-int64(len(prefix))))
+	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		return nil, fmt.Errorf("v3 probe: encoded range response")
+	}
+	length := end - start + 1
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		n, parseErr := strconv.ParseInt(cl, 10, 64)
+		if parseErr != nil || n != length {
+			return nil, fmt.Errorf("v3 probe: incorrect content length")
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, length+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("v3 probe: read body: %w", err)
 	}
-	full := append(append([]byte(nil), prefix...), tail...)
-	if len(full) < int(encryption.V3HeaderSize) {
-		return nil, fmt.Errorf("v3 tail probe: short prefix (%d bytes)", len(full))
+	if int64(len(body)) != length {
+		return nil, fmt.Errorf("v3 probe: short or oversized body")
 	}
-	return full, nil
+	return body, nil
+}
+
+func validV3ProbeHeader(prefix []byte, meta encryption.ContentMeta) bool {
+	return len(prefix) == int(encryption.V3HeaderSize) &&
+		binary.BigEndian.Uint32(prefix[32:36]) == meta.ChunkSize && meta.ChunkSize > 0 &&
+		binary.BigEndian.Uint32(prefix[36:40]) == 16 && meta.PlainSize >= 0
+}
+
+func validV3ProbeGeometry(meta encryption.ContentMeta, trailer bool) bool {
+	bodySize := meta.CiphertextSize - meta.HeaderLen
+	if trailer {
+		bodySize -= 16
+	}
+	recordSize := int64(meta.ChunkSize) + 16
+	if bodySize < 0 || bodySize%recordSize != 0 || meta.PlainSize < 0 {
+		return false
+	}
+	// Avoid overflow from ceil(size/chunk) and multiplication on untrusted
+	// uint64 trailer sizes. Compare record counts using division instead.
+	chunks := meta.PlainSize / int64(meta.ChunkSize)
+	if meta.PlainSize%int64(meta.ChunkSize) != 0 {
+		chunks++
+	}
+	return bodySize/recordSize == chunks
 }
 
 func resolveRedirectTarget(baseURL, location string) (string, error) {
@@ -429,7 +498,7 @@ func contentMetaFromContext(ctx context.Context, passwdInfo *config.PasswdInfo, 
 	}
 	if v := ctx.Value(contentMetaContextKey{}); v != nil {
 		if stored, ok := v.(encryption.ContentMeta); ok {
-			if stored.PlainSize <= 0 {
+			if stored.PlainSize <= 0 && !isEmptyV3Meta(stored) {
 				stored.PlainSize = fallbackSize
 			}
 			if stored.CiphertextSize <= 0 && stored.IsV2() && stored.PlainSize > 0 {
@@ -582,11 +651,20 @@ func discardBytes(r io.Reader, n int64) error {
 	return err
 }
 
+func isEmptyV3Meta(meta encryption.ContentMeta) bool {
+	return meta.IsV3() && meta.PlainSize == 0 && meta.HeaderLen == encryption.V3HeaderSize &&
+		len(meta.NonceField) == int(encryption.V3NonceFieldLen()) && meta.ChunkSize > 0 && meta.ChunkSize <= 1<<30 &&
+		(meta.CiphertextSize == meta.HeaderLen || meta.CiphertextSize == meta.HeaderLen+16)
+}
+
 func normalizePlainFileSize(fileSize int64, meta *encryption.ContentMeta, contentRange string) int64 {
 	if meta == nil {
 		return fileSize
 	}
 	if meta.IsV3() {
+		if isEmptyV3Meta(*meta) {
+			return 0
+		}
 		// The wire size is the container (ciphertext) bytes. Remember it and
 		// keep the authoritative plaintext size the metadata/cache agreed on.
 		if fileSize > 0 && meta.PlainSize > 0 && fileSize != meta.PlainSize {

@@ -96,13 +96,15 @@ func (pp *probePersister) loadWarmState() map[string]probeWarmState {
 }
 
 // saveWarmState 覆盖写 warm map 快照。
-func (pp *probePersister) saveWarmState(m map[string]probeWarmState) {
+func (pp *probePersister) saveWarmState(m map[string]probeWarmState) bool {
 	if pp == nil || pp.store == nil || m == nil {
-		return
+		return false
 	}
 	if err := pp.store.SetJSON(storage.BucketStats, probeWarmStateKey, m); err != nil {
 		log.Warn().Err(err).Msg("failed to persist probe warm state")
+		return false
 	}
+	return true
 }
 
 // loadPersistedState 启动时把 BoltDB 里的计数与 warm 状态装回内存。
@@ -139,6 +141,9 @@ func (ps *ProbeScheduler) loadPersistedState() {
 				ps.successfulWarm[k] = v
 			}
 		}
+		// Persist only if pruning changes the loaded snapshot. A legacy unbounded
+		// snapshot is migrated to the same active-state limits as new entries.
+		ps.pruneWarmLocked(time.Now())
 		ps.recordMu.Unlock()
 	}
 }
@@ -158,6 +163,9 @@ func (ps *ProbeScheduler) startPersistLoop() {
 			case <-ps.done():
 				return
 			case <-ticker.C:
+				ps.seenMu.Lock()
+				ps.pruneSeenLocked(time.Now())
+				ps.seenMu.Unlock()
 				ps.persistSnapshot()
 			}
 		}
@@ -188,17 +196,31 @@ func (ps *ProbeScheduler) persistSnapshot() {
 	ps.persistWarmStateSnapshot()
 }
 
-// persistWarmStateSnapshot 把 successfulWarm 复制一份落盘。
+// persistWarmStateSnapshot writes only changed active state. Serialization and
+// I/O run outside recordMu; failed writes and newer concurrent mutations stay
+// dirty. persistMu prevents an older concurrent flush overwriting a newer one.
 func (ps *ProbeScheduler) persistWarmStateSnapshot() {
 	if ps == nil || ps.persister == nil {
 		return
 	}
+	ps.persistMu.Lock()
+	defer ps.persistMu.Unlock()
 	ps.ensureRecordState()
 	ps.recordMu.Lock()
+	ps.pruneWarmLocked(time.Now())
+	if ps.warmRevision == ps.warmPersistedRevision {
+		ps.recordMu.Unlock()
+		return
+	}
+	revision := ps.warmRevision
 	snapshot := make(map[string]probeWarmState, len(ps.successfulWarm))
 	for k, v := range ps.successfulWarm {
 		snapshot[k] = v
 	}
 	ps.recordMu.Unlock()
-	ps.persister.saveWarmState(snapshot)
+	if ps.persister.saveWarmState(snapshot) {
+		ps.recordMu.Lock()
+		ps.warmPersistedRevision = revision
+		ps.recordMu.Unlock()
+	}
 }

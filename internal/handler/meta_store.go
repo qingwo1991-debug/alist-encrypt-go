@@ -42,11 +42,15 @@ func (w *MySQLFileMetaWriter) UpsertFileMeta(info *dao.FileInfo) error {
 	if info == nil {
 		return nil
 	}
+	return w.store.UpsertFileMeta(context.Background(), fileMetaRecordFromInfo(info))
+}
+
+func fileMetaRecordFromInfo(info *dao.FileInfo) mysqlstore.FileMetaRecord {
 	providerHost := ""
 	if parsed, err := url.Parse(info.RawURL); err == nil {
 		providerHost = parsed.Host
 	}
-	return w.store.UpsertFileMeta(context.Background(), mysqlstore.FileMetaRecord{
+	return mysqlstore.FileMetaRecord{
 		ProviderHost:      providerHost,
 		OriginalPath:      info.Path,
 		EncryptedPath:     info.EncryptedPath,
@@ -56,11 +60,13 @@ func (w *MySQLFileMetaWriter) UpsertFileMeta(info *dao.FileInfo) error {
 		ContentVersion:    info.ContentVersion,
 		HeaderLen:         info.HeaderLen,
 		NonceField:        append([]byte(nil), info.NonceField...),
+		ChunkSize:         info.ChunkSize,
+		KDFIterations:     info.KDFIterations,
 		RawURL:            info.RawURL,
 		RawURLAuthScope:   info.RawURLAuthScope,
 		Sign:              info.Sign,
 		LastAccessed:      time.Now(),
 		UpstreamFetchedAt: info.UpstreamFetchedAt,
 		Active:            true,
-	})
+	}
 }

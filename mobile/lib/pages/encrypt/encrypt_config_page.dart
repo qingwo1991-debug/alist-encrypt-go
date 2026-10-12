@@ -67,6 +67,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   bool _proxyRunning = false;
   bool _isInitialized = false;
   bool _busy = false;
+  bool _saving = false;
+  final _requestCancelToken = CancelToken();
   List<Map<String, dynamic>> _configDocs = [];
   bool _switchBusy = false;
   bool _switchApplying = false;
@@ -79,21 +81,26 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _initAndLoadConfig() async {
-    if (_busy) return;
+    if (!mounted || _busy || _saving) return;
     _busy = true;
     setState(() => _isLoading = true);
     try {
       // 初始化加密代理（仅一次；重试刷新不再重复 init）
       if (!_isInitialized) {
         final dataDir = await NativeBridge.appConfig.getDataDir();
+        if (!mounted) return;
         await NativeBridge.encryptProxy.initEncryptProxy('$dataDir/encrypt_config.json');
+        if (!mounted) return;
         _isInitialized = true;
       }
 
       await _checkProxyStatus();
+      if (!mounted) return;
       await _loadConfig();
+      if (!mounted) return;
       if (_proxyRunning) {
         await _loadConfigViaV2Api();
+        if (!mounted) return;
         await _loadConfigDocsViaV2Api();
       }
     } catch (e) {
@@ -111,8 +118,10 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _loadConfig() async {
+    if (!mounted) return;
     try {
       final configJson = await NativeBridge.encryptProxy.getEncryptConfigJson();
+      if (!mounted) return;
       debugPrint('Loaded config: $configJson');
       
       if (configJson.isNotEmpty && configJson != '{}') {
@@ -178,6 +187,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _loadConfigViaV2Api() async {
+    if (!mounted) return;
     final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 3),
@@ -185,7 +195,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       sendTimeout: const Duration(seconds: 5),
     ));
     try {
-      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config');
+      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config', cancelToken: _requestCancelToken);
+      if (!mounted) return;
       final data = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : null;
       final payload = data?['data'] as Map<String, dynamic>?;
       final config = payload?['config'] as Map<String, dynamic>?;
@@ -207,6 +218,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _loadConfigDocsViaV2Api() async {
+    if (!mounted) return;
     final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 3),
@@ -214,7 +226,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       sendTimeout: const Duration(seconds: 5),
     ));
     try {
-      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config/schema');
+      final resp = await dio.get('http://127.0.0.1:$proxyPort/api/encrypt/v2/config/schema', cancelToken: _requestCancelToken);
+      if (!mounted) return;
       final data = resp.data is Map<String, dynamic> ? resp.data as Map<String, dynamic> : null;
       final payload = data?['data'] as Map<String, dynamic>?;
       final docs = (payload?['docs'] as List<dynamic>? ?? [])
@@ -230,8 +243,10 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _checkProxyStatus() async {
+    if (!mounted) return;
     try {
       final running = await NativeBridge.encryptProxy.isEncryptProxyRunning();
+      if (!mounted) return;
       final proxyPort = int.tryParse(_proxyPortController.text) ?? 5344;
       var ready = false;
       if (running) {
@@ -241,7 +256,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
           sendTimeout: const Duration(seconds: 2),
         ));
         try {
-          final resp = await dio.get('http://127.0.0.1:$proxyPort/ping');
+          final resp = await dio.get('http://127.0.0.1:$proxyPort/ping', cancelToken: _requestCancelToken);
+          if (!mounted) return;
           ready = resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 500;
         } catch (_) {
           ready = false;
@@ -261,7 +277,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     required Future<void> Function() persist,
     required String successMessage,
   }) async {
-    if (_switchBusy) return;
+    if (!mounted || _switchBusy || _switchApplying || _saving || _busy) return;
     _switchBusy = true;
     setState(() {
       _switchError = null;
@@ -269,6 +285,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
     });
     try {
       await persist();
+      if (!mounted) return;
       final wasRunning = _proxyRunning;
       await _checkProxyStatus();
       if (wasRunning && !_proxyRunning) {
@@ -303,7 +320,8 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   /// Saves each section independently and reports exactly which parts failed,
   /// instead of a blanket "保存失败" after some sections already persisted.
   Future<void> _saveConfig() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!mounted || _saving || _busy || _switchApplying) return;
+    if (!(_formKey.currentState?.validate() ?? false)) return;
 
     if (_enableDbExportSync && _dbExportBaseUrlController.text.trim().isEmpty) {
       if (mounted) {
@@ -330,8 +348,18 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       syncInterval = parsedSyncInterval;
     }
 
+    setState(() => _saving = true);
+    try {
+      await _saveConfigSections(syncInterval);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _saveConfigSections(int syncInterval) async {
     final failures = <String>[];
     Future<void> step(String label, Future<void> Function() action) async {
+      if (!mounted) return;
       try {
         await action();
       } catch (e) {
@@ -399,12 +427,16 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _saveAdvancedConfigViaApi() async {
+    if (!mounted) return;
     if (!_proxyRunning) {
       // 如果代理没运行，先启动一下以便保存配置
       try {
         await NativeBridge.encryptProxy.startEncryptProxy();
+        if (!mounted) return;
         await Future.delayed(const Duration(milliseconds: 500));
+        if (!mounted) return;
         await _checkProxyStatus();
+        if (!mounted) return;
         if (!_proxyRunning) throw Exception('启动代理失败，无法保存高级配置');
       } catch (e) {
         throw Exception('代理未运行，无法保存高级配置');
@@ -439,7 +471,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         }
       },
       options: Options(contentType: 'application/json'),
+      cancelToken: _requestCancelToken,
     );
+    if (!mounted) return;
     if (resp.statusCode == null || resp.statusCode! < 200 || resp.statusCode! >= 300) {
       throw Exception('advanced config save failed: ${resp.statusCode}');
     }
@@ -451,7 +485,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       final dio = Dio();
       final resp = await dio.get(
         'http://127.0.0.1:$proxyPort/api/encrypt/exportStats',
+        cancelToken: _requestCancelToken,
       );
+      if (!mounted) return;
       final root = resp.data is Map<String, dynamic>
           ? resp.data as Map<String, dynamic>
           : const <String, dynamic>{};
@@ -474,7 +510,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
   }
 
   Future<void> _toggleProxy() async {
-    if (_switchApplying) return;
+    if (!mounted || _switchApplying || _saving || _busy) return;
     setState(() => _switchApplying = true);
     try {
       if (_proxyRunning) {
@@ -484,7 +520,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
       }
 
       // 延迟检查状态
+      if (!mounted) return;
       await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
       await _checkProxyStatus();
       if (mounted && !_proxyRunning) {
         setState(() => _switchError = '代理未在运行（启动失败或已被系统停止）');
@@ -596,9 +634,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 // 重新加载配置
                 await _loadConfig();
                 
-                if (mounted) Navigator.pop(context);
+                if (mounted && context.mounted) Navigator.pop(context);
               } catch (e) {
-                if (mounted) {
+                if (mounted && context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('添加失败: $e')),
                   );
@@ -693,9 +731,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
               try {
                 await NativeBridge.encryptProxy.removeEncryptPath(index);
                 await _loadConfig();
-                if (mounted) Navigator.pop(context);
+                if (mounted && context.mounted) Navigator.pop(context);
               } catch (e) {
-                if (mounted) {
+                if (mounted && context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('删除失败: $e')),
                   );
@@ -724,9 +762,9 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                 );
                 
                 await _loadConfig();
-                if (mounted) Navigator.pop(context);
+                if (mounted && context.mounted) Navigator.pop(context);
               } catch (e) {
-                if (mounted) {
+                if (mounted && context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('更新失败: $e')),
                   );
@@ -742,6 +780,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
 
   @override
   void dispose() {
+    _requestCancelToken.cancel('Encrypt config page disposed');
     _alistHostController.dispose();
     _alistPortController.dispose();
     _proxyPortController.dispose();
@@ -770,12 +809,12 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _initAndLoadConfig,
+            onPressed: _busy || _saving || _switchApplying ? null : _initAndLoadConfig,
             tooltip: '刷新',
           ),
           IconButton(
             icon: const Icon(Icons.save),
-            onPressed: _saveConfig,
+            onPressed: _isLoading || _saving || _switchApplying ? null : _saveConfig,
             tooltip: '保存',
           ),
         ],
@@ -1000,7 +1039,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                       SwitchListTile(
                         title: const Text('使用 HTTPS'),
                         value: _alistHttps,
-                        onChanged: _switchApplying ? null : (value) async {
+                        onChanged: _switchApplying || _saving || _busy ? null : (value) async {
                           final previous = _alistHttps;
                           setState(() => _alistHttps = value);
                           try {
@@ -1024,7 +1063,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         title: const Text('启用 H2C (HTTP/2 明文)'),
                         subtitle: const Text('需要后端 OpenList 也开启 enable_h2c；切换后代理会自动重启生效'),
                         value: _enableH2C,
-                        onChanged: _switchApplying ? null : (value) {
+                        onChanged: _switchApplying || _saving || _busy ? null : (value) {
                           setState(() => _enableH2C = value);
                           _setListenConfig(
                             newValue: value,
@@ -1046,7 +1085,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                         title: const Text('仅本机访问（关闭局域网）'),
                         subtitle: const Text('开启后只允许本机播放器访问 127.0.0.1:5344；其他手机/电视将无法连接，切换会重启代理'),
                         value: _listenLocalOnly,
-                        onChanged: _switchApplying ? null : (value) {
+                        onChanged: _switchApplying || _saving || _busy ? null : (value) {
                           setState(() => _listenLocalOnly = value);
                           _setListenConfig(
                             newValue: value,
@@ -1199,6 +1238,7 @@ class _EncryptConfigPageState extends State<EncryptConfigPage> {
                             builder: (_) => ProviderRoutingPage(proxyPort: proxyPort),
                           ),
                         );
+                        if (!mounted) return;
                         await _loadConfigViaV2Api();
                       },
                     ),

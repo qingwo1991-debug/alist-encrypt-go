@@ -353,6 +353,28 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 			Int64("header_len", meta.HeaderLen).
 			Msg("Normalized V2 playback sizes")
 	}
+	if fileSize == 0 && isEmptyV3Meta(meta) {
+		// Empty V3 containers have no chunk to decrypt. Preserve their zero
+		// plaintext length instead of treating the header/trailer as payload.
+		httputil.CopyResponseHeaders(w, resp, "Content-Length", "Content-Range", "Accept-Ranges")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", "0")
+		result.StatusCode = http.StatusOK
+		if rangeHeader != "" && req.Method == http.MethodGet {
+			writeRangeNotSatisfiable(w, 0)
+			result.StatusCode = http.StatusRequestedRangeNotSatisfiable
+			result.Err = errors.NewProxyError("range requested for empty v3 container")
+			result.FailureReason = "range_invalid"
+			result.NoLearning = true
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		result.ResponseStarted = true
+		result.ContentType = resp.Header.Get("Content-Type")
+		result.ETag = resp.Header.Get("ETag")
+		result.HeaderLatency = time.Since(streamStart)
+		return result
+	}
 	if fileSize == 0 {
 		result.Err = errors.NewDecryptionError("file size required for decrypt stream")
 		return result
