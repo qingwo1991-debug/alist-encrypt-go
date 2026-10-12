@@ -123,6 +123,60 @@ func TestCloseCancelsAndJoinsActualPoller(t *testing.T) {
 		t.Fatal("session still alive")
 	}
 }
+func TestBackoffPollerFailuresDoNotHotLoop(t *testing.T) {
+	for _, response := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"http500", 500, ""}, {"badJSON", 200, "not-json"},
+	} {
+		t.Run(response.name, func(t *testing.T) {
+			stamps := make(chan time.Time, 16)
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				_ = r.Body.Close()
+				// Timestamp before sending the failure; the next request must include
+				// the cancellable retry delay even on a fast local upstream.
+				select {
+				case stamps <- time.Now():
+				default:
+				}
+				w.WriteHeader(response.status)
+				_, _ = io.WriteString(w, response.body)
+			}))
+			defer s.Close()
+			m := New()
+			m.SetLogger(nil)
+			m.SetAPIUrl(s.URL)
+			defer m.Close()
+			m.startPoller()
+			var previous time.Time
+			for i := 0; i < 3; i++ {
+				select {
+				case stamp := <-stamps:
+					if !previous.IsZero() && stamp.Sub(previous) < minSleepTime {
+						t.Fatalf("failure hot loop: retry gap %s below %s", stamp.Sub(previous), minSleepTime)
+					}
+					previous = stamp
+				case <-time.After(2 * time.Second):
+					t.Fatal("poller failed to retry")
+				}
+			}
+			done := make(chan error, 1)
+			go func() { done <- m.Close() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Close failed to interrupt poller backoff")
+			}
+		})
+	}
+}
+
 func TestBackoffContextCanceledTimerAndNoFurtherRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

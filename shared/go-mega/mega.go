@@ -2019,12 +2019,14 @@ func (m *Mega) pollEvents() {
 		}
 
 		if resp.StatusCode != 200 {
+			err = errors.New("Http Status: " + resp.Status)
 			m.logf("pollEvents: Error from server: %s", resp.Status)
 			_ = resp.Body.Close()
 			continue
 		}
 
-		buf, err := ioutil.ReadAll(resp.Body)
+		var buf []byte
+		buf, err = ioutil.ReadAll(resp.Body)
 		if err != nil {
 			m.logf("pollEvents: Error reading body: %v", err)
 			_ = resp.Body.Close()
@@ -2066,7 +2068,12 @@ func (m *Mega) pollEvents() {
 			}
 			resp, err = m.requestContext(ctx, http.MethodGet, events.W, "", nil)
 			if err == nil {
-				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					err = errors.New("Http Status: " + resp.Status)
+					_ = resp.Body.Close()
+				} else {
+					err = resp.Body.Close()
+				}
 			}
 			continue
 		}
