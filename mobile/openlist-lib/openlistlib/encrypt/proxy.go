@@ -5284,6 +5284,16 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		fileSize := meta.PlainSize
+		if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+			w.Header().Del("Content-Length")
+			w.Header().Del("Content-Range")
+			w.Header().Del("Content-Encoding")
+			http.Error(w, "encoded encrypted media response", http.StatusBadGateway)
+			return
+		}
+		for _, key := range []string{"Content-Encoding", "Transfer-Encoding", "ETag", "Content-MD5", "Digest"} {
+			w.Header().Del(key)
+		}
 		log.Infof("%s WebDAV GET planning: path=%s target=%s fileSize=%d range=%q contentRange=%q",
 			internal.LogPrefix(ctx, internal.TagProxy), filePath, safeURLForLog(targetURL), fileSize, clientRangeHeader, resp.Header.Get("Content-Range"))
 
@@ -5303,7 +5313,12 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			originalSize := fileSize
-			fileSize = normalizePlainFileSize(fileSize, &meta, resp.Header.Get("Content-Range"))
+			if total := parseContentRangeTotal(resp.Header.Get("Content-Range")); total > 0 && total != meta.TotalCiphertextSize() {
+				w.Header().Del("Content-Length")
+				w.Header().Del("Content-Range")
+				http.Error(w, "encrypted representation size changed", http.StatusBadGateway)
+				return
+			}
 			clientRangeStart := int64(0)
 			clientRangeEnd := fileSize - 1
 			hasClientRange := false
