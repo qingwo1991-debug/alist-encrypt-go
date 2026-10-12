@@ -36,17 +36,18 @@ const playbackSessionMaxLifetime = 2 * time.Hour
 const seekRangeHintBytes = 1 << 20
 
 type playbackSession struct {
-	path            string
-	provider        string
-	contentType     string
-	startAt         time.Time
-	lastAt          time.Time
-	bytesServed     int64
-	totalBytes      int64
-	durationSecs    float64
-	seekCount       int
-	headerLatencyMs float64 // 会话首个请求的响应头延迟（首帧可观测）
-	peakMbps        float64 // 会话内峰值下行速率（MiB/s）
+	path               string
+	provider           string
+	contentType        string
+	startAt            time.Time
+	lastAt             time.Time
+	bytesServed        int64
+	totalBytes         int64
+	durationSecs       float64
+	seekCount          int
+	headerLatencyMs    float64 // 会话首个实测的策略响应头就绪延迟
+	firstByteLatencyMs float64 // 首个有实测值的请求：handler 入口到成功 body write
+	peakMbps           float64 // 会话内峰值下行速率（MiB/s）
 }
 
 // playbackSessionTracker 按路径聚合播放会话，并负责最终落库。
@@ -56,11 +57,13 @@ type playbackRecorder interface {
 }
 
 type playbackSessionTracker struct {
-	mu       sync.Mutex
-	sessions map[string]*playbackSession
-	window   time.Duration
-	store    playbackRecorder
-	nowFn    func() time.Time // 便于测试注入
+	mu        sync.Mutex
+	persisted *sync.Cond // uses mu; flushAll waits without holding it
+	inflight  int
+	sessions  map[string]*playbackSession
+	window    time.Duration
+	store     playbackRecorder
+	nowFn     func() time.Time // 便于测试注入
 }
 
 func newPlaybackSessionTracker(store playbackRecorder) *playbackSessionTracker {
@@ -84,6 +87,7 @@ func (t *playbackSessionTracker) record(
 	rangeStart int64,
 	headerLatencyMs float64,
 	mbps float64,
+	firstByteLatencyMs ...float64,
 ) {
 	if t == nil || t.store == nil || strings.TrimSpace(path) == "" || bytesServed <= 0 {
 		return
@@ -94,11 +98,14 @@ func (t *playbackSessionTracker) record(
 		seekCount = 1
 	}
 
+	var detached []PlaybackStatsRecord
 	t.mu.Lock()
-	// 先落库已超时的会话（含路径切换后残留的旧路径会话）。
+	// Detach stale snapshots while locked; never hold the session map lock on SQLite.
 	for _, sess := range t.sessions {
 		if now.Sub(sess.lastAt) > t.window || now.Sub(sess.startAt) > playbackSessionMaxLifetime {
-			t.flushLocked(sess)
+			if rec, ok := t.detachLocked(sess); ok {
+				detached = append(detached, rec)
+			}
 		}
 	}
 	sess := t.sessions[path]
@@ -119,6 +126,9 @@ func (t *playbackSessionTracker) record(
 	if headerLatencyMs > 0 && sess.headerLatencyMs == 0 {
 		sess.headerLatencyMs = headerLatencyMs
 	}
+	if len(firstByteLatencyMs) > 0 && firstByteLatencyMs[0] > 0 && sess.firstByteLatencyMs == 0 {
+		sess.firstByteLatencyMs = firstByteLatencyMs[0]
+	}
 	if mbps > sess.peakMbps {
 		sess.peakMbps = mbps
 	}
@@ -126,47 +136,86 @@ func (t *playbackSessionTracker) record(
 		sess.contentType = contentType
 	}
 	t.mu.Unlock()
+	t.appendDetached(detached)
 }
 
-// flushLocked 把一条会话写库并删除。调用方需持有 mu。
-func (t *playbackSessionTracker) flushLocked(sess *playbackSession) {
-	if sess == nil || t.store == nil {
-		return
-	}
-	if sess.bytesServed <= 0 {
-		delete(t.sessions, sess.path)
-		return
-	}
-	playedAt := sess.startAt.Unix()
-	rec := PlaybackStatsRecord{
-		ID:              strconv.FormatInt(sess.startAt.UnixNano(), 10) + "-" + sess.path,
-		Path:            sess.path,
-		Provider:        sess.provider,
-		BytesServed:     sess.bytesServed,
-		TotalBytes:      sess.totalBytes,
-		DurationSecs:    sess.durationSecs,
-		PlayedAt:        playedAt,
-		Completed:       true,
-		ContentType:     sess.contentType,
-		SeekCount:       sess.seekCount,
-		HeaderLatencyMs: sess.headerLatencyMs,
-		Mbps:            sess.peakMbps,
-	}
-	if err := t.store.AppendPlayback(rec); err != nil {
-		log.Errorf("[%s] failed to flush playback session: %v", internal.TagCache, err)
+// detachLocked snapshots and removes exactly this session under mu.
+func (t *playbackSessionTracker) detachLocked(sess *playbackSession) (PlaybackStatsRecord, bool) {
+	if sess == nil || t.sessions[sess.path] != sess {
+		return PlaybackStatsRecord{}, false
 	}
 	delete(t.sessions, sess.path)
+	if sess.bytesServed <= 0 {
+		return PlaybackStatsRecord{}, false
+	}
+	if t.persisted == nil {
+		t.persisted = sync.NewCond(&t.mu)
+	}
+	t.inflight++
+	playedAt := sess.startAt.Unix()
+	rec := PlaybackStatsRecord{
+		ID:                 strconv.FormatInt(sess.startAt.UnixNano(), 10) + "-" + sess.path,
+		Path:               sess.path,
+		Provider:           sess.provider,
+		BytesServed:        sess.bytesServed,
+		TotalBytes:         sess.totalBytes,
+		DurationSecs:       sess.durationSecs,
+		PlayedAt:           playedAt,
+		Completed:          true,
+		ContentType:        sess.contentType,
+		SeekCount:          sess.seekCount,
+		HeaderLatencyMs:    sess.headerLatencyMs,
+		FirstByteLatencyMs: sess.firstByteLatencyMs,
+		Mbps:               sess.peakMbps,
+	}
+	return rec, true
+}
+
+// Synchronous, bounded persistence outside mu; no background queue/goroutines.
+func (t *playbackSessionTracker) appendDetached(records []PlaybackStatsRecord) {
+	for _, rec := range records {
+		if err := t.store.AppendPlayback(rec); err != nil {
+			log.Errorf("[%s] failed to flush playback session: %v", internal.TagCache, err)
+		}
+		t.mu.Lock()
+		t.inflight--
+		t.persisted.Broadcast()
+		t.mu.Unlock()
+	}
 }
 
 // flushStale 落库所有空闲超过窗口的会话（供定时清理调用）。
 func (t *playbackSessionTracker) flushStale(now time.Time) {
+	var detached []PlaybackStatsRecord
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	for _, sess := range t.sessions {
-		if now.Sub(sess.lastAt) > t.window {
-			t.flushLocked(sess)
+		if now.Sub(sess.lastAt) > t.window || now.Sub(sess.startAt) > playbackSessionMaxLifetime {
+			if rec, ok := t.detachLocked(sess); ok {
+				detached = append(detached, rec)
+			}
 		}
 	}
+	t.mu.Unlock()
+	t.appendDetached(detached)
+}
+
+func (t *playbackSessionTracker) flushAll() {
+	var detached []PlaybackStatsRecord
+	t.mu.Lock()
+	for _, sess := range t.sessions {
+		if rec, ok := t.detachLocked(sess); ok {
+			detached = append(detached, rec)
+		}
+	}
+	t.mu.Unlock()
+	t.appendDetached(detached)
+	// Export/shutdown must also wait for snapshots detached by another caller.
+	// Cond.Wait releases mu while SQLite is slow, allowing new requests to record.
+	t.mu.Lock()
+	for t.inflight > 0 {
+		t.persisted.Wait()
+	}
+	t.mu.Unlock()
 }
 
 // isSeekLikeRequest 判定一次 Range 请求是否为 seek（快进/快退）。
@@ -204,5 +253,5 @@ func (p *ProxyServer) FlushPlaybackSessions() {
 	if p == nil || p.playbackSession == nil {
 		return
 	}
-	p.playbackSession.flushStale(time.Now().Add(time.Hour))
+	p.playbackSession.flushAll()
 }

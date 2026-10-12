@@ -74,8 +74,15 @@ jobs:
             shared/encryptcore/go.sum
       - name: Race-check playback and cache paths
         run: |
-          go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler ./internal/httputil
+          go test -race -mod=readonly -timeout 10m ./internal/dao ./internal/proxy ./internal/handler ./internal/httputil ./internal/playbacktest
           (cd shared/encryptcore && go test -race -mod=readonly -timeout 10m ./...)
+      - name: Record deterministic playback fault acceptance
+        env:
+          PLAYBACK_ACCEPTANCE_REPORT: ${{ github.workspace }}/performance-results/playback-acceptance.json
+        run: |
+          mkdir -p performance-results
+          go test -race -mod=readonly -timeout 3m -count=1 -run '^TestPlaybackAcceptance' ./internal/proxy
+          go test -race -mod=readonly -timeout 1m -count=10 ./internal/playbacktest
       - name: Record network-free performance baselines
         run: |
           set -euo pipefail
@@ -91,6 +98,23 @@ jobs:
           name: performance-baselines
           path: performance-results/
           if-no-files-found: ignore
+
+  test-playback-probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || '' }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Verify rendered-frame measurement semantics
+        run: node --test tools/playback-probe/*.test.mjs
 
   test-mysql-metadata:
     runs-on: ubuntu-latest
@@ -171,7 +195,7 @@ jobs:
       - name: Race-check mobile network and readiness regressions
         working-directory: mobile/openlist-lib
         run: |
-          go test -race -mod=readonly -timeout 10m -run 'Test(DualNetwork|MobileStream|StreamIdle|StorageReady|DoContext)' ./openlistlib/encrypt ./internal/op ./pkg/singleflight
+          go test -race -mod=readonly -timeout 10m -run 'Test(DualNetwork|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession)' ./openlistlib/encrypt ./internal/op ./pkg/singleflight
 
       - name: Test synchronized upstream source copy
         working-directory: mobile/openlist-lib/src
@@ -306,7 +330,7 @@ jobs:
 
   build-docker:
     runs-on: ubuntu-latest
-    needs: [test, test-concurrency-performance, test-mysql-metadata, test-mobile-go, test-webui, test-flutter]
+    needs: [test, test-concurrency-performance, test-playback-probe, test-mysql-metadata, test-mobile-go, test-webui, test-flutter]
     permissions:
       contents: read
       packages: write
@@ -356,7 +380,7 @@ jobs:
 
   build-binaries:
     runs-on: ubuntu-latest
-    needs: [test, test-concurrency-performance, test-mysql-metadata, test-mobile-go, test-webui, test-flutter, version]
+    needs: [test, test-concurrency-performance, test-playback-probe, test-mysql-metadata, test-mobile-go, test-webui, test-flutter, version]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -453,7 +477,7 @@ jobs:
 
   build-mobile-aar:
     runs-on: ubuntu-latest
-    needs: [test, test-concurrency-performance, test-mysql-metadata, test-mobile-go, test-webui, test-flutter, version]
+    needs: [test, test-concurrency-performance, test-playback-probe, test-mysql-metadata, test-mobile-go, test-webui, test-flutter, version]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -522,7 +546,7 @@ jobs:
 
   build-mobile:
     runs-on: ubuntu-latest
-    needs: [test, test-concurrency-performance, test-mysql-metadata, test-mobile-go, test-webui, test-flutter, version, build-mobile-aar]
+    needs: [test, test-concurrency-performance, test-playback-probe, test-mysql-metadata, test-mobile-go, test-webui, test-flutter, version, build-mobile-aar]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read

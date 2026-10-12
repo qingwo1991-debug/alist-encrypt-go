@@ -8,7 +8,10 @@ import 'package:flutter/material.dart';
 /// 入口在设置页"播放统计"。直接读取本地代理 HTTP
 /// `/api/encrypt/exportStats`（仅接受本机回环访问，无需密码）。
 class PlaybackStatsPage extends StatefulWidget {
-  const PlaybackStatsPage({super.key});
+  const PlaybackStatsPage({super.key, this.loadStats});
+
+  /// Optional transport seam for focused widget tests; production uses local Dio.
+  final Future<Map<String, dynamic>> Function()? loadStats;
 
   @override
   State<PlaybackStatsPage> createState() => _PlaybackStatsPageState();
@@ -39,12 +42,17 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
         connectTimeout: const Duration(seconds: 3),
         receiveTimeout: const Duration(seconds: 10),
       ));
-      final resp = await dio.get(
-        'http://127.0.0.1:$_proxyPort/api/encrypt/exportStats',
-      );
-      final root = resp.data is Map<String, dynamic>
-          ? resp.data as Map<String, dynamic>
-          : <String, dynamic>{};
+      final Map<String, dynamic> root;
+      if (widget.loadStats != null) {
+        root = await widget.loadStats!();
+      } else {
+        final resp = await dio.get(
+          'http://127.0.0.1:$_proxyPort/api/encrypt/exportStats',
+        );
+        root = resp.data is Map<String, dynamic>
+            ? resp.data as Map<String, dynamic>
+            : <String, dynamic>{};
+      }
       final plays = root['playbacks'] as List<dynamic>? ?? [];
       final dels = root['deletions'] as List<dynamic>? ?? [];
       final probeStats = root['probe_stats'] as Map<String, dynamic>? ?? {};
@@ -92,12 +100,21 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
     return '${d.year}-${p(d.month)}-${p(d.day)} ${p(d.hour)}:${p(d.minute)}';
   }
 
-  // 首帧/速率可观测：从已导出的播放记录算摘要 + 序列。
+  // Missing/invalid is unknown; explicit numeric zero is a valid measurement.
+  double? _latencyValue(Map<String, dynamic> p, String field) {
+    final value = p[field];
+    if (value is! num || !value.isFinite || value < 0) return null;
+    return value.toDouble();
+  }
+
+  // 正文首字节独立统计，不能以历史响应头代替。
   List<Map<String, dynamic>> get _latencySeries {
     final rows = <Map<String, dynamic>>[];
     for (final p in _playbacks) {
-      final lat = (p['header_latency_ms'] as num?)?.toDouble() ?? 0;
-      if (lat > 0) rows.add({'t': p, 'v': lat});
+      final lat = _latencyValue(p, 'first_byte_latency_ms');
+      if (lat != null && p['played_at'] is num) {
+        rows.add({'t': p, 'v': lat});
+      }
     }
     rows.sort((a, b) => ((a['t']['played_at'] ?? 0) as num)
         .compareTo(((b['t']['played_at'] ?? 0) as num)));
@@ -125,7 +142,7 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
     final vs = _latencySeries.map((e) => e['v'] as double).toList()..sort();
     final p50 = _percentile(vs, 0.5);
     final p95 = _percentile(vs, 0.95);
-    if (p50 == null) return '暂无首帧数据';
+    if (p50 == null) return '暂无正文首字节数据';
     final p50s = p50.toStringAsFixed(0);
     final p95s = p95?.toStringAsFixed(0) ?? '-';
     return 'p50 ${p50s}ms · p95 ${p95s}ms';
@@ -138,10 +155,12 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
   }
 
   String _fmtObs(Map<String, dynamic> p) {
-    final lat = (p['header_latency_ms'] as num?)?.toDouble() ?? 0;
+    final firstByte = _latencyValue(p, 'first_byte_latency_ms');
+    final header = _latencyValue(p, 'header_latency_ms');
     final mb = (p['mbps'] as num?)?.toDouble() ?? 0;
     final buf = StringBuffer();
-    if (lat > 0) buf.write(' · 首帧${lat.toStringAsFixed(0)}ms');
+    buf.write(' · 正文首字节${firstByte?.toStringAsFixed(0) ?? '-'}ms');
+    buf.write(' · 上游响应头${header?.toStringAsFixed(0) ?? '-'}ms');
     if (mb > 0) buf.write(' · ${mb.toStringAsFixed(1)}MiB/s');
     return buf.toString();
   }
@@ -211,15 +230,20 @@ class _PlaybackStatsPageState extends State<PlaybackStatsPage> {
                       ),
                     ),
                   const SizedBox(height: 16),
-                  // 首帧/速率可观测卡片（canvas 自绘，零新依赖）
+                  // 正文首字节/速率可观测卡片（canvas 自绘，零新依赖）
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(12),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Text('首帧耗时 · $_latencySummary',
+                          Text('服务端正文首字节 · $_latencySummary',
                               style: theme.textTheme.titleMedium),
+                          const Text(
+                            'first_byte_latency_ms：handler 开始至首次成功正文写入；'
+                            'header_latency_ms：上游请求至响应头就绪。均非播放器真实首帧。'
+                            '缺字段表示未测量，不回退到响应头；显式 0 保留，后端须省略未知值。',
+                          ),
                           const SizedBox(height: 6),
                           SizedBox(
                             height: 96,
@@ -322,8 +346,8 @@ class _QualityChartPainter extends CustomPainter {
       tp.paint(canvas, Offset(size.width / 2 - tp.width / 2, size.height / 2 - tp.height / 2));
       return;
     }
-    final maxV = series.map((e) => e['v'] as double).reduce((a, b) => a > b ? a : b);
-    if (maxV <= 0) return;
+    final observedMax = series.map((e) => e['v'] as double).reduce((a, b) => a > b ? a : b);
+    final maxV = observedMax > 0 ? observedMax : 1.0;
     final t0 = (series.first['t']['played_at'] as num).toInt();
     final t1 = (series.last['t']['played_at'] as num).toInt();
     final span = (t1 - t0) <= 0 ? 1 : (t1 - t0);
@@ -359,7 +383,7 @@ class _QualityChartPainter extends CustomPainter {
     // 最大标签
     final tp = TextPainter(
       text: TextSpan(
-        text: '${maxV.toStringAsFixed(1)} $label',
+        text: '${observedMax.toStringAsFixed(1)} $label',
         style: const TextStyle(color: Colors.grey, fontSize: 11),
       ),
       textDirection: TextDirection.ltr,
