@@ -134,6 +134,14 @@ object OpenList : Event, LogCallback {
         }
     }
 
+    fun setNativeNetworkBridge(bridge: openlistlib.NetworkBridge?) {
+        Openlistlib.setNetworkBridge(bridge)
+    }
+
+    fun setNativeNetworkRoutes(defaultToken: String, physicalToken: String, generation: Long) {
+        Openlistlib.setNativeNetworkRoutes(defaultToken, physicalToken, generation)
+    }
+
     fun setNetworkState(state: String) {
         runCatching {
             Openlistlib.setNetworkState(state)

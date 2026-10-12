@@ -43,6 +43,7 @@ type ProxyServer struct {
 	streamClient    *http.Client
 	transport       *http.Transport
 	streamTransport *http.Transport
+	routePool       *routeTransportPool
 	h2cTransport    *http2.Transport // H2C Transport (如果启用)
 	server          *http.Server
 	running         bool
@@ -519,6 +520,10 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 		cleanupDone:         make(chan struct{}),
 		metaSyncDone:        make(chan struct{}),
 	}
+	server.routePool = newRouteTransportPool(config, transport, streamTransport, h2cTransport != nil)
+	httpClient.Transport = &routePoolRoundTripper{pool: server.routePool, profile: "control"}
+	probeClient.Transport = &routePoolRoundTripper{pool: server.routePool, profile: "probe"}
+	streamClient.Transport = &routePoolRoundTripper{pool: server.routePool, profile: "media"}
 	httpClient.Transport = &instrumentedRoundTripper{base: httpClient.Transport, stats: &server.controlHTTPStats}
 	probeClient.Transport = &instrumentedRoundTripper{base: probeClient.Transport, stats: &server.probeHTTPStats}
 	streamClient.Transport = &streamIdleRoundTripper{base: &instrumentedRoundTripper{base: streamClient.Transport, stats: &server.streamHTTPStats}, timeout: mobileStreamReadIdleTimeout}
@@ -681,6 +686,7 @@ func (p *ProxyServer) Stop() error {
 	transport := p.transport
 	streamTransport := p.streamTransport
 	h2cTransport := p.h2cTransport
+	routePool := p.routePool
 	p.mutex.Unlock()
 
 	// Never hold p.mutex while waiting for background workers or active HTTP
@@ -703,6 +709,7 @@ func (p *ProxyServer) Stop() error {
 		cancel()
 	}
 
+	routePool.RetireRouteTransports()
 	trackNetworkTransport(transport, false)
 	trackNetworkTransport(streamTransport, false)
 	// 关闭 HTTP Transport 的连接池，确保重启时没有残留连接
@@ -872,13 +879,13 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		}
 	}
 
-	controlBase := http.RoundTripper(transport)
-	probeBase := http.RoundTripper(transport)
-	streamBase := http.RoundTripper(streamTransport)
-	if p.h2cTransport != nil {
-		controlBase = p.h2cTransport
-		probeBase = p.h2cTransport
-	}
+	oldRoutePool := p.routePool
+	// A reload may change the backend origin. Do not reuse the old origin's
+	// successful H2C probe; HTTP/1 and TLS HTTP/2 remain available.
+	p.routePool = newRouteTransportPool(config, transport, streamTransport, false)
+	controlBase := http.RoundTripper(&routePoolRoundTripper{pool: p.routePool, profile: "control"})
+	probeBase := http.RoundTripper(&routePoolRoundTripper{pool: p.routePool, profile: "probe"})
+	streamBase := http.RoundTripper(&routePoolRoundTripper{pool: p.routePool, profile: "media"})
 	noRedirect := func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -900,6 +907,7 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 	p.transport = transport
 	p.streamTransport = streamTransport
 	p.mutex.Unlock()
+	oldRoutePool.RetireRouteTransports()
 	trackNetworkTransport(oldTransport, false)
 	trackNetworkTransport(oldStreamTransport, false)
 	trackNetworkTransport(transport, true)
