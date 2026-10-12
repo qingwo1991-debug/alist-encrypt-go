@@ -329,3 +329,132 @@ func TestV3KDFLegacyWaitsForAdmissionWithoutRegistryExpansion(t *testing.T) {
 	release <- struct{}{}
 	v3KDFTestReceive(t, a)
 }
+
+func TestV3KDFForegroundQueueAdmissionReserved(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan string, 4)
+	s := newV3KDFService(v3KDFLimits{active: 2, queue: 2, waiters: 8}, func(password string, _ []byte, _ uint32) []byte {
+		started <- password
+		<-release
+		return bytes.Repeat([]byte{15}, 32)
+	})
+	defer s.shutdown()
+	defer close(release)
+	nonce := []byte(fmt.Sprintf("%s/%p", t.Name(), s))
+	low1 := v3KDFTestCall(s, context.Background(), "low1", nonce, V3KDFSpeculative)
+	<-started
+	low2 := v3KDFTestCall(s, context.Background(), "low2", nonce, V3KDFSpeculative)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Queued == 1 })
+	if _, err := s.key(context.Background(), "low3", nonce, 1, V3KDFSpeculative, false); !errors.Is(err, ErrV3KDFBusy) {
+		t.Fatal("speculative consumed foreground queue reservation")
+	}
+	foreground := v3KDFTestCall(s, context.Background(), "foreground", nonce, V3KDFForeground)
+	select {
+	case name := <-started:
+		if name != "foreground" {
+			t.Fatal(name)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("foreground admission blocked behind speculative queue")
+	}
+	if st := s.snapshot(); st.Active != 2 || st.Queued != 1 || st.Waiters != 3 {
+		t.Fatalf("reserved admission %+v", st)
+	}
+	// Send one token per execution, including the queued speculative record.
+	release <- struct{}{}
+	release <- struct{}{}
+	release <- struct{}{}
+	v3KDFTestReceive(t, low1)
+	v3KDFTestReceive(t, low2)
+	v3KDFTestReceive(t, foreground)
+}
+
+func TestV3KDFForegroundWaiterAdmissionReserved(t *testing.T) {
+	release := make(chan struct{})
+	s := newV3KDFService(v3KDFLimits{active: 2, queue: 3, waiters: 3}, func(string, []byte, uint32) []byte { <-release; return bytes.Repeat([]byte{16}, 32) })
+	defer s.shutdown()
+	defer close(release)
+	nonce := []byte(fmt.Sprintf("%s/%p", t.Name(), s))
+	first := v3KDFTestCall(s, context.Background(), "shared", nonce, V3KDFSpeculative)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Active == 1 })
+	second := v3KDFTestCall(s, context.Background(), "shared", nonce, V3KDFSpeculative)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Waiters == 2 })
+	if _, err := s.key(context.Background(), "shared", nonce, 1, V3KDFSpeculative, false); !errors.Is(err, ErrV3KDFBusy) {
+		t.Fatal("speculative fanout consumed final waiter")
+	}
+	foreground := v3KDFTestCall(s, context.Background(), "shared", nonce, V3KDFForeground)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Waiters == 3 })
+	release <- struct{}{}
+	v3KDFTestReceive(t, first)
+	v3KDFTestReceive(t, second)
+	v3KDFTestReceive(t, foreground)
+}
+
+func TestV3KDFCanceledForegroundPromotionDemotesQueuedInterest(t *testing.T) {
+	activeRelease := make(chan struct{})
+	specRelease := make(chan struct{})
+	fgRelease := make(chan struct{})
+	started := make(chan string, 8)
+	s := newV3KDFService(v3KDFLimits{active: 2, queue: 4, waiters: 8}, func(password string, _ []byte, _ uint32) []byte {
+		started <- password
+		switch password {
+		case "active1", "active2":
+			<-activeRelease
+		case "foreground":
+			<-fgRelease
+		default:
+			<-specRelease
+		}
+		return bytes.Repeat([]byte{17}, 32)
+	})
+	defer s.shutdown()
+	defer close(specRelease)
+	defer close(fgRelease)
+	nonce := []byte(fmt.Sprintf("%s/%p", t.Name(), s))
+	a1 := v3KDFTestCall(s, context.Background(), "active1", nonce, V3KDFForeground)
+	<-started
+	a2 := v3KDFTestCall(s, context.Background(), "active2", nonce, V3KDFForeground)
+	<-started
+	low1 := v3KDFTestCall(s, context.Background(), "low1", nonce, V3KDFSpeculative)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Queued == 1 })
+	low2 := v3KDFTestCall(s, context.Background(), "low2", nonce, V3KDFSpeculative)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Queued == 2 })
+	ctx, cancel := context.WithCancel(context.Background())
+	promoter := v3KDFTestCall(s, ctx, "low1", nonce, V3KDFForeground)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.Promoted == 1 })
+	cancel()
+	if result := v3KDFTestReceive(t, promoter); !errors.Is(result.err, context.Canceled) {
+		t.Fatal(result.err)
+	}
+	s.mu.Lock()
+	queued := s.flights[v3KeyCacheKey("low1", nonce, 1)]
+	demoted := queued != nil && queued.priority == V3KDFSpeculative && queued.foregroundWaiters == 0
+	s.mu.Unlock()
+	if !demoted {
+		t.Fatal("queued priority retained departed foreground interest")
+	}
+	close(activeRelease)
+	v3KDFTestReceive(t, a1)
+	v3KDFTestReceive(t, a2)
+	v3KDFTestWait(t, s, func(st V3KDFStats) bool { return st.SpeculativeActive == 1 && st.Queued == 1 })
+	<-started
+	foreground := v3KDFTestCall(s, context.Background(), "foreground", nonce, V3KDFForeground)
+	select {
+	case name := <-started:
+		if name != "foreground" {
+			t.Fatalf("speculative took reserved slot: %s", name)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("foreground reserve blocked")
+	}
+	if st := s.snapshot(); st.Active != 2 || st.SpeculativeActive != 1 {
+		t.Fatalf("execution classification %+v", st)
+	}
+	fgRelease <- struct{}{}
+	v3KDFTestReceive(t, foreground)
+	specRelease <- struct{}{}
+	<-started
+	specRelease <- struct{}{}
+	v3KDFTestReceive(t, low1)
+	v3KDFTestReceive(t, low2)
+}

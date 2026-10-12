@@ -37,6 +37,7 @@ type v3KDFFlight struct {
 	iterations        uint32
 	priority          V3KDFPriority
 	waiters           int
+	foregroundWaiters int
 	running, finished bool
 	done              chan struct{}
 	result            []byte
@@ -163,10 +164,18 @@ func (s *v3KDFService) worker() {
 		s.mu.Unlock()
 	}
 }
-func (s *v3KDFService) detach(f *v3KDFFlight, canceled bool) {
+func (s *v3KDFService) detach(f *v3KDFFlight, canceled bool, priority V3KDFPriority) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f.waiters--
+	if priority == V3KDFForeground {
+		f.foregroundWaiters--
+	}
+	// Priority follows current queued interests, not historical promotion.
+	// Running execution classification is immutable until actual completion.
+	if !f.running && !f.finished && f.waiters > 0 && f.foregroundWaiters == 0 {
+		f.priority = V3KDFSpeculative
+	}
 	s.stats.Waiters--
 	if canceled {
 		s.stats.CanceledWait++
@@ -223,7 +232,18 @@ func (s *v3KDFService) key(ctx context.Context, password string, nonce []byte, i
 			return key, nil
 		}
 		f := s.flights[cacheKey]
-		busy := s.stats.Waiters >= s.limits.waiters || (f == nil && len(s.queue) >= s.limits.queue)
+		queueLimit, waiterLimit := s.limits.queue, s.limits.waiters
+		if priority == V3KDFSpeculative {
+			// Reserve admission as well as execution: a speculative queue or
+			// same-key fan-out must not consume the final foreground slot.
+			// This conservative total-count rule needs no per-waiter priority
+			// ownership: cancellation/promotion keep identical accounting.
+			// Test-only limits of one leave no speculative admission capacity;
+			// production limits (32/128) allow 31 queued/127 total waiters.
+			queueLimit--
+			waiterLimit--
+		}
+		busy := s.stats.Waiters >= waiterLimit || (f == nil && len(s.queue) >= queueLimit)
 		if busy {
 			if !legacy {
 				s.stats.Refused++
@@ -250,24 +270,27 @@ func (s *v3KDFService) key(ctx context.Context, password string, nonce []byte, i
 			s.stats.Promoted++
 		}
 		f.waiters++
+		if priority == V3KDFForeground {
+			f.foregroundWaiters++
+		}
 		s.stats.Waiters++
 		s.notify()
 		s.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			s.detach(f, true)
+			s.detach(f, true, priority)
 			return nil, ctx.Err()
 		case <-f.done:
 			// Prefer canceled caller semantics even when completion races cancellation.
 			if err := ctx.Err(); err != nil {
-				s.detach(f, true)
+				s.detach(f, true, priority)
 				return nil, err
 			}
 			s.mu.Lock()
 			result := append([]byte(nil), f.result...)
 			err := f.err
 			s.mu.Unlock()
-			s.detach(f, false)
+			s.detach(f, false, priority)
 			return result, err
 		}
 	}
