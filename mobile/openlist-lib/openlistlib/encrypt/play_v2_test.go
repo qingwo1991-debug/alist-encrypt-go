@@ -187,8 +187,10 @@ func TestPlayV2RedirectRejectsInvalidOrUnsupportedRanges(t *testing.T) {
 				PasswdInfo: &EncryptPath{
 					Path: "/enc/*", Password: "123456", EncType: EncTypeAESCTR, Enable: true,
 				},
-				FileSize:    1000,
-				OriginalURL: "/enc/demo.mp4",
+				FileSize:       1000,
+				CiphertextSize: 1000,
+				ContentVersion: ContentVersionV1,
+				OriginalURL:    "/enc/demo.mp4",
 			})
 
 			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
@@ -247,7 +249,8 @@ func TestPlayV2RedirectSuffixRange(t *testing.T) {
 					"Content-Range":  []string{"bytes 0-47/4096"},
 					"Content-Length": []string{"48"},
 				},
-				Body: io.NopCloser(bytes.NewReader(encrypted[:48])), Request: req,
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(encrypted[:48])), Request: req,
 			}, nil
 		case "bytes=-64":
 			return &http.Response{
@@ -860,8 +863,9 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 				"Content-Length": []string{"48"},
 				"Content-Range":  []string{"bytes 0-47/4128"},
 			},
-			Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
-			Request: req,
+			ContentLength: 48,
+			Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+			Request:       req,
 		}, nil
 	})}
 	refreshed, ok := p.refreshRedirectInfo(
@@ -1491,8 +1495,10 @@ func TestPlayV2RedirectRangePreserves206Headers(t *testing.T) {
 			EncName:  true,
 			Enable:   true,
 		},
-		FileSize:    fileSize,
-		OriginalURL: "/enc/demo.mp4",
+		FileSize:       fileSize,
+		CiphertextSize: fileSize,
+		ContentVersion: ContentVersionV1,
+		OriginalURL:    "/enc/demo.mp4",
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
@@ -1561,8 +1567,9 @@ func TestPlayV2RedirectRangePreserves206HeadersForV2(t *testing.T) {
 						"Content-Length": []string{"48"},
 						"Content-Type":   []string{"application/octet-stream"},
 					},
-					Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
-					Request: req,
+					ContentLength: 48,
+					Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+					Request:       req,
 				}, nil
 			}
 			if req.Header.Get("Range") == "bytes=32-" {
@@ -1664,8 +1671,9 @@ func TestPlayV2RedirectIgnoresV1CacheForEncryptedV2Path(t *testing.T) {
 						"Content-Range":  []string{"bytes 0-47/2080"},
 						"Content-Length": []string{"48"},
 					},
-					Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
-					Request: req,
+					ContentLength: 48,
+					Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+					Request:       req,
 				}, nil
 			case "bytes=32-47":
 				return &http.Response{
@@ -1777,8 +1785,9 @@ func TestPlayV2RedirectPreservesOpenEndedRange(t *testing.T) {
 						"Content-Range":  []string{"bytes 0-47/" + strconv.Itoa(len(ciphertext))},
 						"Content-Length": []string{"48"},
 					},
-					Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
-					Request: req,
+					ContentLength: 48,
+					Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+					Request:       req,
 				}, nil
 			case expectedUpstreamRange:
 				end := 32 + expectedPlainLen
@@ -2009,8 +2018,9 @@ func TestServeRedirectRefreshesStaleSizeBeforeRejectingSeek(t *testing.T) {
 					"Content-Range":  []string{fmt.Sprintf("bytes 0-47/%d", len(ciphertext))},
 					"Content-Length": []string{"48"},
 				},
-				Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
-				Request: req,
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+				Request:       req,
 			}, nil
 		}
 		if got, want := req.Header.Get("Range"), fmt.Sprintf("bytes=%d-", upstreamStart); got != want {
@@ -2189,8 +2199,9 @@ func TestServeRedirectRecoversUnknownV2SizeFromHeader(t *testing.T) {
 					"Content-Range":  []string{fmt.Sprintf("bytes 0-47/%d", len(ciphertext))},
 					"Content-Length": []string{"48"},
 				},
-				Body:    io.NopCloser(bytes.NewReader(ciphertext[:48])),
-				Request: req,
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+				Request:       req,
 			}, nil
 		}
 		if req.Header.Get("Range") != "" {
@@ -2289,8 +2300,10 @@ func TestPlayV2DoesNotOverwriteStartedResponseOnStreamFailure(t *testing.T) {
 			EncName:  true,
 			Enable:   true,
 		},
-		FileSize:    fileSize,
-		OriginalURL: "/enc/demo.mp4",
+		FileSize:       fileSize,
+		CiphertextSize: fileSize,
+		ContentVersion: ContentVersionV1,
+		OriginalURL:    "/enc/demo.mp4",
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/redirect/"+key+"?decode=1", nil)
@@ -2342,7 +2355,9 @@ func TestPlayV2RedirectOpenEndedEOFEmptyTail(t *testing.T) {
 
 	key := "eof-empty-tail-key"
 	p.storeRedirectCache(key, &RedirectInfo{
-		RedirectURL: "http://upstream.local/encrypted",
+		ContentVersion: ContentVersionV1,
+		CiphertextSize: fileSize,
+		RedirectURL:    "http://upstream.local/encrypted",
 		PasswdInfo: &EncryptPath{
 			Path:     "/enc/*",
 			Password: password,

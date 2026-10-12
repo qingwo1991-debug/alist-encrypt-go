@@ -29,11 +29,18 @@
 - Actions 添加 fault acceptance artifact 和独立 Node 测量语义测试；新增测试也作为后续构建发布依赖。首阶段 [PR #67](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/67) 全绿合并，main `2374ca3` 的 [Actions 38197844019](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38197844019) 测试、竞态、Docker、跨平台二进制、三 ABI AAR/APK 与发布全部成功。未宣称真机测试通过。
 - 后续实现设计：`docs/MOBILE_V3_IMPLEMENTATION.md`、`docs/NETWORK_ROUTING_IMPLEMENTATION.md`。
 
+## 阶段 2 当前云端证据（尚未完成）
+
+- [Draft PR #68](https://github.com/qingwo1991-debug/alist-encrypt-go/pull/68)：接入共享 V3 header/trailer/认证 record 读取、完整 metadata 缓存及 SQLite/sync 字段；支持有界 record 内存及 Range 忽略回退，保留显式 raw 下载。
+- [Actions 38199732589](https://github.com/qingwo1991-debug/alist-encrypt-go/actions/runs/38199732589)：受控依赖覆盖及 actual/src readonly module graph 已通过，移动 Go 编译成功；完整移动测试仍失败，不能合并。根 Go、竞态/故障基线、MySQL、两个 Web UI、Flutter 与 probe 测试通过。三 ABI binding 依赖移动测试，因此本次跳过，不是通过。
+- 独立审查补修正常 fs/get 重复播放的 V3 metadata 降级、提交响应前的一次签名 URL 刷新，以及 disabled/raw 表示；真实 API 生命周期和 URL identity 回归已添加。继续修复旧 fixture 的严格响应长度及实际选定 URL 的验证后再取得全绿证据。
+- 不宣称真机首帧、弱网收益、全入口最终通过或阶段 2 发布；后续认证缓存、KDF 排队、路由平台桥和目录生命周期仍按阶段 3–6 实施。
+
 ## 评分与硬性门槛
 
 - 播放正确性/跨端一致性：25；首帧/拖动/切集：25；网络隔离/恢复：20；资源性能：15；代码质量/验证：15。
 - 错误明文、下载损坏、无界等待、持续资源泄漏任一存在，不满足接近满分验收。
-- 验证支持能力，而不是将明确拒绝等同完整支持；移动 V3 当前基线仍返回 415。
+- 验证支持能力，而不是将明确拒绝等同完整支持；PR #66 的移动 V3 基线为 415，阶段 2 正在验证共享认证读取，尚未据此声明所有入口已通过验收。
 - 实际媒体首帧需播放器渲染事件；服务端响应头和正文首字节只代表相应传输阶段。
 - 时间阈值先记录分网络档位基线，再定义可实现的验收阈值；不能以大于物理带宽的速度作为门禁。
 

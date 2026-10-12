@@ -62,6 +62,9 @@ func TestV3FsGetRepeatedTokenPlaybackAndURLIdentity(t *testing.T) {
 				EncryptPaths: []*EncryptPath{{Path: "/enc/*", Enable: true, EncType: EncTypeAESCTR, Password: "redirect-test", regex: regexp.MustCompile(`^/enc/`)}}}, httpClient: upstream.Client(), streamClient: upstream.Client()}
 			p.ensureRuntimeCaches()
 			p.storageDriverMap = map[string]string{"/enc": "test"}
+			// Use the actual loopback mobile proxy authority. A synthetic public
+			// Host would intentionally rewrite the loopback fixture raw URL to
+			// that authority, which has no listening server in this test.
 			for attempt := 0; attempt < 3; attempt++ {
 				if attempt == 2 {
 					signature = "b"
@@ -69,7 +72,7 @@ func TestV3FsGetRepeatedTokenPlaybackAndURLIdentity(t *testing.T) {
 				}
 				before := probes
 				rec := httptest.NewRecorder()
-				p.handleFsGet(rec, httptest.NewRequest("POST", "http://proxy.local/api/fs/get", bytes.NewBufferString(`{"path":"/enc/movie"}`)))
+				p.handleFsGet(rec, httptest.NewRequest("POST", "http://127.0.0.1:5344/api/fs/get", bytes.NewBufferString(`{"path":"/enc/movie"}`)))
 				if rec.Code != 200 {
 					t.Fatalf("fs/get=%d %s", rec.Code, rec.Body.String())
 				}
@@ -103,7 +106,7 @@ func TestV3FsGetRepeatedTokenPlaybackAndURLIdentity(t *testing.T) {
 			}
 			p.config.EncryptPaths[0].Enable = false
 			raw := httptest.NewRecorder()
-			p.handleFsGet(raw, httptest.NewRequest("POST", "http://proxy.local/api/fs/get", bytes.NewBufferString(`{"path":"/enc/movie"}`)))
+			p.handleFsGet(raw, httptest.NewRequest("POST", "http://127.0.0.1:5344/api/fs/get", bytes.NewBufferString(`{"path":"/enc/movie"}`)))
 			var result struct {
 				Data struct {
 					RawURL string `json:"raw_url"`
@@ -136,7 +139,7 @@ func TestV3FsGetFailedProbeDoesNotCreateLegacyToken(t *testing.T) {
 	p.ensureRuntimeCaches()
 	p.storeFileCacheList("/enc/movie", &FileInfo{ContentVersion: ContentVersionV3, RawURL: upstream.URL + "/object", HeaderLen: V3HeaderSize})
 	rec := httptest.NewRecorder()
-	p.handleFsGet(rec, httptest.NewRequest("POST", "http://proxy.local/api/fs/get", bytes.NewBufferString(`{"path":"/enc/movie"}`)))
+	p.handleFsGet(rec, httptest.NewRequest("POST", "http://127.0.0.1:5344/api/fs/get", bytes.NewBufferString(`{"path":"/enc/movie"}`)))
 	if rec.Code != http.StatusBadGateway || !json.Valid(rec.Body.Bytes()) || p.redirectCache.Len() != 0 {
 		t.Fatalf("failed probe issued legacy token: status=%d tokens=%d body=%s", rec.Code, p.redirectCache.Len(), rec.Body.String())
 	}

@@ -24,8 +24,9 @@ func v1ProbeResponse(req *http.Request, bodyLen int) *http.Response {
 			"Content-Range":  []string{"bytes 0-47/4096"},
 			"Content-Length": []string{"48"},
 		},
-		Body:    io.NopCloser(bytes.NewReader(body)),
-		Request: req,
+		ContentLength: 48,
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		Request:       req,
 	}
 }
 

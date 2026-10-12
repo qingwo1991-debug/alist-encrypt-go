@@ -25,7 +25,7 @@ func TestPlaybackFirstByteCacheRoutes(t *testing.T) {
 			info := &RedirectInfo{RedirectURL: "http://upstream.local/encrypted", OriginalURL: "/enc/demo.mp4", FileSize: 4, ContentVersion: ContentVersionV1, PasswdInfo: &EncryptPath{Path: "/enc/*", Password: "test", EncType: EncTypeAESCTR, Enable: true}}
 			p.storeRedirectCache("cached", info)
 			p.decryptedBlockCache = newDecryptedBlockCache(64, 4)
-			meta := ContentMeta{Version: ContentVersionV1, PlainSize: 4}
+			meta := LegacyContentMeta(EncTypeAESCTR, 4)
 			p.decryptedBlockCache.putBlock(p.decryptedCacheBaseKey(info, meta), 0, []byte("body"))
 			url := "http://local/redirect/cached?decode=1"
 			if route == "api" {
@@ -86,7 +86,7 @@ func TestPlaybackFirstByteDirectSuffixStats(t *testing.T) {
 				default:
 					return nil, fmt.Errorf("unexpected range %q", req.Header.Get("Range"))
 				}
-				return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {fmt.Sprintf("bytes %d-%d/%d", start, end, len(ciphertext))}, "Content-Length": {fmt.Sprint(end - start + 1)}}, Body: io.NopCloser(bytes.NewReader(ciphertext[start : end+1])), Request: req}, nil
+				return &http.Response{StatusCode: 206, ContentLength: int64(end - start + 1), Header: http.Header{"Content-Range": {fmt.Sprintf("bytes %d-%d/%d", start, end, len(ciphertext))}, "Content-Length": {fmt.Sprint(end - start + 1)}}, Body: io.NopCloser(bytes.NewReader(ciphertext[start : end+1])), Request: req}, nil
 			})}
 			info := &RedirectInfo{RedirectURL: "http://upstream.local/v2", OriginalURL: "/enc/video.mp4", FileSize: int64(len(ciphertext)), PasswdInfo: &EncryptPath{Password: "test", EncType: EncTypeAESCTR, Enable: true}}
 			p.storeRedirectCache("direct", info)
