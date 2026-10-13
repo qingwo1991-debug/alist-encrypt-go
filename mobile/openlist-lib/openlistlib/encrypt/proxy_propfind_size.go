@@ -19,12 +19,16 @@ type propfindSizeProbe struct {
 	target  string
 	headers http.Header
 	used    bool
+	warm    *metadataWarmListing
 }
 
 const propfindResponseMaxBytes = 1 << 20
 
 func (p *ProxyServer) processPropfindMetadata(body io.Reader, w io.Writer, ep *EncryptPath, budget *propfindRewriteBudget, probe *propfindSizeProbe) error {
 	dec, enc := xml.NewDecoder(body), xml.NewEncoder(w)
+	if probe != nil && probe.warm != nil {
+		defer probe.warm.Commit(false)
+	}
 	seen, closed := false, false
 	for {
 		token, err := dec.Token()
@@ -94,7 +98,13 @@ func (p *ProxyServer) processPropfindMetadata(body io.Reader, w io.Writer, ep *E
 	if !seen || !closed {
 		return errors.New("incomplete PROPFIND metadata response")
 	}
-	return enc.Flush()
+	if err := enc.Flush(); err != nil {
+		return err
+	}
+	if probe != nil && probe.warm != nil {
+		probe.warm.Commit(true)
+	}
+	return nil
 }
 
 func (p *ProxyServer) rewritePropfindEntry(tokens []xml.Token, ep *EncryptPath, budget *propfindRewriteBudget, probe *propfindSizeProbe) {
@@ -204,18 +214,20 @@ func (p *ProxyServer) rewritePropfindEntry(tokens []xml.Token, ep *EncryptPath, 
 		}
 	}
 	isDir := collection || strings.HasSuffix(href, "/") || size < 0
+	if probe != nil && probe.warm != nil {
+		probe.warm.Observe(href, show, size, isDir)
+	}
 	// orig_ is an explicitly exposed original object, never a content-meta alias.
 	eligible := ep != nil && ep.Enable && href != "" && !isDir && !strings.HasPrefix(path.Base(href), "orig_") && !strings.HasPrefix(path.Base(show), "orig_")
 	var confirmed *FileInfo
 	rejectInheritance := false
 	if eligible {
-		if info, ok := p.loadFileCacheInMem(href); ok && info != nil && !info.IsDir && info.CiphertextSize == size {
-			if meta, valid := fileInfoContentMeta(info, EncryptionType(ep.EncType)); valid && propfindMetaSizeValid(meta, size) {
-				copy := *info
-				confirmed = &copy
+		if probe != nil {
+			if meta, valid := p.confirmedMetadataForObject(probe.ctx, href, size); valid {
+				confirmed = &FileInfo{Size: meta.PlainSize, CiphertextSize: meta.CiphertextSize, ContentVersion: meta.Version, HeaderLen: meta.HeaderLen, NonceField: cloneNonceField(meta.NonceField), ChunkSize: meta.ChunkSize, KDFIterations: meta.KDFIterations}
 			}
 		}
-		if probe != nil && !probe.used {
+		if probe != nil && probe.target != "" && !probe.used {
 			target, err := url.Parse(probe.target)
 			if err == nil && target.Path == href {
 				probe.used = true
@@ -223,6 +235,8 @@ func (p *ProxyServer) rewritePropfindEntry(tokens []xml.Token, ep *EncryptPath, 
 				// back to a cached tuple, even when ciphertext sizes coincide.
 				confirmed = nil
 				ctx, cancel := context.WithTimeout(probe.ctx, p.propfindRetryTimeout())
+				ctx = withConfirmedMetadataProbeBudget(ctx, p.propfindRetryTimeout())
+				ctx = withConfirmedMetadataObservedSize(ctx, size)
 				meta, ok := p.inspectLegacyContentMeta(ctx, probe.target, probe.headers, ep, size)
 				cancel()
 				if ok && propfindMetaSizeValid(meta, size) {

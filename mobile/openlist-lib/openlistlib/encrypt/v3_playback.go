@@ -205,6 +205,10 @@ func (p *ProxyServer) v3PlaybackRequest(r *http.Request, info *RedirectInfo, ran
 			}
 			target = next.String()
 		default:
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+				resp.Body.Close()
+				return nil, errors.New("v3: confirmed representation changed")
+			}
 			return resp, nil
 		}
 	}
@@ -358,6 +362,9 @@ func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(status)
 	}
 	if r.Method == http.MethodHead || length == 0 {
+		if !p.authorizeLocalWebDAVMetadata(w, r, info.EncryptedPath, meta) {
+			return errors.New("v3: origin authorization or representation rejected")
+		}
 		commit()
 		return nil
 	}

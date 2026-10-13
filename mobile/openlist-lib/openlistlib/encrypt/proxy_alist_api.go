@@ -551,11 +551,18 @@ func (p *ProxyServer) ProbeStatsSnapshot() map[string]uint64 {
 			"v2_attempts": 0, "v2_success": 0, "dual_probe_attempts": dualProbeAttempts.Load(),
 		}
 	}
-	return map[string]uint64{
+	stats := map[string]uint64{
 		"v2_attempts":         atomic.LoadUint64(&p.probeV2Attempts),
 		"v2_success":          atomic.LoadUint64(&p.probeV2Success),
 		"dual_probe_attempts": dualProbeAttempts.Load(),
 	}
+	for key, value := range p.confirmedMetadataStats() {
+		stats["metadata_"+key] = value
+	}
+	for key, value := range p.metadataWarmStats() {
+		stats["next_warm_"+key] = value
+	}
+	return stats
 }
 
 // handleLocalImport imports local SQLite data from a JSON payload.

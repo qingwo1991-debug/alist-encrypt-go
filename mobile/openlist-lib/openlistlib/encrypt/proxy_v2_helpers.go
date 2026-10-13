@@ -216,6 +216,7 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 			if parseErr != nil || ValidateV3ContentMeta(parsed) != nil {
 				return invalid, true
 			}
+			captureConfirmedMetadataProof(inspectCtx, resp, currentURL)
 			atomic.AddUint64(&p.probeV2Success, 1)
 			return parsed, true
 		}
@@ -238,6 +239,7 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 		if parsed, ok, err := ParseContentHeader(encType, prefix, meta.CiphertextSize); err == nil && ok {
 			log.Infof("[v2] detected content header target=%s encType=%s headerLen=%d cipherSize=%d plainSize=%d",
 				safeURLForLog(currentURL), parsed.EncType, parsed.HeaderLen, parsed.CiphertextSize, parsed.PlainSize)
+			captureConfirmedMetadataProof(inspectCtx, resp, currentURL)
 			atomic.AddUint64(&p.probeV2Success, 1)
 			return parsed, true
 		} else {
@@ -247,6 +249,7 @@ func (p *ProxyServer) inspectEncryptedContentConfirmed(ctx context.Context, targ
 				return meta, false
 			}
 		}
+		captureConfirmedMetadataProof(inspectCtx, resp, currentURL)
 		atomic.AddUint64(&p.probeV2Success, 1)
 		return meta, true
 	}

@@ -416,7 +416,10 @@ func initLocalSchema(db *sql.DB) error {
 			return err
 		}
 	}
-	return migrateLocalSchema(db)
+	if err := migrateLocalSchema(db); err != nil {
+		return err
+	}
+	return initConfirmedMetadataSchema(db)
 }
 
 func migrateLocalSchema(db *sql.DB) error {

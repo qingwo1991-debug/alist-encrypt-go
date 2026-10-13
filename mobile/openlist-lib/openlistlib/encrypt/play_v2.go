@@ -1104,6 +1104,10 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 // resolvePlaybackContentMeta resolves the representation before legacy range,
 // cache and strategy handling. Recognized but incomplete V3 never becomes V1.
 func (p *ProxyServer) resolvePlaybackContentMeta(r *http.Request, info *RedirectInfo, size int64) (ContentMeta, bool) {
+	if confirmedMetadataRequestFromContext(r.Context()) != nil {
+		headers := headersWithStoredOriginCredentials(r.Header, info.Headers)
+		return p.resolveConfirmedMetadata(r.Context(), info.RedirectURL, headers, info.PasswdInfo, size)
+	}
 	if meta, ok := redirectInfoContentMeta(info); ok {
 		return meta, true
 	}
@@ -1576,6 +1580,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		return &StreamOutcome{StatusCode: resp.StatusCode, ResponseStarted: true}
 	}
 
+	if !decodeDisabled && resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+		return &StreamOutcome{Err: fmt.Errorf("encrypted representation changed"), FailureReason: "decrypt_validation_failed", Retryable: false}
+	}
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
 		statusCode = http.StatusPartialContent
@@ -1928,6 +1935,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	info = cloneRedirectInfo(info)
+	if shouldDecrypt(info) && info.EncryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
+		r = o.proxy.withConfirmedMetadataIdentity(r, encryptedDAVPath(info.EncryptedPath), info.PasswdInfo)
+	}
 
 	// Register before resolve so metadata/prework is included in the measurement.
 	fileSize := int64(0)

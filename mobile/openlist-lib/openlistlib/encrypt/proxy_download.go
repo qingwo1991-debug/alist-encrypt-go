@@ -110,7 +110,7 @@ func (p *ProxyServer) inspectLegacyContentMeta(ctx context.Context, target strin
 			return meta, true
 		}
 	}
-	meta, confirmed := p.inspectEncryptedContentConfirmed(ctx, target, headers, encPath, size)
+	meta, confirmed := p.resolveConfirmedMetadata(ctx, target, headers, encPath, size)
 	if confirmed && cache != nil && (!meta.IsV3() || ValidateV3ContentMeta(meta) == nil) {
 		cache.entries[key] = meta
 	}
@@ -137,6 +137,9 @@ func (p *ProxyServer) inspectLegacyV3Download(w http.ResponseWriter, r *http.Req
 		return false, true
 	}
 	w, r, _ = withPlaybackTiming(w, r)
+	if encryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
+		r = p.withConfirmedMetadataIdentity(r, encryptedDAVPath(encryptedPath), encPath)
+	}
 	meta, confirmed := p.inspectLegacyContentMeta(r.Context(), target, headers, encPath, fileSize)
 	if !confirmed && !meta.IsV3() {
 		// An unreadable or encoded prefix proves neither legacy nor V3.

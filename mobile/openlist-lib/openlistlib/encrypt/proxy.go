@@ -595,6 +595,8 @@ type ProxyConfig struct {
 	AlistPort  int    `json:"alistPort"`  // Alist 服务端口
 	AlistHttps bool   `json:"alistHttps"` // 是否使用 HTTPS
 	ProxyPort  int    `json:"proxyPort"`  // 代理服务端口
+	// Optional one-neighbor metadata-only warming; disabled by default.
+	MetadataNextWarmEnabled bool `json:"metadataNextWarmEnabled,omitempty"`
 	// UpstreamTimeoutSeconds: UI/API 转发超时（秒）
 	UpstreamTimeoutSeconds int `json:"upstreamTimeoutSeconds,omitempty"`
 	// ProbeTimeoutSeconds: 单次探测请求超时（秒）
@@ -4402,6 +4404,26 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	if encPath != nil && encPath.Enable {
+		r = p.withConfirmedMetadataIdentity(r, targetURLPath, encPath)
+		ctx = r.Context()
+		if r.Header.Get("X-Encrypt-Metadata-Refresh") == "1" {
+			p.invalidateConfirmedMetadataObject(targetURLPath)
+		}
+		if r.Method == http.MethodDelete || r.Method == "MOVE" || r.Method == "COPY" {
+			// These operations may affect an unknown directory subtree. Conservatively
+			// clear confirmed geometry; normal listing data remains separate.
+			p.invalidateAllConfirmedMetadata()
+		} else if r.Method == http.MethodPut || r.Method == http.MethodPost {
+			p.invalidateConfirmedMetadataObject(targetURLPath)
+		}
+	}
+
+	if r.Method == http.MethodGet && encPath != nil && encPath.Enable && r.URL.Query().Get("decode") != "0" && !strings.HasPrefix(fileName, "orig_") {
+		warmRequest, warmPath, warmEncryption := r, targetURLPath, encPath
+		w = metadataWarmFirstWriter(w, func() { p.maybeWarmNextMetadata(warmRequest, warmPath, warmEncryption) })
+	}
+
 	// Raw content reads still require the filename mapping performed above.
 	if r.URL.Query().Get("decode") == "0" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		encPath = nil
@@ -4778,6 +4800,7 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			// 重组 Destination
 			newDest := p.getAlistURL() + destPath
 			req.Header.Set("Destination", newDest)
+			p.invalidateConfirmedMetadataObject(destPath)
 		}
 	}
 	// Resolve V3 before translating plaintext ranges or allowing unknown-size
@@ -5127,10 +5150,18 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 	}
 	defer resp.Body.Close()
 
-	// Refresh/filename retries can select a different object from the initial
-	// probe. Confirm that exact target before copying headers or reading any body;
-	// this also covers HEAD, unknown size and stale V2 file-cache metadata.
-	if p.serveLegacyV3Download(w, r, targetURL, r.Header, encPath, 0, targetURLPath) {
+	// The actual response must authorize and validate the representation before
+	// any cached V3 path can synthesize local HEAD/empty-file response headers.
+	if encPath != nil && encPath.Enable && (r.Method == http.MethodGet || r.Method == http.MethodHead) && resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Range")
+		http.Error(w, "encrypted representation changed; retry required", http.StatusBadGateway)
+		return
+	}
+
+	// Refresh/filename retries can select a different canonical object. Never
+	// interpret an authorization/error response via cached crypto metadata.
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && p.serveLegacyV3Download(w, r, targetURL, r.Header, encPath, 0, targetURLPath) {
 		return
 	}
 
@@ -5163,6 +5194,12 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 		var sizeProbe *propfindSizeProbe
 		if listDepth == "0" {
 			sizeProbe = &propfindSizeProbe{ctx: r.Context(), target: targetURL, headers: r.Header}
+		} else if listDepth == "1" {
+			listingRequest := r.Clone(r.Context())
+			listingURL := *r.URL
+			listingURL.Path, listingURL.RawPath = targetURLPath, ""
+			listingRequest.URL = &listingURL
+			sizeProbe = &propfindSizeProbe{ctx: r.Context(), warm: newMetadataWarmListing(p, listingRequest, encPath)}
 		}
 		if err := p.processPropfindMetadata(resp.Body, dst, encPath, budget, sizeProbe); err != nil {
 			output.fail()
