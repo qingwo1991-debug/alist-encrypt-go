@@ -11,6 +11,21 @@ func (p *ProxyServer) authorizeLocalWebDAVMetadata(w http.ResponseWriter, r *htt
 	if confirmedMetadataRequestFromContext(r.Context()) == nil || (r.Method != http.MethodHead && !(r.Method == http.MethodGet && meta.PlainSize == 0)) {
 		return true
 	}
+	return p.authorizeConfirmedMetadataOperation(w, r, encryptedPath)
+}
+
+// Fully local decrypted-body hits must also authorize. A real HEAD is not a
+// crypto-geometry probe, and never fetches a replacement video segment.
+func (p *ProxyServer) authorizeConfirmedMetadataCacheHit(w http.ResponseWriter, r *http.Request, encryptedPath string) bool {
+	if confirmedMetadataRequestFromContext(r.Context()) == nil {
+		return true
+	}
+	head := r.Clone(r.Context())
+	head.Method = http.MethodHead
+	return p.authorizeConfirmedMetadataOperation(w, head, encryptedPath)
+}
+
+func (p *ProxyServer) authorizeConfirmedMetadataOperation(w http.ResponseWriter, r *http.Request, encryptedPath string) bool {
 	targetPath := encryptedPath
 	if !strings.HasPrefix(targetPath, "/dav/") {
 		targetPath = "/dav/" + strings.TrimPrefix(targetPath, "/")

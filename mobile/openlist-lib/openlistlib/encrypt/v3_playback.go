@@ -387,7 +387,10 @@ func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Requ
 		prefixReaders, prefixBytes = readers, count
 	}
 	if prefixBytes == length {
-		// No upstream request/KDF: headerLatencyMs is deliberately not populated
+		if !p.authorizeConfirmedMetadataCacheHit(w, r, info.EncryptedPath) {
+			return errors.New("v3: cached-body origin authorization rejected")
+		}
+		// No media request/KDF: headerLatencyMs is deliberately not populated
 		// with a fabricated provider measurement. Writer tracks actual first byte.
 		commit()
 		var buffer [32 << 10]byte

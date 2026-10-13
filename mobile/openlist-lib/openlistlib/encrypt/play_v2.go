@@ -2116,6 +2116,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			}
 			length := end - start + 1
 			if data, ok := cache.getRange(o.proxy.decryptedCacheBaseKey(info, meta), start, length); ok {
+				if !o.proxy.authorizeConfirmedMetadataCacheHit(w, r, encryptedDAVPath(info.EncryptedPath)) {
+					return
+				}
 				w.Header().Set("Accept-Ranges", "bytes")
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
 				w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))
