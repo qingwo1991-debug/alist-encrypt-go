@@ -57,6 +57,94 @@ func confirmedMetadataTestRequest(p *ProxyServer, enc *EncryptPath, auth string)
 	r.Header.Set("Authorization", auth)
 	return p.withConfirmedMetadataIdentity(r, "/mount/video.bin", enc)
 }
+func TestConfirmedMetadataFreshTargetCoalesces(t *testing.T) {
+	gate, started := make(chan struct{}), make(chan struct{}, 1)
+	p, enc, target, calls := confirmedMetadataTestServer(t, gate, started)
+	results := make(chan bool, 100)
+	for i := 0; i < 100; i++ {
+		r := confirmedMetadataTestRequest(p, enc, "one")
+		go func() {
+			_, ok := p.resolveConfirmedMetadata(withConfirmedMetadataFreshTarget(r.Context()), target, r.Header, enc, 0)
+			results <- ok
+		}()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cold probe did not start")
+	}
+	close(gate)
+	for i := 0; i < 100; i++ {
+		select {
+		case ok := <-results:
+			if !ok {
+				t.Fatal("fresh target coalesced result failed")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("fresh target waiter blocked")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("same-target cold calls=%d", calls.Load())
+	}
+	r := confirmedMetadataTestRequest(p, enc, "one")
+	// Model old complete geometry with a different nonce: a new target must
+	// replace that record with the real fixture's newly inspected nonce.
+	p.confirmedMetadata.mu.Lock()
+	entry := p.confirmedMetadata.entries[confirmedMetadataRequestFromContext(r.Context()).identity]
+	entry.record.Meta.NonceField[0] = 99
+	p.confirmedMetadata.mu.Unlock()
+	ctx := withConfirmedMetadataFreshTarget(r.Context())
+	meta, ok := p.resolveConfirmedMetadata(ctx, target+"?sig=b", r.Header, enc, 0)
+	if !ok || meta.NonceField[0] != 7 || calls.Load() != 2 {
+		t.Fatalf("new target meta=%+v ok=%v calls=%d", meta, ok, calls.Load())
+	}
+	_, _ = p.resolveConfirmedMetadata(ctx, target+"?sig=b", r.Header, enc, 0)
+	if calls.Load() != 2 {
+		t.Fatal("same fresh target re-probed")
+	}
+	// Ordinary playback retains stable cross-target reuse.
+	_, _ = p.resolveConfirmedMetadata(r.Context(), target+"?sig=c", r.Header, enc, 0)
+	if calls.Load() != 2 {
+		t.Fatal("normal playback adopted fresh-target policy")
+	}
+}
+
+func TestConfirmedMetadataFreshTargetWaitsForDifferentOwnedFlight(t *testing.T) {
+	gate, started := make(chan struct{}), make(chan struct{}, 1)
+	p, enc, target, calls := confirmedMetadataTestServer(t, gate, started)
+	first := confirmedMetadataTestRequest(p, enc, "one")
+	second := confirmedMetadataTestRequest(p, enc, "one")
+	firstDone, secondDone := make(chan bool, 1), make(chan bool, 1)
+	go func() {
+		_, ok := p.resolveConfirmedMetadata(first.Context(), target+"?sig=a", first.Header, enc, 0)
+		firstDone <- ok
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first probe did not start")
+	}
+	go func() {
+		_, ok := p.resolveConfirmedMetadata(withConfirmedMetadataFreshTarget(second.Context()), target+"?sig=b", second.Header, enc, 0)
+		secondDone <- ok
+	}()
+	close(gate)
+	for _, done := range []chan bool{firstDone, secondDone} {
+		select {
+		case ok := <-done:
+			if !ok {
+				t.Fatal("target flight failed")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("different target waiter blocked")
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("different-target probes=%d", calls.Load())
+	}
+}
+
 func TestConfirmedMetadataFallbackOptInAndEscapedDAVPath(t *testing.T) {
 	p, enc, _, calls := confirmedMetadataTestServer(t, nil, nil)
 	original := p.streamClientSnapshot().Transport

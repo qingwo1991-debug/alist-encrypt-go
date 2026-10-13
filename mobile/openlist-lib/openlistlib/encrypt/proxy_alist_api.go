@@ -899,8 +899,7 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 						// proof through the shared resolver so playback does not inspect
 						// again or retain geometry replaced by a fresh fs/get proof.
 						proofRequest := p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(filePath), encPath)
-						proofContext := withConfirmedMetadataFallback(proofRequest.Context())
-						p.invalidateConfirmedMetadataObject(canonicalMetadataDAVPath(filePath))
+						proofContext := withConfirmedMetadataFreshTarget(withConfirmedMetadataFallback(proofRequest.Context()))
 						meta, confirmed = p.resolveConfirmedMetadata(proofContext, rawURL, r.Header, encPath, ciphertextSize)
 						// Metadata errors must not turn recognized V3 into a legacy
 						// redirect token or persist an incomplete encryption tuple.

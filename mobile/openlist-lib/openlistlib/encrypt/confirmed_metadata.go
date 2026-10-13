@@ -40,14 +40,16 @@ func (p *ProxyServer) confirmedMetadataStats() map[string]uint64 {
 }
 
 type confirmedMetadataEntry struct {
-	record     confirmedMetadataRecord
-	flight     *confirmedMetadataFlight
-	generation uint64
-	loaded     bool
-	used       time.Time
+	record      confirmedMetadataRecord
+	proofTarget string // Initial transport target evidence, memory only; may contain tokens.
+	flight      *confirmedMetadataFlight
+	generation  uint64
+	loaded      bool
+	used        time.Time
 }
 type confirmedMetadataFlight struct {
 	done      chan struct{}
+	target    string
 	meta      ContentMeta
 	confirmed bool
 	record    confirmedMetadataRecord
@@ -57,6 +59,17 @@ type confirmedMetadataCollectorKey struct{}
 type confirmedMetadataWarmBudgetKey struct{}
 type confirmedMetadataObservedSizeKey struct{}
 type confirmedMetadataFallbackKey struct{}
+type confirmedMetadataFreshTargetKey struct{}
+
+// withConfirmedMetadataFreshTarget requests proof from this exact initial URL.
+// It is opt-in for FsGet's fresh-target semantics, not normal playback: signed
+// URL rotation never changes the stable object identity or ordinary cache hits.
+func withConfirmedMetadataFreshTarget(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, confirmedMetadataFreshTargetKey{}, true)
+}
 
 // withConfirmedMetadataFallback opts playback into authenticated canonical DAV
 // fallback only after a target fails inspection. Ordinary DAV/warm resolution
@@ -321,126 +334,161 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 	store := p.localStore
 	p.mutex.RUnlock()
 	state := &p.confirmedMetadata
-	state.mu.Lock()
-	entry := state.ensureEntry(holder.identity, time.Now())
-	if entry == nil {
-		state.mu.Unlock()
-		return p.inspectEncryptedContentConfirmed(ctx, target, headers, enc, size)
-	}
-	if !entry.loaded {
-		entry.loaded = true
-		if store != nil {
-			if rec, ok := store.GetConfirmedMetadata(holder.identity); ok && rec.Identity == holder.identity {
-				entry.record = cloneConfirmedMetadataRecord(rec)
-				if state.nextGeneration <= rec.Generation {
-					state.nextGeneration = rec.Generation + 1
-				}
-				entry.generation = state.nextGeneration
-				entry.record.Generation = entry.generation
-				if confirmedMetadataFresh(entry.record, time.Now()) {
-					state.persistentHits.Add(1)
+	freshTarget, _ := ctx.Value(confirmedMetadataFreshTargetKey{}).(bool)
+	var flight *confirmedMetadataFlight
+	for {
+		if ctx.Err() != nil {
+			return LegacyContentMeta(enc.EncType, size), false
+		}
+		state.mu.Lock()
+		entry := state.ensureEntry(holder.identity, time.Now())
+		if entry == nil {
+			state.mu.Unlock()
+			return p.inspectEncryptedContentConfirmed(ctx, target, headers, enc, size)
+		}
+		if !entry.loaded {
+			entry.loaded = true
+			if store != nil {
+				if rec, ok := store.GetConfirmedMetadata(holder.identity); ok && rec.Identity == holder.identity {
+					entry.record = cloneConfirmedMetadataRecord(rec)
+					if state.nextGeneration <= rec.Generation {
+						state.nextGeneration = rec.Generation + 1
+					}
+					entry.generation = state.nextGeneration
+					entry.record.Generation = entry.generation
+					if confirmedMetadataFresh(entry.record, time.Now()) {
+						state.persistentHits.Add(1)
+					}
 				}
 			}
 		}
-	}
-	if observed, _ := ctx.Value(confirmedMetadataObservedSizeKey{}).(int64); observed > 0 && entry.record.Provenance != "" && entry.record.Meta.CiphertextSize != observed {
-		state.invalidateObjectLocked(holder.identity.ObjectID, store)
-		entry = state.ensureEntry(holder.identity, time.Now())
-		entry.loaded = true // The object-wide store delete was synchronous.
-		holder.mu.Lock()
-		holder.attached = false
-		holder.mu.Unlock()
-	}
-	if confirmedMetadataFresh(entry.record, time.Now()) {
-		state.hits.Add(1)
-		rec := cloneConfirmedMetadataRecord(entry.record)
-		state.mu.Unlock()
-		holder.attach(rec)
-		return rec.Meta, true
-	}
-	flight := entry.flight
-	if flight != nil {
-		state.sharedWaits.Add(1)
-	}
-	if flight == nil {
-		flight = &confirmedMetadataFlight{done: make(chan struct{})}
-		entry.flight = flight
-		generation := entry.generation
-		// Clone caller-owned mutable inputs before the detached goroutine starts.
-		auth := headers.Clone()
-		encCopy := *enc
-		budget := 15 * time.Second
-		if explicit, ok := ctx.Value(confirmedMetadataWarmBudgetKey{}).(time.Duration); ok && explicit > 0 && explicit < budget {
-			budget = explicit
+		if observed, _ := ctx.Value(confirmedMetadataObservedSizeKey{}).(int64); observed > 0 && entry.record.Provenance != "" && entry.record.Meta.CiphertextSize != observed {
+			state.invalidateObjectLocked(holder.identity.ObjectID, store)
+			entry = state.ensureEntry(holder.identity, time.Now())
+			entry.loaded = true // The object-wide store delete was synchronous.
+			holder.mu.Lock()
+			holder.attached = false
+			holder.mu.Unlock()
 		}
-		fallback, _ := ctx.Value(confirmedMetadataFallbackKey{}).(bool)
-		started := p.goBackground(func(lifetime context.Context) {
-			completed := false
-			// RoundTrippers and test hooks may terminate their goroutine with
-			// runtime.Goexit; cancellation alone cannot close this flight then.
-			// Do not recover panics, but always release waiters and admission.
-			defer func() {
+		if freshTarget && entry.flight != nil && entry.flight.target != target {
+			// A different target owns this flight. Let its waiters finish, then
+			// atomically reconsider this request's target; never cancel its owner.
+			previous := entry.flight
+			state.sharedWaits.Add(1)
+			state.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return LegacyContentMeta(enc.EncType, size), false
+			case <-previous.done:
+			}
+			continue
+		}
+		if freshTarget && entry.flight == nil && entry.record.Provenance != "" && entry.proofTarget != target {
+			state.nextGeneration++
+			entry.generation = state.nextGeneration
+			entry.record = confirmedMetadataRecord{}
+			entry.proofTarget = ""
+			state.invalidations.Add(1)
+			if store != nil {
+				_ = store.DeleteConfirmedMetadata(holder.identity)
+			}
+			holder.mu.Lock()
+			holder.attached = false
+			holder.mu.Unlock()
+		}
+		if confirmedMetadataFresh(entry.record, time.Now()) {
+			state.hits.Add(1)
+			rec := cloneConfirmedMetadataRecord(entry.record)
+			state.mu.Unlock()
+			holder.attach(rec)
+			return rec.Meta, true
+		}
+		flight = entry.flight
+		if flight != nil {
+			state.sharedWaits.Add(1)
+		}
+		if flight == nil {
+			flight = &confirmedMetadataFlight{done: make(chan struct{}), target: target}
+			entry.flight = flight
+			generation := entry.generation
+			// Clone caller-owned mutable inputs before the detached goroutine starts.
+			auth := headers.Clone()
+			encCopy := *enc
+			budget := 15 * time.Second
+			if explicit, ok := ctx.Value(confirmedMetadataWarmBudgetKey{}).(time.Duration); ok && explicit > 0 && explicit < budget {
+				budget = explicit
+			}
+			fallback, _ := ctx.Value(confirmedMetadataFallbackKey{}).(bool)
+			started := p.goBackground(func(lifetime context.Context) {
+				completed := false
+				// RoundTrippers and test hooks may terminate their goroutine with
+				// runtime.Goexit; cancellation alone cannot close this flight then.
+				// Do not recover panics, but always release waiters and admission.
+				defer func() {
+					state.mu.Lock()
+					defer state.mu.Unlock()
+					if !completed {
+						flight.meta = LegacyContentMeta(encCopy.EncType, size)
+						flight.confirmed = false
+						flight.record = confirmedMetadataRecord{}
+					}
+					if current := state.entries[holder.identity]; current == entry && entry.generation == generation && entry.flight == flight {
+						entry.flight = nil
+						if !completed {
+							entry.record = confirmedMetadataRecord{}
+						}
+					}
+					close(flight.done)
+				}()
+				inspectCtx, cancel := context.WithTimeout(lifetime, budget)
+				defer cancel()
+				collector := &confirmedMetadataCollector{}
+				inspectCtx = context.WithValue(inspectCtx, confirmedMetadataCollectorKey{}, collector)
+				var meta ContentMeta
+				var confirmed bool
+				if fallback {
+					// Normalize both object paths and already-prefixed DAV routes,
+					// then escape decoded paths once, including literal %, #, ?.
+					route := (&url.URL{Path: canonicalMetadataDAVPath(holder.davPath)}).EscapedPath()
+					meta, confirmed = p.inspectEncryptedContentWithFallbackConfirmed(inspectCtx, target, auth, &encCopy, size, route)
+				} else {
+					meta, confirmed = p.inspectEncryptedContentConfirmed(inspectCtx, target, auth, &encCopy, size)
+				}
+				collector.mu.Lock()
+				proof := collector.proof
+				collector.mu.Unlock()
+				now := time.Now().Unix()
+				rec := confirmedMetadataRecord{Identity: holder.identity, Meta: meta, Provenance: confirmedMetadataProvenanceInspection, ConfirmedAt: now, ValidatedAt: now, ETag: proof.etag, LastModified: proof.lastModified, ValidatorScope: proof.scope, Generation: generation}
 				state.mu.Lock()
 				defer state.mu.Unlock()
-				if !completed {
-					flight.meta = LegacyContentMeta(encCopy.EncType, size)
-					flight.confirmed = false
-					flight.record = confirmedMetadataRecord{}
-				}
-				if current := state.entries[holder.identity]; current == entry && entry.generation == generation && entry.flight == flight {
-					entry.flight = nil
-					if !completed {
-						entry.record = confirmedMetadataRecord{}
+				current := state.entries[holder.identity]
+				validGeneration := current == entry && entry.generation == generation && entry.flight == flight
+				if validGeneration {
+					flight.meta, flight.confirmed = meta, confirmed
+					// A recognized invalid V3 is not a confirmed complete record. The store's
+					// validation rejects it too, but avoid publishing it to memory first.
+					if confirmed && proof.captured && proof.reusable && proof.total == meta.CiphertextSize && validConfirmedMetadataRecord(rec) {
+						entry.record = cloneConfirmedMetadataRecord(rec)
+						entry.proofTarget = target
+						flight.record = cloneConfirmedMetadataRecord(rec)
+						if store != nil {
+							_ = store.PutConfirmedMetadata(rec)
+						}
 					}
 				}
+				completed = true
+			})
+			if started {
+				state.coldStarts.Add(1)
+			}
+			if !started {
+				entry.flight = nil
 				close(flight.done)
-			}()
-			inspectCtx, cancel := context.WithTimeout(lifetime, budget)
-			defer cancel()
-			collector := &confirmedMetadataCollector{}
-			inspectCtx = context.WithValue(inspectCtx, confirmedMetadataCollectorKey{}, collector)
-			var meta ContentMeta
-			var confirmed bool
-			if fallback {
-				// Normalize both object paths and already-prefixed DAV routes,
-				// then escape decoded paths once, including literal %, #, ?.
-				route := (&url.URL{Path: canonicalMetadataDAVPath(holder.davPath)}).EscapedPath()
-				meta, confirmed = p.inspectEncryptedContentWithFallbackConfirmed(inspectCtx, target, auth, &encCopy, size, route)
-			} else {
-				meta, confirmed = p.inspectEncryptedContentConfirmed(inspectCtx, target, auth, &encCopy, size)
 			}
-			collector.mu.Lock()
-			proof := collector.proof
-			collector.mu.Unlock()
-			now := time.Now().Unix()
-			rec := confirmedMetadataRecord{Identity: holder.identity, Meta: meta, Provenance: confirmedMetadataProvenanceInspection, ConfirmedAt: now, ValidatedAt: now, ETag: proof.etag, LastModified: proof.lastModified, ValidatorScope: proof.scope, Generation: generation}
-			state.mu.Lock()
-			defer state.mu.Unlock()
-			current := state.entries[holder.identity]
-			validGeneration := current == entry && entry.generation == generation && entry.flight == flight
-			if validGeneration {
-				flight.meta, flight.confirmed = meta, confirmed
-				// A recognized invalid V3 is not a confirmed complete record. The store's
-				// validation rejects it too, but avoid publishing it to memory first.
-				if confirmed && proof.captured && proof.reusable && proof.total == meta.CiphertextSize && validConfirmedMetadataRecord(rec) {
-					entry.record = cloneConfirmedMetadataRecord(rec)
-					flight.record = cloneConfirmedMetadataRecord(rec)
-					if store != nil {
-						_ = store.PutConfirmedMetadata(rec)
-					}
-				}
-			}
-			completed = true
-		})
-		if started {
-			state.coldStarts.Add(1)
 		}
-		if !started {
-			entry.flight = nil
-			close(flight.done)
-		}
+		state.mu.Unlock()
+		break
 	}
-	state.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		return LegacyContentMeta(enc.EncType, size), false
