@@ -135,29 +135,71 @@ func TestMXWebDAVPropfindColdDepthZeroTailRoundTrip(t *testing.T) {
 	}
 }
 
+// mxPropfindTrustedFixture explicitly seeds a unit-test validated-inspection
+// record. It is not a claim that a legacy FileInfo/listing proves the format.
+func mxPropfindTrustedFixture(t *testing.T, p *ProxyServer, r *http.Request, href string, info *FileInfo, expired bool) {
+	t.Helper()
+	holder := confirmedMetadataRequestFromContext(r.Context())
+	if holder == nil {
+		t.Fatal("missing scoped directory identity")
+	}
+	id := holder.identity
+	id.ObjectID = p.confirmedMetadataObjectID(href)
+	now := time.Now()
+	confirmedAt := now
+	if expired {
+		confirmedAt = now.Add(-confirmedMetadataMaxAge - time.Second)
+	}
+	rec := confirmedMetadataRecord{
+		Identity: id, Provenance: confirmedMetadataProvenanceInspection,
+		ConfirmedAt: confirmedAt.Unix(), ValidatedAt: confirmedAt.Unix(), Generation: 1,
+		Meta: ContentMeta{EncType: EncTypeAESCTR, Version: info.ContentVersion,
+			PlainSize: info.Size, CiphertextSize: info.CiphertextSize, HeaderLen: info.HeaderLen,
+			NonceField: cloneNonceField(info.NonceField), ChunkSize: info.ChunkSize, KDFIterations: info.KDFIterations},
+	}
+	if !validConfirmedMetadataRecord(rec) {
+		t.Fatal("trusted fixture must have valid complete geometry and provenance")
+	}
+	p.confirmedMetadata.mu.Lock()
+	defer p.confirmedMetadata.mu.Unlock()
+	entry := p.confirmedMetadata.ensureEntry(id, now)
+	entry.record, entry.generation, entry.loaded = rec, 1, true
+}
+
 func TestMXWebDAVPropfindKnownAndUnknownMetadata(t *testing.T) {
 	ep := &EncryptPath{Enable: true, EncType: EncTypeAESCTR}
 	v2 := &FileInfo{Name: "movie.mp4", Path: "/dav/enc/movie.mp4", Size: 100, CiphertextSize: 132, ContentVersion: 2, HeaderLen: 32, NonceField: []byte("0123456789abcdef")}
 	tests := []struct {
-		name, href          string
-		raw, want           int64
-		info                *FileInfo
-		collection, expired bool
+		name, href                   string
+		raw, want                    int64
+		info                         *FileInfo
+		collection, expired, trusted bool
 	}{
-		{"confirmed v2", "/dav/enc/movie.mp4", 132, 100, v2, false, false},
-		{"unknown no guessing", "/dav/enc/movie.mp4", 132, 132, nil, false, false},
-		{"changed size", "/dav/enc/movie.mp4", 164, 164, v2, false, false},
-		{"expired", "/dav/enc/movie.mp4", 132, 132, v2, false, true},
-		{"collection", "/dav/enc/movie.mp4", 132, 132, v2, true, false},
-		{"orig", "/dav/enc/orig_movie.mp4", 132, 132, v2, false, false},
-		{"v1", "/dav/enc/movie.mp4", 100, 100, &FileInfo{Size: 100, CiphertextSize: 100, ContentVersion: 1}, false, false},
-		{"unenc", "/dav/enc/movie.mp4", 132, 132, nil, false, false},
-		{"incomplete tuple", "/dav/enc/movie.mp4", 132, 132, &FileInfo{Size: 100, CiphertextSize: 132, ContentVersion: 2, NonceField: []byte("0123456789abcdef")}, false, false},
-		{"v3", "/dav/enc/movie.mp4", 112, 17, &FileInfo{Size: 17, CiphertextSize: 112, ContentVersion: 3, HeaderLen: 48, NonceField: []byte("0123456789abcdef"), ChunkSize: 16, KDFIterations: 1}, false, false},
+		{"confirmed v2", "/dav/enc/movie.mp4", 132, 100, v2, false, false, true},
+		{"legacy v2 tuple untrusted", "/dav/enc/movie.mp4", 132, 132, v2, false, false, false},
+		{"unknown no guessing", "/dav/enc/movie.mp4", 132, 132, nil, false, false, false},
+		{"changed size", "/dav/enc/movie.mp4", 164, 164, v2, false, false, true},
+		{"expired", "/dav/enc/movie.mp4", 132, 132, v2, false, true, true},
+		{"collection", "/dav/enc/movie.mp4", 132, 132, v2, true, false, true},
+		{"orig", "/dav/enc/orig_movie.mp4", 132, 132, v2, false, false, true},
+		{"v1", "/dav/enc/movie.mp4", 100, 100, &FileInfo{Size: 100, CiphertextSize: 100, ContentVersion: 1}, false, false, true},
+		{"unenc", "/dav/enc/movie.mp4", 132, 132, nil, false, false, false},
+		{"incomplete tuple", "/dav/enc/movie.mp4", 132, 132, &FileInfo{Size: 100, CiphertextSize: 132, ContentVersion: 2, NonceField: []byte("0123456789abcdef")}, false, false, false},
+		{"v3", "/dav/enc/movie.mp4", 112, 17, &FileInfo{Size: 17, CiphertextSize: 112, ContentVersion: 3, HeaderLen: 48, NonceField: []byte("0123456789abcdef"), ChunkSize: 16, KDFIterations: 1}, false, false, true},
+		{"legacy v3 tuple untrusted", "/dav/enc/movie.mp4", 112, 112, &FileInfo{Size: 17, CiphertextSize: 112, ContentVersion: 3, HeaderLen: 48, NonceField: []byte("0123456789abcdef"), ChunkSize: 16, KDFIterations: 1}, false, false, false},
+		{"invalid v3 tuple", "/dav/enc/movie.mp4", 112, 112, &FileInfo{Size: 17, CiphertextSize: 112, ContentVersion: 3, HeaderLen: 48, NonceField: []byte("0123456789abcdef"), ChunkSize: 0, KDFIterations: 1}, false, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p := &ProxyServer{config: &ProxyConfig{}}
+			p := &ProxyServer{config: &ProxyConfig{AlistHost: "upstream", AlistPort: 5244}}
+			r := p.withConfirmedMetadataIdentity(httptest.NewRequest("PROPFIND", "http://proxy/dav/enc", nil), "/dav/enc", ep)
+			if tc.trusted {
+				mxPropfindTrustedFixture(t, p, r, tc.href, tc.info, tc.expired)
+			}
+			p.streamClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				t.Errorf("directory issued network request: %s", r.URL)
+				return nil, fmt.Errorf("forbidden directory probe")
+			})}
 			if tc.info != nil {
 				copy := *tc.info
 				p.storeFileCacheList(tc.href, &copy)
@@ -167,7 +209,7 @@ func TestMXWebDAVPropfindKnownAndUnknownMetadata(t *testing.T) {
 				}
 			}
 			var out bytes.Buffer
-			if err := p.processPropfindResponseBudget(strings.NewReader(mxPropfindXML(tc.href, tc.raw, tc.collection)), &out, ep, nil); err != nil {
+			if err := p.processPropfindMetadata(strings.NewReader(mxPropfindXML(tc.href, tc.raw, tc.collection)), &out, ep, nil, &propfindSizeProbe{ctx: r.Context()}); err != nil {
 				t.Fatal(err)
 			}
 			if got := mxXMLLength(t, out.Bytes()); got != tc.want {
@@ -180,6 +222,28 @@ func TestMXWebDAVPropfindKnownAndUnknownMetadata(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMXWebDAVPropfindConfirmedMetadataRequiresRequestScope(t *testing.T) {
+	ep := &EncryptPath{Enable: true, EncType: EncTypeAESCTR}
+	p := &ProxyServer{config: &ProxyConfig{AlistHost: "upstream", AlistPort: 5244}}
+	r := httptest.NewRequest("PROPFIND", "http://proxy/dav/enc", nil)
+	r.Header.Set("Authorization", "Bearer fixture-owner")
+	r = p.withConfirmedMetadataIdentity(r, "/dav/enc", ep)
+	info := &FileInfo{Size: 100, CiphertextSize: 132, ContentVersion: 2, HeaderLen: 32, NonceField: []byte("0123456789abcdef")}
+	mxPropfindTrustedFixture(t, p, r, "/dav/enc/movie.mp4", info, false)
+	other := httptest.NewRequest("PROPFIND", "http://proxy/dav/enc", nil)
+	other.Header.Set("Authorization", "Bearer fixture-other")
+	other = p.withConfirmedMetadataIdentity(other, "/dav/enc", ep)
+	for _, ctx := range []context.Context{context.Background(), other.Context()} {
+		var out bytes.Buffer
+		if err := p.processPropfindMetadata(strings.NewReader(mxPropfindXML("/dav/enc/movie.mp4", 132, false)), &out, ep, nil, &propfindSizeProbe{ctx: ctx}); err != nil {
+			t.Fatal(err)
+		}
+		if got := mxXMLLength(t, out.Bytes()); got != 132 {
+			t.Fatalf("missing/mismatched scope reused trusted size: %d", got)
+		}
 	}
 }
 
@@ -198,15 +262,17 @@ func TestMXWebDAVPropfindDisabledContentDoesNotRewriteKnownSize(t *testing.T) {
 
 func TestMXWebDAVPropfindDirectoryNoNetworkAndSnapshotNoDoubleSubtract(t *testing.T) {
 	ep := &EncryptPath{Enable: true, EncType: EncTypeAESCTR, EncName: true}
-	p := &ProxyServer{config: &ProxyConfig{}}
+	p := &ProxyServer{config: &ProxyConfig{AlistHost: "upstream", AlistPort: 5244}}
+	r := p.withConfirmedMetadataIdentity(httptest.NewRequest("PROPFIND", "http://proxy/dav/enc", nil), "/dav/enc", ep)
 	p.streamClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		t.Errorf("directory issued network request: %s", r.URL)
 		return nil, fmt.Errorf("forbidden directory probe")
 	})}
 	info := &FileInfo{Name: "movie.mp4", Size: 100, CiphertextSize: 132, ContentVersion: 2, HeaderLen: 32, NonceField: []byte("0123456789abcdef")}
 	p.storeFileCacheList("/dav/enc/movie.mp4", info)
+	mxPropfindTrustedFixture(t, p, r, "/dav/enc/movie.mp4", info, false)
 	var first, second bytes.Buffer
-	if err := p.processPropfindResponseBudget(strings.NewReader(mxPropfindXML("/dav/enc/movie.mp4", 132, false)), &first, ep, nil); err != nil {
+	if err := p.processPropfindMetadata(strings.NewReader(mxPropfindXML("/dav/enc/movie.mp4", 132, false)), &first, ep, nil, &propfindSizeProbe{ctx: r.Context()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.processPropfindResponseSnapshot(bytes.NewReader(first.Bytes()), &second, ep, nil); err != nil {

@@ -56,6 +56,17 @@ type confirmedMetadataRequestKey struct{}
 type confirmedMetadataCollectorKey struct{}
 type confirmedMetadataWarmBudgetKey struct{}
 type confirmedMetadataObservedSizeKey struct{}
+type confirmedMetadataFallbackKey struct{}
+
+// withConfirmedMetadataFallback opts playback into authenticated canonical DAV
+// fallback only after a target fails inspection. Ordinary DAV/warm resolution
+// remains a single inspector call unless its own route explicitly opts in.
+func withConfirmedMetadataFallback(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, confirmedMetadataFallbackKey{}, true)
+}
 
 // withConfirmedMetadataObservedSize carries an authoritative ciphertext size
 // for this canonical object, not a plaintext size or an untrusted listing hint.
@@ -100,6 +111,7 @@ func withConfirmedMetadataProbeBudget(ctx context.Context, budget time.Duration)
 
 type confirmedMetadataRequest struct {
 	identity confirmedMetadataIdentity
+	davPath  string // Canonical decoded encrypted DAV object path; never a CDN URL.
 	mu       sync.Mutex
 	record   confirmedMetadataRecord
 	attached bool
@@ -177,7 +189,7 @@ func (p *ProxyServer) withConfirmedMetadataIdentity(r *http.Request, encryptedPa
 	// Hash all values rather than Header.Get: duplicate credential headers must
 	// not accidentally share an identity with a differently authenticated request.
 	id.CredentialScope = confirmedMetadataDigest(strings.Join(r.Header.Values("Authorization"), "\x00"), strings.Join(r.Header.Values("Cookie"), "\x00"), strings.Join(r.Header.Values("Proxy-Authorization"), "\x00"))
-	holder := &confirmedMetadataRequest{identity: id}
+	holder := &confirmedMetadataRequest{identity: id, davPath: encryptedPath}
 	return r.WithContext(context.WithValue(r.Context(), confirmedMetadataRequestKey{}, holder))
 }
 func confirmedMetadataRequestFromContext(ctx context.Context) *confirmedMetadataRequest {
@@ -361,6 +373,7 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 		if explicit, ok := ctx.Value(confirmedMetadataWarmBudgetKey{}).(time.Duration); ok && explicit > 0 && explicit < budget {
 			budget = explicit
 		}
+		fallback, _ := ctx.Value(confirmedMetadataFallbackKey{}).(bool)
 		started := p.goBackground(func(lifetime context.Context) {
 			completed := false
 			// RoundTrippers and test hooks may terminate their goroutine with
@@ -386,7 +399,16 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 			defer cancel()
 			collector := &confirmedMetadataCollector{}
 			inspectCtx = context.WithValue(inspectCtx, confirmedMetadataCollectorKey{}, collector)
-			meta, confirmed := p.inspectEncryptedContentConfirmed(inspectCtx, target, auth, &encCopy, size)
+			var meta ContentMeta
+			var confirmed bool
+			if fallback {
+				// Normalize both object paths and already-prefixed DAV routes,
+				// then escape decoded paths once, including literal %, #, ?.
+				route := (&url.URL{Path: canonicalMetadataDAVPath(holder.davPath)}).EscapedPath()
+				meta, confirmed = p.inspectEncryptedContentWithFallbackConfirmed(inspectCtx, target, auth, &encCopy, size, route)
+			} else {
+				meta, confirmed = p.inspectEncryptedContentConfirmed(inspectCtx, target, auth, &encCopy, size)
+			}
 			collector.mu.Lock()
 			proof := collector.proof
 			collector.mu.Unlock()

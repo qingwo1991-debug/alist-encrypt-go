@@ -377,9 +377,9 @@ func (p *ProxyServer) inspectEncryptedContentWithFallbackConfirmed(
 		return meta, false
 	}
 	// Defensive: strip any leading /dav or /d prefix so candidates don't double up
-	if strings.HasPrefix(encryptedPath, "/dav") {
+	if encryptedPath == "/dav" || strings.HasPrefix(encryptedPath, "/dav/") {
 		encryptedPath = strings.TrimPrefix(encryptedPath, "/dav")
-	} else if strings.HasPrefix(encryptedPath, "/d") {
+	} else if encryptedPath == "/d" || strings.HasPrefix(encryptedPath, "/d/") {
 		encryptedPath = strings.TrimPrefix(encryptedPath, "/d")
 	}
 	if encryptedPath == "" {

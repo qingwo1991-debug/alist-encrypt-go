@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -56,6 +57,56 @@ func confirmedMetadataTestRequest(p *ProxyServer, enc *EncryptPath, auth string)
 	r.Header.Set("Authorization", auth)
 	return p.withConfirmedMetadataIdentity(r, "/mount/video.bin", enc)
 }
+func TestConfirmedMetadataFallbackOptInAndEscapedDAVPath(t *testing.T) {
+	p, enc, _, calls := confirmedMetadataTestServer(t, nil, nil)
+	original := p.streamClientSnapshot().Transport
+	if original == nil {
+		original = http.DefaultTransport
+	}
+	var externalCalls atomic.Int32
+	var pathMatches, authMatches atomic.Bool
+	objectPath := "/docs/video #?%.bin"
+	p.streamClient = &http.Client{Transport: v2ProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "expired-cdn.local" {
+			externalCalls.Add(1)
+			if req.Header.Get("Authorization") != "" || req.Header.Get("Cookie") != "" {
+				return nil, fmt.Errorf("external target leaked credentials")
+			}
+			return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(nil)), Request: req}, nil
+		}
+		pathMatches.Store(req.URL.Path == "/dav"+objectPath && req.URL.RawQuery == "" && req.URL.Fragment == "")
+		authMatches.Store(req.Header.Get("Authorization") == "Bearer one" && req.Header.Get("Cookie") == "session=one")
+		return original.RoundTrip(req)
+	})}
+	r := httptest.NewRequest(http.MethodGet, "http://proxy.local/play", nil)
+	r.Header.Set("Authorization", "Bearer one")
+	r.Header.Set("Cookie", "session=one")
+	r = p.withConfirmedMetadataIdentity(r, objectPath, enc)
+	target := "https://expired-cdn.local/object?expired=yes"
+	if _, ok := p.resolveConfirmedMetadata(r.Context(), target, r.Header, enc, 0); ok {
+		t.Fatal("ordinary resolution unexpectedly fell back")
+	}
+	if externalCalls.Load() != 1 || calls.Load() != 0 {
+		t.Fatal("non-opted resolution added fallback requests")
+	}
+	ctx := withConfirmedMetadataFallback(r.Context())
+	meta, ok := p.resolveConfirmedMetadata(ctx, target, r.Header, enc, 0)
+	if !ok || meta.PlainSize != 4096 || externalCalls.Load() != 2 || calls.Load() != 1 || !pathMatches.Load() || !authMatches.Load() {
+		t.Fatalf("fallback meta=%+v ok=%v external=%d DAV=%d path=%v auth=%v", meta, ok, externalCalls.Load(), calls.Load(), pathMatches.Load(), authMatches.Load())
+	}
+	_, _ = p.resolveConfirmedMetadata(ctx, "https://new-cdn.local/signed?new=yes", r.Header, enc, 0)
+	if externalCalls.Load() != 2 || calls.Load() != 1 {
+		t.Fatal("fallback-confirmed stable object did not reuse across signed URLs")
+	}
+	// The parent passes an already-canonical /dav route. It must not produce
+	// /dav/dav/... during fallback, including escaped special-name objects.
+	prefixed := p.withConfirmedMetadataIdentity(r, "/dav"+objectPath, enc)
+	_, ok = p.resolveConfirmedMetadata(withConfirmedMetadataFallback(prefixed.Context()), target, prefixed.Header, enc, 0)
+	if !ok || !pathMatches.Load() || externalCalls.Load() != 3 || calls.Load() != 2 {
+		t.Fatalf("prefixed DAV fallback ok=%v path=%v external=%d DAV=%d", ok, pathMatches.Load(), externalCalls.Load(), calls.Load())
+	}
+}
+
 func TestConfirmedMetadataGoexitReleasesFlight(t *testing.T) {
 	p, enc, target, calls := confirmedMetadataTestServer(t, nil, nil)
 	original := p.streamClientSnapshot().Transport
