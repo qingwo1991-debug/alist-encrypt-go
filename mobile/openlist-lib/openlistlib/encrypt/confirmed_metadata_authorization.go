@@ -1,9 +1,6 @@
 package encrypt
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
 // Metadata proves geometry, never permission. Local V3 HEAD/empty responses
 // still issue the real authorized origin operation, without another header probe.
@@ -26,10 +23,7 @@ func (p *ProxyServer) authorizeConfirmedMetadataCacheHit(w http.ResponseWriter, 
 }
 
 func (p *ProxyServer) authorizeConfirmedMetadataOperation(w http.ResponseWriter, r *http.Request, encryptedPath string) bool {
-	targetPath := encryptedPath
-	if !strings.HasPrefix(targetPath, "/dav/") {
-		targetPath = "/dav/" + strings.TrimPrefix(targetPath, "/")
-	}
+	targetPath := canonicalMetadataDAVPath(encryptedPath)
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.getAlistURL()+targetPath, nil)
 	if err != nil {
 		http.Error(w, "invalid origin request", http.StatusBadGateway)

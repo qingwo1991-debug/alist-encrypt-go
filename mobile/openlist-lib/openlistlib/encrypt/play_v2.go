@@ -1936,7 +1936,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}
 	info = cloneRedirectInfo(info)
 	if shouldDecryptRedirect(r, info) && info.EncryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
-		r = o.proxy.withConfirmedMetadataIdentity(r, encryptedDAVPath(info.EncryptedPath), info.PasswdInfo)
+		r = o.proxy.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(info.EncryptedPath), info.PasswdInfo)
 	}
 
 	// Register before resolve so metadata/prework is included in the measurement.
@@ -2116,7 +2116,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			}
 			length := end - start + 1
 			if data, ok := cache.getRange(o.proxy.decryptedCacheBaseKey(info, meta), start, length); ok {
-				if !o.proxy.authorizeConfirmedMetadataCacheHit(w, r, encryptedDAVPath(info.EncryptedPath)) {
+				if !o.proxy.authorizeConfirmedMetadataCacheHit(w, r, canonicalMetadataDAVPath(info.EncryptedPath)) {
 					return
 				}
 				w.Header().Set("Accept-Ranges", "bytes")

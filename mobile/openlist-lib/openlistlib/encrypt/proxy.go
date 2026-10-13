@@ -5063,6 +5063,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 			resp = resp2
 			targetURL = fallbackTargetURL
 			targetURLPath = fallbackPath
+			r = p.withConfirmedMetadataIdentity(r, targetURLPath, encPath)
+			ctx = r.Context()
 			break
 		}
 	}
@@ -5131,6 +5133,8 @@ func (p *ProxyServer) handleWebDAVLegacy(w http.ResponseWriter, r *http.Request)
 				p.debugf("webdav", "PROPFIND retry response stage=%s path=%s status=%d", candidate.stage, candidate.path, resp.StatusCode)
 				targetURLPath = candidate.path
 				targetURL = retryTargetURL
+				r = p.withConfirmedMetadataIdentity(r, targetURLPath, encPath)
+				ctx = r.Context()
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					log.Infof("%s WebDAV PROPFIND retry resolved: stage=%s candidate=%s status=%d",
 						internal.LogPrefix(ctx, internal.TagProxy), candidate.stage, candidate.path, resp.StatusCode)

@@ -138,7 +138,7 @@ func (p *ProxyServer) inspectLegacyV3Download(w http.ResponseWriter, r *http.Req
 	}
 	w, r, _ = withPlaybackTiming(w, r)
 	if encryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
-		r = p.withConfirmedMetadataIdentity(r, encryptedDAVPath(encryptedPath), encPath)
+		r = p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(encryptedPath), encPath)
 	}
 	meta, confirmed := p.inspectLegacyContentMeta(r.Context(), target, headers, encPath, fileSize)
 	if !confirmed && !meta.IsV3() {
@@ -381,6 +381,10 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	var err error
 	var selectedAttempt downloadAttempt
 	for i, attempt := range attempts {
+		if encPath != nil && encPath.Enable {
+			r = p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(attempt.urlPath), encPath)
+			ctx = r.Context()
+		}
 		p.debugf("playback", "download attempt=%d stage=%s path=%s sendRange=%v", i+1, attempt.stage, attempt.urlPath, attempt.sendRange)
 		targetForV3 := attempt.fullURL
 		if strings.TrimSpace(targetForV3) == "" {
