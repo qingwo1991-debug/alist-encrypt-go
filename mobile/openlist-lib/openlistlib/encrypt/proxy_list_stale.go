@@ -53,7 +53,7 @@ func (p *ProxyServer) serveStaleWebDAVList(w http.ResponseWriter, ctx context.Co
 	w.WriteHeader(status)
 	encPath := p.findEncryptPath(strings.TrimPrefix(negativeCachePath, "/dav"))
 	if encPath != nil && encPath.EncName {
-		if err := p.processPropfindResponse(bytes.NewReader(body), w, encPath); err != nil {
+		if err := p.processPropfindResponseSnapshot(bytes.NewReader(body), w, encPath, nil); err != nil {
 			log.Warnf("%s WebDAV stale list re-parse failed: dir=%s err=%v",
 				internal.LogPrefix(ctx, internal.TagCache), cacheKey, err)
 			return true

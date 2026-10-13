@@ -740,6 +740,24 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 		staleRaw = "http://cdn.example/stale"
 		freshRaw = "http://cdn.example/refreshed"
 	)
+	// The fallback now streams through the existing playback orchestrator,
+	// rather than ending at a local 302. Supply a real V2 representation so
+	// this policy regression also verifies the final plaintext range.
+	plain := bytes.Repeat([]byte("MX-WebDAV-fallback"), 256)[:4096]
+	nonce := bytes.Repeat([]byte{3}, 16)
+	header, err := BuildV2Header(EncTypeAESCTR, int64(len(plain)), nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipherV2(EncTypeAESCTR, "123456", int64(len(plain)), nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(NewEncryptReader(bytes.NewReader(plain), cipher))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := append(header, payload...)
 	p.storeFileCache("/dav/enc/MFCW-019.mp4", &FileInfo{
 		Name:           "MFCW-019.mp4",
 		Size:           4096,
@@ -810,6 +828,21 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader("redirect")),
 				Request:    req,
 			}, nil
+		case req.Method == http.MethodGet && req.URL.String() == "http://cdn.example/from-dav":
+			if req.Header.Get("Range") != "bytes=32-1055" {
+				t.Fatalf("fallback ciphertext Range=%q want=bytes=32-1055", req.Header.Get("Range"))
+			}
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Type":   {"application/octet-stream"},
+					"Content-Range":  {"bytes 32-1055/4128"},
+					"Content-Length": {"1024"},
+				},
+				ContentLength: 1024,
+				Body:          io.NopCloser(bytes.NewReader(fixture[32:1056])),
+				Request:       req,
+			}, nil
 		case req.Method == http.MethodGet && req.URL.Path == "/api/admin/storage/list":
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -836,13 +869,19 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 	rr := httptest.NewRecorder()
 	p.handleWebDAVLegacy(rr, req)
 
-	if rr.Code != http.StatusFound {
+	if rr.Code != http.StatusPartialContent {
 		t.Fatalf("status=%d body=%q requests=%v", rr.Code, rr.Body.String(), requests)
 	}
-	if location := rr.Header().Get("Location"); !strings.HasPrefix(location, "/redirect/") {
-		t.Fatalf("proxy redirect Location=%q", location)
+	if location := rr.Header().Get("Location"); location != "" {
+		t.Fatalf("fallback leaked redirect Location=%q", location)
 	}
-	var sawStale, sawFresh, sawEncryptedDAV bool
+	if rr.Header().Get("Content-Length") != "1024" || rr.Header().Get("Content-Range") != "bytes 0-1023/4096" {
+		t.Fatalf("plaintext fallback headers=%v", rr.Header())
+	}
+	if !bytes.Equal(rr.Body.Bytes(), plain[:1024]) {
+		t.Fatalf("fallback did not decrypt the exact requested plaintext: len=%d", rr.Body.Len())
+	}
+	var sawStale, sawFresh, sawEncryptedDAV, sawFinalCDN bool
 	for _, record := range requests {
 		if strings.Contains(record.url, "MFCW-019.mp4") || strings.Contains(record.body, "MFCW-019.mp4") {
 			t.Fatalf("plaintext OriginalURL was requested: %+v", record)
@@ -858,6 +897,11 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 				t.Fatalf("refreshed CDN received local credentials: %+v", record)
 			}
 			sawFresh = true
+		case record.url == "http://cdn.example/from-dav":
+			if record.authorization != "" || record.cookie != "" || record.proxyAuth != "" {
+				t.Fatalf("final CDN received local credentials: %+v", record)
+			}
+			sawFinalCDN = true
 		case strings.HasPrefix(record.url, "http://alist.local:5244/dav/enc/"):
 			if record.authorization != "Bearer local-only" ||
 				record.cookie != "session=local-only" ||
@@ -867,8 +911,8 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 			sawEncryptedDAV = true
 		}
 	}
-	if !sawStale || !sawFresh || !sawEncryptedDAV {
-		t.Fatalf("requests=%v stale=%v fresh=%v encryptedDAV=%v", requests, sawStale, sawFresh, sawEncryptedDAV)
+	if !sawStale || !sawFresh || !sawEncryptedDAV || !sawFinalCDN {
+		t.Fatalf("requests=%v stale=%v fresh=%v encryptedDAV=%v finalCDN=%v", requests, sawStale, sawFresh, sawEncryptedDAV, sawFinalCDN)
 	}
 	if !p.rawURLFailureBlocked(staleRaw) || !p.rawURLFailureBlocked(freshRaw) {
 		t.Fatalf("failed raw URLs were not placed in cooldown: stale=%v fresh=%v",
@@ -888,8 +932,8 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 	secondReq.Header.Set("Proxy-Authorization", "Basic proxy-local-only")
 	secondRR := httptest.NewRecorder()
 	p.handleWebDAVLegacy(secondRR, secondReq)
-	if secondRR.Code != http.StatusFound {
-		t.Fatalf("second status=%d body=%q", secondRR.Code, secondRR.Body.String())
+	if secondRR.Code != http.StatusPartialContent || secondRR.Header().Get("Content-Length") != "1024" || secondRR.Header().Get("Content-Range") != "bytes 0-1023/4096" || secondRR.Header().Get("Location") != "" || !bytes.Equal(secondRR.Body.Bytes(), plain[:1024]) {
+		t.Fatalf("second status=%d headers=%v body=%q", secondRR.Code, secondRR.Header(), secondRR.Body.String())
 	}
 	for _, record := range requests[beforeSecond:] {
 		if record.url == staleRaw || record.url == freshRaw {
