@@ -8,6 +8,8 @@ Identity is a digest of the configured origin, canonical encrypted DAV object pa
 
 A fresh complete record avoids additional metadata-prefix/HEAD/PROPFIND/fs-get calls made solely to reconfirm geometry. Actual media requests, real authorization of local HEAD/empty V3 responses, and necessary signed-URL resolution are **not** eliminated. Geometry expires after 24 hours and is rechecked on demand, not by periodic polling. The ordinary owned inspection budget is 15 seconds; explicit Depth:0 budgets and speculative warm probes use smaller caps. SQLite busy time is separate from the network budget.
 
+The fs/get route now publishes its required fresh inspection into the same confirmed store, so the subsequent token playback does not repeat that proof. Its existing signed-URL-change path still requires a fresh inspection; this is a remaining endpoint-specific cost, not a promise that every transport refresh is probe-free.
+
 Actual media responses are checked before forwarding successful headers/body: ciphertext total, full-response length, and same-origin/path strong ETag (or observed Last-Modified) conflicts invalidate confirmation. Unsupported Vary dimensions disable cache admission. A detected conflict fails closed for that response; the next request reconfirms rather than silently decrypting with stale geometry.
 
 ## Change detection and limitations

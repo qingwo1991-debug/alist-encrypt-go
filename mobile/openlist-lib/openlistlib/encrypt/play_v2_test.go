@@ -1059,14 +1059,28 @@ func TestServeRedirectRaw403FallsBackToEncryptedDAVAndFollowsRedirect(t *testing
 			if got := req.Header.Get("Cookie"); got != "" {
 				t.Fatalf("CDN received local Cookie=%q", got)
 			}
+			if req.Header.Get("Range") == "bytes=0-47" {
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Type":   {"application/octet-stream"},
+						"Content-Length": {"48"},
+						"Content-Range":  {fmt.Sprintf("bytes 0-47/%d", len(ciphertext))},
+					},
+					ContentLength: 48,
+					Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+					Request:       req,
+				}, nil
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header: http.Header{
 					"Content-Type":   []string{"video/mp4"},
 					"Content-Length": []string{strconv.Itoa(len(ciphertext))},
 				},
-				Body:    io.NopCloser(bytes.NewReader(ciphertext)),
-				Request: req,
+				ContentLength: int64(len(ciphertext)),
+				Body:          io.NopCloser(bytes.NewReader(ciphertext)),
+				Request:       req,
 			}, nil
 		default:
 			t.Fatalf("unexpected stream request: %s", req.URL)
@@ -1886,6 +1900,8 @@ func TestPlayV2LargeOpenEndedSeekAcceptsShort206Window(t *testing.T) {
 	}
 
 	p, err := NewProxyServer(&ProxyConfig{
+		AlistHost:                       "alist.local",
+		AlistPort:                       5244,
 		ProxyPort:                       5344,
 		ProviderCatalogEnabled:          false,
 		ProviderCatalogTTLMinutes:       1,
