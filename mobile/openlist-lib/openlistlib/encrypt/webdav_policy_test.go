@@ -932,8 +932,8 @@ func TestWebDAVRawURL404RefreshesThenFallsBackToEncryptedDAV(t *testing.T) {
 	secondReq.Header.Set("Proxy-Authorization", "Basic proxy-local-only")
 	secondRR := httptest.NewRecorder()
 	p.handleWebDAVLegacy(secondRR, secondReq)
-	if secondRR.Code != http.StatusFound {
-		t.Fatalf("second status=%d body=%q", secondRR.Code, secondRR.Body.String())
+	if secondRR.Code != http.StatusPartialContent || secondRR.Header().Get("Content-Length") != "1024" || secondRR.Header().Get("Content-Range") != "bytes 0-1023/4096" || secondRR.Header().Get("Location") != "" || !bytes.Equal(secondRR.Body.Bytes(), plain[:1024]) {
+		t.Fatalf("second status=%d headers=%v body=%q", secondRR.Code, secondRR.Header(), secondRR.Body.String())
 	}
 	for _, record := range requests[beforeSecond:] {
 		if record.url == staleRaw || record.url == freshRaw {
