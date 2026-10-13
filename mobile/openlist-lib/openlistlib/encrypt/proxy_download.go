@@ -110,7 +110,7 @@ func (p *ProxyServer) inspectLegacyContentMeta(ctx context.Context, target strin
 			return meta, true
 		}
 	}
-	meta, confirmed := p.inspectEncryptedContentConfirmed(ctx, target, headers, encPath, size)
+	meta, confirmed := p.resolveConfirmedMetadata(ctx, target, headers, encPath, size)
 	if confirmed && cache != nil && (!meta.IsV3() || ValidateV3ContentMeta(meta) == nil) {
 		cache.entries[key] = meta
 	}
@@ -137,6 +137,9 @@ func (p *ProxyServer) inspectLegacyV3Download(w http.ResponseWriter, r *http.Req
 		return false, true
 	}
 	w, r, _ = withPlaybackTiming(w, r)
+	if encryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
+		r = p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(encryptedPath), encPath)
+	}
 	meta, confirmed := p.inspectLegacyContentMeta(r.Context(), target, headers, encPath, fileSize)
 	if !confirmed && !meta.IsV3() {
 		// An unreadable or encoded prefix proves neither legacy nor V3.
@@ -378,6 +381,10 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	var err error
 	var selectedAttempt downloadAttempt
 	for i, attempt := range attempts {
+		if encPath != nil && encPath.Enable {
+			r = p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(attempt.urlPath), encPath)
+			ctx = r.Context()
+		}
 		p.debugf("playback", "download attempt=%d stage=%s path=%s sendRange=%v", i+1, attempt.stage, attempt.urlPath, attempt.sendRange)
 		targetForV3 := attempt.fullURL
 		if strings.TrimSpace(targetForV3) == "" {
@@ -428,6 +435,11 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 	p.debugf("playback", "download selected stage=%s path=%s status=%d", selectedAttempt.stage, actualURLPath, resp.StatusCode)
 	if selectedAttempt.stage == "fallback-original-path" || selectedAttempt.stage == "fallback-original-toggle-range" {
 		p.debugf("filename", "download fallback to original path=%s from=%s", originalPath, initialURLPath)
+	}
+
+	if encPath != nil && encPath.Enable && resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+		http.Error(w, "encrypted representation changed; retry required", http.StatusBadGateway)
+		return
 	}
 
 	// 处理 302/303 重定向：对于需要解密的路径，创建代理重定向

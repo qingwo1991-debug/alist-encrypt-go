@@ -412,7 +412,7 @@ func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHea
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, mobileRawURLResolveTimeout)
 	defer cancel()
-	apiPath := encryptedDAVPath(encryptedPath)
+	apiPath := canonicalMetadataDAVPath(encryptedPath)
 	apiPath = strings.TrimPrefix(apiPath, "/dav")
 	if apiPath == "" {
 		apiPath = "/"
@@ -986,14 +986,13 @@ func (p *ProxyServer) refreshRedirectInfo(ctx context.Context, redirectKey strin
 		refreshed.CiphertextSize = size
 		if refreshed.PasswdInfo != nil && refreshed.PasswdInfo.Enable {
 			encProbePath := strings.TrimPrefix(encryptedDAVPath(refreshed.EncryptedPath), "/dav")
-			meta, confirmed := p.inspectEncryptedContentWithFallbackConfirmed(
-				ctx,
-				rawURL,
-				headers,
-				refreshed.PasswdInfo,
-				size,
-				encProbePath,
-			)
+			var meta ContentMeta
+			var confirmed bool
+			if confirmedMetadataRequestFromContext(ctx) != nil {
+				meta, confirmed = p.resolveConfirmedMetadata(withConfirmedMetadataFallback(ctx), rawURL, headers, refreshed.PasswdInfo, size)
+			} else {
+				meta, confirmed = p.inspectEncryptedContentWithFallbackConfirmed(ctx, rawURL, headers, refreshed.PasswdInfo, size, encProbePath)
+			}
 			if meta.IsV3() && ValidateV3ContentMeta(meta) != nil {
 				// Preserve recognition only; incomplete fields are never reusable metadata.
 				refreshed.ContentVersion = ContentVersionV3
@@ -1104,6 +1103,21 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 // resolvePlaybackContentMeta resolves the representation before legacy range,
 // cache and strategy handling. Recognized but incomplete V3 never becomes V1.
 func (p *ProxyServer) resolvePlaybackContentMeta(r *http.Request, info *RedirectInfo, size int64) (ContentMeta, bool) {
+	if confirmedMetadataRequestFromContext(r.Context()) != nil {
+		headers := headersWithStoredOriginCredentials(r.Header, info.Headers)
+		ctx := withConfirmedMetadataFallback(r.Context())
+		meta, confirmed := p.resolveConfirmedMetadata(ctx, info.RedirectURL, headers, info.PasswdInfo, size)
+		if confirmed || ctx.Err() != nil {
+			return meta, confirmed
+		}
+		// Refresh transport only; a rejected signed URL does not invalidate
+		// stable geometry or authorize a fallback to an imported crypto tuple.
+		if freshURL, _ := p.resolveEncryptedRawURLViaFsGet(ctx, headers, canonicalMetadataDAVPath(info.EncryptedPath)); freshURL != "" && freshURL != info.RedirectURL {
+			info.RedirectURL = freshURL
+			return p.resolveConfirmedMetadata(ctx, freshURL, headers, info.PasswdInfo, size)
+		}
+		return meta, false
+	}
 	if meta, ok := redirectInfoContentMeta(info); ok {
 		return meta, true
 	}
@@ -1576,6 +1590,9 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		return &StreamOutcome{StatusCode: resp.StatusCode, ResponseStarted: true}
 	}
 
+	if !decodeDisabled && resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+		return &StreamOutcome{Err: fmt.Errorf("encrypted representation changed"), FailureReason: "decrypt_validation_failed", Retryable: false}
+	}
 	statusCode := resp.StatusCode
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Range") != "" {
 		statusCode = http.StatusPartialContent
@@ -1928,6 +1945,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	info = cloneRedirectInfo(info)
+	if shouldDecryptRedirect(r, info) && info.EncryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
+		r = o.proxy.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(info.EncryptedPath), info.PasswdInfo)
+	}
 
 	// Register before resolve so metadata/prework is included in the measurement.
 	fileSize := int64(0)
@@ -2106,6 +2126,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 			}
 			length := end - start + 1
 			if data, ok := cache.getRange(o.proxy.decryptedCacheBaseKey(info, meta), start, length); ok {
+				if !o.proxy.authorizeConfirmedMetadataCacheHit(w, r, canonicalMetadataDAVPath(info.EncryptedPath)) {
+					return
+				}
 				w.Header().Set("Accept-Ranges", "bytes")
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
 				w.Header().Set("Content-Length", strconv.FormatInt(int64(len(data)), 10))

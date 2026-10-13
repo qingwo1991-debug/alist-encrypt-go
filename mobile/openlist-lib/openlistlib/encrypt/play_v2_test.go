@@ -823,6 +823,7 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 	})}
 	p.mutex.Unlock()
 
+	p.invalidateAllConfirmedMetadata()
 	oldNonce := bytes.Repeat([]byte{0x91}, 16)
 	p.storeFileCache(displayPath, &FileInfo{
 		Name:           "demo.mp4",
@@ -910,8 +911,24 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 		if got := req.URL.String(); got != freshURL {
 			t.Fatalf("stream URL=%q, want refreshed URL", got)
 		}
+		// refreshRedirectInfo was invoked outside a confirmed resolver scope:
+		// its legacy tuple alone cannot establish the new playback identity.
+		if req.Header.Get("Range") == "bytes=0-47" {
+			probeCalls++
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Type":   {"application/octet-stream"},
+					"Content-Length": {"48"},
+					"Content-Range":  {"bytes 0-47/4128"},
+				},
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+				Request:       req,
+			}, nil
+		}
 		if got := req.Header.Get("Range"); got != "bytes=4127-4127" {
-			t.Fatalf("tail upstream Range=%q", got)
+			return nil, fmt.Errorf("tail upstream Range=%q, want bytes=4127-4127", got)
 		}
 		return &http.Response{
 			StatusCode: http.StatusPartialContent,
@@ -936,6 +953,9 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 	}
 	if got := tailRec.Body.Bytes(); !bytes.Equal(got, plain[len(plain)-1:]) {
 		t.Fatalf("tail body=%x, want %x", got, plain[len(plain)-1:])
+	}
+	if probeCalls != 2 {
+		t.Fatalf("refresh plus cold playback identity probes=%d, want 2", probeCalls)
 	}
 }
 
@@ -979,6 +999,7 @@ func TestServeRedirectRaw403FallsBackToEncryptedDAVAndFollowsRedirect(t *testing
 	defer p.stopCacheCleanup()
 	defer p.closeLocalStore()
 
+	p.invalidateAllConfirmedMetadata()
 	type requestRecord struct {
 		url           string
 		body          string
@@ -1038,14 +1059,28 @@ func TestServeRedirectRaw403FallsBackToEncryptedDAVAndFollowsRedirect(t *testing
 			if got := req.Header.Get("Cookie"); got != "" {
 				t.Fatalf("CDN received local Cookie=%q", got)
 			}
+			if req.Header.Get("Range") == "bytes=0-47" {
+				return &http.Response{
+					StatusCode: http.StatusPartialContent,
+					Header: http.Header{
+						"Content-Type":   {"application/octet-stream"},
+						"Content-Length": {"48"},
+						"Content-Range":  {fmt.Sprintf("bytes 0-47/%d", len(ciphertext))},
+					},
+					ContentLength: 48,
+					Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+					Request:       req,
+				}, nil
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header: http.Header{
 					"Content-Type":   []string{"video/mp4"},
 					"Content-Length": []string{strconv.Itoa(len(ciphertext))},
 				},
-				Body:    io.NopCloser(bytes.NewReader(ciphertext)),
-				Request: req,
+				ContentLength: int64(len(ciphertext)),
+				Body:          io.NopCloser(bytes.NewReader(ciphertext)),
+				Request:       req,
 			}, nil
 		default:
 			t.Fatalf("unexpected stream request: %s", req.URL)
@@ -1865,6 +1900,8 @@ func TestPlayV2LargeOpenEndedSeekAcceptsShort206Window(t *testing.T) {
 	}
 
 	p, err := NewProxyServer(&ProxyConfig{
+		AlistHost:                       "alist.local",
+		AlistPort:                       5244,
 		ProxyPort:                       5344,
 		ProviderCatalogEnabled:          false,
 		ProviderCatalogTTLMinutes:       1,
@@ -1879,15 +1916,38 @@ func TestPlayV2LargeOpenEndedSeekAcceptsShort206Window(t *testing.T) {
 	defer p.stopRangeProbeLoop()
 	defer p.stopCacheCleanup()
 	defer p.closeLocalStore()
+	p.invalidateAllConfirmedMetadata()
 
+	prefixReader, err := contentEnc.EncryptReader(bytes.NewReader(bytes.Repeat([]byte{0x6b}, 16)), 0)
+	if err != nil {
+		t.Fatalf("encrypt header prefix: %v", err)
+	}
+	cipherPrefix, err := io.ReadAll(prefixReader)
+	if err != nil || len(cipherPrefix) != 48 {
+		t.Fatalf("cipher prefix len=%d err=%v, want 48", len(cipherPrefix), err)
+	}
 	upstreamStart := start + contentEnc.Meta.HeaderLen
 	upstreamEnd := upstreamStart + windowLen - 1
 	expectedRange := fmt.Sprintf("bytes=%d-", upstreamStart)
 	var ranges []string
+	probeCalls := 0
 	p.streamClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Range") == "bytes=0-47" {
+			probeCalls++
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range":  {fmt.Sprintf("bytes 0-47/%d", contentEnc.Meta.CiphertextSize)},
+					"Content-Length": {"48"},
+				},
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(cipherPrefix)),
+				Request:       req,
+			}, nil
+		}
 		ranges = append(ranges, req.Header.Get("Range"))
 		if req.Header.Get("Range") != expectedRange {
-			t.Fatalf("upstream Range=%q want=%q", req.Header.Get("Range"), expectedRange)
+			return nil, fmt.Errorf("upstream Range=%q want=%q", req.Header.Get("Range"), expectedRange)
 		}
 		return &http.Response{
 			StatusCode: http.StatusPartialContent,
@@ -1942,7 +2002,10 @@ func TestPlayV2LargeOpenEndedSeekAcceptsShort206Window(t *testing.T) {
 		t.Fatalf("decrypted short window mismatch: got=%d want=%d", rr.Body.Len(), len(plainWindow))
 	}
 	if len(ranges) != 1 {
-		t.Fatalf("large seek should stay on one Range request, got %v", ranges)
+		t.Fatalf("large seek should stay on one media Range request, got %v", ranges)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("cold large seek identity probes=%d, want 1", probeCalls)
 	}
 }
 
@@ -2006,10 +2069,27 @@ func TestServeRedirectRefreshesStaleSizeBeforeRejectingSeek(t *testing.T) {
 			Request: req,
 		}, nil
 	})}
+	p.invalidateAllConfirmedMetadata()
 	upstreamStart := start + contentEnc.Meta.HeaderLen
 	p.streamClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == "http://cdn.example/stale-size" && req.Header.Get("Range") == "bytes=0-47" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("expired signed URL")),
+				Request:    req,
+			}, nil
+		}
+		if (req.URL.String() == "http://alist.local:5244/dav/enc/cipher-size.bin" || req.URL.String() == "http://alist.local:5244/d/enc/cipher-size.bin") && req.Header.Get("Range") == "bytes=0-47" {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("DAV requires refreshed raw URL")),
+				Request:    req,
+			}, nil
+		}
 		if req.URL.String() != freshURL {
-			t.Fatalf("stream URL=%q want=%q", req.URL, freshURL)
+			return nil, fmt.Errorf("stream URL=%q want=%q", req.URL, freshURL)
 		}
 		if req.Header.Get("Range") == "bytes=0-47" {
 			return &http.Response{
@@ -2108,8 +2188,34 @@ func TestServeRedirectLargeSeekStill416NeverFallsBackToFull(t *testing.T) {
 			Request: req,
 		}, nil
 	})}
+	p.invalidateAllConfirmedMetadata()
+	prefixReader, err := contentEnc.EncryptReader(bytes.NewReader(bytes.Repeat([]byte{0x6b}, 16)), 0)
+	if err != nil {
+		t.Fatalf("encrypt header prefix: %v", err)
+	}
+	cipherPrefix, err := io.ReadAll(prefixReader)
+	if err != nil || len(cipherPrefix) != 48 {
+		t.Fatalf("cipher prefix len=%d err=%v, want 48", len(cipherPrefix), err)
+	}
 	var upstreamRanges []string
+	probeCalls := 0
 	p.streamClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != rawURL {
+			return nil, fmt.Errorf("unexpected stream URL=%q", req.URL)
+		}
+		if req.Header.Get("Range") == "bytes=0-47" {
+			probeCalls++
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range":  {fmt.Sprintf("bytes 0-47/%d", contentEnc.Meta.CiphertextSize)},
+					"Content-Length": {"48"},
+				},
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(cipherPrefix)),
+				Request:       req,
+			}, nil
+		}
 		upstreamRanges = append(upstreamRanges, req.Header.Get("Range"))
 		return &http.Response{
 			StatusCode: http.StatusRequestedRangeNotSatisfiable,
@@ -2141,6 +2247,9 @@ func TestServeRedirectLargeSeekStill416NeverFallsBackToFull(t *testing.T) {
 		t.Fatalf("status=%d body=%q ranges=%v", rr.Code, rr.Body.String(), upstreamRanges)
 	}
 	wantRange := fmt.Sprintf("bytes=%d-", start+meta.HeaderLen)
+	if probeCalls != 1 {
+		t.Fatalf("same-identity seek header probes=%d, want 1", probeCalls)
+	}
 	if len(upstreamRanges) != 2 {
 		t.Fatalf("expected one Range plus one refreshed Range retry, got %v", upstreamRanges)
 	}

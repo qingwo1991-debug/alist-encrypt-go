@@ -551,11 +551,18 @@ func (p *ProxyServer) ProbeStatsSnapshot() map[string]uint64 {
 			"v2_attempts": 0, "v2_success": 0, "dual_probe_attempts": dualProbeAttempts.Load(),
 		}
 	}
-	return map[string]uint64{
+	stats := map[string]uint64{
 		"v2_attempts":         atomic.LoadUint64(&p.probeV2Attempts),
 		"v2_success":          atomic.LoadUint64(&p.probeV2Success),
 		"dual_probe_attempts": dualProbeAttempts.Load(),
 	}
+	for key, value := range p.confirmedMetadataStats() {
+		stats["metadata_"+key] = value
+	}
+	for key, value := range p.metadataWarmStats() {
+		stats["next_warm_"+key] = value
+	}
+	return stats
 }
 
 // handleLocalImport imports local SQLite data from a JSON payload.
@@ -872,13 +879,14 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 					// Check file cache before probing upstream
 					cachedMetaFound := false
 					recognizedCachedV3 := false
+					proofRequest := p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(filePath), encPath)
 					for _, cacheKey := range []string{originalPath, filePath, strings.TrimPrefix(filePath, "/dav/"), strings.TrimPrefix(filePath, "/dav")} {
 						if cacheKey == "" {
 							continue
 						}
 						if cached, ok := p.loadFileCache(cacheKey); ok && cached != nil && cached.RawURL == rawURL {
 							recognizedCachedV3 = recognizedCachedV3 || cached.ContentVersion == ContentVersionV3
-							if cachedMeta, valid := playbackFileInfoContentMeta(cached, EncryptionType(encPath.EncType), rawURL); valid && cachedMeta.CiphertextSize == ciphertextSize {
+							if cachedMeta, valid := p.confirmedMetadataForObject(proofRequest.Context(), canonicalMetadataDAVPath(filePath), ciphertextSize); valid {
 								meta = cachedMeta
 								cachedMetaFound = true
 								break
@@ -887,7 +895,12 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 					}
 					if !cachedMetaFound {
 						var confirmed bool
-						meta, confirmed = p.inspectEncryptedContentWithFallbackConfirmed(ctx, rawURL, r.Header, encPath, ciphertextSize, filePath)
+						// This path already requires a fresh inspection. Publish that
+						// proof through the shared resolver so playback does not inspect
+						// again or retain geometry replaced by a fresh fs/get proof.
+						proofRequest := p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(filePath), encPath)
+						proofContext := withConfirmedMetadataFreshTarget(withConfirmedMetadataFallback(proofRequest.Context()))
+						meta, confirmed = p.resolveConfirmedMetadata(proofContext, rawURL, r.Header, encPath, ciphertextSize)
 						// Metadata errors must not turn recognized V3 into a legacy
 						// redirect token or persist an incomplete encryption tuple.
 						if !confirmed || (recognizedCachedV3 && !meta.IsV3()) || (meta.IsV3() && ValidateV3ContentMeta(meta) != nil) {

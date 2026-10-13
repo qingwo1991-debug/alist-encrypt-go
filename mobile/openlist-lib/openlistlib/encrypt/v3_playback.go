@@ -205,6 +205,10 @@ func (p *ProxyServer) v3PlaybackRequest(r *http.Request, info *RedirectInfo, ran
 			}
 			target = next.String()
 		default:
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+				resp.Body.Close()
+				return nil, errors.New("v3: confirmed representation changed")
+			}
 			return resp, nil
 		}
 	}
@@ -358,6 +362,9 @@ func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(status)
 	}
 	if r.Method == http.MethodHead || length == 0 {
+		if !p.authorizeLocalWebDAVMetadata(w, r, info.EncryptedPath, meta) {
+			return errors.New("v3: origin authorization or representation rejected")
+		}
 		commit()
 		return nil
 	}
@@ -380,7 +387,10 @@ func (p *ProxyServer) serveV3PlaybackAttempt(w http.ResponseWriter, r *http.Requ
 		prefixReaders, prefixBytes = readers, count
 	}
 	if prefixBytes == length {
-		// No upstream request/KDF: headerLatencyMs is deliberately not populated
+		if !p.authorizeConfirmedMetadataCacheHit(w, r, info.EncryptedPath) {
+			return errors.New("v3: cached-body origin authorization rejected")
+		}
+		// No media request/KDF: headerLatencyMs is deliberately not populated
 		// with a fabricated provider measurement. Writer tracks actual first byte.
 		commit()
 		var buffer [32 << 10]byte

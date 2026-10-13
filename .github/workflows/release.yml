@@ -238,7 +238,7 @@ jobs:
       - name: Race-check mobile network and readiness regressions
         working-directory: mobile/openlist-lib
         run: |
-          go test -race -mod=readonly -timeout 10m -run 'Test(MXWebDAV|ProxyLifecycle|DualNetwork|Native|NetworkBridge|RouteTransport|DriverRoute|ProviderCatalog|MetaSync|RangeProbe|NativePhysical|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession|V3|MobileV3)' ./openlistlib ./openlistlib/encrypt ./internal/op ./pkg/singleflight
+          go test -race -mod=readonly -timeout 10m -run 'Test(ConfirmedMetadata|MetadataWarm|MXWebDAV|ProxyLifecycle|DualNetwork|Native|NetworkBridge|RouteTransport|DriverRoute|ProviderCatalog|MetaSync|RangeProbe|NativePhysical|MobileStream|StreamIdle|StorageReady|DoContext|PlaybackTiming|PlaybackFirstByte|PlaybackSession|V3|MobileV3)' ./openlistlib ./openlistlib/encrypt ./internal/op ./pkg/singleflight
 
       - name: Test synchronized upstream source copy
         working-directory: mobile/openlist-lib/src

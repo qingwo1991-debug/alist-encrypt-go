@@ -77,6 +77,8 @@ type ProxyServer struct {
 	cleanupTicker       *time.Ticker
 	cleanupDone         chan struct{}
 	localStore          *localStore
+	confirmedMetadata   confirmedMetadataState
+	metadataWarm        metadataWarmState
 	metaSyncDone        chan struct{}
 	metaSyncWG          sync.WaitGroup
 	upstreamMu          sync.RWMutex
