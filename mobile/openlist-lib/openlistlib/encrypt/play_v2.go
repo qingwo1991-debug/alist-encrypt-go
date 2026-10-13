@@ -1935,7 +1935,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	info = cloneRedirectInfo(info)
-	if shouldDecrypt(info) && info.EncryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
+	if shouldDecryptRedirect(r, info) && info.EncryptedPath != "" && confirmedMetadataRequestFromContext(r.Context()) == nil {
 		r = o.proxy.withConfirmedMetadataIdentity(r, encryptedDAVPath(info.EncryptedPath), info.PasswdInfo)
 	}
 
