@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -55,6 +56,45 @@ func confirmedMetadataTestRequest(p *ProxyServer, enc *EncryptPath, auth string)
 	r.Header.Set("Authorization", auth)
 	return p.withConfirmedMetadataIdentity(r, "/mount/video.bin", enc)
 }
+func TestConfirmedMetadataGoexitReleasesFlight(t *testing.T) {
+	p, enc, target, calls := confirmedMetadataTestServer(t, nil, nil)
+	original := p.streamClientSnapshot().Transport
+	if original == nil {
+		original = http.DefaultTransport
+	}
+	var attempts atomic.Int32
+	p.streamClient = &http.Client{Transport: v2ProbeRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			runtime.Goexit()
+		}
+		return original.RoundTrip(r)
+	})}
+	r := confirmedMetadataTestRequest(p, enc, "one")
+	done := make(chan bool, 1)
+	go func() { _, ok := p.resolveConfirmedMetadata(r.Context(), target, r.Header, enc, 0); done <- ok }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("Goexit inspection was confirmed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Goexit stranded shared flight")
+	}
+	// Failed worker cleanup must release the entry for a new cold inspection.
+	go func() { _, ok := p.resolveConfirmedMetadata(r.Context(), target, r.Header, enc, 0); done <- ok }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("fresh inspection after Goexit failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Goexit retained failed flight")
+	}
+	if attempts.Load() != 2 || calls.Load() != 1 {
+		t.Fatalf("attempts=%d HTTP calls=%d", attempts.Load(), calls.Load())
+	}
+}
+
 func TestConfirmedMetadataMemoryOnlyObjectLookup(t *testing.T) {
 	p, enc, target, calls := confirmedMetadataTestServer(t, nil, nil)
 	child := confirmedMetadataTestRequest(p, enc, "one")

@@ -362,6 +362,26 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 			budget = explicit
 		}
 		started := p.goBackground(func(lifetime context.Context) {
+			completed := false
+			// RoundTrippers and test hooks may terminate their goroutine with
+			// runtime.Goexit; cancellation alone cannot close this flight then.
+			// Do not recover panics, but always release waiters and admission.
+			defer func() {
+				state.mu.Lock()
+				defer state.mu.Unlock()
+				if !completed {
+					flight.meta = LegacyContentMeta(encCopy.EncType, size)
+					flight.confirmed = false
+					flight.record = confirmedMetadataRecord{}
+				}
+				if current := state.entries[holder.identity]; current == entry && entry.generation == generation && entry.flight == flight {
+					entry.flight = nil
+					if !completed {
+						entry.record = confirmedMetadataRecord{}
+					}
+				}
+				close(flight.done)
+			}()
 			inspectCtx, cancel := context.WithTimeout(lifetime, budget)
 			defer cancel()
 			collector := &confirmedMetadataCollector{}
@@ -373,6 +393,7 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 			now := time.Now().Unix()
 			rec := confirmedMetadataRecord{Identity: holder.identity, Meta: meta, Provenance: confirmedMetadataProvenanceInspection, ConfirmedAt: now, ValidatedAt: now, ETag: proof.etag, LastModified: proof.lastModified, ValidatorScope: proof.scope, Generation: generation}
 			state.mu.Lock()
+			defer state.mu.Unlock()
 			current := state.entries[holder.identity]
 			validGeneration := current == entry && entry.generation == generation && entry.flight == flight
 			if validGeneration {
@@ -386,10 +407,8 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 						_ = store.PutConfirmedMetadata(rec)
 					}
 				}
-				entry.flight = nil
 			}
-			close(flight.done)
-			state.mu.Unlock()
+			completed = true
 		})
 		if started {
 			state.coldStarts.Add(1)

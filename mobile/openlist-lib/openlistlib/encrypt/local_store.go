@@ -745,7 +745,7 @@ func (s *localStore) flushBatchAsync(batch []storeRecord) {
 
 	s.mu.Lock()
 	s.flushing = false
-	if len(s.buffer) < s.flushThreshold {
+	if len(s.buffer) == 0 || len(s.buffer) < s.flushThreshold {
 		s.mu.Unlock()
 		return
 	}

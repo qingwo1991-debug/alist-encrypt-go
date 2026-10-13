@@ -437,6 +437,11 @@ func (p *ProxyServer) handleDownloadLegacy(w http.ResponseWriter, r *http.Reques
 		p.debugf("filename", "download fallback to original path=%s from=%s", originalPath, initialURLPath)
 	}
 
+	if encPath != nil && encPath.Enable && resp.StatusCode >= 200 && resp.StatusCode < 300 && !p.validateConfirmedMetadataResponse(r.Context(), resp) {
+		http.Error(w, "encrypted representation changed; retry required", http.StatusBadGateway)
+		return
+	}
+
 	// 处理 302/303 重定向：对于需要解密的路径，创建代理重定向
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		location := resp.Header.Get("Location")

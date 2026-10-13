@@ -910,8 +910,24 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 		if got := req.URL.String(); got != freshURL {
 			t.Fatalf("stream URL=%q, want refreshed URL", got)
 		}
+		// refreshRedirectInfo was invoked outside a confirmed resolver scope:
+		// its legacy tuple alone cannot establish the new playback identity.
+		if req.Header.Get("Range") == "bytes=0-47" {
+			probeCalls++
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Type":   {"application/octet-stream"},
+					"Content-Length": {"48"},
+					"Content-Range":  {"bytes 0-47/4128"},
+				},
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(ciphertext[:48])),
+				Request:       req,
+			}, nil
+		}
 		if got := req.Header.Get("Range"); got != "bytes=4127-4127" {
-			t.Fatalf("tail upstream Range=%q", got)
+			return nil, fmt.Errorf("tail upstream Range=%q, want bytes=4127-4127", got)
 		}
 		return &http.Response{
 			StatusCode: http.StatusPartialContent,
@@ -936,6 +952,9 @@ func TestRefreshRedirectInfoRevalidatesV2IdentityAndPlainSize(t *testing.T) {
 	}
 	if got := tailRec.Body.Bytes(); !bytes.Equal(got, plain[len(plain)-1:]) {
 		t.Fatalf("tail body=%x, want %x", got, plain[len(plain)-1:])
+	}
+	if probeCalls != 2 {
+		t.Fatalf("refresh plus cold playback identity probes=%d, want 2", probeCalls)
 	}
 }
 
@@ -1880,14 +1899,36 @@ func TestPlayV2LargeOpenEndedSeekAcceptsShort206Window(t *testing.T) {
 	defer p.stopCacheCleanup()
 	defer p.closeLocalStore()
 
+	prefixReader, err := contentEnc.EncryptReader(bytes.NewReader(bytes.Repeat([]byte{0x6b}, 16)), 0)
+	if err != nil {
+		t.Fatalf("encrypt header prefix: %v", err)
+	}
+	cipherPrefix, err := io.ReadAll(prefixReader)
+	if err != nil || len(cipherPrefix) != 48 {
+		t.Fatalf("cipher prefix len=%d err=%v, want 48", len(cipherPrefix), err)
+	}
 	upstreamStart := start + contentEnc.Meta.HeaderLen
 	upstreamEnd := upstreamStart + windowLen - 1
 	expectedRange := fmt.Sprintf("bytes=%d-", upstreamStart)
 	var ranges []string
+	probeCalls := 0
 	p.streamClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Range") == "bytes=0-47" {
+			probeCalls++
+			return &http.Response{
+				StatusCode: http.StatusPartialContent,
+				Header: http.Header{
+					"Content-Range":  {fmt.Sprintf("bytes 0-47/%d", contentEnc.Meta.CiphertextSize)},
+					"Content-Length": {"48"},
+				},
+				ContentLength: 48,
+				Body:          io.NopCloser(bytes.NewReader(cipherPrefix)),
+				Request:       req,
+			}, nil
+		}
 		ranges = append(ranges, req.Header.Get("Range"))
 		if req.Header.Get("Range") != expectedRange {
-			t.Fatalf("upstream Range=%q want=%q", req.Header.Get("Range"), expectedRange)
+			return nil, fmt.Errorf("upstream Range=%q want=%q", req.Header.Get("Range"), expectedRange)
 		}
 		return &http.Response{
 			StatusCode: http.StatusPartialContent,
@@ -1942,7 +1983,10 @@ func TestPlayV2LargeOpenEndedSeekAcceptsShort206Window(t *testing.T) {
 		t.Fatalf("decrypted short window mismatch: got=%d want=%d", rr.Body.Len(), len(plainWindow))
 	}
 	if len(ranges) != 1 {
-		t.Fatalf("large seek should stay on one Range request, got %v", ranges)
+		t.Fatalf("large seek should stay on one media Range request, got %v", ranges)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("cold large seek identity probes=%d, want 1", probeCalls)
 	}
 }
 
