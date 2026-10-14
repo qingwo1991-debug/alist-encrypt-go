@@ -594,7 +594,8 @@ func (h *backupTestHandle) Remaining() int               { return h.remaining }
 func (h *backupTestHandle) PageCount() int               { return h.pages }
 
 // Rehearse the on-disk state left by interruption after the final-name
-// reservation but before rename. Matching .bak-* is never a publication proof.
+// reservation or database link but before manifest commit. Matching .bak-* is
+// never a publication proof.
 func TestLocalStoreSnapshotRejectsInterruptedPublicationReservations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reservation.db")
 	db := backupTestOpenDB(t, path, false)
@@ -647,6 +648,35 @@ func TestLocalStoreSnapshotRejectsInterruptedPublicationReservations(t *testing.
 	}
 }
 
+func TestLocalStoreSnapshotCommittedPackageSurvivesDirectorySyncFailure(t *testing.T) {
+	for _, failureCall := range []int{4, 5} {
+		t.Run(fmt.Sprint(failureCall), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "committed.db")
+			db := backupTestOpenDB(t, path, false)
+			backupTestExec(t, db, "CREATE TABLE fixture(value INTEGER); INSERT INTO fixture VALUES (7)")
+			previous := backupTestSnapshot(t, path)
+			before := backupTestFileHash(t, filepath.Join(previous, "database.sqlite"))
+			calls := 0
+			dir, err := snapshotLocalStoreDBWithSync(context.Background(), path, func(name string) error {
+				calls++
+				if calls == failureCall {
+					return syscall.ENOSPC
+				}
+				return syncSnapshotPath(name)
+			})
+			if dir == "" || !errors.Is(err, syscall.ENOSPC) || calls != failureCall {
+				t.Fatalf("directory sync failure = %q, %v, calls=%d", dir, err, calls)
+			}
+			if _, err := verifyLocalStoreSnapshot(context.Background(), dir); err != nil {
+				t.Fatalf("complete committed package deleted or broken: %v", err)
+			}
+			if got := backupTestFileHash(t, filepath.Join(previous, "database.sqlite")); got != before {
+				t.Fatal("directory sync failure changed previous snapshot")
+			}
+		})
+	}
+}
+
 func TestLocalStoreSnapshotCancellationDuringPublicationSync(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cancel-sync.db")
 	db := backupTestOpenDB(t, path, false)
@@ -659,12 +689,12 @@ func TestLocalStoreSnapshotCancellationDuringPublicationSync(t *testing.T) {
 		if err := syncSnapshotPath(name); err != nil {
 			return err
 		}
-		if calls == 4 {
+		if calls == 5 {
 			cancel()
 		}
 		return nil
 	})
-	if !errors.Is(err, context.Canceled) || dir == "" || calls != 4 {
+	if !errors.Is(err, context.Canceled) || dir == "" || calls != 5 {
 		t.Fatalf("publication cancellation = %q, %v, syncs=%d", dir, err, calls)
 	}
 	if _, err := verifyLocalStoreSnapshot(context.Background(), dir); err != nil {
@@ -742,6 +772,13 @@ func TestLocalStoreFailedMigrationDoesNotPublishSchemaVersion(t *testing.T) {
 			db := backupTestOpenDB(t, path, false)
 			backupTestExec(t, db, backupTestOldSchema+`CREATE TABLE local_db_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
 			INSERT INTO local_db_meta VALUES ('schema_version', '1', 123);`)
+			// A genuinely old playback table is necessary: duplicate-column
+			// ALTER fails before SQLite invokes the ALTER authorizer callback.
+			backupTestExec(t, db, `CREATE TABLE playback_stats (
+			 id TEXT PRIMARY KEY, path TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '',
+			 bytes_served INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER NOT NULL DEFAULT 0,
+			 duration_secs REAL NOT NULL DEFAULT 0, played_at INTEGER NOT NULL,
+			 completed INTEGER NOT NULL DEFAULT 0, content_type TEXT NOT NULL DEFAULT '');`)
 			conn, err := db.Conn(context.Background())
 			if err != nil {
 				t.Fatal(err)

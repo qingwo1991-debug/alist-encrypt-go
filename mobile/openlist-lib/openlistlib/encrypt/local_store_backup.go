@@ -162,22 +162,37 @@ func snapshotLocalStoreDBWithSync(parent context.Context, path string, syncPath 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	// Reserve a fresh, private destination with O_EXCL semantics (MkdirTemp).
-	// Rename replaces only OUR empty reservation, never a previous snapshot.
-	// IMPORTANT: .bak-* is a candidate namespace, NOT a completeness marker.
-	// A crash before Rename can leave this empty reservation. Discovery must
-	// call verifyLocalStoreSnapshot, never trust a matching pathname alone.
+	// Reserve our own private candidate directory; never rename onto another
+	// directory. Link creates each final member without overwriting. The final
+	// manifest link is the commit marker, but discovery must still verify it:
+	// .bak-* names alone never prove completeness after an interrupted publish.
 	destination, err := os.MkdirTemp(filepath.Dir(path), filepath.Base(path)+".bak-*")
 	if err != nil {
 		return "", err
 	}
-	if err := os.Rename(stage, destination); err != nil {
-		_ = os.Remove(destination)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(destination) // only this call's owned candidate
+		}
+	}()
+	if err := os.Link(dbPath, filepath.Join(destination, "database.sqlite")); err != nil {
 		return "", err
 	}
-	// Keep the published complete snapshot even if directory durability fails.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := os.Link(filepath.Join(stage, "manifest.json"), filepath.Join(destination, "manifest.json")); err != nil {
+		return "", err
+	}
+	// Both links now refer to the already verified and fsynced staging files.
+	// From here on retain the complete package, even on cancellation/sync error.
+	committed = true
+	if err := syncPath(destination); err != nil {
+		return destination, fmt.Errorf("snapshot complete but candidate directory sync failed: %w", err)
+	}
 	if err := syncPath(filepath.Dir(path)); err != nil {
-		return "", fmt.Errorf("snapshot published at %s but directory sync failed: %w", destination, err)
+		return destination, fmt.Errorf("snapshot published at %s but parent directory sync failed: %w", destination, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return destination, err
