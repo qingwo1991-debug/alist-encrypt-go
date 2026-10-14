@@ -326,148 +326,6 @@ func (h *APIHandler) SaveSchemeConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ExportFileMeta exports file metadata from MySQL for external sync
-func (h *APIHandler) ExportFileMeta(w http.ResponseWriter, r *http.Request) {
-	limit := 1000
-	offset := 0
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-			if parsed > 5000 {
-				parsed = 5000
-			}
-			limit = parsed
-		}
-	}
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed >= 0 {
-			offset = parsed
-		}
-	}
-
-	var updatedAfter time.Time
-	if v := r.URL.Query().Get("since"); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
-			updatedAfter = time.Unix(parsed, 0)
-		}
-	}
-	if updatedAfter.IsZero() {
-		if v := r.URL.Query().Get("updated_after"); v != "" {
-			if t, err := time.Parse(time.RFC3339, v); err == nil {
-				updatedAfter = t
-			}
-		}
-	}
-
-	// MySQL is the preferred metadata backend. When it is not enabled (the
-	// default BoltDB deployment), fall back to the file info cache so mobile
-	// DB_EXPORT sync still has metadata to pull.
-	if h.mysqlStore != nil {
-		filter := mysqlstore.FileMetaFilter{
-			ProviderHost: r.URL.Query().Get("provider"),
-			OriginalPath: r.URL.Query().Get("path"),
-			PathPrefix:   r.URL.Query().Get("path_prefix"),
-			UpdatedAfter: updatedAfter,
-			CursorKey:    r.URL.Query().Get("cursor"),
-			Limit:        limit,
-			Offset:       offset,
-		}
-
-		records, err := h.svc.ExportFileMeta(r.Context(), filter)
-		if err != nil {
-			RespondAPIError(w, 500, err.Error())
-			return
-		}
-
-		var maxUpdated time.Time
-		nextCursor := ""
-		for _, record := range records {
-			if record.UpdatedAt.After(maxUpdated) {
-				maxUpdated = record.UpdatedAt
-			}
-			nextCursor = record.KeyHash
-		}
-		nextSince := int64(0)
-		nextSinceRFC3339 := ""
-		if !maxUpdated.IsZero() {
-			nextSince = maxUpdated.Unix()
-			nextSinceRFC3339 = maxUpdated.UTC().Format(time.RFC3339)
-		}
-
-		RespondSuccess(w, map[string]interface{}{
-			"items":              records,
-			"limit":              limit,
-			"offset":             offset,
-			"has_more":           len(records) == limit,
-			"next_since":         nextSince,
-			"next_since_rfc3339": nextSinceRFC3339,
-			"next_cursor":        nextCursor,
-		})
-		return
-	}
-
-	if h.fileDAO == nil {
-		RespondAPIError(w, 500, "no metadata backend available")
-		return
-	}
-
-	all := h.fileDAO.List(limit + offset)
-	records := make([]mysqlstore.FileMetaRecord, 0, len(all))
-	var maxUpdated time.Time
-	nextCursor := ""
-	for i, info := range all {
-		if i < offset {
-			continue
-		}
-		providerHost := ProviderKey(info.RawURL, info.Path)
-		record := mysqlstore.FileMetaRecord{
-			KeyHash:           mysqlstore.KeyHash(providerHost, info.Path),
-			ProviderHost:      providerHost,
-			OriginalPath:      info.Path,
-			EncryptedPath:     info.EncryptedPath,
-			Name:              info.Name,
-			Size:              info.Size,
-			CiphertextSize:    info.CiphertextSize,
-			ContentVersion:    info.ContentVersion,
-			HeaderLen:         info.HeaderLen,
-			NonceField:        append([]byte(nil), info.NonceField...),
-			ChunkSize:         info.ChunkSize,
-			KDFIterations:     info.KDFIterations,
-			RawURL:            info.RawURL,
-			RawURLAuthScope:   info.RawURLAuthScope,
-			Sign:              info.Sign,
-			UpstreamFetchedAt: info.UpstreamFetchedAt,
-			UpdatedAt:         info.Modified,
-			LastAccessed:      info.Modified,
-		}
-		if record.UpdatedAt.IsZero() {
-			record.UpdatedAt = info.UpstreamFetchedAt
-		}
-		if record.UpdatedAt.After(maxUpdated) {
-			maxUpdated = record.UpdatedAt
-		}
-		nextCursor = record.KeyHash
-		records = append(records, record)
-	}
-
-	nextSince := int64(0)
-	nextSinceRFC3339 := ""
-	if !maxUpdated.IsZero() {
-		nextSince = maxUpdated.Unix()
-		nextSinceRFC3339 = maxUpdated.UTC().Format(time.RFC3339)
-	}
-
-	RespondSuccess(w, map[string]interface{}{
-		"items":              records,
-		"limit":              limit,
-		"offset":             offset,
-		"has_more":           len(all) > limit+offset,
-		"next_since":         nextSince,
-		"next_since_rfc3339": nextSinceRFC3339,
-		"next_cursor":        nextCursor,
-		"backend":            "boltdb",
-	})
-}
-
 func parseExportSinceParams(r *http.Request) time.Time {
 	var updatedAfter time.Time
 	if v := r.URL.Query().Get("since"); v != "" {
@@ -501,10 +359,12 @@ func exportLimitAndCursor(r *http.Request) (int, string) {
 // ExportStrategy exports strategy metadata for DB_EXPORT sync.
 func (h *APIHandler) ExportStrategy(w http.ResponseWriter, r *http.Request) {
 	if h.mysqlStore == nil {
-		// Strategy learning lives in MySQL; without it the endpoint reports an
-		// empty set so mobile DB_EXPORT sync degrades to size-only instead of
-		// failing the whole cycle.
+		// Preserve the legacy empty payload, but explicitly disclose that this
+		// backend does not implement strategy export (not a complete empty DB).
 		RespondSuccess(w, map[string]interface{}{
+			"supported":   false,
+			"status":      "unsupported",
+			"backend":     "boltdb",
 			"items":       []interface{}{},
 			"has_more":    false,
 			"next_since":  int64(0),
@@ -573,9 +433,12 @@ func (h *APIHandler) ExportStrategy(w http.ResponseWriter, r *http.Request) {
 // ExportRangeCompat exports range compatibility metadata for DB_EXPORT sync.
 func (h *APIHandler) ExportRangeCompat(w http.ResponseWriter, r *http.Request) {
 	if h.mysqlStore == nil {
-		// Range compatibility state is stored per-provider in range_compat.json
-		// when MySQL is off; exporting an empty set keeps mobile sync healthy.
+		// The JSON-backed compatibility state has no export implementation.
+		// Keep the old payload shape while declaring the capability unsupported.
 		RespondSuccess(w, map[string]interface{}{
+			"supported":   false,
+			"status":      "unsupported",
+			"backend":     "boltdb",
 			"items":       []interface{}{},
 			"has_more":    false,
 			"next_since":  int64(0),
