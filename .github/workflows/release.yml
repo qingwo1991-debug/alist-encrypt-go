@@ -319,7 +319,7 @@ jobs:
           node-version: '22'
 
       - name: Check native bridge source contracts (not device instrumentation)
-        run: node --test mobile/test/native_network_bridge_contract.test.mjs
+        run: node --test mobile/test/native_network_bridge_contract.test.mjs mobile/test/download_async_io_contract.test.mjs
 
       - name: Analyze and test Flutter app
         working-directory: mobile

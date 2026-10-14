@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -10,7 +9,16 @@ import '../generated/l10n.dart';
 
 /// 下载文件管理页面
 class DownloadManagerPage extends StatefulWidget {
-  const DownloadManagerPage({Key? key}) : super(key: key);
+  const DownloadManagerPage({
+    Key? key,
+    this.scanDownloadedFiles,
+    this.readDownloadedFile,
+    this.getDownloadDirectoryPath,
+  }) : super(key: key);
+
+  final Stream<List<DownloadedFile>> Function()? scanDownloadedFiles;
+  final Future<DownloadedFile?> Function(String path)? readDownloadedFile;
+  final Future<String?> Function()? getDownloadDirectoryPath;
 
   @override
   State<DownloadManagerPage> createState() => _DownloadManagerPageState();
@@ -18,8 +26,14 @@ class DownloadManagerPage extends StatefulWidget {
 
 class _DownloadManagerPageState extends State<DownloadManagerPage>
     with TickerProviderStateMixin {
-  List<FileSystemEntity> _downloadedFiles = [];
+  final List<DownloadedFile> _downloadedFiles = [];
   bool _isLoading = true;
+  Object? _scanError;
+  int _scanGeneration = 0;
+  int _infoGeneration = 0;
+  String? _infoPath;
+  StreamSubscription<List<DownloadedFile>>? _scanSubscription;
+  Completer<void>? _scanCompletion;
   String? _downloadPath;
   late TabController _tabController;
   StreamSubscription<int>? _periodicRefreshSubscription;
@@ -36,6 +50,11 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
 
   @override
   void dispose() {
+    ++_scanGeneration;
+    ++_infoGeneration;
+    unawaited(_scanSubscription?.cancel());
+    _scanSubscription = null;
+    _finishScan();
     unawaited(_periodicRefreshSubscription?.cancel());
     _periodicRefreshSubscription = null;
     _tabController.dispose();
@@ -53,28 +72,70 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     });
   }
 
+  void _finishScan() {
+    final completion = _scanCompletion;
+    _scanCompletion = null;
+    if (completion != null && !completion.isCompleted) completion.complete();
+  }
+
+  Future<void> _loadDownloadPath(int generation) async {
+    try {
+      final path = await (widget.getDownloadDirectoryPath ??
+          DownloadManager.getDownloadDirectoryPath)();
+      if (!mounted || generation != _scanGeneration) return;
+      setState(() => _downloadPath = path);
+    } catch (_) {
+      // Directory lookup must not prevent streamed files from being displayed.
+    }
+  }
+
   Future<void> _loadDownloadedFiles() async {
     if (!mounted) return;
+    final generation = ++_scanGeneration;
+    ++_infoGeneration;
+    _infoPath = null;
+    final previous = _scanSubscription;
+    _scanSubscription = null;
+    _finishScan();
+    final completion = Completer<void>();
+    _scanCompletion = completion;
     setState(() {
+      _downloadedFiles.clear();
       _isLoading = true;
+      _scanError = null;
     });
+    unawaited(_loadDownloadPath(generation));
+
+    void fail(Object error) {
+      if (!mounted || generation != _scanGeneration) return;
+      setState(() {
+        _scanError = error;
+        _isLoading = false;
+      });
+      _finishScan();
+    }
 
     try {
-      final downloadedFiles = await DownloadManager.getDownloadedFiles();
-      final downloadPath = await DownloadManager.getDownloadDirectoryPath();
-      if (!mounted) return;
-      setState(() {
-        _downloadedFiles = downloadedFiles;
-        _downloadPath = downloadPath;
-        _isLoading = false;
-      });
-    } catch (e) {
-      print('${S.current.loadDownloadFilesFailed}: $e');
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-      });
+      await previous?.cancel();
+      if (!mounted || generation != _scanGeneration) return;
+      _scanSubscription = (widget.scanDownloadedFiles ??
+          DownloadManager.scanDownloadedFiles)().listen(
+        (batch) {
+          if (!mounted || generation != _scanGeneration) return;
+          setState(() => _downloadedFiles.addAll(batch));
+        },
+        onError: (Object error, StackTrace stackTrace) => fail(error),
+        onDone: () {
+          if (!mounted || generation != _scanGeneration) return;
+          setState(() => _isLoading = false);
+          _finishScan();
+        },
+        cancelOnError: true,
+      );
+    } catch (error) {
+      fail(error);
     }
+    await completion.future;
   }
 
   String _formatFileSize(int bytes) {
@@ -282,39 +343,44 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   Widget _buildCompletedTasksTab() {
     List<DownloadTask> completedTasks = DownloadManager.completedTasks;
     
-    if (_isLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (completedTasks.isEmpty && _downloadedFiles.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.download_done,
-              size: 64,
-              color: Colors.grey,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              S.of(context).noCompletedDownloads,
-              style: const TextStyle(
-                fontSize: 16,
-                color: Colors.grey,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
+    final taskNames = completedTasks.map((task) => task.filename).toSet();
+    final files = _downloadedFiles
+        .where((file) => !taskNames.contains(file.name))
+        .toList(growable: false);
+    final rowCount = completedTasks.length + files.length;
+    final hasStatus = _isLoading || _scanError != null || rowCount == 0;
 
     return RefreshIndicator(
       onRefresh: _loadDownloadedFiles,
-      child: ListView(
-        children: [
-          // 显示任务记录中的已完成下载
-          ...completedTasks.map((task) => Card(
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: rowCount + (hasStatus ? 1 : 0),
+        itemBuilder: (context, index) {
+          if (index == rowCount) {
+            return Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                children: [
+                  if (_isLoading)
+                    const CircularProgressIndicator()
+                  else if (_scanError != null) ...[
+                    Text('${S.of(context).loadDownloadFilesFailed}: $_scanError'),
+                    TextButton(
+                      onPressed: () => unawaited(_loadDownloadedFiles()),
+                      child: const Icon(Icons.refresh),
+                    ),
+                  ] else ...[
+                    const Icon(Icons.download_done, size: 64, color: Colors.grey),
+                    const SizedBox(height: 16),
+                    Text(S.of(context).noCompletedDownloads),
+                  ],
+                ],
+              ),
+            );
+          }
+          if (index < completedTasks.length) {
+            final task = completedTasks[index];
+            return Card(
             margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: ListTile(
               leading: Icon(
@@ -410,18 +476,13 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
                 ],
               ),
             ),
-          )),
-          
-          // 显示文件系统中的其他下载文件
-          ..._downloadedFiles.where((file) {
-            String filename = file.path.split('/').last;
-            // 过滤掉已经在任务记录的文件
-            return !completedTasks.any((task) => task.filename == filename);
-          }).map((file) {
-            String filename = file.path.split('/').last;
-            FileStat stat = file.statSync();
-            
-            return Card(
+            );
+          }
+
+          // Only visible rows create widgets; metadata already arrived in batches.
+          final file = files[index - completedTasks.length];
+          final filename = file.name;
+          return Card(
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: ListTile(
                 leading: Icon(
@@ -437,16 +498,15 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('${S.of(context).size}: ${_formatFileSize(stat.size)}'),
-                    Text('${S.of(context).modifiedTime}: ${_formatDateTime(stat.modified)}'),
+                    Text('${S.of(context).size}: ${_formatFileSize(file.size)}'),
+                    Text('${S.of(context).modifiedTime}: ${_formatDateTime(file.modified)}'),
                   ],
                 ),
                 trailing: const Icon(Icons.more_vert),
                 onTap: () => _showFileOptions(file),
               ),
             );
-          }),
-        ],
+        },
       ),
     );
   }
@@ -499,8 +559,8 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     );
   }
 
-  void _showFileOptions(FileSystemEntity file) {
-    String filename = file.path.split('/').last;
+  void _showFileOptions(DownloadedFile file) {
+    final filename = file.name;
     
     showModalBottomSheet(
       context: context,
@@ -566,11 +626,27 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     );
   }
 
-  void _showFileInfo(FileSystemEntity file) {
-    String filename = file.path.split('/').last;
-    FileStat stat = file.statSync();
-    
-    showDialog(
+  Future<void> _showFileInfo(DownloadedFile selectedFile) async {
+    // Repeated requests for the same file share the pending read/dialog.
+    if (_infoPath == selectedFile.path) return;
+    final generation = ++_infoGeneration;
+    final scanGeneration = _scanGeneration;
+    _infoPath = selectedFile.path;
+    bool isCurrent() => mounted &&
+        generation == _infoGeneration &&
+        scanGeneration == _scanGeneration;
+    try {
+      final file = await (widget.readDownloadedFile ??
+          DownloadManager.readDownloadedFile)(selectedFile.path);
+      if (!isCurrent()) return;
+      if (file == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(S.of(context).fileNotFound)),
+        );
+        return;
+      }
+      final filename = file.name;
+      await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(S.of(context).fileInfo),
@@ -580,9 +656,9 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           children: [
             Text('${S.of(context).fileName}: $filename'),
             const SizedBox(height: 8),
-            Text('${S.of(context).size}: ${_formatFileSize(stat.size)}'),
+            Text('${S.of(context).size}: ${_formatFileSize(file.size)}'),
             const SizedBox(height: 8),
-            Text('${S.of(context).modifiedTime}: ${_formatDateTime(stat.modified)}'),
+            Text('${S.of(context).modifiedTime}: ${_formatDateTime(file.modified)}'),
             const SizedBox(height: 8),
             Text('${S.of(context).filePath}: ${file.path}'),
           ],
@@ -594,7 +670,15 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
           ),
         ],
       ),
-    );
+      );
+    } catch (error) {
+      if (!isCurrent()) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${S.of(context).loadDownloadFilesFailed}: $error')),
+      );
+    } finally {
+      if (generation == _infoGeneration) _infoPath = null;
+    }
   }
 
   void _confirmDeleteFile(String filename) {

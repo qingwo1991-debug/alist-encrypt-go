@@ -4,7 +4,9 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/widgets.dart';
 import 'package:openlist_mobile/utils/download_manager.dart';
+import 'package:openlist_mobile/generated/l10n.dart';
 
 class _Adapter implements HttpClientAdapter {
   final Future<ResponseBody> Function(RequestOptions, Future<void>?) handler;
@@ -26,14 +28,18 @@ ResponseBody _head(int size) => ResponseBody.fromString('', 200, headers: {
     });
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory directory;
   late HttpClientAdapter original;
   setUp(() async {
+    await S.load(const Locale('en'));
     directory = await Directory.systemTemp.createTemp('download-resilience-');
     original = DownloadManager.networkClientForTesting.httpClientAdapter;
 
   });
   tearDown(() async {
+    DownloadManager.directoryForTesting = null;
+    DownloadManager.clearCompletedTasks();
     DownloadManager.networkClientForTesting.httpClientAdapter = original;
     DownloadManager.headerBudget = const Duration(seconds: 20);
     DownloadManager.idleBudget = const Duration(seconds: 20);
@@ -56,31 +62,69 @@ void main() {
     final originalPath = '${directory.path}/pending.bin';
     final reserved = <String>[];
     try {
-      final first = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      final first = await DownloadManager.reserveDownloadPathForTesting(originalPath);
       reserved.add(first);
-      final second = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      final second = await DownloadManager.reserveDownloadPathForTesting(originalPath);
       reserved.add(second);
-      final third = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      final third = await DownloadManager.reserveDownloadPathForTesting(originalPath);
       reserved.add(third);
       expect(first, originalPath);
       expect(second, '${directory.path}/pending_1.bin');
       expect(third, '${directory.path}/pending_2.bin');
-      expect(await File(first).exists(), isFalse);
-      expect(await File(second).exists(), isFalse);
-      DownloadManager.releaseDownloadPathForTesting(first);
-      final reused = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      expect(await File(first).exists(), isTrue);
+      expect(await File(second).exists(), isTrue);
+      await DownloadManager.releaseDownloadPathForTesting(first, discard: true);
+      final reused = await DownloadManager.reserveDownloadPathForTesting(originalPath);
       reserved.add(reused);
       expect(reused, originalPath);
       await File(reused).writeAsString('existing download');
-      DownloadManager.releaseDownloadPathForTesting(reused);
-      final next = DownloadManager.reserveDownloadPathForTesting(originalPath);
+      await DownloadManager.releaseDownloadPathForTesting(reused);
+      final next = await DownloadManager.reserveDownloadPathForTesting(originalPath);
       reserved.add(next);
       expect(next, '${directory.path}/pending_3.bin');
     } finally {
       for (final path in reserved.toSet()) {
-        DownloadManager.releaseDownloadPathForTesting(path);
+        await DownloadManager.releaseDownloadPathForTesting(path);
       }
     }
+  });
+
+  test('actual background and callback paths reserve same-name independently and cleanup skips both', () async {
+    DownloadManager.directoryForTesting = () async => directory;
+    final releaseBodies = Completer<void>();
+    final ready = Completer<void>();
+    var bodies = 0;
+    DownloadManager.networkClientForTesting.httpClientAdapter =
+        _Adapter((options, _) async {
+      if (options.method == 'HEAD') return ResponseBody.fromString('', 200);
+      if (++bodies == 2) ready.complete();
+      return ResponseBody(Stream<Uint8List>.fromFuture(
+        releaseBodies.future.then((_) => Uint8List.fromList([1, 2, 3]))),
+        200, headers: {'content-length': ['3']});
+    });
+    String? callbackPath;
+    final background = DownloadManager.downloadFileInBackground(
+      url: 'https://download.invalid/same', filename: 'same.bin');
+    final callback = DownloadManager.downloadWithProgressCallback(
+      url: 'https://download.invalid/same', filename: 'same.bin',
+      onProgress: (_, __, ___) {},
+      onComplete: (path) { callbackPath = path; },
+      onError: (error) { fail(error); });
+    await ready.future;
+    final active = DownloadManager.activeTasks.single;
+    expect(await DownloadManager.deleteFile(active.filename), isFalse);
+    expect(await DownloadManager.clearDownloadDirectory(), isTrue);
+    final pendingFiles = await directory.list().toList();
+    expect(pendingFiles.length, 2);
+    expect(pendingFiles.map((file) => file.path).toSet().length, 2);
+    releaseBodies.complete();
+    expect(await background, isTrue);
+    expect(await callback, callbackPath);
+    expect(callbackPath, isNot(active.filePath));
+    expect(await File(active.filePath).readAsBytes(), [1, 2, 3]);
+    expect(await File(callbackPath!).readAsBytes(), [1, 2, 3]);
+    expect(await DownloadManager.clearDownloadDirectory(), isTrue);
+    expect(await directory.list().isEmpty, isTrue);
   });
 
   test('four streams interleave batches with exact bytes at every offset',
