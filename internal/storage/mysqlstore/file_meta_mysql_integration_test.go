@@ -13,11 +13,12 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// TestMySQLV3MetadataIntegration runs only against an explicitly supplied MySQL
+// newMySQLIntegrationStore runs only against an explicitly supplied MySQL
 // instance. The DSN account needs CREATE/DROP DATABASE privileges: each run owns
 // a separate database so the destructive old-schema migration case cannot alter
 // another test's tables. No Store flush/cleanup goroutines are started.
-func TestMySQLV3MetadataIntegration(t *testing.T) {
+func newMySQLIntegrationStore(t *testing.T) (context.Context, *Store, string) {
+	t.Helper()
 	dsn := os.Getenv("MYSQL_TEST_DSN")
 	if dsn == "" {
 		t.Skip("MYSQL_TEST_DSN not set")
@@ -31,30 +32,36 @@ func TestMySQLV3MetadataIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
+	t.Cleanup(func() { _ = admin.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	database := fmt.Sprintf("alist_v3_test_%d", time.Now().UnixNano())
 	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+database+"` CHARACTER SET utf8mb4"); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
 		if _, err := admin.ExecContext(cleanupCtx, "DROP DATABASE `"+database+"`"); err != nil {
 			t.Errorf("cleanup isolated database: %v", err)
 		}
-	}()
+	})
 	cfg.DBName = database
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 	s := &Store{db: db}
 	if err := s.ensureSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
+	return ctx, s, database
+}
+
+func TestMySQLV3MetadataIntegration(t *testing.T) {
+	ctx, s, database := newMySQLIntegrationStore(t)
+	db := s.db
 	write := func(record FileMetaRecord) {
 		t.Helper()
 		record.KeyHash = KeyHash(record.ProviderHost, record.OriginalPath)
