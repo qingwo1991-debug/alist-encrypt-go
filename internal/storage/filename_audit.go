@@ -2,8 +2,10 @@ package storage
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path"
 	"strings"
 	"time"
 
@@ -34,6 +36,23 @@ type FilenameAuditPage struct {
 	Scanned int                `json:"scanned"`
 }
 
+// validFilenameAuditRecord follows the existing v1 reservation writer shape,
+// not media/container geometry or a new reservation schema. Unknown status/schema
+// evidence is not silently filtered into an apparently complete empty export.
+func validFilenameAuditRecord(k []byte, r FilenameRecord) bool {
+	if !validFilenameScope(string(k)) || !bytes.Equal(k, filenameKey(r.Origin, r.EncryptedPath)) {
+		return false
+	}
+	if !validFilenameOrigin(r.Origin) || !validFilenamePath(r.EncryptedPath) || !validFilenamePath(r.OriginalPath) || r.DisplayName == "" || r.DisplayName == "." || r.DisplayName == ".." || path.Base(r.DisplayName) != r.DisplayName || strings.ContainsAny(r.DisplayName, "\x00\r\n\\") || !validFilenameScope(r.AuthScope) || !validFilenameScope(r.RuleFingerprint) || r.CiphertextSize < 0 {
+		return false
+	}
+	token, err := hex.DecodeString(r.Token)
+	if err != nil || len(token) != 16 || r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() || r.UpdatedAt.Before(r.CreatedAt) {
+		return false
+	}
+	return r.Status == FilenamePending || r.Status == FilenameFailed || r.Status == FilenameComplete
+}
+
 // FilenameAudit reads a single consistent Bolt view. Pagination is live, not a
 // cross-request snapshot. Scan work as well as response size is bounded.
 func (s *Store) FilenameAudit(q FilenameAuditQuery) (FilenameAuditPage, error) {
@@ -46,10 +65,16 @@ func (s *Store) FilenameAudit(q FilenameAuditQuery) (FilenameAuditPage, error) {
 	}
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(filenameReservations)
+		idx := tx.Bucket(filenameOriginalIndex)
 		if b == nil {
+			if idx != nil {
+				k, _ := idx.Cursor().First()
+				if k != nil {
+					return errors.New("invalid filename audit record")
+				}
+			}
 			return nil
 		}
-		idx := tx.Bucket(filenameOriginalIndex)
 		c := b.Cursor()
 		k, v := c.First()
 		if q.After != "" {
@@ -61,7 +86,7 @@ func (s *Store) FilenameAudit(q FilenameAuditQuery) (FilenameAuditPage, error) {
 		for ; k != nil; k, v = c.Next() {
 			out.Scanned++
 			var r FilenameRecord
-			if err := json.Unmarshal(v, &r); err != nil {
+			if err := json.Unmarshal(v, &r); err != nil || !validFilenameAuditRecord(k, r) {
 				return errors.New("invalid filename audit record")
 			}
 			if r.Origin == q.Origin && (q.Prefix == "/" || r.EncryptedPath == q.Prefix || strings.HasPrefix(r.EncryptedPath, q.Prefix+"/")) && !r.CreatedAt.Before(q.From) && r.CreatedAt.Before(q.Until) {
@@ -88,7 +113,11 @@ func (s *Store) FilenameAudit(q FilenameAuditQuery) (FilenameAuditPage, error) {
 		}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		// Never return partial names or an unusable continuation with corruption.
+		return FilenameAuditPage{Records: []FilenameAuditRow{}}, err
+	}
+	return out, nil
 }
 
 var filenameChecks = []byte("filename_management_checks_v1")

@@ -92,9 +92,89 @@ func TestFilenameAuditSensitiveJWTCurrentUserAndDryRun(t *testing.T) {
 			t.Fatalf("secret in response: %s", w.Body.String())
 		}
 	}
+	other := rec
+	other.EncryptedPath = "/enc/second.bin"
+	other.OriginalPath = "/enc/second original.mp4"
+	if _, err = files.ReserveFilename(other); err != nil {
+		t.Fatal(err)
+	}
+	first := invoke("GET", values.Encode(), token, false)
+	var firstPage struct {
+		Next string `json:"next_cursor"`
+	}
+	if err = json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil || first.Code != 200 || firstPage.Next == "" {
+		t.Fatal("expected actual handler continuation")
+	}
+	clone := func() url.Values {
+		v := url.Values{}
+		for k, x := range values {
+			v[k] = append([]string(nil), x...)
+		}
+		v.Set("cursor", firstPage.Next)
+		return v
+	}
+	if continued := invoke("GET", clone().Encode(), token, false); continued.Code != 200 {
+		t.Fatal("same-scope continuation rejected")
+	}
+	for _, tc := range []struct{ key, value string }{
+		{"path_prefix", "/different"}, {"from", now.Add(-2 * time.Hour).Format(time.RFC3339Nano)},
+		{"until", now.Add(2 * time.Hour).Format(time.RFC3339Nano)}, {"limit", "2"}, {"include_names", "true"},
+		{"version", "2"}, {"sensitive", "false"},
+	} {
+		t.Run("cursor-"+tc.key, func(t *testing.T) {
+			v := clone()
+			v.Set(tc.key, tc.value)
+			if got := invoke("GET", v.Encode(), token, false); got.Code != 400 {
+				t.Fatalf("cursor scope accepted: %d", got.Code)
+			}
+		})
+	}
+	if got := invoke("POST", clone().Encode(), token, true); got.Code != 400 {
+		t.Fatal("query cursor accepted for dry-run")
+	}
+	if err = s.SetJSON(storage.BucketUsers, "other-manager", dao.User{Username: "other-manager", PasswordHash: "nonempty-test-hash"}); err != nil {
+		t.Fatal(err)
+	}
+	otherToken, e := auth.NewJWTAuth(cfg.JWTSecret, time.Hour).GenerateToken("other-manager")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got := invoke("GET", clone().Encode(), otherToken, false); got.Code != 400 {
+		t.Fatal("cursor accepted for other current management user")
+	}
+	cfg.JWTSecret = "rotated-audit-secret"
+	rotatedToken, e := auth.NewJWTAuth(cfg.JWTSecret, time.Hour).GenerateToken("manager")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got := invoke("GET", clone().Encode(), rotatedToken, false); got.Code != 400 {
+		t.Fatal("cursor accepted after secret rotation")
+	}
+	cfg.JWTSecret = "audit-test-secret"
+	originalOrigin := cfg.AlistServer.ServerHost
+	cfg.AlistServer.ServerHost = "different-upstream.invalid"
+	if got := invoke("GET", clone().Encode(), token, false); got.Code != 400 {
+		t.Fatal("cursor accepted for changed upstream")
+	}
+	cfg.AlistServer.ServerHost = originalOrigin
+	if err = s.SetJSON(storage.BucketUsers, "manager", dao.User{Username: "manager", PasswordHash: "changed-test-hash"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := invoke("GET", clone().Encode(), token, false); got.Code != 400 {
+		t.Fatal("cursor accepted after persistent password hash change")
+	}
+	if err = s.SetJSON(storage.BucketUsers, "manager", dao.User{Username: "manager", PasswordHash: "nonempty-test-hash"}); err != nil {
+		t.Fatal(err)
+	}
+	tooWide := clone()
+	tooWide.Del("cursor")
+	tooWide.Set("until", now.Add(32*24*time.Hour).Format(time.RFC3339Nano))
+	if got := invoke("GET", tooWide.Encode(), token, false); got.Code != 400 {
+		t.Fatal("over-31-day interval accepted")
+	}
 	values.Set("include_names", "true")
 	w = invoke("GET", values.Encode(), token, false)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), rec.OriginalPath) {
+	if w.Code != 200 || (!strings.Contains(w.Body.String(), rec.OriginalPath) && !strings.Contains(w.Body.String(), other.OriginalPath)) {
 		t.Fatalf("names %d %s", w.Code, w.Body.String())
 	}
 	w = invoke("POST", values.Encode(), token, true)
