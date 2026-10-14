@@ -37,6 +37,23 @@ func AcquireEmbeddedLease() (*EmbeddedLease, error) {
 	return l, nil
 }
 func (l *EmbeddedLease) Context() context.Context { return l.ctx }
+
+// AuthorizeBootstrap rejects ownerless CLI/library entrypoints while an
+// embedded generation holds global state. No implicit current-owner adoption.
+func AuthorizeBootstrap(owner *EmbeddedLease) error {
+	embeddedOwner.Lock()
+	defer embeddedOwner.Unlock()
+	if embeddedOwner.lease == nil {
+		if owner != nil {
+			return errors.New("embedded_instance_not_owner")
+		}
+		return nil
+	}
+	if owner != embeddedOwner.lease {
+		return errors.New("embedded_instance_bootstrap_owned")
+	}
+	return nil
+}
 func (l *EmbeddedLease) Publish(factory func(DriverRouteIdentity) (http.RoundTripper, func())) error {
 	embeddedOwner.Lock()
 	defer embeddedOwner.Unlock()
@@ -102,6 +119,26 @@ func BootstrapStorageContext(init context.Context, driver, provider, storage str
 	}
 	init = context.WithValue(init, storageSessionKey{}, session)
 	return WithDriverRouteIdentity(init, identity)
+}
+
+// JoinThenCleanup keeps the capability fence held through drained-map cleanup
+// and global release. The callback must not reenter lease operations.
+func (l *EmbeddedLease) JoinThenCleanup(cleanup func()) error {
+	embeddedOwner.Lock()
+	defer embeddedOwner.Unlock()
+	if l == nil || embeddedOwner.lease != l || !l.stopping {
+		return errors.New("embedded_instance_not_stopped_owner")
+	}
+	driverFactoryMu.Lock()
+	defer driverFactoryMu.Unlock()
+	if ownedDriverClients != 0 {
+		return fmt.Errorf("embedded_instance_pending: %d driver clients/bodies have not joined", ownedDriverClients)
+	}
+	cleanup()
+	l.cancel()
+	driverFactory = nil
+	embeddedOwner.lease = nil
+	return nil
 }
 
 func (l *EmbeddedLease) PendingEpoch() uint64 {

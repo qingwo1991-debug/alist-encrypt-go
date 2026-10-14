@@ -19,17 +19,47 @@ import (
 const StorageInitTimeout = 3 * time.Second
 
 var storageLoadWG sync.WaitGroup
+var storageLoadAdmission struct {
+	sync.Mutex
+	sealed bool
+}
 
-// JoinStorageLoads waits for actual Init calls, not merely their deadline.
-func JoinStorageLoads() { storageLoadWG.Wait() }
+// PrepareStorageLoadGeneration is called only after the prior generation joined.
+func PrepareStorageLoadGeneration() {
+	storageLoadAdmission.Lock()
+	defer storageLoadAdmission.Unlock()
+	storageLoadAdmission.sealed = false
+}
+
+// JoinStorageLoads seals admission before waiting, so Add cannot race Wait.
+// It waits for actual Init calls, not merely their deadline.
+func JoinStorageLoads() {
+	storageLoadAdmission.Lock()
+	storageLoadAdmission.sealed = true
+	storageLoadAdmission.Unlock()
+	storageLoadWG.Wait()
+}
 
 func LoadStorages() {
+	storageLoadAdmission.Lock()
+	if storageLoadAdmission.sealed {
+		storageLoadAdmission.Unlock()
+		return
+	}
+	storageLoadWG.Add(1)
+	storageLoadAdmission.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			storageLoadWG.Done()
+		}
+	}()
 	storages, err := db.GetEnabledStorages()
 	if err != nil {
 		utils.Log.Fatalf("failed get enabled storages: %+v", err)
 	}
 	op.PrepareStorageLoads(storages)
-	storageLoadWG.Add(1)
+	handedOff = true
 	go func(storages []model.Storage) {
 		defer storageLoadWG.Done()
 		// 并行加载：每个盘一个 goroutine，并带超时 context 隔离。

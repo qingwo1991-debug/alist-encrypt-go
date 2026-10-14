@@ -27,6 +27,23 @@ import (
 // so it should actually be a storage, just wrapped by the driver
 var storagesMap generic_sync.MapOf[string, driver.Driver]
 
+// ResetOwnedStorageGeneration is legal only after endpoints/loaders/Drop and
+// managed bodies joined. The lease holds the ownership fence through cleanup.
+func ResetOwnedStorageGeneration(owner *internalnet.EmbeddedLease) error {
+	return owner.JoinThenCleanup(func() {
+		storagesMap.Range(func(mount string, d driver.Driver) bool {
+			Cache.DeleteDirectoryTree(d, "/")
+			Cache.InvalidateStorageDetails(d)
+			storagesMap.Delete(mount)
+			return true
+		})
+		balanceMap.Range(func(mount string, _ int) bool { balanceMap.Delete(mount); return true })
+		readiness.Lock()
+		readiness.mounts = make(map[string]*storageReadiness)
+		readiness.Unlock()
+	})
+}
+
 func GetAllStorages() []driver.Driver {
 	return storagesMap.Values()
 }

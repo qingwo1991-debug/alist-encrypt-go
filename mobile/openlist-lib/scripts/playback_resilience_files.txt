@@ -1,5 +1,12 @@
+cmd/instance_owner_test.go
+cmd/common.go
+cmd/server.go
 internal/bootstrap/run.go
 internal/bootstrap/storage.go
+internal/bootstrap/storage_generation_test.go
+internal/bootstrap/instance_owner_test.go
+internal/bootstrap/endpoint_generation.go
+internal/bootstrap/endpoint_generation_test.go
 internal/fs/list.go
 internal/fs/readiness_navigation_test.go
 internal/op/fs.go
@@ -7,6 +14,7 @@ internal/op/path.go
 internal/op/storage.go
 internal/op/readiness.go
 internal/op/readiness_test.go
+internal/op/storage_generation_test.go
 pkg/singleflight/singleflight.go
 pkg/singleflight/context_test.go
 server/handles/storage.go

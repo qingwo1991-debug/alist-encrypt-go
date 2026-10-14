@@ -68,7 +68,9 @@ func Init(event Event, cb LogCallback) (err error) {
 		bootstrap.RemoveEndpointShutdownHook(shutdownHookUuid)
 		shutdownHookUuid = ""
 	}
-	bootstrap.Init()
+	if err = bootstrap.InitOwned(lease); err != nil {
+		return err
+	}
 	startFailedHookUuid = bootstrap.RegisterEndpointStartFailedHook(event.OnStartError)
 	shutdownHookUuid = bootstrap.RegisterEndpointShutdownHook(event.OnShutdown)
 	logFormatter = &internal.MyFormatter{
@@ -142,9 +144,9 @@ func StartEmbedded() error {
 	if err := encrypt.PublishDriverRouteFactory(embeddedLease, config); err != nil {
 		return err
 	}
+	bootstrap.PrepareStorageLoadGeneration()
 	embeddedStarted = true
-	bootstrap.Start()
-	return nil
+	return bootstrap.StartOwned(embeddedLease)
 }
 
 func publishEmbeddedFactory(config *encrypt.ProxyConfig) {
@@ -178,9 +180,8 @@ func Shutdown(timeout int64) (err error) {
 	}
 	timeoutDuration := time.Duration(timeout) * time.Millisecond
 	if embeddedStarted {
-		bootstrap.Shutdown(timeoutDuration)
-		if bootstrap.ShutdownDrainError != nil {
-			return bootstrap.ShutdownDrainError
+		if err := bootstrap.ShutdownOwned(embeddedLease, timeoutDuration); err != nil {
+			return err
 		}
 	}
 	bootstrap.JoinStorageLoads()
@@ -192,7 +193,7 @@ func Shutdown(timeout int64) (err error) {
 		}
 	}
 	ForceDBSync()
-	if err := embeddedLease.Release(); err != nil {
+	if err := op.ResetOwnedStorageGeneration(embeddedLease); err != nil {
 		return err
 	}
 	embeddedLease = nil

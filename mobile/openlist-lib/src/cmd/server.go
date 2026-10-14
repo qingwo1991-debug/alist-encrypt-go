@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -17,9 +18,15 @@ var ServerCmd = &cobra.Command{
 	Long: `Start the server at the specified address
 the address is defined in config file`,
 	Run: func(cmd *cobra.Command, args []string) {
-		bootstrap.Init()
+		if err := bootstrap.Init(); err != nil {
+			log.Error(err)
+			return
+		}
 		defer bootstrap.Release()
-		bootstrap.Start()
+		if err := bootstrap.Start(); err != nil {
+			log.Error(err)
+			return
+		}
 		// Wait for interrupt signal to gracefully shutdown the server with
 		// a timeout of 1 second.
 		quit := make(chan os.Signal, 1)
