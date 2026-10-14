@@ -151,7 +151,7 @@ jobs:
       - name: Verify V3 metadata on real MySQL
         env:
           MYSQL_TEST_DSN: root:integration-only@tcp(127.0.0.1:3306)/metadata_test?parseTime=true
-        run: go test -mod=readonly -timeout 5m -run '^TestMySQLV3MetadataIntegration$' -v ./internal/storage/mysqlstore
+        run: go test -mod=readonly -timeout 5m -run '^TestMySQL(V3Metadata|ListFileMeta)Integration$' -v ./internal/storage/mysqlstore
 
   test-mobile-go:
     runs-on: ubuntu-latest
