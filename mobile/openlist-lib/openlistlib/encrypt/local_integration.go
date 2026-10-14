@@ -18,7 +18,7 @@ func (p *ProxyServer) initLocalStore() {
 	baseDir := filepath.Dir(p.config.ConfigPath)
 	store, err := newLocalStore(baseDir)
 	if err != nil {
-		log.Warnf("[%s] Local store init failed: %v", internal.TagCache, err)
+		log.Errorf("[%s] Local persistence disabled: initialization/pre-migration snapshot failed (no schema migration attempted after snapshot failure): %v", internal.TagCache, err)
 		return
 	}
 	p.localStore = store
