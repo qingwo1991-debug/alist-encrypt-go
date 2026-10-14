@@ -27,22 +27,73 @@ func WithStrictFreshnessCheck(ctx context.Context, revision uint64, target strin
 // This check rejects superseded writes; it is not atomic transfer revocation.
 type strictFreshnessWriter struct {
 	http.ResponseWriter
-	proxy   *StreamProxy
-	request *http.Request
-	target  string
+	proxy     *StreamProxy
+	request   *http.Request
+	target    string
+	committed bool
+	status    int
+	failure   error
 }
 
+func (w *strictFreshnessWriter) deny() {
+	w.failure = fmt.Errorf("strict freshness superseded before response publication")
+	if w.committed {
+		return
+	} // already-started transfers cannot change status
+	// A silent dropped HEAD WriteHeader becomes an implicit HTTP 200. Commit
+	// an explicit empty failure instead, removing all stale geometry/evidence.
+	for key := range w.Header() {
+		w.Header().Del(key)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", "0")
+	w.status = http.StatusServiceUnavailable
+	w.committed = true
+	w.ResponseWriter.WriteHeader(w.status)
+}
 func (w *strictFreshnessWriter) WriteHeader(status int) {
-	if w.proxy.strictFreshnessFailure(w.request, w.target) != nil {
+	if w.failure != nil {
 		return
 	}
+	if w.proxy.strictFreshnessFailure(w.request, w.target) != nil {
+		w.deny()
+		return
+	}
+	if w.committed {
+		return
+	}
+	w.committed = true
+	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
 func (w *strictFreshnessWriter) Write(data []byte) (int, error) {
+	if w.failure != nil {
+		return 0, w.failure
+	}
 	if w.proxy.strictFreshnessFailure(w.request, w.target) != nil {
-		return 0, fmt.Errorf("strict freshness superseded before response publication")
+		w.deny()
+		return 0, w.failure
+	}
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(data)
+}
+func finishStrictFreshnessOutcome(w http.ResponseWriter, out *StreamOutcome) *StreamOutcome {
+	guard, ok := w.(*strictFreshnessWriter)
+	if !ok || guard.failure == nil {
+		return out
+	}
+	if out == nil {
+		out = &StreamOutcome{}
+	}
+	out.Err = guard.failure
+	out.FailureReason = "strict_freshness_unconfirmed"
+	out.Retryable = false
+	out.NoLearning = true
+	out.ResponseStarted = guard.committed
+	out.StatusCode = guard.status
+	return out
 }
 func (s *StreamProxy) guardStrictFreshnessWriter(w http.ResponseWriter, r *http.Request, target string) http.ResponseWriter {
 	_, checked := r.Context().Value(strictFreshnessKey{}).(strictFreshnessCheck)

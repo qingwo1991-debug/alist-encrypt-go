@@ -31,11 +31,12 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 }
 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
-func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) (outcome *StreamOutcome) {
 	if failure := s.strictFreshnessFailure(r, targetURL); failure != nil {
 		return failure
 	}
 	w = s.guardStrictFreshnessWriter(w, r, targetURL)
+	defer func() { outcome = finishStrictFreshnessOutcome(w, outcome) }()
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := r.Header.Get("Range")
@@ -151,11 +152,12 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 }
 
 // ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
-func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) (outcome *StreamOutcome) {
 	if failure := s.strictFreshnessFailure(req, targetURL); failure != nil {
 		return failure
 	}
 	w = s.guardStrictFreshnessWriter(w, req, targetURL)
+	defer func() { outcome = finishStrictFreshnessOutcome(w, outcome) }()
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := req.Header.Get("Range")
