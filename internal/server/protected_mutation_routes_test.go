@@ -11,6 +11,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/handler"
+	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -31,7 +32,7 @@ func TestProtectedMutationRealRouteFallback(t *testing.T) {
 	cfg.AlistServer.FilenameWriteLimits = map[string]int{"/mount/protected": 100}
 	p := handler.NewProxyHandler(cfg, nil, nil, nil, nil, nil)
 	defer p.Stop()
-	d := handler.NewWebDAVHandler(cfg, nil, nil, nil, nil, nil, nil)
+	d := handler.NewWebDAVHandler(cfg, proxy.NewStreamProxy(cfg), nil, nil, nil, nil, nil)
 	defer d.Stop()
 	s := &Server{cfg: cfg}
 	r := gin.New()
