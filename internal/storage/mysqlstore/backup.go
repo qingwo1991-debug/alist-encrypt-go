@@ -2,6 +2,7 @@ package mysqlstore
 
 import (
 	"bufio"
+	byteutil "bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -14,7 +15,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -25,9 +25,10 @@ import (
 )
 
 var (
-	ErrBackupUnsupported   = errors.New("mysql backup unsupported")
-	ErrBackupSchemaChanged = errors.New("mysql backup schema changed")
-	ErrBackupLimit         = errors.New("mysql backup byte limit exceeded")
+	ErrBackupUnsupported        = errors.New("mysql backup unsupported")
+	ErrBackupSchemaChanged      = errors.New("mysql backup schema changed")
+	ErrBackupLimit              = errors.New("mysql backup byte limit exceeded")
+	ErrBackupPublishedUncertain = errors.New("mysql backup published but directory durability unconfirmed")
 )
 
 // BackupOptions requires explicit storage and time budgets. Directory must be an
@@ -84,7 +85,80 @@ type backupRecord struct {
 	Manifest *BackupManifest `json:"manifest,omitempty"`
 }
 
-var autoIncrementCounter = regexp.MustCompile(` AUTO_INCREMENT=\d+`)
+// normalizeBackupDDL removes only SHOW CREATE's top-level table option counter.
+// It never rewrites quoted strings/identifiers, column definitions, partition
+// clauses or comments. Unknown/noncanonical syntax is preserved conservatively.
+func normalizeBackupDDL(ddl string) string {
+	depth, bodySeen, options := 0, false, false
+	for i := 0; i < len(ddl); {
+		switch ddl[i] {
+		case '\'', '"', '`':
+			quote := ddl[i]
+			i++
+			for i < len(ddl) {
+				if ddl[i] == '\\' {
+					i += 2
+					continue
+				}
+				if ddl[i] == quote {
+					if i+1 < len(ddl) && ddl[i+1] == quote {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		case '/':
+			if i+1 < len(ddl) && ddl[i+1] == '*' {
+				end := strings.Index(ddl[i+2:], "*/")
+				if end < 0 {
+					return ddl
+				}
+				i += end + 4
+				continue
+			}
+		case '#':
+			end := strings.IndexByte(ddl[i:], '\n')
+			if end < 0 {
+				return ddl
+			}
+			i += end + 1
+			continue
+		case '-':
+			if i+2 < len(ddl) && ddl[i+1] == '-' && ddl[i+2] <= ' ' {
+				end := strings.IndexByte(ddl[i:], '\n')
+				if end < 0 {
+					return ddl
+				}
+				i += end + 1
+				continue
+			}
+		case '(':
+			depth++
+			bodySeen = true
+		case ')':
+			depth--
+			if bodySeen && depth == 0 {
+				options = true
+			}
+		}
+		if options && depth == 0 && ddl[i] == ' ' && strings.HasPrefix(ddl[i+1:], "AUTO_INCREMENT=") {
+			end := i + 1 + len("AUTO_INCREMENT=")
+			start := end
+			for end < len(ddl) && ddl[end] >= '0' && ddl[end] <= '9' {
+				end++
+			}
+			if end > start && (end == len(ddl) || ddl[end] == ' ' || ddl[end] == '\n' || ddl[end] == ';') {
+				return ddl[:i] + ddl[end:]
+			}
+		}
+		i++
+	}
+	return ddl
+}
 
 func quoteBackupIdentifier(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
 
@@ -127,7 +201,7 @@ func backupInventory(ctx context.Context, tx *sql.Tx) ([]backupTable, error) {
 			return nil, err
 		}
 		// A concurrent insert's counter is not a schema mutation.
-		tables[i].DDL = autoIncrementCounter.ReplaceAllString(ddl, "")
+		tables[i].DDL = normalizeBackupDDL(ddl)
 	}
 	return tables, nil
 }
@@ -146,7 +220,11 @@ func BackupMySQL(ctx context.Context, dsn string, opt BackupOptions) (BackupMani
 }
 
 // afterPin is a synchronous fixture seam, never a runtime/global hook.
-func backupMySQL(ctx context.Context, dsn string, opt BackupOptions, afterPin func() error) (manifest BackupManifest, err error) {
+func backupMySQL(ctx context.Context, dsn string, opt BackupOptions, afterPin func() error) (BackupManifest, error) {
+	return backupMySQLHooks(ctx, dsn, opt, afterPin, nil)
+}
+
+func backupMySQLHooks(ctx context.Context, dsn string, opt BackupOptions, afterPin, afterRead func() error) (manifest BackupManifest, err error) {
 	if ctx == nil || opt.MaxBytes <= 0 || opt.Timeout <= 0 || opt.Name == "" || filepath.Base(opt.Name) != opt.Name || opt.Name == "." || opt.Name == ".." || strings.ContainsAny(opt.Name, "/\\") {
 		return manifest, errors.New("invalid mysql backup options")
 	}
@@ -317,14 +395,30 @@ func backupMySQL(ctx context.Context, dsn string, opt BackupOptions, afterPin fu
 			return manifest, e
 		}
 	}
-	after, err := backupInventory(ctx, tx)
+	if err = tx.Commit(); err != nil {
+		return manifest, err
+	}
+	if afterRead != nil {
+		if err = afterRead(); err != nil {
+			return manifest, err
+		}
+	}
+	// MySQL 8's transactional data dictionary can repeat the initial inventory
+	// inside the export read view. Reuse the dedicated connection only AFTER
+	// committing all snapshot reads, with a fresh READ COMMITTED metadata tx.
+	metadataTx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted, ReadOnly: true})
+	if err != nil {
+		return manifest, err
+	}
+	defer metadataTx.Rollback()
+	after, err := backupInventory(ctx, metadataTx)
 	if err != nil {
 		return manifest, err
 	}
 	if backupSchemaHash(after) != manifest.SchemaSHA256 {
 		return manifest, ErrBackupSchemaChanged
 	}
-	if err = tx.Commit(); err != nil {
+	if err = metadataTx.Commit(); err != nil {
 		return manifest, err
 	}
 	manifest.PayloadSHA256 = hex.EncodeToString(hash.Sum(nil))
@@ -351,11 +445,11 @@ func backupMySQL(ctx context.Context, dsn string, opt BackupOptions, afterPin fu
 	} // atomic no-replace publication.
 	directory, err := os.Open(dir)
 	if err != nil {
-		return manifest, err
+		return manifest, fmt.Errorf("%w: %v", ErrBackupPublishedUncertain, err)
 	}
 	defer directory.Close()
 	if err = directory.Sync(); err != nil {
-		return manifest, fmt.Errorf("backup published but directory durability unconfirmed: %w", err)
+		return manifest, fmt.Errorf("%w: %v", ErrBackupPublishedUncertain, err)
 	}
 	return manifest, nil
 }
@@ -422,14 +516,22 @@ func ValidateMySQLBackup(ctx context.Context, path string, maxBytes int64) (Back
 			return result, errors.New("incomplete mysql backup")
 		}
 		var rec backupRecord
-		if err = json.Unmarshal(line, &rec); err != nil {
+		decoder := json.NewDecoder(byteutil.NewReader(line))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&rec); err != nil {
 			return result, err
 		}
+		if err = decoder.Decode(new(any)); err != io.EOF {
+			return result, errors.New("trailing JSON value")
+		}
 		if rec.Kind == "manifest" {
-			if rec.Manifest == nil {
+			if rec.Manifest == nil || rec.Table != nil || rec.Columns != nil || rec.Values != nil {
 				return result, errors.New("missing manifest")
 			}
 			result = *rec.Manifest
+			if err = validateBackupManifest(result); err != nil {
+				return result, err
+			}
 			if result.Version != 1 || result.Component != "root-mysql-metadata" || result.Rows != rows || result.Tables != len(tables) || result.PayloadBytes != bytes || result.PayloadSHA256 != hex.EncodeToString(hash.Sum(nil)) || result.SchemaSHA256 != backupSchemaHash(tables) {
 				return result, errors.New("mysql backup manifest mismatch")
 			}
@@ -440,7 +542,7 @@ func ValidateMySQLBackup(ctx context.Context, path string, maxBytes int64) (Back
 		}
 		switch rec.Kind {
 		case "table":
-			if rec.Table == nil || rec.Table.Name == "" || !strings.EqualFold(rec.Table.Engine, "InnoDB") || len(rec.Columns) == 0 {
+			if rec.Table == nil || rec.Table.Name == "" || strings.TrimSpace(rec.Table.DDL) == "" || rec.Manifest != nil || rec.Values != nil || !strings.EqualFold(rec.Table.Engine, "InnoDB") || len(rec.Columns) == 0 {
 				return result, errors.New("invalid backup table")
 			}
 			for _, t := range tables {
@@ -448,10 +550,17 @@ func ValidateMySQLBackup(ctx context.Context, path string, maxBytes int64) (Back
 					return result, errors.New("duplicate backup table")
 				}
 			}
+			names := map[string]bool{}
+			for _, col := range rec.Columns {
+				if col.Name == "" || col.DatabaseType == "" || names[col.Name] {
+					return result, errors.New("invalid backup columns")
+				}
+				names[col.Name] = true
+			}
 			tables = append(tables, *rec.Table)
 			columns = len(rec.Columns)
 		case "row":
-			if columns == 0 || len(rec.Values) != columns {
+			if columns == 0 || len(rec.Values) != columns || rec.Table != nil || rec.Columns != nil || rec.Manifest != nil {
 				return result, errors.New("invalid backup row")
 			}
 			for _, v := range rec.Values {
@@ -467,6 +576,35 @@ func ValidateMySQLBackup(ctx context.Context, path string, maxBytes int64) (Back
 		bytes += int64(len(line))
 	}
 }
+func validateBackupManifest(m BackupManifest) error {
+	bad := errors.New("invalid mysql backup manifest contract")
+	if m.Version != 1 || m.Component != "root-mysql-metadata" || m.Consistency != "committed-transactions-only/repeatable-read-pinned" || m.Sensitive != "full-database-including-transfer-secrets" || m.Tables < 1 || m.Rows < 0 || m.PayloadBytes <= 0 || m.GoVersion == "" || m.ServerVersion == "" {
+		return bad
+	}
+	for _, digest := range []string{m.PayloadSHA256, m.SchemaSHA256} {
+		b, err := hex.DecodeString(digest)
+		if err != nil || len(b) != sha256.Size || hex.EncodeToString(b) != digest {
+			return bad
+		}
+	}
+	start, err := time.Parse(time.RFC3339Nano, m.StartedUTC)
+	if err != nil || !strings.HasSuffix(m.StartedUTC, "Z") {
+		return bad
+	}
+	finish, err := time.Parse(time.RFC3339Nano, m.FinishedUTC)
+	if err != nil || !strings.HasSuffix(m.FinishedUTC, "Z") || finish.Before(start) {
+		return bad
+	}
+	// Empty provenance is explicitly unknown; supplied provenance is a Git SHA.
+	if m.SourceCommit != "" {
+		b, e := hex.DecodeString(m.SourceCommit)
+		if e != nil || (len(b) != 20 && len(b) != 32) || hex.EncodeToString(b) != m.SourceCommit {
+			return bad
+		}
+	}
+	return nil
+}
+
 func validateBackupValue(v BackupValue) error {
 	var err error
 	switch v.Kind {

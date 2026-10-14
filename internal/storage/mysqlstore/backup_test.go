@@ -2,8 +2,11 @@ package mysqlstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +23,80 @@ func parseBackupFixtureDSN(dsn, database string) (string, error) {
 	}
 	cfg.DBName = database
 	return cfg.FormatDSN(), nil
+}
+
+func TestMySQLBackupDDLNormalization(t *testing.T) {
+	literal := "CREATE TABLE ` AUTO_INCREMENT=999` (`id` int AUTO_INCREMENT, `s` text DEFAULT ' AUTO_INCREMENT=123' COMMENT ' AUTO_INCREMENT=456') ENGINE=InnoDB AUTO_INCREMENT=42 COMMENT=' AUTO_INCREMENT=789'"
+	want := strings.Replace(literal, " ENGINE=InnoDB AUTO_INCREMENT=42", " ENGINE=InnoDB", 1)
+	if got := normalizeBackupDDL(literal); got != want {
+		t.Fatalf("literal rewritten: %q", got)
+	}
+	for _, ddl := range []string{
+		"CREATE TABLE `t` (`x` text DEFAULT 'escaped\\' AUTO_INCREMENT=123') ENGINE=InnoDB",
+		"CREATE TABLE `t` (`x` text DEFAULT 'double'' AUTO_INCREMENT=123') ENGINE=InnoDB COMMENT=' AUTO_INCREMENT=456'",
+		"CREATE TABLE `t` (`x` int) ENGINE=InnoDB /* AUTO_INCREMENT=123 */",
+	} {
+		if got := normalizeBackupDDL(ddl); got != ddl {
+			t.Fatalf("quoted/comment SQL changed: %q", got)
+		}
+	}
+}
+
+func TestMySQLBackupValidationContract(t *testing.T) {
+	table := backupTable{Name: "t", Engine: "InnoDB", DDL: "CREATE TABLE t (n BIGINT) ENGINE=InnoDB"}
+	col := BackupColumn{Name: "n", DatabaseType: "BIGINT"}
+	base := []backupRecord{{Kind: "table", Table: &table, Columns: []BackupColumn{col}}, {Kind: "row", Values: []BackupValue{{Kind: "int64", Value: "42"}}}}
+	makeFile := func(records []backupRecord, mutate func(*BackupManifest)) []byte {
+		var b []byte
+		for _, r := range records {
+			line, _ := json.Marshal(r)
+			b = append(b, line...)
+			b = append(b, '\n')
+		}
+		h := sha256.Sum256(b)
+		m := BackupManifest{Version: 1, Component: "root-mysql-metadata", Consistency: "committed-transactions-only/repeatable-read-pinned", Sensitive: "full-database-including-transfer-secrets", StartedUTC: "2026-01-01T00:00:00Z", FinishedUTC: "2026-01-01T00:00:01Z", GoVersion: "go-fixture", ServerVersion: "8.4", PayloadBytes: int64(len(b)), PayloadSHA256: hex.EncodeToString(h[:]), SchemaSHA256: backupSchemaHash([]backupTable{table}), Tables: 1, Rows: 1}
+		if mutate != nil {
+			mutate(&m)
+		}
+		line, _ := json.Marshal(backupRecord{Kind: "manifest", Manifest: &m})
+		return append(append(b, line...), '\n')
+	}
+	path := filepath.Join(t.TempDir(), "fixture.ndjson")
+	check := func(b []byte, wantOK bool) {
+		t.Helper()
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ValidateMySQLBackup(context.Background(), path, 1<<20)
+		if (err == nil) != wantOK {
+			t.Fatalf("validation success=%v err=%v", wantOK, err)
+		}
+	}
+	good := makeFile(base, nil)
+	check(good, true)
+	check(good[:len(good)-1], false) // truncated final line
+	badHash := append([]byte(nil), good...)
+	badHash = []byte(strings.Replace(string(badHash), "42", "43", 1))
+	check(badHash, false) // valid numeric JSON, independent digest mismatch
+	wrong := append([]backupRecord(nil), base...)
+	wrong[1].Values = []BackupValue{{Kind: "int64", Value: "not-an-integer"}}
+	check(makeFile(wrong, nil), false) // recomputed digest, invalid typed value
+	for _, mutate := range []func(*BackupManifest){func(m *BackupManifest) { m.Consistency = "unknown" }, func(m *BackupManifest) { m.Sensitive = "public" }, func(m *BackupManifest) { m.StartedUTC = "bad" }, func(m *BackupManifest) { m.SourceCommit = "not-a-sha" }, func(m *BackupManifest) { m.Tables = 0 }} {
+		check(makeFile(base, mutate), false)
+	}
+	unknown := []byte(strings.Replace(string(good), `"kind":"row"`, `"kind":"row","unknown":1`, 1))
+	check(unknown, false)
+	wrong = append([]backupRecord(nil), base...)
+	wrong[1].Table = &table
+	check(makeFile(wrong, nil), false)
+	badtable := table
+	badtable.DDL = ""
+	wrong = append([]backupRecord(nil), base...)
+	wrong[0].Table = &badtable
+	check(makeFile(wrong, nil), false)
+	wrong = append([]backupRecord(nil), base...)
+	wrong[0].Columns = []BackupColumn{col, col}
+	check(makeFile(wrong, nil), false)
 }
 
 func TestMySQLBackupTypedValues(t *testing.T) {
@@ -97,7 +174,7 @@ func TestMySQLBackupIntegration(t *testing.T) {
 	if err = os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	opt := BackupOptions{Directory: dir, Name: "good.ndjson", MaxBytes: 8 << 20, Timeout: 10 * time.Second, SourceCommit: "fixture-commit"}
+	opt := BackupOptions{Directory: dir, Name: "good.ndjson", MaxBytes: 8 << 20, Timeout: 10 * time.Second, SourceCommit: "0123456789abcdef0123456789abcdef01234567"}
 	m, err := backupMySQL(ctx, dsn, opt, func() error {
 		writer, e := s.db.BeginTx(ctx, nil)
 		if e != nil {
@@ -204,10 +281,44 @@ func TestMySQLBackupIntegration(t *testing.T) {
 		t.Fatal("cancel ignored")
 	}
 	opt.Name = "changed.ndjson"
-	if _, err = backupMySQL(ctx, dsn, opt, func() error { _, e := s.db.ExecContext(ctx, "CREATE TABLE ddl_added (id INT) ENGINE=InnoDB"); return e }); err == nil {
-		t.Fatal("schema drift published")
+	if _, err = backupMySQL(ctx, dsn, opt, func() error {
+		_, e := s.db.ExecContext(ctx, "CREATE TABLE ddl_added (id INT) ENGINE=InnoDB")
+		if e != nil {
+			t.Fatalf("fixture DDL failed: %v", e)
+		}
+		return nil
+	}); !errors.Is(err, ErrBackupSchemaChanged) {
+		t.Fatalf("schema drift not detected: %v", err)
 	}
 	exec("DROP TABLE ddl_added")
+	opt.Name = "midcancel.ndjson"
+	midctx, midcancel := context.WithCancel(ctx)
+	if _, err = backupMySQL(midctx, dsn, opt, func() error { midcancel(); return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("after-pin cancellation ignored: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(dir, opt.Name)); !os.IsNotExist(err) {
+		t.Fatal("mid-operation cancellation published")
+	}
+
+	exec("CREATE TABLE literal_fixture (id INT PRIMARY KEY AUTO_INCREMENT, s VARCHAR(128) DEFAULT ' AUTO_INCREMENT=123') ENGINE=InnoDB COMMENT=' AUTO_INCREMENT=123'")
+	opt.Name = "literal.ndjson"
+	if _, err = backupMySQLHooks(ctx, dsn, opt, nil, func() error {
+		_, e := s.db.ExecContext(ctx, "ALTER TABLE literal_fixture COMMENT=' AUTO_INCREMENT=456'")
+		return e
+	}); !errors.Is(err, ErrBackupSchemaChanged) {
+		t.Fatalf("literal schema change not detected: %v", err)
+	}
+	opt.Name = "counter.ndjson"
+	if _, err = backupMySQL(ctx, dsn, opt, func() error {
+		_, e := s.db.ExecContext(ctx, "INSERT INTO literal_fixture (s) VALUES ('new')")
+		return e
+	}); err != nil {
+		t.Fatalf("ordinary counter change rejected: %v", err)
+	}
+	if err = os.Remove(filepath.Join(dir, opt.Name)); err != nil {
+		t.Fatal(err)
+	}
+	exec("DROP TABLE literal_fixture")
 	exec("CREATE TABLE invisible_fixture (id INT, hidden INT INVISIBLE) ENGINE=InnoDB")
 	opt.Name = "invisible.ndjson"
 	if _, err = BackupMySQL(ctx, dsn, opt); err == nil {
