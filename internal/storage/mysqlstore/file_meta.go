@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"time"
 )
 
 type FileMetaFilter struct {
-	ProviderHost string
-	OriginalPath string
-	PathPrefix   string
-	UpdatedAfter time.Time
-	CursorKey    string
-	Limit        int
-	Offset       int
+	ProviderHost  string
+	OriginalPath  string
+	PathPrefix    string
+	UpdatedAfter  time.Time // Inclusive lower bound, independent of the cursor.
+	CursorKey     string
+	CursorTime    time.Time // Exclusive (CursorTime, CursorKey) lower bound.
+	LegacySeconds bool      // Compare and order timestamps at whole-second precision.
+	Limit         int       // Explicit fetch count; callers include any lookahead row.
+	Offset        int
 }
 
 func (s *Store) GetFileMeta(ctx context.Context, providerKey, originalPath string) (*FileMetaRecord, bool, error) {
@@ -133,34 +137,56 @@ func (s *Store) CleanupFileMeta(ctx context.Context, cutoff time.Time) error {
 }
 
 func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]FileMetaRecord, error) {
-	if s == nil {
-		return nil, nil
+	if s == nil || s.db == nil {
+		return nil, errors.New("mysqlstore: file metadata store is unavailable")
+	}
+
+	cursorTime := filter.CursorTime
+	if filter.LegacySeconds && cursorTime.IsZero() {
+		cursorTime = filter.UpdatedAfter
+	}
+	if filter.CursorKey != "" && cursorTime.IsZero() {
+		return nil, errors.New("mysqlstore: file metadata cursor key requires a cursor timestamp")
+	}
+
+	// DATE_FORMAT floors fractional seconds, unlike casts to DATETIME(0),
+	// which may round. Use the same expression for every legacy predicate and
+	// ordering term so rows within one second are ordered only by their key.
+	timeColumn := "updated_at"
+	timePlaceholder := "?"
+	timeArg := func(t time.Time) interface{} { return t }
+	if filter.LegacySeconds {
+		timeColumn = "DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')"
+		timePlaceholder = "DATE_FORMAT(?, '%Y-%m-%d %H:%i:%s')"
+		// Keep time.Time arguments so the driver applies its configured Loc.
+		timeArg = func(t time.Time) interface{} { return t.Truncate(time.Second) }
 	}
 
 	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE is_active=1"
 	args := []interface{}{}
 
 	if filter.ProviderHost != "" {
-		query += " AND provider_host = ?"
+		query += " AND BINARY provider_host = BINARY ?"
 		args = append(args, filter.ProviderHost)
 	}
 	if filter.OriginalPath != "" {
-		query += " AND original_path = ?"
+		query += " AND BINARY original_path = BINARY ?"
 		args = append(args, filter.OriginalPath)
 	}
 	if filter.PathPrefix != "" {
-		query += " AND original_path LIKE ?"
-		args = append(args, filter.PathPrefix+"%")
+		query += " AND BINARY original_path LIKE BINARY ? ESCAPE '='"
+		prefix := strings.NewReplacer("=", "==", "%", "=%", "_", "=_").Replace(filter.PathPrefix)
+		args = append(args, prefix+"%")
 	}
 	if !filter.UpdatedAfter.IsZero() {
-		query += " AND updated_at >= ?"
-		args = append(args, filter.UpdatedAfter)
+		query += " AND " + timeColumn + " >= " + timePlaceholder
+		args = append(args, timeArg(filter.UpdatedAfter))
 	}
-	if filter.CursorKey != "" && !filter.UpdatedAfter.IsZero() {
-		query += " AND (updated_at > ? OR (updated_at = ? AND key_hash > ?))"
-		args = append(args, filter.UpdatedAfter, filter.UpdatedAfter, filter.CursorKey)
+	if filter.CursorKey != "" {
+		query += " AND (" + timeColumn + " > " + timePlaceholder + " OR (" + timeColumn + " = " + timePlaceholder + " AND BINARY key_hash > BINARY ?))"
+		args = append(args, timeArg(cursorTime), timeArg(cursorTime), filter.CursorKey)
 	}
-	query += " ORDER BY updated_at ASC, key_hash ASC"
+	query += " ORDER BY " + timeColumn + " ASC, BINARY key_hash ASC"
 
 	limit := filter.Limit
 	if limit <= 0 {

@@ -3,6 +3,7 @@ package dao
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -368,6 +369,31 @@ func (d *FileDAO) List(limit int) []*FileInfo {
 		out = out[:limit]
 	}
 	return out
+}
+
+// ExportAll reads every persisted FileInfo in one Bolt read transaction. Unlike
+// List, it never truncates or turns storage/JSON corruption into an empty success.
+// Volatile path-cache entries and the separate size-map bucket are not included.
+func (d *FileDAO) ExportAll() ([]*FileInfo, error) {
+	if d == nil || d.store == nil {
+		return nil, fmt.Errorf("file metadata store unavailable")
+	}
+	all, err := d.store.GetAll(storage.BucketFileInfo)
+	if err != nil {
+		return nil, fmt.Errorf("read file metadata: %w", err)
+	}
+	out := make([]*FileInfo, 0, len(all))
+	for path, raw := range all {
+		var info FileInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return nil, fmt.Errorf("decode file metadata: %w", err)
+		}
+		if info.Path == "" {
+			info.Path = path
+		}
+		out = append(out, &info)
+	}
+	return out, nil
 }
 
 // SetComplete stores a fully-populated FileInfo without the read-before-write merge.

@@ -51,6 +51,21 @@ type Server struct {
 	statsShutdown      func() // 停服前冲刷统计（recorder.FlushSessions + store.Stop）
 	rangeCompatStore   proxy.RangeCompatStore
 	lifetimeLock       *recovery.Lock
+	backups            *backupOwner
+	shutdownOnce       sync.Once
+	shutdownErr        error
+	lifecycleMu        sync.Mutex
+	started            bool
+	stopping           bool
+	sealedSignal       chan struct{}
+	prepareWG          sync.WaitGroup
+	serveWG            sync.WaitGroup
+	requestWG          sync.WaitGroup
+	listeners          []net.Listener
+	listenFactory      func(string, string) (net.Listener, error)
+	requestContext     context.Context
+	requestCancel      context.CancelFunc
+	connections        map[net.Conn]http.ConnState
 }
 
 // New creates a new server instance
@@ -90,13 +105,21 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	cfg.BindRecoveryState(store.RecoveryState())
+	backups, err := newBackupOwner(store, cfg.DataDir)
+	if err != nil {
+		_ = store.Close()
+		if mysqlStore != nil {
+			_ = mysqlStore.Close()
+		}
+		return nil, fmt.Errorf("failed to initialize backup owner: %w", err)
+	}
 
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
 
 	s := &Server{
-		cfg:          cfg,
 		lifetimeLock: lifetime,
+		cfg:          cfg,
 		store:        store,
 		engine:       gin.New(),
 		streamProxy:  proxy.NewStreamProxy(cfg),
@@ -104,6 +127,7 @@ func New(cfg *config.Config) (*Server, error) {
 		fileDAO:      dao.NewFileDAO(store, cfg),
 		passwdDAO:    dao.NewPasswdDAO(store, cfg),
 		mysqlStore:   mysqlStore,
+		backups:      backups,
 	}
 
 	// If MySQL is available, hook it into FileDAO for file metadata persistence.
@@ -246,6 +270,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		// Protected routes (auth required)
 		protected := encAPI.Group("")
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
+		s.registerBackupRoutes(protected)
 		{
 			protected.GET("/admin/reconciliation-status", func(c *gin.Context) { c.JSON(http.StatusOK, s.cfg.RecoveryStatus()) })
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
@@ -463,50 +488,48 @@ func debugTokenMiddleware(token string) gin.HandlerFunc {
 
 // Start starts the server(s)
 func (s *Server) Start() error {
-	errChan := make(chan error, 3)
-
-	// Start HTTP server
-	go func() {
-		err := s.startHTTP()
-		if err != nil && err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("HTTP server error: %w", err)
-		} else {
-			errChan <- nil // Signal normal shutdown
-		}
-	}()
-
-	// Start HTTPS server if enabled
-	if s.cfg.IsHTTPSEnabled() {
-		go func() {
-			err := s.startHTTPS()
-			if err != nil && err != http.ErrServerClosed {
-				errChan <- fmt.Errorf("HTTPS server error: %w", err)
-			} else {
-				errChan <- nil
-			}
-		}()
+	s.lifecycleMu.Lock()
+	if s.started || s.stopping {
+		s.lifecycleMu.Unlock()
+		return fmt.Errorf("server already started or stopped")
 	}
-
-	// Start Unix socket if enabled
-	if s.cfg.IsUnixSocketEnabled() {
-		go func() {
-			err := s.startUnix()
-			if err != nil && err != http.ErrServerClosed {
-				errChan <- fmt.Errorf("Unix socket error: %w", err)
-			} else {
-				errChan <- nil
-			}
-		}()
+	s.started = true
+	// Preparation admission and Add are atomic with Shutdown's seal.
+	s.prepareWG.Add(1)
+	s.lifecycleMu.Unlock()
+	servers, err := s.prepareListeners()
+	s.prepareWG.Done()
+	if err != nil {
+		_ = s.Shutdown(context.Background())
+		return err
 	}
-
-	// Wait for any server to stop
-	return <-errChan
+	errChan := make(chan error, len(servers))
+	for _, endpoint := range servers {
+		go func(endpoint serverEndpoint) {
+			defer s.serveWG.Done()
+			var err error
+			if endpoint.tls {
+				scheme := s.cfg.SchemeSnapshot()
+				err = endpoint.server.ServeTLS(endpoint.listener, scheme.CertFile, scheme.KeyFile)
+			} else {
+				err = endpoint.server.Serve(endpoint.listener)
+			}
+			errChan <- err
+		}(endpoint)
+	}
+	err = <-errChan
+	// A failed endpoint stops its siblings and drains requests before store close.
+	_ = s.Shutdown(context.Background())
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
-func (s *Server) startHTTP() error {
+func (s *Server) prepareHTTP() *http.Server {
 	addr := s.cfg.GetHTTPAddr()
 
-	var httpHandler http.Handler = s.engine
+	var httpHandler http.Handler = s.ownedHTTPHandler(s.engine)
 
 	// Enable h2c (HTTP/2 cleartext) if configured
 	if s.cfg.IsH2CEnabled() {
@@ -514,11 +537,11 @@ func (s *Server) startHTTP() error {
 			MaxConcurrentStreams: 1000,
 			IdleTimeout:          120 * time.Second,
 		}
-		httpHandler = h2c.NewHandler(s.engine, h2s)
+		httpHandler = h2c.NewHandler(httpHandler, h2s)
 		log.Info().Msg("HTTP/2 cleartext (h2c) enabled")
 	}
 
-	s.httpServer = &http.Server{
+	server := &http.Server{
 		Addr:              addr,
 		Handler:           httpHandler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -530,19 +553,19 @@ func (s *Server) startHTTP() error {
 	log.Info().Str("addr", addr).Msg("Starting HTTP server")
 	log.Info().Str("alist_url", s.cfg.GetAlistURL()).Msg("Proxying to Alist")
 
-	return s.httpServer.ListenAndServe()
+	server.ConnState = s.ownedConnState
+	server.Handler = httpHandler
+	return server
 }
 
-func (s *Server) startHTTPS() error {
+func (s *Server) prepareHTTPS() *http.Server {
 	addr := s.cfg.GetHTTPSAddr()
-	scheme := s.cfg.SchemeSnapshot()
-
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"h2", "http/1.1"},
 	}
 
-	s.httpsServer = &http.Server{
+	server := &http.Server{
 		Addr:              addr,
 		Handler:           s.engine,
 		TLSConfig:         tlsConfig,
@@ -553,28 +576,30 @@ func (s *Server) startHTTPS() error {
 	}
 
 	// Enable HTTP/2
-	http2.ConfigureServer(s.httpsServer, &http2.Server{
+	http2.ConfigureServer(server, &http2.Server{
 		MaxConcurrentStreams: 1000,
 		IdleTimeout:          120 * time.Second,
 	})
 
 	log.Info().Str("addr", addr).Msg("Starting HTTPS server with HTTP/2")
 
-	return s.httpsServer.ListenAndServeTLS(scheme.CertFile, scheme.KeyFile)
+	server.ConnState = s.ownedConnState
+	server.Handler = s.ownedHTTPHandler(s.engine)
+	return server
 }
 
-func (s *Server) startUnix() error {
+func (s *Server) prepareUnix() (*http.Server, net.Listener, error) {
 	scheme := s.cfg.SchemeSnapshot()
 	socketPath := scheme.UnixFile
 
 	// Remove existing socket file
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove existing socket: %w", err)
+		return nil, nil, fmt.Errorf("failed to remove existing socket: %w", err)
 	}
 
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := s.listen("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("failed to create unix socket: %w", err)
+		return nil, nil, fmt.Errorf("failed to create unix socket: %w", err)
 	}
 
 	// Set socket permissions if specified
@@ -585,7 +610,7 @@ func (s *Server) startUnix() error {
 		}
 	}
 
-	s.unixServer = &http.Server{
+	server := &http.Server{
 		Handler:           s.engine,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       0,
@@ -595,15 +620,33 @@ func (s *Server) startUnix() error {
 
 	log.Info().Str("socket", socketPath).Msg("Starting Unix socket server")
 
-	if err := s.unixServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-		return err
-	}
-	return nil
+	server.ConnState = s.ownedConnState
+	server.Handler = s.ownedHTTPHandler(s.engine)
+	return server, listener, nil
 }
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { s.shutdownErr = s.shutdown(ctx) })
+	return s.shutdownErr
+}
+
+func (s *Server) shutdown(ctx context.Context) error {
 	log.Info().Msg("Shutting down server...")
+	s.lifecycleMu.Lock()
+	s.stopping = true
+	if s.sealedSignal == nil {
+		s.sealedSignal = make(chan struct{})
+	}
+	close(s.sealedSignal)
+	if s.requestCancel != nil {
+		s.requestCancel()
+	}
+	s.lifecycleMu.Unlock()
+	// Seal admission before HTTP shutdown, including on a never-started server.
+	if s.backups != nil {
+		s.backups.seal()
+	}
 
 	// Cancel startup probe goroutine
 	if s.probeCancel != nil {
@@ -612,25 +655,32 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	var lastErr error
 
-	// Stop accepting requests and let in-flight handlers finish before tearing
-	// down the background workers and caches they use.
-	if s.httpServer != nil {
-		if err := s.httpServer.Shutdown(ctx); err != nil {
-			lastErr = err
+	// A late prepared listener cannot publish after the seal. Join preparation
+	// before snapshotting the server fields, then close every owned listener.
+	s.prepareWG.Wait()
+	s.lifecycleMu.Lock()
+	servers := []*http.Server{s.httpServer, s.httpsServer, s.unixServer}
+	listeners := append([]net.Listener(nil), s.listeners...)
+	s.lifecycleMu.Unlock()
+	for _, server := range servers {
+		if server != nil {
+			if err := server.Shutdown(ctx); err != nil {
+				lastErr = err
+				// Force-close connections to cancel actual request contexts on timeout.
+				_ = server.Close()
+			}
 		}
 	}
-
-	if s.httpsServer != nil {
-		if err := s.httpsServer.Shutdown(ctx); err != nil {
-			lastErr = err
-		}
+	for _, listener := range listeners {
+		_ = listener.Close()
 	}
-
-	if s.unixServer != nil {
-		if err := s.unixServer.Shutdown(ctx); err != nil {
-			lastErr = err
-		}
-	}
+	s.serveWG.Wait()
+	// Hijacked h2c sockets are not closed by http.Server.Shutdown/Close.
+	// Release them explicitly so blocked transport I/O and idle sessions end.
+	s.closeOwnedConnections()
+	// Close cancels network I/O, not arbitrary handler code. Always wait for
+	// actual return before tearing down DAOs/stores, even after ctx expiry.
+	s.requestWG.Wait()
 	s.probeWG.Wait()
 
 	if s.proxyHandler != nil {
@@ -663,6 +713,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// A deadline signals cancellation but cannot abandon owned disk I/O.
+	// Always join the actual snapshot return before closing the Bolt store.
+	if s.backups != nil {
+		s.backups.wait()
+	}
 	if s.store != nil {
 		if err := s.store.Close(); err != nil {
 			lastErr = err
