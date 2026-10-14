@@ -23,6 +23,7 @@ import (
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/storage"
 	"github.com/alist-encrypt-go/internal/trace"
 	"github.com/alist-encrypt-go/shared/encryptcore"
 )
@@ -51,6 +52,7 @@ type WebDAVHandler struct {
 	warmupEnqueueCount    uint64
 	statsRecorder         StatsRecorder
 	dirSyncStore          DirSyncStore
+	mediaRecovery         mediaRecoveryState
 }
 
 // SetDirSyncStore injects the shared dir-sync snapshot store so directory
@@ -131,6 +133,21 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		ctx := context.WithValue(r.Context(), webdavAuthContextKey, auth)
 		r = r.WithContext(ctx)
+	}
+
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == "PROPFIND" {
+		if h.hasInvalidProtectedFilenameScope(r, davPath) {
+			http.Error(w, "Protected filename unavailable for this scope", http.StatusNotFound)
+			return
+		}
+		rec, ok := h.restoreVerifiedAliasMapping(r, davPath)
+		if !ok && isRecoveredMediaAliasPath(davPath) {
+			http.Error(w, "Verified media alias not available for this scope", http.StatusNotFound)
+			return
+		}
+		if ok && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			w = &mediaAliasResponseWriter{ResponseWriter: w, mime: rec.MIME, display: rec.DisplayPath}
+		}
 	}
 
 	switch r.Method {
@@ -321,7 +338,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	}
 
 	// Convert display path to real encrypted path
-	realPath, pathMode := h.resolveRealPathWithMode(davPath, passwdInfo)
+	realPath, pathMode := h.resolveRealPathForRequest(r, davPath, passwdInfo)
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
 
 	// WebDAV clients often start playback without a Range header. Some signed
@@ -590,21 +607,52 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 		fileName := path.Base(davPath)
 		realPath = path.Dir(davPath) + "/" + converter.ToRealName(fileName)
 
-		// Cache file info for subsequent PROPFIND (like alist-encrypt does)
-		h.fileDAO.Set(&dao.FileInfo{
-			Path:  davPath,
-			Name:  fileName,
-			Size:  fileSize,
-			IsDir: false,
-		})
+		// Preserve legacy behavior outside protected scopes. Protected writes
+		// publish display metadata only after physical and durable verification.
+		if protectedFilenameLimit(h.cfg, davPath) == 0 {
+			h.fileDAO.Set(&dao.FileInfo{
+				Path: davPath, Name: fileName, Size: fileSize, IsDir: false,
+			})
+		}
 		log.Debug().Str("original", davPath).Str("encrypted", realPath).Msg("WebDAV PUT filename encrypted")
 	}
 
+	protected, safePath, err := prepareFilenameWrite(h.cfg, h.fileDAO, r, passwdInfo, davPath, realPath, fileSize, hasRange, h.stdClient)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, err.Error(), http.StatusConflict)
+		return
+	}
+	var buffered *filenameWriteResponse
+	var uploadResponse http.ResponseWriter = w
+	if protected != nil {
+		realPath = safePath
+		r = r.WithContext(proxy.WithSynchronousUploadVerification(r.Context()))
+		buffered = newFilenameWriteResponse()
+		uploadResponse = buffered
+	}
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
-	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
+	if err := h.streamProxy.ProxyUploadEncrypt(uploadResponse, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
+		if protected != nil {
+			_ = protected.finish(storage.FilenameFailed)
+		}
 		log.Error().Err(err).Str("path", davPath).Msg("WebDAV PUT encryption failed")
 		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
+		return
+	}
+	if protected != nil {
+		if buffered.overflow || buffered.status >= 300 {
+			_ = protected.finish(storage.FilenameFailed)
+			RespondHTTPErrorWithStatus(w, "Protected upload failed", http.StatusBadGateway)
+			return
+		}
+		if err := protected.verify(r, h.stdClient); err != nil {
+			RespondHTTPErrorWithStatus(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		h.fileDAO.Set(&dao.FileInfo{Path: davPath, Name: path.Base(davPath), Size: fileSize, IsDir: false})
+		h.fileDAO.SetEncPathMapping(davPath, realPath)
+		buffered.publish(w)
 	}
 }
 
@@ -685,6 +733,10 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 				converter := encryption.NewFileNameConverter(destPasswd.Password, destPasswd.EncType, destPasswd.EncSuffix)
 				fileName := path.Base(destPath)
 				realDestPath := path.Dir(destPath) + "/" + converter.ToRealName(fileName)
+				if limit := protectedFilenameLimit(h.cfg, destPath); limit > 0 && len(path.Base(realDestPath)) > limit {
+					RespondHTTPErrorWithStatus(w, "Encrypted write destination exceeds configured filename limit; use a shorter name", http.StatusBadRequest)
+					return
+				}
 
 				// Rebuild destination URL
 				destURL.Path = "/dav" + realDestPath
@@ -773,11 +825,13 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	requestPath := davPath
 	isDirRequest := strings.HasSuffix(davPath, "/")
 	if found && passwdInfo.EncName && !isDirRequest {
-		if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
+		if bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath); ok && bound.display == davPath {
+			requestPath = bound.raw
+		} else if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
 			requestPath = encPath
 			trace.Logf(r.Context(), "propfind", "Using cached enc path: %s -> %s rule=%s", davPath, requestPath, ruleSource)
 		} else {
-			retryPath := h.convertToRealPath(davPath, passwdInfo)
+			retryPath, _ := h.resolveRealPathForRequest(r, davPath, passwdInfo)
 			if retryPath != "" && retryPath != davPath {
 				requestPath = retryPath
 				trace.Logf(r.Context(), "propfind", "Using derived enc path: %s -> %s rule=%s", davPath, requestPath, ruleSource)
@@ -800,6 +854,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// trip at all (极速). Only directory requests are eligible.
 	if isDirRequest {
 		if body, ok := h.serveSnapshotListing(r, requestPath); ok {
+			body = h.recoverMediaNames(r, body, true)
 			trace.Logf(r.Context(), "propfind", "Snapshot cache hit: %s bytes=%d", requestPath, len(body))
 			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 			w.Header().Set("X-Alist-Encrypt-Cache", "dir-snapshot")
@@ -839,7 +894,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		fileName := path.Base(davPath)
 		if fileName != "" && fileName != "/" && fileName != "." {
 			// Convert to encrypted path and retry
-			realPath := h.convertToRealPath(davPath, passwdInfo)
+			realPath, _ := h.resolveRealPathForRequest(r, davPath, passwdInfo)
 			retryURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 			trace.Logf(r.Context(), "propfind", "404 retry: request=%s retry=%s rule=%s", requestPath, realPath, ruleSource)
@@ -893,14 +948,16 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		// Single linear pass: decrypt display names/hrefs (when EncName enabled)
 		// and adjust V2 getcontentlength. Replaces the previous two-pass
 		// decryptPropfindResponse + adjustPropfindContentLengthForV2.
-		respBody = h.rewritePropfindBody(respBody, passwdInfo)
+		originalPropfindBody := respBody
+		snapshotBody := h.rewritePropfindBody(respBody, passwdInfo)
+		respBody = h.recoverMediaNames(r, snapshotBody, false, originalPropfindBody)
 
 		// Populate the shared dir-sync snapshot on a whitelisted directory
 		// listing miss so subsequent HTTP fs/list and WebDAV reads hit the
-		// fast path (极速). Re-parse the rewritten body: hrefs and display
-		// names here are already the decrypted display form the client sees.
+		// fast path (极速). Store the name-decrypted body without media aliases:
+		// those are scoped, expiring evidence and must be overlaid on each read.
 		if isDirRequest && h.dirSyncStore != nil {
-			if davEntries := h.parsePropfindEntries(respBody); len(davEntries) > 0 {
+			if davEntries := h.parsePropfindEntries(snapshotBody); len(davEntries) > 0 {
 				h.persistWebDAVSnapshot(r, requestPath, davEntries)
 				trace.Logf(r.Context(), "propfind", "Snapshot populated: %s entries=%d", requestPath, len(davEntries))
 			}

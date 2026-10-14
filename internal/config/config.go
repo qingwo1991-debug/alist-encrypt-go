@@ -40,67 +40,69 @@ type StreamStrategyOverride struct {
 
 // AlistServer represents the main Alist server configuration
 type AlistServer struct {
-	Name                        string                   `json:"name"`
-	Path                        string                   `json:"path"`
-	Describe                    string                   `json:"describe"`
-	ServerHost                  string                   `json:"serverHost"`
-	ServerPort                  int                      `json:"serverPort"`
-	HTTPS                       bool                     `json:"https"`
-	EnableH2C                   bool                     `json:"enableH2c"` // Enable HTTP/2 cleartext to backend
-	PasswdList                  []PasswdInfo             `json:"passwdList"`
-	StreamStrategyOverrides     []StreamStrategyOverride `json:"streamStrategyOverrides"`
-	EnableSizeMap               bool                     `json:"enableSizeMap"`
-	SizeMapTtlMinutes           int                      `json:"sizeMapTtlMinutes"`
-	EnableRangeCompatCache      bool                     `json:"enableRangeCompatCache"`
-	RangeFailToDowngrade        int                      `json:"rangeFailToDowngrade"`
-	RangeSuccessToRecover       int                      `json:"rangeSuccessToRecover"`
-	RangeReprobeMinutes         int                      `json:"rangeReprobeMinutes"`
-	RangeProbeTimeoutSeconds    int                      `json:"rangeProbeTimeoutSeconds"`
-	EnableParallelDecrypt       bool                     `json:"enableParallelDecrypt"`
-	ParallelDecryptConcurrency  int                      `json:"parallelDecryptConcurrency"`
-	StreamBufferKb              int                      `json:"streamBufferKb"`
-	EnableDecryptedBlockCache   bool                     `json:"enableDecryptedBlockCache"`
-	DecryptedBlockCacheMb       int                      `json:"decryptedBlockCacheMb"`
-	DecryptedBlockSizeKb        int                      `json:"decryptedBlockSizeKb"`
-	FollowRedirectForDecrypt    bool                     `json:"followRedirectForDecrypt"`
-	RedirectMaxHops             int                      `json:"redirectMaxHops"`
-	AllowLooseDecode            bool                     `json:"allowLooseDecode"`
-	RequestTimeoutSeconds       int                      `json:"requestTimeoutSeconds"`
-	EnableStartupProbe          bool                     `json:"enableStartupProbe"`
-	StartupProbeDelaySeconds    int                      `json:"startupProbeDelaySeconds"`
-	StartupProbeIntervalMinutes int                      `json:"startupProbeIntervalMinutes"`
-	NegativeCacheMinutes        int                      `json:"negativeCacheMinutes"`
-	StartupProbeDeepScan        bool                     `json:"startupProbeDeepScan"`
-	ScanUsername                string                   `json:"scanUsername"`
-	ScanPassword                string                   `json:"scanPassword"`
-	ScanAuthHeader              string                   `json:"scanAuthHeader"`
-	ScanVideoOnly               bool                     `json:"scanVideoOnly"`
-	ScanMaxDepth                int                      `json:"scanMaxDepth"`
-	ScanConcurrency             int                      `json:"scanConcurrency"`
-	EnableStrategyStore         bool                     `json:"enableStrategyStore"`
-	StrategyStoreFile           string                   `json:"strategyStoreFile"`
-	StrategyFailToDowngrade     int                      `json:"strategyFailToDowngrade"`
-	StrategySuccessToRecover    int                      `json:"strategySuccessToRecover"`
-	StrategyCooldownMinutes     int                      `json:"strategyCooldownMinutes"`
-	EnableBackgroundProbe       bool                     `json:"enableBackgroundProbe"`
-	ProbeConcurrency            int                      `json:"probeConcurrency"`
-	ProbeProviderConcurrency    int                      `json:"probeProviderConcurrency"`
-	ProbeMinDelayMs             int                      `json:"probeMinDelayMs"`
-	ProbeMaxDelayMs             int                      `json:"probeMaxDelayMs"`
-	ProbeCooldownMinutes        int                      `json:"probeCooldownMinutes"`
-	ProbeQueueSize              int                      `json:"probeQueueSize"`
-	ProbeMinSizeBytes           int64                    `json:"probeMinSizeBytes"`
-	PlayFirstFallback           bool                     `json:"playFirstFallback"`
-	SizeUnknownStrict           bool                     `json:"sizeUnknownStrict"`
-	UpstreamStalenessMinutes    int                      `json:"upstreamStalenessMinutes"` // 0 = use default (30 min)
-	ChunkedSeekMaxDiscardBytes  int64                    `json:"chunkedSeekMaxDiscardBytes"`
-	EnableSniff                 bool                     `json:"enableSniff"`
-	CircuitBreakerThreshold     int                      `json:"circuitBreakerThreshold"`
-	CircuitBreakerCooldownSecs  int                      `json:"circuitBreakerCooldownSecs"`
-	RetryMaxAttempts            int                      `json:"retryMaxAttempts"`
-	MaxActiveStreams            int                      `json:"maxActiveStreams"`
-	StreamOverloadStatus        int                      `json:"streamOverloadStatus"`
-	V2KeyCacheTTLMinutes        int                      `json:"v2KeyCacheTtlMinutes"`
+	Name                       string                   `json:"name"`
+	Path                       string                   `json:"path"`
+	Describe                   string                   `json:"describe"`
+	ServerHost                 string                   `json:"serverHost"`
+	ServerPort                 int                      `json:"serverPort"`
+	HTTPS                      bool                     `json:"https"`
+	EnableH2C                  bool                     `json:"enableH2c"` // Enable HTTP/2 cleartext to backend
+	PasswdList                 []PasswdInfo             `json:"passwdList"`
+	StreamStrategyOverrides    []StreamStrategyOverride `json:"streamStrategyOverrides"`
+	EnableSizeMap              bool                     `json:"enableSizeMap"`
+	SizeMapTtlMinutes          int                      `json:"sizeMapTtlMinutes"`
+	EnableRangeCompatCache     bool                     `json:"enableRangeCompatCache"`
+	RangeFailToDowngrade       int                      `json:"rangeFailToDowngrade"`
+	RangeSuccessToRecover      int                      `json:"rangeSuccessToRecover"`
+	RangeReprobeMinutes        int                      `json:"rangeReprobeMinutes"`
+	RangeProbeTimeoutSeconds   int                      `json:"rangeProbeTimeoutSeconds"`
+	EnableParallelDecrypt      bool                     `json:"enableParallelDecrypt"`
+	ParallelDecryptConcurrency int                      `json:"parallelDecryptConcurrency"`
+	StreamBufferKb             int                      `json:"streamBufferKb"`
+	EnableDecryptedBlockCache  bool                     `json:"enableDecryptedBlockCache"`
+	DecryptedBlockCacheMb      int                      `json:"decryptedBlockCacheMb"`
+	DecryptedBlockSizeKb       int                      `json:"decryptedBlockSizeKb"`
+	FollowRedirectForDecrypt   bool                     `json:"followRedirectForDecrypt"`
+	RedirectMaxHops            int                      `json:"redirectMaxHops"`
+	AllowLooseDecode           bool                     `json:"allowLooseDecode"`
+	// FilenameWriteLimits enables explicit per-mount safe naming. No global cloud limit is assumed.
+	FilenameWriteLimits         map[string]int `json:"filenameWriteLimits,omitempty"`
+	RequestTimeoutSeconds       int            `json:"requestTimeoutSeconds"`
+	EnableStartupProbe          bool           `json:"enableStartupProbe"`
+	StartupProbeDelaySeconds    int            `json:"startupProbeDelaySeconds"`
+	StartupProbeIntervalMinutes int            `json:"startupProbeIntervalMinutes"`
+	NegativeCacheMinutes        int            `json:"negativeCacheMinutes"`
+	StartupProbeDeepScan        bool           `json:"startupProbeDeepScan"`
+	ScanUsername                string         `json:"scanUsername"`
+	ScanPassword                string         `json:"scanPassword"`
+	ScanAuthHeader              string         `json:"scanAuthHeader"`
+	ScanVideoOnly               bool           `json:"scanVideoOnly"`
+	ScanMaxDepth                int            `json:"scanMaxDepth"`
+	ScanConcurrency             int            `json:"scanConcurrency"`
+	EnableStrategyStore         bool           `json:"enableStrategyStore"`
+	StrategyStoreFile           string         `json:"strategyStoreFile"`
+	StrategyFailToDowngrade     int            `json:"strategyFailToDowngrade"`
+	StrategySuccessToRecover    int            `json:"strategySuccessToRecover"`
+	StrategyCooldownMinutes     int            `json:"strategyCooldownMinutes"`
+	EnableBackgroundProbe       bool           `json:"enableBackgroundProbe"`
+	ProbeConcurrency            int            `json:"probeConcurrency"`
+	ProbeProviderConcurrency    int            `json:"probeProviderConcurrency"`
+	ProbeMinDelayMs             int            `json:"probeMinDelayMs"`
+	ProbeMaxDelayMs             int            `json:"probeMaxDelayMs"`
+	ProbeCooldownMinutes        int            `json:"probeCooldownMinutes"`
+	ProbeQueueSize              int            `json:"probeQueueSize"`
+	ProbeMinSizeBytes           int64          `json:"probeMinSizeBytes"`
+	PlayFirstFallback           bool           `json:"playFirstFallback"`
+	SizeUnknownStrict           bool           `json:"sizeUnknownStrict"`
+	UpstreamStalenessMinutes    int            `json:"upstreamStalenessMinutes"` // 0 = use default (30 min)
+	ChunkedSeekMaxDiscardBytes  int64          `json:"chunkedSeekMaxDiscardBytes"`
+	EnableSniff                 bool           `json:"enableSniff"`
+	CircuitBreakerThreshold     int            `json:"circuitBreakerThreshold"`
+	CircuitBreakerCooldownSecs  int            `json:"circuitBreakerCooldownSecs"`
+	RetryMaxAttempts            int            `json:"retryMaxAttempts"`
+	MaxActiveStreams            int            `json:"maxActiveStreams"`
+	StreamOverloadStatus        int            `json:"streamOverloadStatus"`
+	V2KeyCacheTTLMinutes        int            `json:"v2KeyCacheTtlMinutes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
@@ -246,6 +248,7 @@ func (c *Config) AlistServerSnapshot() AlistServer {
 	defer c.mu.RUnlock()
 	out := c.AlistServer
 	out.PasswdList = clonePasswdList(c.AlistServer.PasswdList)
+	out.FilenameWriteLimits = cloneFilenameWriteLimits(c.AlistServer.FilenameWriteLimits)
 	out.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), c.AlistServer.StreamStrategyOverrides...)
 	return out
 }
@@ -573,6 +576,9 @@ func loadConfigAt(configPath string) *Config {
 		cfg.Save()
 	}
 
+	if err := validateFilenameWriteLimits(cfg.AlistServer.FilenameWriteLimits); err != nil {
+		log.Fatal().Err(err).Msg("Invalid explicit filename write limits; refusing unsafe startup")
+	}
 	cfg.applyEnvOverrides()
 	cfg.normalizeAlistServerTuning()
 	encryption.SetV2KeyCacheTTL(time.Duration(cfg.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
@@ -686,6 +692,7 @@ func (c *Config) saveLocked() error {
 func (c *Config) snapshotLocked() *Config {
 	alistServer := c.AlistServer
 	alistServer.PasswdList = clonePasswdList(c.AlistServer.PasswdList)
+	alistServer.FilenameWriteLimits = cloneFilenameWriteLimits(c.AlistServer.FilenameWriteLimits)
 	alistServer.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), c.AlistServer.StreamStrategyOverrides...)
 	webDAVServers := append([]WebDAVServer(nil), c.WebDAVServer...)
 	for i := range webDAVServers {
@@ -757,6 +764,9 @@ func (c *Config) ReplaceFromJSON(data []byte) error {
 		return err
 	}
 	if err := validateEnabledPasswdList(candidate.AlistServer.PasswdList); err != nil {
+		return err
+	}
+	if err := validateFilenameWriteLimits(candidate.AlistServer.FilenameWriteLimits); err != nil {
 		return err
 	}
 	for i := range candidate.WebDAVServer {
@@ -1336,6 +1346,10 @@ func (c *Config) UpdateAlistServer(server AlistServer) error {
 	if err := validateEnabledPasswdList(server.PasswdList); err != nil {
 		return err
 	}
+	if err := validateFilenameWriteLimits(server.FilenameWriteLimits); err != nil {
+		return err
+	}
+	server.FilenameWriteLimits = cloneFilenameWriteLimits(server.FilenameWriteLimits)
 	server.PasswdList = clonePasswdList(server.PasswdList)
 	server.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), server.StreamStrategyOverrides...)
 	normalizePasswdListEncPaths(server.PasswdList)

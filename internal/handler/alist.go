@@ -21,6 +21,7 @@ import (
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/storage"
 	"github.com/alist-encrypt-go/internal/trace"
 	"github.com/alist-encrypt-go/shared/encryptcore"
 )
@@ -1401,15 +1402,44 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 		log.Debug().Str("original", uploadPath).Str("encrypted", encryptedPath).Msg("Encrypted filename for upload")
 	}
 
+	protected, safePath, err := prepareFilenameWrite(h.cfg, h.fileDAO, r, passwdInfo, uploadPath, encryptedPath, fileSize, hasRange, h.httpClient)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, err.Error(), http.StatusConflict)
+		return
+	}
+	var buffered *filenameWriteResponse
+	var uploadResponse http.ResponseWriter = w
+	if protected != nil {
+		encryptedPath = safePath
+		r.Header.Set("File-Path", url.QueryEscape(encryptedPath))
+		r = r.WithContext(proxy.WithSynchronousUploadVerification(r.Context()))
+		buffered = newFilenameWriteResponse()
+		uploadResponse = buffered
+	}
 	// Encrypt and upload
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/put", r)
 
-	if err := h.streamProxy.ProxyUploadEncrypt(w, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
+	if err := h.streamProxy.ProxyUploadEncrypt(uploadResponse, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
+		if protected != nil {
+			_ = protected.finish(storage.FilenameFailed)
+		}
 		log.Error().Err(err).Str("path", uploadPath).Msg("Failed to encrypt upload")
 		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
 		return
 	}
 
+	if protected != nil {
+		if buffered.overflow || buffered.status >= 300 {
+			_ = protected.finish(storage.FilenameFailed)
+			RespondHTTPErrorWithStatus(w, "Protected upload failed", http.StatusBadGateway)
+			return
+		}
+		if err := protected.verify(r, h.httpClient); err != nil {
+			RespondHTTPErrorWithStatus(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		buffered.publish(w)
+	}
 	// Update cache mapping after successful upload
 	if passwdInfo.EncName && encryptedPath != "" {
 		h.fileDAO.SetEncPathMapping(uploadPath, encryptedPath)
@@ -1551,6 +1581,10 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 
 			modifiedReq["path"] = path.Dir(reqData.Path) + "/" + realOldName
 			modifiedReq["name"] = newEncName + ext
+			if limit := protectedFilenameLimit(h.cfg, path.Join(path.Dir(reqData.Path), reqData.Name)); limit > 0 && len(newEncName+ext) > limit {
+				RespondHTTPErrorWithStatus(w, "Encrypted rename destination exceeds configured filename limit; use a shorter name", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
