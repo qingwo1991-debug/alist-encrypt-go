@@ -14,11 +14,11 @@
 
 | 阶段 | 状态 | 分支/PR/发布证据 | 待完成 |
 |---|---|---|---|
-| P0-A 操作守卫、worker生命周期 | 实施及review修正中 | `agent/p0-write-lifecycle` / Draft PR #78；首head `aec6c3f`完整PR矩阵成功（run 38543191485） | review发现catchall/orig_转换绕过及literal百分号误判已补修；33d4032全矩阵成功（38545112340）。再review发现outbound二次URL解释，bef8581修URL Path编码并加真实上游路径回归，run38546687503待验证；未合并/发布 |
-| P0-B 导出、契约及文档 | 独立实施中 | `agent/p0-export` / `.agent-worktrees/p0-export` | 全量错误返回、literal过滤、limit+1与v2 cursor、敏感字段处理；尚无PR/发布 |
-| P1 一致快照/restore | 组件实施及review中 | `agent/p1-bolt-snapshot`、`agent/p1-sqlite-snapshot` / 同名隔离工作树 | Bolt库级事务快照与索引验证初稿，SQLite升级前WAL快照初稿；尚无PR/发布。MySQL/owner入口及持久restore reconciliation fence未实施 |
+| P0-A 操作守卫、worker生命周期 | 实施及review修正中 | `agent/p0-write-lifecycle` / Draft PR #78；首head `aec6c3f`完整PR矩阵成功（run 38543191485） | review发现catchall/orig_转换绕过及literal百分号误判已补修；33d4032全矩阵成功（38545112340）。再review发现outbound二次URL解释，bef8581修URL Path编码并加真实上游路径回归，run38546687503发现DAV测试nil transport并修夹具为c092c9d，run38547140654完整矩阵（含Android）全绿，PR78已merge，main6b99425；main完整发布run38548692606进行中，尚未签收发布 |
+| P0-B 导出、契约及文档 | 独立实施中 | `agent/p0-export` / Draft PR #79 / f4806f9（同步main6b99425） | 完成初稿与独立只读review；全量错误返回、literal过滤、limit+1与v2 cursor、敏感字段处理。真实MySQL多页/删anchor/literalfilter集成在run38547668272已执行通过（非skip）；完整矩阵/main尚待 |
+| P1 一致快照/restore | 组件实施及review中 | `agent/p1-bolt-snapshot`、`agent/p1-sqlite-snapshot` / 同名隔离工作树 | Bolt component Draft PR #80 /65dcdef；SQLite升级前component Draft PR #81 /51bbd3d，初稿经review补齐发布/取消/旧schema marker边界，SQLite初版run38548128055真实测试发现候选目录rename失败及late migration fixture问题，已修manifest-last no-clobber发布并同步main候选2cca996/run38549020742验证中；未merge。Bolt同步main候选cd48df8/run38548792740待完整矩阵。OpenList checkpoint语义Draft PR #82，startup恢复fence Draft PR #83（无restore/lock/stickygen完成声称），runtime备份owner Draft PR #84（依赖Bolt组件，component-only/external runtime JSON除外），均待云检查。offline restore CLI/common lifetime lock/DB sticky generation在独立agent/p1-offline-restore实施，MySQL一致备份待实施 |
 | P2 实例/挂载所有权 | 待开始 | — | 工厂/epoch/pool预算 |
-| P3 驱动分批 | 待开始 | — | 能力清单+按transport逐批 |
+| P3 驱动分批 | 清单准备中（不代表P2完成） | `agent/p3-driver-inventory` | 固定版本逐操作保守能力清单和漂移gate准备；runtime改造待P2及清单review |
 | P4 异步UI | 待开始 | — | 五处sync及原子预约 |
 | P5 新鲜度 | 待开始 | — | root/mobile证据和失效 |
 | P6 V3别名 | 待开始 | — | 整record/KDF预算/layout |
