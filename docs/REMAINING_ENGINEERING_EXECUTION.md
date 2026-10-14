@@ -22,7 +22,7 @@
 | P4 异步UI | 云端失败修正中 | `agent/p4-async-files` / Draft PR #87 | 五处sync及单进程owner路径预约，明确不把Dart File.create当跨进程O_EXCL；run38552523221 analyze通过但3widget刷新/overflow失败，已补取消join与真实小viewport滚动/fixture时序至0abe2e7同PR重跑，尚无Flutter tests通过声明 |
 | P5 新鲜度 | 实施中 | `agent/p5-freshness` | Draft PR #91/057859e：root/mobile strict opt-in实际caller授权复查与证据分级；独立review发现root admission epoch过晚/响应阻塞后发布未复核/scheme凭据降级及mobile重复payload编译错误，正在同PR修正，未称ready；provider revision优化仍待能力验证 |
 | P6 V3别名 | 实施中 | `agent/p6-v3-recognition` | Draft PR #92：root完整认证record识别保守默认1MiB；移动仅shared wrapper无别名classifier入口，明确延后接线不捏造任意URL API；独立review发现现有2worker/2probe fixture与新预算不符，正在补真实成本/Stop回归，未执行通过声明 |
-| P7 可信适配/预热 | 首批实施中 | `agent/p7-interest-withdraw` | root authenticated generation withdraw/capability，跨端和App桥能力边界待验证 |
+| P7 可信适配/预热 | 首批实施中 | `agent/p7-interest-withdraw` | Draft PR #94/2c5a572：root authenticated generation withdraw/capability，shared DTO与Flutter confirmed-choice mock adapter；actual移动endpoint、URL-only chooser与signed-CDN未实现，跨端/App桥后续，独立review/云门禁待验 |
 | P8 审计/安全mutation | 首批实施中 | `agent/p8-audit-management` | Draft PR #93/95a1931：敏感JWT+fresh user、原名只读有界导出、本地一致dry-run；无可信upstream caller的remote核对明确blocked/unknown，rename/copy仍拒绝 |
 | P9 综合验收 | 待开始 | — | 自动证据矩阵、发布签收 |
 
