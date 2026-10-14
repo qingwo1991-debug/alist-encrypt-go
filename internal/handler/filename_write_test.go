@@ -28,7 +28,7 @@ func TestProtectedFilenamePutBoundedReservedAndVerified(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			if len(stored) == 0 {
-				_, _ = io.WriteString(w, `{"code":200,"data":{"total":0,"content":[]}}`)
+				_, _ = io.WriteString(w, `{"code":200,"data":{"total":0,"content":null}}`)
 				return
 			}
 			_, _ = fmt.Fprintf(w, `{"code":200,"data":{"total":1,"content":[{"name":%q,"size":%d,"is_dir":false}]}}`, pathBase(raw), len(stored))
@@ -161,6 +161,9 @@ func TestProtectedFilenameAPIListingRequiresFreshCompleteEnvelope(t *testing.T) 
 		wantStatus int
 	}{
 		{"absent", `{"code":200,"data":{"total":0,"content":[]}}`, 200, 404},
+		{"empty-null", `{"code":200,"data":{"total":0,"content":null}}`, 200, 404},
+		{"nonempty-null", `{"code":200,"data":{"total":1,"content":null}}`, 200, 0},
+		{"invalid-content-type", `{"code":200,"data":{"total":0,"content":{}}}`, 200, 0},
 		{"present", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":37}]}}`, 200, 200},
 		{"app-error", `{"code":500,"data":null}`, 200, 0},
 		{"partial", `{"code":200,"data":{"total":2,"content":[{"name":"other.bin","size":37}]}}`, 200, 0},

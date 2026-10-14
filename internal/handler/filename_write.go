@@ -203,23 +203,38 @@ func filenameRemoteAPIList(r *http.Request, origin, raw string, client *http.Cli
 	var listing struct {
 		Code int `json:"code"`
 		Data *struct {
-			Total   *int `json:"total"`
-			Content *[]struct {
-				Name  string `json:"name"`
-				Size  *int64 `json:"size"`
-				IsDir bool   `json:"is_dir"`
-			} `json:"content"`
+			Total   *int            `json:"total"`
+			Content json.RawMessage `json:"content"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &listing); err != nil {
 		return 0, 0, err
 	}
-	if listing.Code != 200 || listing.Data == nil || listing.Data.Total == nil || listing.Data.Content == nil || *listing.Data.Total < 0 || *listing.Data.Total != len(*listing.Data.Content) {
+	if listing.Code != 200 || listing.Data == nil || listing.Data.Total == nil || len(listing.Data.Content) == 0 || *listing.Data.Total < 0 {
+		return 0, 0, fmt.Errorf("filename API verification lacks a complete successful listing")
+	}
+	// OpenList serializes a successful empty directory as content:null. Keep
+	// missing content distinct, and accept null only with authoritative total 0.
+	if bytes.Equal(bytes.TrimSpace(listing.Data.Content), []byte("null")) {
+		if *listing.Data.Total == 0 {
+			return http.StatusNotFound, 0, nil
+		}
+		return 0, 0, fmt.Errorf("filename API verification has null non-empty content")
+	}
+	var content []struct {
+		Name  string `json:"name"`
+		Size  *int64 `json:"size"`
+		IsDir bool   `json:"is_dir"`
+	}
+	if err := json.Unmarshal(listing.Data.Content, &content); err != nil {
+		return 0, 0, err
+	}
+	if *listing.Data.Total != len(content) {
 		return 0, 0, fmt.Errorf("filename API verification lacks a complete successful listing")
 	}
 	var found bool
 	var size int64
-	for _, entry := range *listing.Data.Content {
+	for _, entry := range content {
 		if entry.Name != path.Base(raw) {
 			continue
 		}
