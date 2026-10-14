@@ -127,6 +127,13 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO po
 
 // Handle routes WebDAV requests
 func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET", "HEAD", "PROPFIND", "OPTIONS":
+	default:
+		if rejectRecoveryMutation(h.cfg, w, "dav_mutation") {
+			return
+		}
+	}
 	davPath := strings.TrimPrefix(r.URL.Path, "/dav")
 	if davPath == "" {
 		davPath = "/"

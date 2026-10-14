@@ -1348,6 +1348,9 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 
 // HandleFsPut handles /api/fs/put for encrypted uploads with filename encryption
 func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
+	if rejectRecoveryMutation(h.cfg, w, "put") {
+		return
+	}
 	uploadPath := r.Header.Get("File-Path")
 	if uploadPath != "" {
 		uploadPath, _ = url.QueryUnescape(uploadPath)
@@ -1449,6 +1452,9 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 
 // HandleFsRemove handles /api/fs/remove with filename encryption
 func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
+	if rejectRecoveryMutation(h.cfg, w, "remove") {
+		return
+	}
 	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
@@ -1537,6 +1543,9 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 
 // HandleFsRename handles /api/fs/rename with filename encryption
 func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
+	if rejectRecoveryMutation(h.cfg, w, "rename") {
+		return
+	}
 	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
@@ -1670,6 +1679,9 @@ func (h *AlistHandler) HandleFsCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, endpoint string) {
+	if rejectRecoveryMutation(h.cfg, w, "copy_or_move") {
+		return
+	}
 	body, err := readLimitedRequestBody(r)
 	if err != nil {
 		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)

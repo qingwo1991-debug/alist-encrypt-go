@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/alist-encrypt-go/internal/recovery"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,10 +25,11 @@ var (
 
 // Store represents the BoltDB storage
 type Store struct {
-	db        *bolt.DB
-	path      string
-	closeOnce sync.Once
-	closeErr  error
+	db            *bolt.DB
+	path          string
+	closeOnce     sync.Once
+	closeErr      error
+	recoveryState *recovery.State
 	// writeTxns counts completed write transactions. It exists so batch-write
 	// paths (e.g. directory listings) can assert the transaction budget they
 	// target rather than blindly trusting benchmarks.
@@ -56,6 +58,15 @@ type BucketTx struct {
 
 // NewStore creates a new BoltDB store
 func NewStore(dataDir string) (*Store, error) {
+	return NewStoreWithRecovery(dataDir, recovery.Load(dataDir))
+}
+
+// NewStoreWithRecovery shares the immutable startup state with the server.
+// It must not be used to install or remove a fence on a running instance.
+func NewStoreWithRecovery(dataDir string, state *recovery.State) (*Store, error) {
+	if state == nil {
+		state = recovery.Load(dataDir)
+	}
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
@@ -67,8 +78,9 @@ func NewStore(dataDir string) (*Store, error) {
 	}
 
 	store := &Store{
-		db:   db,
-		path: dbPath,
+		db:            db,
+		path:          dbPath,
+		recoveryState: state,
 	}
 
 	// Initialize buckets
