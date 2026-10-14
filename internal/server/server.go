@@ -49,6 +49,9 @@ type Server struct {
 	statsExportHandler *handler.StatsExportHandler
 	statsShutdown      func() // 停服前冲刷统计（recorder.FlushSessions + store.Stop）
 	rangeCompatStore   proxy.RangeCompatStore
+	backups            *backupOwner
+	shutdownOnce       sync.Once
+	shutdownErr        error
 }
 
 // New creates a new server instance
@@ -70,6 +73,15 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 
+	backups, err := newBackupOwner(store, cfg.DataDir)
+	if err != nil {
+		_ = store.Close()
+		if mysqlStore != nil {
+			_ = mysqlStore.Close()
+		}
+		return nil, fmt.Errorf("failed to initialize backup owner: %w", err)
+	}
+
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
 
@@ -82,6 +94,7 @@ func New(cfg *config.Config) (*Server, error) {
 		fileDAO:     dao.NewFileDAO(store, cfg),
 		passwdDAO:   dao.NewPasswdDAO(store, cfg),
 		mysqlStore:  mysqlStore,
+		backups:     backups,
 	}
 
 	// If MySQL is available, hook it into FileDAO for file metadata persistence.
@@ -223,6 +236,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		// Protected routes (auth required)
 		protected := encAPI.Group("")
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
+		s.registerBackupRoutes(protected)
 		{
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
@@ -439,6 +453,21 @@ func debugTokenMiddleware(token string) gin.HandlerFunc {
 
 // Start starts the server(s)
 func (s *Server) Start() error {
+	if s.backups != nil {
+		s.backups.mu.Lock()
+		sealed := s.backups.sealed
+		s.backups.mu.Unlock()
+		if sealed {
+			return errBackupStopped
+		}
+	}
+	// An exited/failed listener must not leave backup admission open.
+	defer func() {
+		if s.backups != nil {
+			s.backups.seal()
+			s.backups.wait()
+		}
+	}()
 	errChan := make(chan error, 3)
 
 	// Start HTTP server
@@ -579,7 +608,16 @@ func (s *Server) startUnix() error {
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() { s.shutdownErr = s.shutdown(ctx) })
+	return s.shutdownErr
+}
+
+func (s *Server) shutdown(ctx context.Context) error {
 	log.Info().Msg("Shutting down server...")
+	// Seal admission before HTTP shutdown, including on a never-started server.
+	if s.backups != nil {
+		s.backups.seal()
+	}
 
 	// Cancel startup probe goroutine
 	if s.probeCancel != nil {
@@ -639,6 +677,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	// A deadline signals cancellation but cannot abandon owned disk I/O.
+	// Always join the actual snapshot return before closing the Bolt store.
+	if s.backups != nil {
+		s.backups.wait()
+	}
 	if s.store != nil {
 		if err := s.store.Close(); err != nil {
 			lastErr = err
