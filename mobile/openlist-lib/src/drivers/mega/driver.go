@@ -28,6 +28,7 @@ type Mega struct {
 	c             *mega.Mega
 	clientRelease func()
 	dropOnce      sync.Once
+	sessionStop   func() bool
 }
 
 func (d *Mega) Config() driver.Config {
@@ -51,7 +52,11 @@ func (d *Mega) Init(ctx context.Context) error {
 		twoFACode = code
 	}
 	client := mega.New()
-	httpClient, release := opnet.NewDriverHTTPClient(opnet.DriverRouteIdentity{Driver: d.Config().Name}, 0)
+	identity, ok := opnet.DriverRouteIdentityFromContext(ctx)
+	if !ok {
+		identity = opnet.DriverRouteIdentity{Driver: d.Config().Name, Storage: fmt.Sprint(d.ID)}
+	}
+	httpClient, release := opnet.NewDriverHTTPClient(identity, 0)
 	client.SetClient(httpClient)
 	err := client.MultiFactorLoginContext(ctx, d.Email, d.Password, twoFACode)
 	if err != nil {
@@ -64,6 +69,9 @@ func (d *Mega) Init(ctx context.Context) error {
 		release()
 		return ctxErr
 	}
+	// Generation cancellation cancels SDK lifetime without blocking AfterFunc
+	// on a join; explicit Drop below performs the actual join before release.
+	d.sessionStop = context.AfterFunc(opnet.StorageSessionContext(ctx), client.CancelSession)
 	d.c = client
 	d.clientRelease = release
 	d.dropOnce = sync.Once{}
@@ -73,6 +81,9 @@ func (d *Mega) Init(ctx context.Context) error {
 func (d *Mega) Drop(ctx context.Context) error {
 	var err error
 	d.dropOnce.Do(func() {
+		if d.sessionStop != nil {
+			d.sessionStop()
+		}
 		if d.c != nil {
 			err = d.c.Close()
 		}

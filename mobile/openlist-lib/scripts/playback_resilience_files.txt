@@ -1,3 +1,4 @@
+internal/bootstrap/run.go
 internal/bootstrap/storage.go
 internal/fs/list.go
 internal/fs/readiness_navigation_test.go
@@ -22,5 +23,7 @@ drivers/mega/util.go
 drivers/mega/new_context_test.go
 internal/net/driver_client.go
 internal/net/driver_client_test.go
+internal/net/instance_owner.go
+internal/net/instance_owner_test.go
 pkg/utils/io.go
 pkg/utils/new_retry_context_test.go

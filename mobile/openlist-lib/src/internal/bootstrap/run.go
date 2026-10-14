@@ -271,7 +271,18 @@ func Start() {
 	running = true
 }
 
+// ShutdownDrainError records actual endpoint drain failures. A caller must not
+// release process-global ownership on a timeout while handlers are still alive.
+var ShutdownDrainError error
+
 func Shutdown(timeout time.Duration) {
+	ShutdownDrainError = nil
+	var drainMu sync.Mutex
+	failedDrain := func(err error) {
+		drainMu.Lock()
+		ShutdownDrainError = fmt.Errorf("endpoint drain failed: %v (previous: %v)", err, ShutdownDrainError)
+		drainMu.Unlock()
+	}
 	utils.Log.Println("Shutdown server...")
 	fs.ArchiveContentUploadTaskManager.RemoveAll()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -283,6 +294,8 @@ func Shutdown(timeout time.Duration) {
 			defer wg.Done()
 			if err := httpSrv.Shutdown(ctx); err != nil {
 				utils.Log.Error("HTTP server shutdown err: ", err)
+				failedDrain(err)
+				return
 			}
 			httpSrv = nil
 		}()
@@ -293,6 +306,8 @@ func Shutdown(timeout time.Duration) {
 			defer wg.Done()
 			if err := httpsSrv.Shutdown(ctx); err != nil {
 				utils.Log.Error("HTTPS server shutdown err: ", err)
+				failedDrain(err)
+				return
 			}
 			httpsSrv = nil
 		}()
@@ -302,6 +317,8 @@ func Shutdown(timeout time.Duration) {
 				defer wg.Done()
 				if err := quicSrv.Shutdown(ctx); err != nil {
 					utils.Log.Error("HTTP3 (quic) server shutdown err: ", err)
+					failedDrain(err)
+					return
 				}
 				quicSrv = nil
 			}()
@@ -313,6 +330,8 @@ func Shutdown(timeout time.Duration) {
 			defer wg.Done()
 			if err := unixSrv.Shutdown(ctx); err != nil {
 				utils.Log.Error("Unix server shutdown err: ", err)
+				failedDrain(err)
+				return
 			}
 			unixSrv = nil
 		}()
@@ -323,6 +342,8 @@ func Shutdown(timeout time.Duration) {
 			defer wg.Done()
 			if err := s3Srv.Shutdown(ctx); err != nil {
 				utils.Log.Error("S3 server shutdown err: ", err)
+				failedDrain(err)
+				return
 			}
 			s3Srv = nil
 		}()

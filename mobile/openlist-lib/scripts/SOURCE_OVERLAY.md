@@ -13,6 +13,7 @@ to overwrite it.
 
 ```sh
 python3 mobile/openlist-lib/scripts/test_source_overlay.py
+python3 mobile/openlist-lib/scripts/test_sync_source_overlay.py
 python3 mobile/openlist-lib/scripts/verify_source_overlay.py --check-mirrors
 ```
 
@@ -37,6 +38,38 @@ cover historical model/buffer/WPS/static compatibility backup mechanisms. The
 separate controlled **module** overlay still pins shared crypto and the MEGA
 fork; these source checks do not modify dependency graphs, add checksums, or run
 tidy. Heavy Go/gomobile/Android builds remain in GitHub Actions.
+
+## Manual actual-to-src sync after review
+
+The actual build tree is the source of truth for this **explicit manual** operation.
+After reviewing the actual/src differences for the listed paths, preview first:
+
+```sh
+python3 mobile/openlist-lib/scripts/sync_source_overlay.py
+# Review the reported paths and their actual/src diffs, then explicitly apply:
+python3 mobile/openlist-lib/scripts/sync_source_overlay.py --apply
+python3 mobile/openlist-lib/scripts/verify_source_overlay.py --check-mirrors
+```
+
+Without `--apply`, this utility only reports which listed mirrors would change.
+It validates the manifest/list agreement, path allowlist, pinned `UPSTREAM_VERSION`,
+and every actual file and existing `src` mirror before writing anything. Control
+files, sources, and destinations must be regular files without symlinked path
+components; missing files, directories, FIFOs, and symlinks fail closed. All
+listed files are checked even if some already match. New reviewed paths must be
+added to the manifest/list together and supplied in both trees before sync; this
+utility does not authorize new paths or create missing mirrors.
+
+Only differing listed `src` files are replaced, preserving their permission bits.
+Actual files, unlisted files, `UPSTREAM_VERSION`, the manifest/list, and pristine
+fingerprints are never changed. This is **not** upstream provenance verification,
+a rebase, fingerprint regeneration, or a workaround for an upstream pin failure.
+It does not run automatically in init/build. Replacement is atomic per file, not
+transactional across the batch: an I/O failure during writes can leave a partial
+sync. Do not run concurrent sync/init/edit operations; rerun preview and the mirror
+gate after correcting a failure. `--root`, `--manifest`, and `--file-list` are
+available for explicit alternate locations (the latter two otherwise use the
+checked-in files beside the utility).
 
 ## Deliberate upstream upgrades
 
