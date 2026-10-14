@@ -44,7 +44,7 @@ void main() {
     expect(transport.reports.map((r) => r['path']).toList(), ['/A.mp4', '/B.mp4']);
     await owner.dispose();
     expect(transport.reports.last['clear'], true);
-    expect(transport.reports.last['generation'], 3);
+    expect(transport.reports.last['generation'], 2);
   });
   test('URL-only and foreign origin choices do not infer canonical identity', () async {
     final transport = MockInterestTransport();
@@ -60,6 +60,10 @@ void main() {
     await expectLater(owner.launchChoice(ConfirmedPlaybackChoice('/A.mp4', origin), () async { throw StateError('canceled'); }), throwsStateError);
     await owner.settled;
     expect(transport.reports.last['clear'], true);
+    expect(transport.reports.last['generation'], 1);
+    await owner.launchChoice(ConfirmedPlaybackChoice('/B.mp4', origin), () async {});
+    await owner.settled;
     expect(transport.reports.last['generation'], 2);
+    expect(transport.reports.last['path'], '/B.mp4');
   });
 }

@@ -14,7 +14,13 @@ import (
 )
 
 func (s *interestTestScheduler) ClearPlaybackInterest(scope, session, provider string, generation uint64) (bool, error) {
-	return s.AdvancePlaybackInterest(scope, session, provider, generation, "")
+	if generation < s.generation {
+		return false, handler.ErrPlaybackInterestStale
+	}
+	advanced := generation > s.generation
+	s.generation = generation
+	s.target = ""
+	return advanced, nil
 }
 
 // Exercise a real TCP listener, JWT middleware and wire JSON, not source strings.

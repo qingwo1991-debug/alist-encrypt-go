@@ -313,10 +313,10 @@ func TestPlaybackInterestActiveCancellationJoinsRealTransfer(t *testing.T) {
 	defer store.Close()
 	ps.fileDAO = dao.NewFileDAO(store)
 	ps.resolver = NewFileSizeResolver(cfg, ps.fileDAO, nil, 1, MinMetaSize(cfg), RedirectMaxHops(cfg))
-	interestAdvance(t, ps, "one", 1, "/A")
+	interestAdvance(t, ps, "one", 7, "/A")
 	file := interestTestFile("/active")
 	file.TargetURL = srv.URL + "/active"
-	if err := ps.EnqueuePlaybackInterest("verified", "sessionone", "provider", 1, file, nil, 0, WarmSpeculative); err != nil {
+	if err := ps.EnqueuePlaybackInterest("verified", "sessionone", "provider", 7, file, nil, 0, WarmSpeculative); err != nil {
 		t.Fatal(err)
 	}
 	item, sem, ok := ps.nextReadyItem()
@@ -331,7 +331,7 @@ func TestPlaybackInterestActiveCancellationJoinsRealTransfer(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("actual request not started")
 	}
-	if _, err := ps.ClearPlaybackInterest("verified", "sessionone", "provider", 2); err != nil {
+	if _, err := ps.ClearPlaybackInterest("verified", "sessionone", "provider", 7); err != nil {
 		t.Fatal(err)
 	}
 	select {

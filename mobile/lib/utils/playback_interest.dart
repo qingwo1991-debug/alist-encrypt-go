@@ -45,9 +45,12 @@ class PlaybackInterestOwner {
     }
   }
 
-  void _enqueue(String? path) {
-    final generation = ++_generation;
+  void _enqueue(int generation, String? path) {
     _pending = _pending.then((_) => _report(generation, path));
+  }
+
+  void _clearCurrentChoice() {
+    if (_generation > 0) _enqueue(_generation, null);
   }
 
   /// The launcher runs immediately, independently of capability and reporting.
@@ -62,25 +65,25 @@ class PlaybackInterestOwner {
         !path.contains('//') && (path == '/' || !path.endsWith('/')) &&
         !path.split('/').any((part) => part == '..' || part == '.');
     final adapted = canonical && choice!.serverOrigin == trustedOrigin;
-    if (adapted) _enqueue(path);
+    if (adapted) _enqueue(++_generation, path);
     final launchedGeneration = _generation;
     try {
       await launch();
     } catch (_) {
       if (adapted && !_disposed && launchedGeneration == _generation) {
-        _enqueue(null);
+        _enqueue(launchedGeneration, null);
       }
       rethrow;
     }
   }
 
   /// Explicit app-owned cancellation only; app foreground/resume is not exit.
-  void withdrawChoice() { if (!_disposed) _enqueue(null); }
+  void withdrawChoice() { if (!_disposed) _clearCurrentChoice(); }
 
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    _enqueue(null);
+    _clearCurrentChoice();
     await _pending;
   }
 

@@ -5,7 +5,9 @@ package playbackprotocol
 const Version = 2
 
 // Request only accepts canonical logical paths, never transport URLs or auth scope.
-// Clear advances the generation and retains a tombstone until session TTL expiry.
+// Clear conditionally releases the current generation, or advances to a higher
+// generation for older clients. Both retain a tombstone until session TTL expiry;
+// a lower generation is stale and a cleared generation cannot be resurrected.
 type Request struct {
 	Session          string   `json:"session"`
 	Generation       uint64   `json:"generation"`

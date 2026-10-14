@@ -115,6 +115,16 @@ func (ps *ProbeScheduler) advancePlaybackInterest(scope, session, provider strin
 			return false, ErrPlaybackInterestStale
 		}
 		if generation == s.generation {
+			if clear {
+				ps.withdrawPlaybackSessionLocked(k, s)
+				s.target = ""
+				s.touched = now
+				ps.notifyDispatchLocked()
+				return false, nil
+			}
+			if s.target == "" {
+				return false, ErrPlaybackInterestStale
+			}
 			if target != s.target {
 				return false, ErrPlaybackInterestInvalid
 			}

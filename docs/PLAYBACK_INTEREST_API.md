@@ -39,7 +39,7 @@ Registry 按 scope/session/provider 隔离，最多 256 sessions、每 session 3
 
 `GET /enc-api/playbackInterest/capabilities` 同样受 JWT middleware 保护并 `no-store`。返回 data `{version:2, available, clear:true, canonicalPathsOnly:true, signedCDN:false, events:"explicit-launch-intent-only"}`。scheduler 未启用/已 Stop 时 available=false；404/旧版/鉴权或网络失败应回退普通播放，不能阻断 launcher。
 
-`POST /enc-api/playbackInterest` 支持 `{session:"explicit-player-session", generation:2, clear:true}`。clear 不允许 path/speculativePaths；不依赖文件仍在 DAO，因此对象删除后仍可释放兴趣。clear 只释放对应 JWT/config scope、provider、session 的后台任务 refs，不删除 session：保留 generation tombstone 至现有五分钟 TTL。相同 clear generation 重试幂等；同 generation 改 target 不允许；旧 clear 返回 409，不能擦除后来的 launch。已 clear generation 不允许 speculative enqueue。最后引用才取消实际后台请求，provider slot 在 worker 真正返回后归还，Stop join 不变；真实 media context 从未绑定此 registry。TTL 后会话过期，客户端需使用新 session，不能宣称无限期持久化单调性。
+`POST /enc-api/playbackInterest` 支持 `{session:"explicit-player-session", generation:2, clear:true}`。clear 不允许 path/speculativePaths；不依赖文件仍在 DAO，因此对象删除后仍可释放兴趣。clear 只释放对应 JWT/config scope、provider、session 的后台任务 refs，不删除 session：保留 generation tombstone 至现有五分钟 TTL。clear 接受等于当前 generation（条件释放当前兴趣，不预占未来 generation）或更高 generation（兼容旧 next-generation clear 客户端）；相同 clear 重试幂等，equal clear 返回 advanced=false。低于当前 generation 的 clear 返回 409，不能擦除后来的 launch。已 clear generation 的 launch/所有 enqueue 返回 stale，不能复活；活动同 generation 改 target 仍不允许。Flutter chooser 失败只提交该失败 launch 的 exact generation，dispose/明确退出 clear 当前 generation，不通过递增 clear 预占下一次 launch。最后引用才取消实际后台请求，provider slot 在 worker 真正返回后归还，Stop join 不变；真实 media context 从未绑定此 registry。TTL 后会话过期，客户端需使用新 session，不能宣称无限期持久化单调性。
 
 共享 Go DTO 在 `shared/encryptcore/playbackprotocol`，移动后续 endpoint 可复用，不代表已经接入。
 
