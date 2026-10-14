@@ -220,6 +220,37 @@ type Config struct {
 	// Internal
 	configPath string
 	mu         sync.RWMutex
+	// runtimeRevision is an in-process publication fence, never persisted.
+	// Successful management updates advance it even when values return to A
+	// after an intervening B, so background work cannot miss an ABA change.
+	runtimeRevision uint64
+}
+
+// RuntimeRevision returns the configuration publication generation. It is not
+// an object version or an authorization proof. Compare it around a captured
+// snapshot and again before publishing background results.
+func (c *Config) RuntimeRevision() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.runtimeRevision
+}
+
+// PublishIfRevision serializes a short local publication against management
+// updates. The callback must not call Config methods or perform network I/O.
+// It returns false when its captured generation was superseded.
+func (c *Config) PublishIfRevision(revision uint64, publish func() error) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.runtimeRevision != revision {
+		return false, nil
+	}
+	return true, publish()
 }
 
 // PasswdListSnapshot returns a deep copy suitable for lock-free request
@@ -801,6 +832,7 @@ func (c *Config) ReplaceFromJSON(data []byte) error {
 		c.assignSnapshotLocked(old)
 		return err
 	}
+	c.runtimeRevision++
 	encryption.SetV2KeyCacheTTL(time.Duration(c.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
 	return nil
 }
@@ -1362,6 +1394,7 @@ func (c *Config) UpdateAlistServer(server AlistServer) error {
 		c.AlistServer = old
 		return err
 	}
+	c.runtimeRevision++
 	encryption.SetV2KeyCacheTTL(time.Duration(c.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
 	return nil
 }
@@ -1386,6 +1419,7 @@ func (c *Config) AddWebDAVServer(server WebDAVServer) error {
 		c.WebDAVServer = old
 		return err
 	}
+	c.runtimeRevision++
 	return nil
 }
 
@@ -1411,6 +1445,7 @@ func (c *Config) UpdateWebDAVServer(server WebDAVServer) error {
 				c.WebDAVServer[i] = old
 				return err
 			}
+			c.runtimeRevision++
 			return nil
 		}
 	}
@@ -1487,6 +1522,7 @@ func (c *Config) DeleteWebDAVServer(id string) error {
 				c.WebDAVServer = old
 				return err
 			}
+			c.runtimeRevision++
 			return nil
 		}
 	}
@@ -1510,6 +1546,7 @@ func (c *Config) UpdateScheme(scheme SchemeConfig) (bool, error) {
 		c.Scheme = old
 		return false, err
 	}
+	c.runtimeRevision++
 	return needRestart, nil
 }
 
@@ -1528,6 +1565,7 @@ func (c *Config) UpdateProxy(proxyCfg ProxyConfig) error {
 		c.Proxy = old
 		return err
 	}
+	c.runtimeRevision++
 	return nil
 }
 

@@ -1,0 +1,31 @@
+# 非真机工程计划执行台账
+
+计划：`REMAINING_ENGINEERING_PLAN.md`；批准：用户“完成这个plan”。基线 `b5d84da` / `v2026.10.14.414`。
+
+## 采用的默认范围
+
+- 先P0正确性、统一守卫、媒体worker生命周期及导出，再P1一致备份。
+- 单写者默认；未知上游CAS能力不承诺严格HA。断点续传、跨规则迁移、新容器版本、独立Docker OpenList后端升级不未经评审自动启用。
+- mutation未实现安全审计迁移前，受保护范围明确拒绝，不改已有网盘对象。
+- 兼容缓存默认、严格新鲜策略opt-in，V3目录识别保守预算。
+- 可信App launch适配，不推断第三方播放器自动切集；排除真机体验验收。
+
+## 当前状态
+
+| 阶段 | 状态 | 分支/PR/发布证据 | 待完成 |
+|---|---|---|---|
+| P0-A 操作守卫、worker生命周期 | 实施及review修正中 | `agent/p0-write-lifecycle` / Draft PR #78；首head `aec6c3f`完整PR矩阵成功（run 38543191485） | review发现catchall/orig_转换绕过及literal百分号误判已补修；33d4032全矩阵成功（38545112340）。再review发现outbound二次URL解释，bef8581修URL Path编码并加真实上游路径回归，run38546687503待验证；未合并/发布 |
+| P0-B 导出、契约及文档 | 独立实施中 | `agent/p0-export` / `.agent-worktrees/p0-export` | 全量错误返回、literal过滤、limit+1与v2 cursor、敏感字段处理；尚无PR/发布 |
+| P1 一致快照/restore | 组件实施及review中 | `agent/p1-bolt-snapshot`、`agent/p1-sqlite-snapshot` / 同名隔离工作树 | Bolt库级事务快照与索引验证初稿，SQLite升级前WAL快照初稿；尚无PR/发布。MySQL/owner入口及持久restore reconciliation fence未实施 |
+| P2 实例/挂载所有权 | 待开始 | — | 工厂/epoch/pool预算 |
+| P3 驱动分批 | 待开始 | — | 能力清单+按transport逐批 |
+| P4 异步UI | 待开始 | — | 五处sync及原子预约 |
+| P5 新鲜度 | 待开始 | — | root/mobile证据和失效 |
+| P6 V3别名 | 待开始 | — | 整record/KDF预算/layout |
+| P7 可信适配/预热 | 待开始 | — | root/mobile协议、withdraw、App桥 |
+| P8 审计/安全mutation | 待开始 | — | 单写管理优先，协调写能力分层 |
+| P9 综合验收 | 待开始 | — | 自动证据矩阵、发布签收 |
+
+## 验证声明
+
+此台账中的“待开始/实施中”不表示已验证。PR所需checks和main完整发布全绿后才记录工程完成；云端不能替代设备体验。生产新发布/配置及网盘测试必须单独核实范围。已有用户文件不批量改名、不覆盖。

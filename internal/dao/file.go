@@ -900,6 +900,12 @@ func (d *PasswdDAO) MatchDir(dirPath string) bool {
 	return false
 }
 
+// FindByPathFresh bypasses the request cache for background publication fences.
+// Callers must still compare Config.RuntimeRevision around snapshot capture.
+func (d *PasswdDAO) FindByPathFresh(urlPath string) (*config.PasswdInfo, bool) {
+	return d.findByPathInternal(urlPath)
+}
+
 func (d *PasswdDAO) findByPathInternal(urlPath string) (*config.PasswdInfo, bool) {
 	list := d.cfg.PasswdListSnapshot()
 	var bestMatch *config.PasswdInfo
