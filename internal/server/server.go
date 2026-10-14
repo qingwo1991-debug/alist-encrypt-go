@@ -63,6 +63,7 @@ type Server struct {
 	listenFactory      func(string, string) (net.Listener, error)
 	requestContext     context.Context
 	requestCancel      context.CancelFunc
+	connections        map[net.Conn]http.ConnState
 }
 
 // New creates a new server instance
@@ -513,7 +514,7 @@ func (s *Server) prepareHTTP() *http.Server {
 			MaxConcurrentStreams: 1000,
 			IdleTimeout:          120 * time.Second,
 		}
-		httpHandler = h2c.NewHandler(s.engine, h2s)
+		httpHandler = h2c.NewHandler(httpHandler, h2s)
 		log.Info().Msg("HTTP/2 cleartext (h2c) enabled")
 	}
 
@@ -529,6 +530,7 @@ func (s *Server) prepareHTTP() *http.Server {
 	log.Info().Str("addr", addr).Msg("Starting HTTP server")
 	log.Info().Str("alist_url", s.cfg.GetAlistURL()).Msg("Proxying to Alist")
 
+	server.ConnState = s.ownedConnState
 	server.Handler = httpHandler
 	return server
 }
@@ -558,6 +560,7 @@ func (s *Server) prepareHTTPS() *http.Server {
 
 	log.Info().Str("addr", addr).Msg("Starting HTTPS server with HTTP/2")
 
+	server.ConnState = s.ownedConnState
 	server.Handler = s.ownedHTTPHandler(s.engine)
 	return server
 }
@@ -594,6 +597,7 @@ func (s *Server) prepareUnix() (*http.Server, net.Listener, error) {
 
 	log.Info().Str("socket", socketPath).Msg("Starting Unix socket server")
 
+	server.ConnState = s.ownedConnState
 	server.Handler = s.ownedHTTPHandler(s.engine)
 	return server, listener, nil
 }
@@ -648,6 +652,9 @@ func (s *Server) shutdown(ctx context.Context) error {
 		_ = listener.Close()
 	}
 	s.serveWG.Wait()
+	// Hijacked h2c sockets are not closed by http.Server.Shutdown/Close.
+	// Release them explicitly so blocked transport I/O and idle sessions end.
+	s.closeOwnedConnections()
 	// Close cancels network I/O, not arbitrary handler code. Always wait for
 	// actual return before tearing down DAOs/stores, even after ctx expiry.
 	s.requestWG.Wait()

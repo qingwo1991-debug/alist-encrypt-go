@@ -86,9 +86,13 @@ Repeat Start (including Start after Stop) is rejected. Request handlers are owne
 and joined before DAO/store shutdown even when HTTP Shutdown times out: Close
 cancels ordinary connection I/O, while an instance cancellation context also
 signals request contexts (including h2c hijacked sessions). A handler ignoring
-cancellation must actually return before the store closes. Idle hijacked h2c
-transport sessions are not counted as active application handlers; after sealing,
-new requests receive 503 without accessing closed stores.
+cancellation must actually return before the store closes. The ownership wrapper
+is inside `h2c.NewHandler`, so each HTTP/2 stream passes request admission/join.
+Accepted connections are tracked through ConnState, including Hijacked h2c sockets,
+and closed explicitly during Stop (net/http does not own them after hijacking).
+A connection wrapper removes closed hijacked sessions from the tracking map, so
+ordinary session churn is not an unbounded registry. After sealing, new application
+requests receive 503 without accessing closed stores; idle owned sessions close.
 
 Latest 64 job statuses are retained in memory (including the active job); terminal
 entries are evicted on admission, with no unbounded status map. Status does not

@@ -5,7 +5,33 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 )
+
+type ownedListener struct {
+	net.Listener
+	owner *Server
+}
+
+func (l *ownedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &ownedConnection{Conn: conn, owner: l.owner}, nil
+}
+
+type ownedConnection struct {
+	net.Conn
+	owner *Server
+	once  sync.Once
+}
+
+func (c *ownedConnection) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { c.owner.lifecycleMu.Lock(); delete(c.owner.connections, c); c.owner.lifecycleMu.Unlock() })
+	return err
+}
 
 type serverEndpoint struct {
 	server   *http.Server
@@ -65,6 +91,9 @@ func (s *Server) prepareListeners() (endpoints []serverEndpoint, err error) {
 		return endpoints, fmt.Errorf("server stopped during listener preparation")
 	}
 	s.httpServer = httpServer
+	for i := range endpoints {
+		endpoints[i].listener = &ownedListener{Listener: endpoints[i].listener, owner: s}
+	}
 	for _, endpoint := range endpoints {
 		if endpoint.tls {
 			s.httpsServer = endpoint.server
@@ -76,6 +105,39 @@ func (s *Server) prepareListeners() (endpoints []serverEndpoint, err error) {
 	// Registered before Stop can Wait, even before Serve goroutines are launched.
 	s.serveWG.Add(len(endpoints))
 	return endpoints, nil
+}
+
+// net/http drops hijacked sessions from Shutdown's ownership. Retain those
+// sockets (including h2c) until instance Stop closes them; closed callbacks remove
+// ordinary connections. No lifecycle mutex is held across connection.Close.
+func (s *Server) ownedConnState(conn net.Conn, state http.ConnState) {
+	s.lifecycleMu.Lock()
+	if state == http.StateClosed {
+		delete(s.connections, conn)
+		s.lifecycleMu.Unlock()
+		return
+	}
+	if s.connections == nil {
+		s.connections = make(map[net.Conn]http.ConnState)
+	}
+	s.connections[conn] = state
+	stopping := s.stopping
+	s.lifecycleMu.Unlock()
+	if stopping && (state == http.StateNew || state == http.StateHijacked) {
+		_ = conn.Close()
+	}
+}
+func (s *Server) closeOwnedConnections() {
+	s.lifecycleMu.Lock()
+	connections := make([]net.Conn, 0, len(s.connections))
+	for conn := range s.connections {
+		connections = append(connections, conn)
+	}
+	s.connections = make(map[net.Conn]http.ConnState)
+	s.lifecycleMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
 }
 func (s *Server) ownedHTTPHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

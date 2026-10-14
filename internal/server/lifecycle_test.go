@@ -2,8 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+
 	"encoding/json"
 	"errors"
+	"golang.org/x/net/http2"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +22,86 @@ import (
 	"github.com/alist-encrypt-go/internal/storage"
 	"github.com/gin-gonic/gin"
 )
+
+func TestLifecycleActualH2CRequestOwnedAndSessionClosed(t *testing.T) {
+	store, owner := backupFixture(t)
+	entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	engine := gin.New()
+	engine.GET("/h2gate", func(c *gin.Context) {
+		if c.Request.ProtoMajor != 2 {
+			t.Error("not an actual HTTP/2 request")
+		}
+		close(entered)
+		<-c.Request.Context().Done()
+		close(canceled)
+		<-release
+		if err := store.SetJSON(storage.BucketConfig, "h2-handler-real-return", true); err != nil {
+			t.Error(err)
+		}
+		c.Status(200)
+	})
+	cfg := &config.Config{Scheme: &config.SchemeConfig{EnableH2C: true}}
+	s := &Server{cfg: cfg, engine: engine, store: store, backups: owner}
+	listening := make(chan net.Listener, 1)
+	s.listenFactory = func(string, string) (net.Listener, error) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			listening <- listener
+		}
+		return listener, err
+	}
+	started := make(chan error, 1)
+	go func() { started <- s.Start() }()
+	listener := <-listening
+	transport := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		response, err := client.Get("http://" + listener.Addr().String() + "/h2gate")
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	<-entered
+	s.lifecycleMu.Lock()
+	hijacked := 0
+	for _, state := range s.connections {
+		if state == http.StateHijacked {
+			hijacked++
+		}
+	}
+	s.lifecycleMu.Unlock()
+	if hijacked == 0 {
+		t.Error("h2c connection not tracked as hijacked")
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- s.Shutdown(context.Background()) }()
+	<-canceled
+	select {
+	case <-stopped:
+		t.Fatal("h2c active handler abandoned")
+	default:
+	}
+	if err := store.SetJSON(storage.BucketConfig, "h2-store-not-yet-closed", true); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	<-clientDone
+	s.lifecycleMu.Lock()
+	remaining := len(s.connections)
+	s.lifecycleMu.Unlock()
+	if remaining != 0 {
+		t.Fatal("owned h2c session leaked", remaining)
+	}
+}
 
 func TestBackupActualServerRoutesAndDisk(t *testing.T) {
 	dir := t.TempDir()
