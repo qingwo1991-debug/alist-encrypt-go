@@ -5,6 +5,19 @@ import (
 	"github.com/alist-encrypt-go/internal/storage"
 )
 
+func (d *FileDAO) FilenameAudit(q storage.FilenameAuditQuery) (storage.FilenameAuditPage, error) {
+	if d == nil || d.store == nil {
+		return storage.FilenameAuditPage{}, errors.New("filename store unavailable")
+	}
+	return d.store.FilenameAudit(q)
+}
+func (d *FileDAO) AppendFilenameCheck(c storage.FilenameCheck) error {
+	if d == nil || d.store == nil {
+		return errors.New("filename store unavailable")
+	}
+	return d.store.AppendFilenameCheck(c)
+}
+
 // Filename reservations use the durable local store, independently of ordinary
 // mutable file metadata. Missing persistence must never permit a protected write.
 func (d *FileDAO) ReserveFilename(record storage.FilenameRecord) (storage.FilenameRecord, error) {
