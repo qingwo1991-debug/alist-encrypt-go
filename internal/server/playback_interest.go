@@ -14,6 +14,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/handler"
+	"github.com/alist-encrypt-go/shared/encryptcore/playbackprotocol"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,11 +25,22 @@ type playbackInterestScheduler interface {
 type playbackInterestFiles interface {
 	Get(string) (*dao.FileInfo, bool)
 }
-type playbackInterestRequest struct {
-	Session          string   `json:"session"`
-	Generation       uint64   `json:"generation"`
-	Path             string   `json:"path"`
-	SpeculativePaths []string `json:"speculativePaths,omitempty"`
+type playbackInterestRequest = playbackprotocol.Request
+
+type playbackInterestClearer interface {
+	ClearPlaybackInterest(string, string, string, uint64) (bool, error)
+}
+
+func playbackInterestCapabilityHandler(scheduler playbackInterestScheduler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		_, clear := scheduler.(playbackInterestClearer)
+		available := scheduler != nil
+		if state, ok := scheduler.(interface{ PlaybackInterestAvailable() bool }); ok {
+			available = state.PlaybackInterestAvailable()
+		}
+		c.JSON(200, gin.H{"code": 0, "data": playbackprotocol.Capability{Version: playbackprotocol.Version, Available: available, Clear: clear, CanonicalPathsOnly: true, SignedCDN: false, Events: "explicit-launch-intent-only"}})
+	}
 }
 
 // Only an explicit authenticated application intent advances generations. No
@@ -52,7 +64,7 @@ func playbackInterestHandler(cfg *config.Config, files playbackInterestFiles, sc
 			c.JSON(400, gin.H{"code": 400, "msg": "invalid playback interest"})
 			return
 		}
-		if cfg == nil || files == nil || scheduler == nil {
+		if cfg == nil || scheduler == nil || (!input.Clear && files == nil) {
 			playbackInterestError(c, handler.ErrPlaybackInterestStopped)
 			return
 		}
@@ -60,6 +72,32 @@ func playbackInterestHandler(cfg *config.Config, files playbackInterestFiles, sc
 		origin, err := url.Parse(config.BuildAlistURL(snapshot))
 		if err != nil || origin.Host == "" || (origin.Scheme != "http" && origin.Scheme != "https") || origin.User != nil {
 			playbackInterestError(c, handler.ErrPlaybackInterestStopped)
+			return
+		}
+		// Configuration and verified JWT bind both launch and clear to one owner.
+		scopeJSON, _ := json.Marshal(struct {
+			Domain, Token string
+			Config        config.AlistServer
+		}{"playback-interest-scope-v1", token, snapshot})
+		digest := sha256.Sum256(scopeJSON)
+		scope := hex.EncodeToString(digest[:])
+		provider := handler.ProviderKey(origin.String(), input.Path)
+		if input.Clear {
+			if input.Path != "" || len(input.SpeculativePaths) != 0 {
+				playbackInterestError(c, handler.ErrPlaybackInterestInvalid)
+				return
+			}
+			clearer, ok := scheduler.(playbackInterestClearer)
+			if !ok {
+				playbackInterestError(c, handler.ErrPlaybackInterestStopped)
+				return
+			}
+			advanced, err := clearer.ClearPlaybackInterest(scope, input.Session, provider, input.Generation)
+			if err != nil {
+				playbackInterestError(c, err)
+				return
+			}
+			c.JSON(http.StatusAccepted, gin.H{"code": 0, "data": gin.H{"generation": input.Generation, "advanced": advanced, "cleared": true, "warmAccepted": 0, "warmRejected": 0}})
 			return
 		}
 		paths := append([]string{input.Path}, input.SpeculativePaths...)
@@ -87,15 +125,6 @@ func playbackInterestHandler(cfg *config.Config, files playbackInterestFiles, sc
 			items = append(items, handler.FileItem{DisplayPath: name, EncryptedPath: info.EncryptedPath, TargetURL: info.RawURL, FileName: info.Name, PropfindSize: info.Size})
 			sizes = append(sizes, info.Size)
 		}
-		// Bind the verified token and configuration (including credential rotation)
-		// without exposing either in registry identifiers, logs or response bodies.
-		scopeJSON, _ := json.Marshal(struct {
-			Domain, Token string
-			Config        config.AlistServer
-		}{"playback-interest-scope-v1", token, snapshot})
-		digest := sha256.Sum256(scopeJSON)
-		scope := hex.EncodeToString(digest[:])
-		provider := handler.ProviderKey(origin.String(), input.Path)
 		advanced, err := scheduler.AdvancePlaybackInterest(scope, input.Session, provider, input.Generation, input.Path)
 		if err != nil {
 			playbackInterestError(c, err)

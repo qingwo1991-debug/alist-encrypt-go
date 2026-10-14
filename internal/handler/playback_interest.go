@@ -64,10 +64,36 @@ func validPlaybackSession(scope, session, provider string, generation uint64, ta
 // by the caller. A client header, source IP, HEAD or Range is never session proof.
 // The boolean reports a new generation; identical retries do not advance it.
 func (ps *ProbeScheduler) AdvancePlaybackInterest(scope, session, provider string, generation uint64, target string) (bool, error) {
+	return ps.advancePlaybackInterest(scope, session, provider, generation, target, false)
+}
+
+// ClearPlaybackInterest retains the monotonic generation tombstone. Delayed old
+// withdraws cannot erase a new launch, and a cleared generation cannot re-enqueue.
+func (ps *ProbeScheduler) ClearPlaybackInterest(scope, session, provider string, generation uint64) (bool, error) {
+	return ps.advancePlaybackInterest(scope, session, provider, generation, "", true)
+}
+
+func (ps *ProbeScheduler) PlaybackInterestAvailable() bool {
+	if ps == nil || !ps.enabled || ps.queue == nil {
+		return false
+	}
+	select {
+	case <-ps.done():
+		return false
+	default:
+		return true
+	}
+}
+
+func (ps *ProbeScheduler) advancePlaybackInterest(scope, session, provider string, generation uint64, target string, clear bool) (bool, error) {
 	if ps == nil || !ps.enabled || ps.queue == nil {
 		return false, ErrPlaybackInterestStopped
 	}
-	if !validPlaybackSession(scope, session, provider, generation, target) {
+	validationTarget := target
+	if clear {
+		validationTarget = "clear"
+	}
+	if !validPlaybackSession(scope, session, provider, generation, validationTarget) {
 		return false, ErrPlaybackInterestInvalid
 	}
 	ps.queueMu.Lock()
@@ -158,7 +184,7 @@ func (ps *ProbeScheduler) EnqueuePlaybackInterestWithConfig(scope, session, prov
 	ps.prunePlaybackInterestsLocked(time.Now())
 	sk := playbackSessionKey{scope, session, provider}
 	s := ps.interests[sk]
-	if s == nil || generation != s.generation {
+	if s == nil || generation != s.generation || s.target == "" {
 		return ErrPlaybackInterestStale
 	}
 	if kind == WarmForeground && file.DisplayPath != s.target {

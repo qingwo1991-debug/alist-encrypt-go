@@ -331,7 +331,9 @@ func TestPlaybackInterestActiveCancellationJoinsRealTransfer(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("actual request not started")
 	}
-	interestAdvance(t, ps, "one", 2, "/C")
+	if _, err := ps.ClearPlaybackInterest("verified", "sessionone", "provider", 2); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-canceled:
 	case <-time.After(3 * time.Second):

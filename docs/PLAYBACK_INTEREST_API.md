@@ -1,6 +1,6 @@
 # 显式播放兴趣与 V3 KDF：阶段四实施契约
 
-> 当前为 Draft PR #70 实施契约；新增兴趣调度和 endpoint 尚待完整云端验证。不是所有播放器自动切集支持或真机时延证明。
+> 历史基础来自 PR #70；本批 P7 增加 root v2 clear/capability 与可复用客户端契约，尚待候选 head 云端验证。不是所有播放器自动切集支持、移动 endpoint 完成或真机时延证明。
 
 ## V3 KDF
 
@@ -35,6 +35,24 @@ Registry 按 scope/session/provider 隔离，最多 256 sessions、每 session 3
 
 真实 media HTTP context 从未附到 generation；第三方播放器没有可信兴趣提供器时维持原来的保守行为。原有不带兴趣的目录/常规预热不被某个 session 撤销。取消不假释放 provider slot：必须等实际 transfer 返回才退还，Stop 要真实 join。
 
-## 尚待验证与接入
+## v2 capability 与 clear（root actual）
 
-仓库根 Web UI 是管理页，没有已知的内置播放器会话入口；移动 WebView/外部 app 的普通下载 URL 也不提供可靠的逻辑对象/session 映射。新增 endpoint 是显式客户端接入契约，不宣称这些入口已自动上报兴趣。需支持此契约的真实客户端明确发出 intent 才有 generation 效果；真机切集收敛和首帧时延仍待验收。
+`GET /enc-api/playbackInterest/capabilities` 同样受 JWT middleware 保护并 `no-store`。返回 data `{version:2, available, clear:true, canonicalPathsOnly:true, signedCDN:false, events:"explicit-launch-intent-only"}`。scheduler 未启用/已 Stop 时 available=false；404/旧版/鉴权或网络失败应回退普通播放，不能阻断 launcher。
+
+`POST /enc-api/playbackInterest` 支持 `{session:"explicit-player-session", generation:2, clear:true}`。clear 不允许 path/speculativePaths；不依赖文件仍在 DAO，因此对象删除后仍可释放兴趣。clear 只释放对应 JWT/config scope、provider、session 的后台任务 refs，不删除 session：保留 generation tombstone 至现有五分钟 TTL。相同 clear generation 重试幂等；同 generation 改 target 不允许；旧 clear 返回 409，不能擦除后来的 launch。已 clear generation 不允许 speculative enqueue。最后引用才取消实际后台请求，provider slot 在 worker 真正返回后归还，Stop join 不变；真实 media context 从未绑定此 registry。TTL 后会话过期，客户端需使用新 session，不能宣称无限期持久化单调性。
+
+共享 Go DTO 在 `shared/encryptcore/playbackprotocol`，移动后续 endpoint 可复用，不代表已经接入。
+
+## CDN 与非 canonical 的明确边界
+
+本批仍 **unsupported signed-CDN / noncanonical URL**。DAO 里存在 RawURL 不证明当前 caller 的 fs/get 授权、规则 epoch 或 CDN 对象绑定；当前 root API 无法安全完成该证明，不据任意 URL、query stripping、IP 或 basename 猜身份。未来支持仅可从当前 caller canonical fs/get 的已确认对象、当前规则/auth scope、当前 rawURL 建立绑定并验证旋转；不能仅放宽同 origin 检查。客户端不提交 rawURL/provider/scope。
+
+## 移动与 chooser：本批延期范围
+
+移动 encrypt 包 **没有实际同等 endpoint/capability**；P2 owner/lifecycle 未合并，本批不复制其任务所有权。`mobile/lib/utils/playback_interest.dart` 提供 transport-injected 明确 confirmed-choice adapter 与 mock tests：旧服务 fallback、上报失败不阻断 launch、快速 chooser 失败不撤销新 generation、dispose/明确取消只 clear 自己、foreign origin/URL-only 不上报。transport 必须由实际认证服务器和 caller fs/get confirmation owner 注入，目前没有生产 transport。
+
+实际 `mobile/lib/pages/web/web.dart` 下载 chooser 仅收到 URL/suggestedFilename，没有 canonical fs/get 身份，因此 **未接入兴趣上报**，普通打开保持原样；不伪造 raw URL 到 canonical 的映射。Flutter launch 只证明打开请求，不是 MX actual play/frame/exit。App resume 不触发 clear；未引入 Pigeon battery bridge。邻集预热默认保守关闭，adapter 不发 speculativePaths，未知计费/电量/网络输入不启用新 warm。
+
+## 验证状态
+
+新增 root TCP/JWT capability/clear/expired-token wire tests、clear exact-owner/shared-ref/rapid/stale registry tests；existing 实际上游取消/join测试改为 clear 触发，保留队列满/Stop拒绝测试。Flutter mock adapter tests 待云端执行。本地 root focused test 在首次依赖下载 60s 后终止（未获得通过信号）；Flutter/Dart 工具本机不可用。shared DTO 单包 test 因 `/root/.cache/go-build` 只读沙箱拒绝未运行（不绕过/提权）。gofmt 与 git diff --check 通过。真机切集、首帧、耗电与生产 CDN 均未验收。
