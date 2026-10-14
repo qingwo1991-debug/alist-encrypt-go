@@ -33,6 +33,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
   int _infoGeneration = 0;
   String? _infoPath;
   StreamSubscription<List<DownloadedFile>>? _scanSubscription;
+  Future<void> _scanCancellation = Future<void>.value();
   Completer<void>? _scanCompletion;
   String? _downloadPath;
   late TabController _tabController;
@@ -96,6 +97,14 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     _infoPath = null;
     final previous = _scanSubscription;
     _scanSubscription = null;
+    // Later refreshes must also join any earlier cancellation, even while the
+    // subscription field is empty. Only the newest epoch may start a scan.
+    final cancellation = _scanCancellation.then((_) async {
+      await previous?.cancel();
+    });
+    // Report this epoch's error below, but do not poison future refreshes.
+    _scanCancellation = cancellation.then<void>((_) {},
+      onError: (Object _, StackTrace __) {});
     _finishScan();
     final completion = Completer<void>();
     _scanCompletion = completion;
@@ -116,7 +125,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     }
 
     try {
-      await previous?.cancel();
+      await cancellation;
       if (!mounted || generation != _scanGeneration) return;
       _scanSubscription = (widget.scanDownloadedFiles ??
           DownloadManager.scanDownloadedFiles)().listen(
@@ -564,7 +573,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
+      builder: (context) => SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -650,6 +659,7 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
       context: context,
       builder: (context) => AlertDialog(
         title: Text(S.of(context).fileInfo),
+        scrollable: true,
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
