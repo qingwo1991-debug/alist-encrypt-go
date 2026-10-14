@@ -176,6 +176,14 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 	if passwdListRaw, ok := raw["passwdList"]; ok {
 		server.PasswdList = ParsePasswdList(passwdListRaw)
 	}
+	if limitsRaw, ok := raw["filenameWriteLimits"].(map[string]interface{}); ok {
+		server.FilenameWriteLimits = make(map[string]int, len(limitsRaw))
+		for prefix, value := range limitsRaw {
+			if limit, ok := value.(float64); ok && limit == float64(int(limit)) {
+				server.FilenameWriteLimits[prefix] = int(limit)
+			}
+		}
+	}
 	if overridesRaw, ok := raw["streamStrategyOverrides"]; ok {
 		server.StreamStrategyOverrides = ParseStreamStrategyOverrides(overridesRaw)
 	}

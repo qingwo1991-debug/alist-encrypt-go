@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,10 +12,18 @@ import (
 	"strings"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
+
+type synchronousUploadVerificationKey struct{}
+
+// WithSynchronousUploadVerification requests a bounded synchronous fs/put result
+// check before any successful response or upload metadata is published.
+func WithSynchronousUploadVerification(ctx context.Context) context.Context {
+	return context.WithValue(ctx, synchronousUploadVerificationKey{}, true)
+}
 
 // ProxyUploadEncrypt uploads with encryption.
 // startOffset should be the absolute file offset for chunked/resume uploads.
@@ -96,6 +107,11 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	rewriteUploadHeadersForV2(req, contentMeta, startOffset, originalContentRange, plainContentLength)
+	verifySynchronous, _ := r.Context().Value(synchronousUploadVerificationKey{}).(bool)
+	verifySynchronous = verifySynchronous && !isWebDAVUploadTarget(targetURL)
+	if verifySynchronous {
+		req.Header.Set("As-Task", "false")
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -109,6 +125,26 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 		return errors.NewProxyError(fmt.Sprintf("upstream upload status %d", resp.StatusCode))
 	}
+	var verifiedResponse []byte
+	if verifySynchronous {
+		const maxUploadResultBytes = 64 * 1024
+		verifiedResponse, err = io.ReadAll(io.LimitReader(resp.Body, maxUploadResultBytes+1))
+		if err != nil {
+			return errors.NewProxyErrorWithCause("failed to read synchronous upload result", err)
+		}
+		if len(verifiedResponse) > maxUploadResultBytes {
+			return errors.NewProxyError("synchronous upload result exceeds limit")
+		}
+		var result struct {
+			Code int `json:"code"`
+		}
+		if err := json.Unmarshal(verifiedResponse, &result); err != nil {
+			return errors.NewProxyError("invalid synchronous upload result")
+		}
+		if result.Code != http.StatusOK {
+			return errors.NewProxyError(fmt.Sprintf("upstream upload result code %d", result.Code))
+		}
+	}
 	if contentMeta.IsV2() {
 		uploadComplete := (!hasContentRange && startOffset == 0) || (hasContentRange && parsedRange.end+1 == parsedRange.total)
 		if uploadComplete {
@@ -120,6 +156,13 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 
 	// Copy response headers and write status
 	httputil.CopyResponseHeaders(w, resp)
+	if verifySynchronous {
+		w.Header().Set("Content-Length", strconv.Itoa(len(verifiedResponse)))
+		w.Header().Del("Transfer-Encoding")
+		w.WriteHeader(resp.StatusCode)
+		_, err = io.Copy(w, bytes.NewReader(verifiedResponse))
+		return err
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream response with large buffer
