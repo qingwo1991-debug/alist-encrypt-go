@@ -23,6 +23,62 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestLifecycleLateConnectionStatesNeverResurrect(t *testing.T) {
+	for _, sealed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "closed-before-delayed-state", true: "sealed-before-delayed-state"}[sealed], func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			client, err := net.Dial("tcp", listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			socket, err := listener.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := &Server{}
+			conn := &ownedConnection{Conn: socket, owner: s}
+			s.ownedConnState(conn, http.StateNew)
+			gated, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				close(gated)
+				<-release
+				s.ownedConnState(conn, http.StateHijacked)
+				s.ownedConnState(conn, http.StateActive)
+				s.ownedConnState(conn, http.StateIdle)
+				close(done)
+			}()
+			<-gated
+			if sealed {
+				s.lifecycleMu.Lock()
+				s.stopping = true
+				s.lifecycleMu.Unlock()
+				s.closeOwnedConnections()
+			} else {
+				_ = conn.Close()
+			}
+			close(release)
+			<-done
+			s.lifecycleMu.Lock()
+			remaining := len(s.connections)
+			closed := conn.closed
+			s.lifecycleMu.Unlock()
+			if remaining != 0 || !closed {
+				t.Fatal("late callback resurrected socket", remaining, closed)
+			}
+			_ = client.SetReadDeadline(time.Now().Add(time.Second))
+			var one [1]byte
+			if _, err = client.Read(one[:]); err != io.EOF {
+				t.Fatal("owned real socket not closed", err)
+			}
+		})
+	}
+}
+
 func TestLifecycleActualH2CRequestOwnedAndSessionClosed(t *testing.T) {
 	store, owner := backupFixture(t)
 	entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
