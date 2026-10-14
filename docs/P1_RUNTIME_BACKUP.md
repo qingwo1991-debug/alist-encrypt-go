@@ -77,9 +77,18 @@ is still successful. Failure messages are generic and never copy raw disk errors
 Shutdown first seals admission and signals cancellation, then shuts down HTTP,
 then joins the actual backup worker before closing Bolt. Joining is mandatory even
 if the HTTP shutdown context expires; shutdown can therefore exceed that deadline.
-Shutdown works without Start and is idempotent through `sync.Once`. Start exit,
-including listener failure, also seals/drains backup admission. These changes do
-not redesign the preexisting HTTP listener startup synchronization contract.
+Shutdown works without Start and is idempotent through `sync.Once`. A lifecycle
+mutex seals Start/preparation/request admission atomically with wait-group adds.
+Listener preparation is joined outside that mutex; a late prepared listener is
+closed rather than published after shutdown. All HTTP/HTTPS/Unix listeners are
+prepared before Serve, and startup/Serve failure closes siblings and drains them.
+Repeat Start (including Start after Stop) is rejected. Request handlers are owned
+and joined before DAO/store shutdown even when HTTP Shutdown times out: Close
+cancels ordinary connection I/O, while an instance cancellation context also
+signals request contexts (including h2c hijacked sessions). A handler ignoring
+cancellation must actually return before the store closes. Idle hijacked h2c
+transport sessions are not counted as active application handlers; after sealing,
+new requests receive 503 without accessing closed stores.
 
 Latest 64 job statuses are retained in memory (including the active job); terminal
 entries are evicted on admission, with no unbounded status map. Status does not
@@ -96,7 +105,13 @@ real private validated artifact, previous-good preservation, strict bounds,
 symlink rejection, latest-64 status cap, actual management JWT/unknown-user checks,
 create/busy/status/cancel, slot retention until return, no-Start shutdown drain and
 repeat shutdown. Shutdown fixture accesses Bolt after cancellation while blocked,
-proving the store remains open until worker return. Formatting and diff checks
+proving the store remains open until worker return. `lifecycle_test.go` adds real
+listener gates before preparation and before publication, Start/Stop races,
+repeat/never-started lifecycle, sibling failure cleanup, real network requests
+blocked through canceled Shutdown with actual context signaling and store access
+before handler return, and `New`/production routes/JWT/HTTP-to-validated-disk-bundle
+integration. The cancellation disk fixture cancels before CreateSnapshot enters;
+it does not simulate a blocked filesystem syscall. Formatting and diff checks
 are local gates; root heavy compilation/test/race execution is delegated to parent
 cloud validation, not claimed from formatting. ENOSPC/crash/fault injection and
 platform-specific ACL/FS capability tests remain unverified.
