@@ -53,6 +53,7 @@ type WebDAVHandler struct {
 	statsRecorder         StatsRecorder
 	dirSyncStore          DirSyncStore
 	mediaRecovery         mediaRecoveryState
+	stopOnce              sync.Once
 }
 
 // SetDirSyncStore injects the shared dir-sync snapshot store so directory
@@ -120,6 +121,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO po
 		shortClient:     proxy.NewHTTPClientWithTransport(sharedTransport, 10*time.Second),
 		stdClient:       proxy.NewHTTPClientWithTransport(sharedTransport, 30*time.Second),
 	}
+	h.mediaRecovery.initLocked() // Not yet published; also support lazy zero-value construction.
 	return h
 }
 
@@ -188,10 +190,17 @@ func (h *WebDAVHandler) SetStatsRecorder(recorder StatsRecorder) {
 
 // Stop terminates background maintenance goroutines owned by the WebDAV handler.
 func (h *WebDAVHandler) Stop() {
-	if h == nil || h.proxyHandler == nil {
+	if h == nil {
 		return
 	}
-	h.proxyHandler.Stop()
+	h.stopOnce.Do(func() {
+		// Join our I/O before stopping shared proxy dependencies or letting
+		// the caller close the store. Concurrent/repeated Stop calls join too.
+		h.mediaRecovery.stop()
+		if h.proxyHandler != nil {
+			h.proxyHandler.Stop()
+		}
+	})
 }
 
 // getStdClient returns the shared standard-timeout HTTP client,
@@ -712,6 +721,21 @@ func (h *WebDAVHandler) handleCopy(w http.ResponseWriter, r *http.Request, davPa
 
 // handleMoveOrCopy handles MOVE/COPY requests with filename encryption
 func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request, davPath string, method string) {
+	if mutationProtectionEnabled(h.cfg) {
+		dest, err := url.Parse(r.Header.Get("Destination"))
+		if err != nil || dest.User != nil || dest.RawQuery != "" || dest.Fragment != "" || (dest.Host != "" && !strings.EqualFold(dest.Host, r.Host)) || (dest.Scheme != "" && dest.Scheme != "http" && dest.Scheme != "https") || (dest.Path != "/dav" && !strings.HasPrefix(dest.Path, "/dav/")) {
+			respondProtectedMutationError(w, invalidMutation(method))
+			return
+		}
+		destPath := strings.TrimPrefix(dest.Path, "/dav")
+		if destPath == "" {
+			destPath = "/"
+		}
+		if err := guardProtectedMutation(h.cfg, method, davPath, destPath); err != nil {
+			respondProtectedMutationError(w, err)
+			return
+		}
+	}
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 
 	// Convert source path

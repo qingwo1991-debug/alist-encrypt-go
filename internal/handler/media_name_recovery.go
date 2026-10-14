@@ -33,10 +33,39 @@ type mediaRecoveryFlight struct {
 	ok     bool
 }
 type mediaRecoveryState struct {
+	// mu serializes admission/Add, Stop's fence, and publication. Never hold it
+	// while joining workers: their completion also needs this lock.
 	mu       sync.Mutex
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopped  bool
+	workers  sync.WaitGroup
 	flights  map[string]*mediaRecoveryFlight
 	failures map[string]time.Time
 	sem      chan struct{}
+}
+
+func (s *mediaRecoveryState) initLocked() {
+	if s.ctx == nil {
+		s.ctx, s.cancel = context.WithCancel(context.Background())
+	}
+	if s.flights == nil {
+		s.flights = make(map[string]*mediaRecoveryFlight)
+		s.failures = make(map[string]time.Time)
+		s.sem = make(chan struct{}, 2)
+	}
+}
+
+func (s *mediaRecoveryState) stop() {
+	s.mu.Lock()
+	s.stopped = true
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.mu.Unlock()
+	// All positive Add calls occur under mu after checking stopped, so no
+	// admission can race with Wait, including on a zero-value handler.
+	s.workers.Wait()
 }
 
 type verifiedFilenameRawPathKey struct{}
@@ -297,18 +326,19 @@ func (h *WebDAVHandler) mediaRecoveryCoolingDown(raw, auth, rule string, size in
 }
 
 func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Request, repo mediaAliasRepository, inspector mediaPrefixInspector, ep *config.PasswdInfo, raw, auth, rule string, size int64) (storage.VerifiedMediaAlias, bool) {
+	revision := h.cfg.RuntimeRevision()
 	origin := h.cfg.GetAlistURL()
 	key := filenameScopeDigest(origin, raw, auth, rule, strconv.FormatInt(size, 10))
 	s := &h.mediaRecovery
 	s.mu.Lock()
+	if s.stopped || ctx.Err() != nil {
+		s.mu.Unlock()
+		return storage.VerifiedMediaAlias{}, false
+	}
+	s.initLocked()
 	if rec, ok, err := repo.GetVerifiedMediaAlias(origin, raw, auth, rule, size); err == nil && ok {
 		s.mu.Unlock()
 		return rec, true
-	}
-	if s.flights == nil {
-		s.flights = make(map[string]*mediaRecoveryFlight)
-		s.failures = make(map[string]time.Time)
-		s.sem = make(chan struct{}, 2)
 	}
 	if until := s.failures[key]; time.Now().Before(until) {
 		s.mu.Unlock()
@@ -325,13 +355,18 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 		headers := r.Header.Clone()
 		info := *ep
 		info.EncPath = append([]string(nil), ep.EncPath...)
+		limit := protectedFilenameLimit(h.cfg, raw)
+		worker, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		s.workers.Add(1)
 		go func() {
-			worker, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer s.workers.Done()
 			defer cancel()
 			defer func() {
 				s.mu.Lock()
 				delete(s.flights, key)
-				if !flight.ok {
+				// Lifecycle cancellation and stale configuration are not format
+				// evidence. Preserve the bounded cooldown for other failures.
+				if !flight.ok && !s.stopped && worker.Err() != context.Canceled && h.cfg.RuntimeRevision() == revision {
 					if len(s.failures) >= 2048 {
 						clear(s.failures)
 					}
@@ -346,19 +381,28 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 			case <-worker.Done():
 				return
 			}
+			if worker.Err() != nil {
+				return
+			}
 			target := origin + (&url.URL{Path: "/dav" + raw}).EscapedPath()
 			out, err := inspector.InspectDecryptedMediaPrefix(worker, target, headers, &info, size)
 			if err != nil || !out.Reusable || !strings.HasPrefix(out.MIME, "video/") || out.Ext == "" {
 				return
 			}
-			// Recheck live origin/rule before admission: old configuration cannot publish.
+			// Serialize publication against Stop; cancellation-ignoring readers
+			// must not write after the admission fence has closed.
+			s.mu.Lock()
+			defer s.mu.Unlock()
 			current, ok := h.passwdDAO.FindByPath(raw)
-			if !ok || current == nil || h.cfg.GetAlistURL() != origin || filenameRuleScope(current) != rule {
+			if s.stopped || worker.Err() != nil || !ok || current == nil || h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin || filenameRuleScope(current) != rule || protectedFilenameLimit(h.cfg, raw) != limit {
 				return
 			}
 			m := out.Meta
 			rec := storage.VerifiedMediaAlias{Origin: origin, EncryptedPath: raw, DisplayPath: path.Join(path.Dir(raw), encryption.OrigPrefix+strings.TrimSuffix(path.Base(raw), path.Ext(raw))+out.Ext), AuthScope: auth, RuleFingerprint: rule, CiphertextSize: m.CiphertextSize, PlainSize: m.PlainSize, ContentVersion: m.Version, HeaderLen: m.HeaderLen, NonceField: append([]byte(nil), m.NonceField...), ChunkSize: uint32(m.ChunkSize), KDFIterations: m.KDFIterations, EncType: m.EncType, ETag: out.ETag, LastModified: out.LastModified, ValidatorScope: out.ValidatorScope, VerifiedAt: time.Now().UTC(), MIME: out.MIME, Ext: out.Ext, Provenance: storage.VerifiedMediaAliasProvenance}
-			if err := repo.PutVerifiedMediaAlias(rec); err != nil {
+			published, err := h.cfg.PublishIfRevision(revision, func() error {
+				return repo.PutVerifiedMediaAlias(rec)
+			})
+			if err != nil || !published {
 				return
 			}
 			flight.record, flight.ok = rec, true

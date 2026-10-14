@@ -1552,6 +1552,11 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := guardProtectedRename(h.cfg, reqData.Path, reqData.Name); err != nil {
+		respondProtectedMutationError(w, err)
+		return
+	}
+
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(reqData.Path)
 	modifiedReq := map[string]interface{}{
 		"path": reqData.Path,
@@ -1666,6 +1671,11 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 	}
 	if err := json.Unmarshal(body, &reqData); err != nil {
 		RespondHTTPErrorWithStatus(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if err := guardProtectedBatchMutation(h.cfg, path.Base(endpoint), reqData.SrcDir, reqData.DstDir, reqData.Names); err != nil {
+		respondProtectedMutationError(w, err)
 		return
 	}
 
