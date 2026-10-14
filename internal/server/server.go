@@ -50,10 +50,26 @@ type Server struct {
 	statsExportHandler *handler.StatsExportHandler
 	statsShutdown      func() // 停服前冲刷统计（recorder.FlushSessions + store.Stop）
 	rangeCompatStore   proxy.RangeCompatStore
+	lifetimeLock       *recovery.Lock
 }
 
 // New creates a new server instance
 func New(cfg *config.Config) (*Server, error) {
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+		return nil, err
+	}
+	lockCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	lifetime, err := recovery.Acquire(lockCtx, cfg.DataDir)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("store ownership: %w", err)
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			_ = lifetime.Close()
+		}
+	}()
 	state := recovery.Load(cfg.DataDir)
 	state = cfg.BindRecoveryState(state)
 	// When MySQL is explicitly configured it is the authoritative persistence
@@ -73,18 +89,21 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 
+	cfg.BindRecoveryState(store.RecoveryState())
+
 	// Set Gin mode
 	gin.SetMode(gin.ReleaseMode)
 
 	s := &Server{
-		cfg:         cfg,
-		store:       store,
-		engine:      gin.New(),
-		streamProxy: proxy.NewStreamProxy(cfg),
-		userDAO:     dao.NewUserDAO(store),
-		fileDAO:     dao.NewFileDAO(store, cfg),
-		passwdDAO:   dao.NewPasswdDAO(store, cfg),
-		mysqlStore:  mysqlStore,
+		cfg:          cfg,
+		lifetimeLock: lifetime,
+		store:        store,
+		engine:       gin.New(),
+		streamProxy:  proxy.NewStreamProxy(cfg),
+		userDAO:      dao.NewUserDAO(store),
+		fileDAO:      dao.NewFileDAO(store, cfg),
+		passwdDAO:    dao.NewPasswdDAO(store, cfg),
+		mysqlStore:   mysqlStore,
 	}
 
 	// If MySQL is available, hook it into FileDAO for file metadata persistence.
@@ -98,6 +117,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	s.setupRoutes()
+	owned = true
 	return s, nil
 }
 
@@ -666,6 +686,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		os.Remove(s.cfg.SchemeSnapshot().UnixFile)
 	}
 
+	if err := s.lifetimeLock.Close(); err != nil {
+		lastErr = err
+	}
 	return lastErr
 }
 

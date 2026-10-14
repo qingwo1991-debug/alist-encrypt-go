@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -72,11 +73,25 @@ func NewStoreWithRecovery(dataDir string, state *recovery.State) (*Store, error)
 	}
 
 	dbPath := filepath.Join(dataDir, "alist-encrypt.db")
-	db, err := bolt.Open(dbPath, 0600, nil)
+	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	err = db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(BucketConfig); b != nil {
+			raw := b.Get([]byte(recovery.StickyKey))
+			if b.Bucket([]byte(recovery.StickyKey)) != nil {
+				raw = []byte("invalid nested recovery marker")
+			}
+			state = recovery.WithSticky(state, raw)
+		}
+		return nil
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	store := &Store{
 		db:            db,
 		path:          dbPath,
@@ -103,6 +118,9 @@ func (s *Store) initBuckets() error {
 		return nil
 	})
 }
+
+// RecoveryState returns the immutable state after sticky database inspection.
+func (s *Store) RecoveryState() *recovery.State { return s.recoveryState }
 
 // Close closes the database
 func (s *Store) Close() error {

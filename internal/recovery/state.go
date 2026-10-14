@@ -18,12 +18,20 @@ var ErrRequired = errors.New("recovery_reconciliation_required")
 
 // State is immutable after Load. A missing marker permits legacy startup; any
 // present marker fences writes. There is deliberately no approved/clear state.
-// Absence detection against a restored DB generation requires the future offline
-// restore protocol; deleting this file outside that protocol is not safe.
+// The Store additionally checks the sticky database marker on startup.
 type State struct {
 	required bool
 	stage    string
 	reason   string
+}
+
+// WithSticky never treats a marked database as a legacy unfenced store. Even
+// corrupt sticky bytes require reconciliation; no current protocol can clear it.
+func WithSticky(s *State, raw []byte) *State {
+	if raw != nil && !s.Required() {
+		return &State{true, "invalid", "missing_required_recovery_state"}
+	}
+	return s
 }
 
 func (s *State) Required() bool { return s != nil && s.required }
@@ -40,7 +48,10 @@ type Status struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-type marker struct {
+const StickyKey = "recovery_generation_v1"
+
+// Marker is written only by the exclusive offline protocol, never HTTP management.
+type Marker struct {
 	Version      int    `json:"version"`
 	Stage        string `json:"stage"`
 	OperationID  string `json:"operation_id"`
@@ -71,7 +82,7 @@ func Load(dir string) *State {
 	if err != nil || len(raw) > 4096 {
 		return bad
 	}
-	var m marker
+	var m Marker
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
