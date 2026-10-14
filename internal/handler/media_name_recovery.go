@@ -52,7 +52,7 @@ func (s *mediaRecoveryState) initLocked() {
 	if s.flights == nil {
 		s.flights = make(map[string]*mediaRecoveryFlight)
 		s.failures = make(map[string]time.Time)
-		s.sem = make(chan struct{}, 2)
+		s.sem = make(chan struct{}, 1)
 	}
 }
 
@@ -121,6 +121,20 @@ func (h *WebDAVHandler) restoreVerifiedAliasMapping(r *http.Request, display str
 	rec, found, err := repo.GetVerifiedMediaAliasByDisplay(h.cfg.GetAlistURL(), display, filenameRequestScope(r), filenameRuleScope(ep), 0)
 	if err != nil || !found {
 		return storage.VerifiedMediaAlias{}, false
+	}
+	// No live upstream revision is available at this restore point. Do not use
+	// persisted V3 geometry/MIME as current-object evidence.
+	if rec.ContentVersion == encryption.ContentVersionV3 {
+		revision := h.cfg.RuntimeRevision()
+		inspector, ok := h.streamProxy.(mediaPrefixInspector)
+		if !ok {
+			return storage.VerifiedMediaAlias{}, false
+		}
+		target := h.cfg.GetAlistURL() + (&url.URL{Path: "/dav" + rec.EncryptedPath}).EscapedPath()
+		out, err := inspector.InspectDecryptedMediaPrefix(r.Context(), target, r.Header, ep, rec.CiphertextSize)
+		if h.cfg.RuntimeRevision() != revision || r.Context().Err() != nil || err != nil || !out.Reusable || !out.RecordAuthenticated || out.V3Layout != rec.V3Layout || out.Ext != rec.Ext || out.ETag != rec.ETag || out.Meta.PlainSize != rec.PlainSize || out.Meta.ChunkSize != rec.ChunkSize || !bytes.Equal(out.Meta.NonceField, rec.NonceField) {
+			return storage.VerifiedMediaAlias{}, false
+		}
 	}
 	rememberVerifiedFilenamePath(r, display, rec.EncryptedPath)
 	return rec, true
@@ -303,6 +317,11 @@ func (h *WebDAVHandler) recoverMediaNames(r *http.Request, body []byte, snapshot
 		if err != nil {
 			return block
 		}
+		// Listing length is not an object revision. V3 must reauthenticate record0
+		// rather than reuse a same-size alias against an unknown current revision.
+		if found && rec.ContentVersion == encryption.ContentVersionV3 {
+			found = false
+		}
 		if !found && attempts < 4 && ctx.Err() == nil && !h.mediaRecoveryCoolingDown(raw, auth, rule, observed) {
 			attempts++
 			rec, found = h.resolveMediaRecovery(ctx, r, repo, inspector, ep, raw, auth, rule, observed)
@@ -351,7 +370,7 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 		return storage.VerifiedMediaAlias{}, false
 	}
 	s.initLocked()
-	if rec, ok, err := repo.GetVerifiedMediaAlias(origin, raw, auth, rule, size); err == nil && ok {
+	if rec, ok, err := repo.GetVerifiedMediaAlias(origin, raw, auth, rule, size); err == nil && ok && rec.ContentVersion != encryption.ContentVersionV3 {
 		s.mu.Unlock()
 		return rec, true
 	}
@@ -361,7 +380,7 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 	}
 	flight := s.flights[key]
 	if flight == nil {
-		if len(s.flights) >= 32 {
+		if len(s.flights) >= 3 { // one active and at most two pending
 			s.mu.Unlock()
 			return storage.VerifiedMediaAlias{}, false
 		}
@@ -371,7 +390,11 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 		info := *ep
 		info.EncPath = append([]string(nil), ep.EncPath...)
 		limit := protectedFilenameLimit(h.cfg, raw)
-		worker, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		workerDeadline := 5 * time.Second
+		if h.cfg.AlistServerSnapshot().MediaRecognitionLargeRecordOptIn {
+			workerDeadline = 30 * time.Second
+		}
+		worker, cancel := context.WithTimeout(s.ctx, workerDeadline)
 		s.workers.Add(1)
 		go func() {
 			// Five-minute cooldown is reserved for inspected-but-unknown format.
@@ -429,7 +452,7 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 				return
 			}
 			m := out.Meta
-			rec := storage.VerifiedMediaAlias{Origin: origin, EncryptedPath: raw, DisplayPath: path.Join(path.Dir(raw), encryption.OrigPrefix+strings.TrimSuffix(path.Base(raw), path.Ext(raw))+out.Ext), AuthScope: auth, RuleFingerprint: rule, CiphertextSize: m.CiphertextSize, PlainSize: m.PlainSize, ContentVersion: m.Version, HeaderLen: m.HeaderLen, NonceField: append([]byte(nil), m.NonceField...), ChunkSize: uint32(m.ChunkSize), KDFIterations: m.KDFIterations, EncType: m.EncType, ETag: out.ETag, LastModified: out.LastModified, ValidatorScope: out.ValidatorScope, VerifiedAt: time.Now().UTC(), MIME: out.MIME, Ext: out.Ext, Provenance: storage.VerifiedMediaAliasProvenance}
+			rec := storage.VerifiedMediaAlias{Origin: origin, EncryptedPath: raw, DisplayPath: path.Join(path.Dir(raw), encryption.OrigPrefix+strings.TrimSuffix(path.Base(raw), path.Ext(raw))+out.Ext), AuthScope: auth, RuleFingerprint: rule, CiphertextSize: m.CiphertextSize, PlainSize: m.PlainSize, ContentVersion: m.Version, V3Layout: out.V3Layout, HeaderLen: m.HeaderLen, NonceField: append([]byte(nil), m.NonceField...), ChunkSize: uint32(m.ChunkSize), KDFIterations: m.KDFIterations, EncType: m.EncType, ETag: out.ETag, LastModified: out.LastModified, ValidatorScope: out.ValidatorScope, VerifiedAt: time.Now().UTC(), MIME: out.MIME, Ext: out.Ext, Provenance: storage.VerifiedMediaAliasProvenance}
 			published, err := h.cfg.PublishIfRevision(revision, func() error {
 				return repo.PutVerifiedMediaAlias(rec)
 			})

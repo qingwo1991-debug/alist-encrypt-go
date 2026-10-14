@@ -18,10 +18,13 @@ import (
 )
 
 const (
-	FilenamePending              = "pending"
-	FilenameComplete             = "complete"
-	FilenameFailed               = "failed"
-	VerifiedMediaAliasProvenance = "verified-video-signature"
+	FilenamePending                   = "pending"
+	FilenameComplete                  = "complete"
+	FilenameFailed                    = "failed"
+	VerifiedMediaAliasProvenance      = "verified-video-signature"
+	VerifiedMediaAliasSchemaVersion   = 2
+	VerifiedMediaAliasV3LayoutFixed   = "fixed"
+	VerifiedMediaAliasV3LayoutTrailer = "trailer"
 )
 
 var (
@@ -53,8 +56,16 @@ type FilenameRecord struct {
 
 // VerifiedMediaAlias is admitted only by a caller that has actually verified a
 // decrypted video signature. Geometry from a list/import is not provenance.
-// Neither download URLs nor credentials belong in this record.
+// For V3 this means record0 authentication plus geometry and signature checks,
+// not authentication of the header, trailer, PlainSize or the entire file:
+// existing V3 records use empty AAD. Neither URLs nor credentials belong here.
 type VerifiedMediaAlias struct {
+	// SchemaVersion is stamped on write. Legacy V1/V2 records remain readable;
+	// legacy V3 records without explicit layout evidence require reinspection.
+	SchemaVersion int
+	// V3Layout is captured from inspected front/tail matter, never guessed from
+	// listing size. It is required for V3 and must be empty for older versions.
+	V3Layout        string
 	Origin          string
 	EncryptedPath   string
 	DisplayPath     string
@@ -239,6 +250,9 @@ func (s *Store) FinishFilenameReservation(origin, encryptedPath, token, status s
 	})
 }
 func validMediaAlias(rec VerifiedMediaAlias) bool {
+	if (rec.SchemaVersion != 0 && rec.SchemaVersion != VerifiedMediaAliasSchemaVersion) || (rec.ContentVersion != encryption.ContentVersionV3 && rec.V3Layout != "") {
+		return false
+	}
 	if !validFilenameOrigin(rec.Origin) || !validFilenamePath(rec.EncryptedPath) || !validFilenamePath(rec.DisplayPath) || !validFilenameScope(rec.AuthScope) || !validFilenameScope(rec.RuleFingerprint) || rec.Provenance != VerifiedMediaAliasProvenance || rec.VerifiedAt.IsZero() || rec.VerifiedAt.After(time.Now().Add(time.Minute)) {
 		return false
 	}
@@ -260,6 +274,16 @@ func validMediaAlias(rec VerifiedMediaAlias) bool {
 		_, err := encryption.BuildV2Header(m.EncType, m.PlainSize, m.NonceField)
 		return err == nil
 	case encryption.ContentVersionV3:
+		// Layout is explicit evidence; accepting an absent field would silently
+		// upgrade old aliases whose provenance did not capture streaming layout.
+		overhead := int64(encryption.V3HeaderSize)
+		switch rec.V3Layout {
+		case VerifiedMediaAliasV3LayoutFixed:
+		case VerifiedMediaAliasV3LayoutTrailer:
+			overhead += 16
+		default:
+			return false
+		}
 		if m.HeaderLen != encryption.V3HeaderSize || len(m.NonceField) != 16 || m.ChunkSize == 0 || m.ChunkSize > 1<<30 || m.KDFIterations == 0 || m.KDFIterations > 10000000 {
 			return false
 		}
@@ -268,10 +292,11 @@ func validMediaAlias(rec VerifiedMediaAlias) bool {
 			chunks++
 		}
 		stride := int64(m.ChunkSize) + 16
-		if chunks > (math.MaxInt64-encryption.V3HeaderSize)/stride {
+		// Record indices are encoded in a 32-bit AEAD nonce suffix.
+		if chunks > 1<<32 || chunks > (math.MaxInt64-overhead)/stride {
 			return false
 		}
-		return m.CiphertextSize == encryption.V3HeaderSize+chunks*stride
+		return m.CiphertextSize == overhead+chunks*stride
 	}
 	return false
 }
@@ -282,6 +307,7 @@ func (s *Store) PutVerifiedMediaAlias(rec VerifiedMediaAlias) error {
 	if !validMediaAlias(rec) {
 		return errors.New("invalid verified media alias")
 	}
+	rec.SchemaVersion = VerifiedMediaAliasSchemaVersion
 	raw, err := json.Marshal(rec)
 	if err != nil {
 		return err

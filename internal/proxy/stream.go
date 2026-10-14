@@ -8,6 +8,7 @@ import (
 	"github.com/alist-encrypt-go/internal/backoff"
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/errors"
+	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 // Buffer pool for streaming - default 512KB buffers for high-bitrate video
@@ -67,27 +68,29 @@ func PutBuffer(buf *[]byte) {
 
 // StreamProxy handles streaming proxy with encryption/decryption
 type StreamProxy struct {
-	client           *Client
-	cfg              *config.Config
-	compatStore      RangeCompatStore
-	redirectRewriter RedirectRewriter
-	rangeStats       *rangeLearningStats
-	playbackHintsMu  sync.RWMutex
-	playbackHints    map[string]recentPlaybackHint
-	playbackHintHits uint64
-	chunkedHintHits  uint64
-	rangeHintHits    uint64
-	fullHintHits     uint64
-	cbGate           *backoff.Gate           // circuit breaker for the configured upstream and invalid targets
-	cbGates          *circuitBreakerRegistry // host-isolated circuit breakers for CDN/data-plane targets
-	retrier          *backoff.Retrier        // retry with jitter for transient network errors
-	uploadMetaMu     sync.Mutex
-	uploadMeta       map[string]uploadMetaEntry
-	blockCache       *decryptedBlockCache
-	v3Memory         *v3MemoryBudget
-	streamLimiter    chan struct{}
-	activeStreams    int64
-	rejectedStreams  uint64
+	client             *Client
+	cfg                *config.Config
+	compatStore        RangeCompatStore
+	redirectRewriter   RedirectRewriter
+	rangeStats         *rangeLearningStats
+	playbackHintsMu    sync.RWMutex
+	playbackHints      map[string]recentPlaybackHint
+	playbackHintHits   uint64
+	chunkedHintHits    uint64
+	rangeHintHits      uint64
+	fullHintHits       uint64
+	cbGate             *backoff.Gate           // circuit breaker for the configured upstream and invalid targets
+	cbGates            *circuitBreakerRegistry // host-isolated circuit breakers for CDN/data-plane targets
+	retrier            *backoff.Retrier        // retry with jitter for transient network errors
+	uploadMetaMu       sync.Mutex
+	uploadMeta         map[string]uploadMetaEntry
+	blockCache         *decryptedBlockCache
+	v3Memory           *v3MemoryBudget
+	mediaRecognitionMu sync.Mutex
+	mediaRecognition   *encryption.MediaRecognizer
+	streamLimiter      chan struct{}
+	activeStreams      int64
+	rejectedStreams    uint64
 }
 
 // StreamOutcome describes the streaming result for strategy selection.

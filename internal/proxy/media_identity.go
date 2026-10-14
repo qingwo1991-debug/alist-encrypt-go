@@ -20,10 +20,25 @@ type MediaIdentityResult struct {
 	Ext, MIME, ETag, LastModified, ValidatorScope string
 	UpstreamStatus                                int
 	Reusable                                      bool
+	V3Layout, Reason                              string
+	BytesRead, RecordBytes                        int64
+	RecordAuthenticated                           bool
+}
+
+// StopMediaRecognition closes the instance admission fence and joins recognition
+// operations only. It does not stop playback or the global KDF service.
+func (s *StreamProxy) StopMediaRecognition() {
+	s.mediaRecognitionMu.Lock()
+	if s.mediaRecognition == nil {
+		s.mediaRecognition = encryption.NewMediaRecognizer(encryption.MediaRecognitionConfig{})
+	}
+	owner := s.mediaRecognition
+	s.mediaRecognitionMu.Unlock()
+	owner.Stop()
 }
 
 // InspectDecryptedMediaPrefix is optional and deliberately not part of proxy
-// ports. V3 is fail-closed here: prefix inspection must not bypass AEAD records.
+// ports. V3 must authenticate a complete record, under instance-owned admission.
 func (s *StreamProxy) InspectDecryptedMediaPrefix(ctx context.Context, targetURL string, authHeaders http.Header, passwdInfo *config.PasswdInfo, ciphertextSize int64) (MediaIdentityResult, error) {
 	var out MediaIdentityResult
 	if s == nil || s.client == nil || s.client.Client == nil || passwdInfo == nil || !passwdInfo.Enable {
@@ -32,24 +47,55 @@ func (s *StreamProxy) InspectDecryptedMediaPrefix(ctx context.Context, targetURL
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	deadline := 8 * time.Second
+	if s.cfg != nil && s.cfg.AlistServerSnapshot().MediaRecognitionLargeRecordOptIn {
+		deadline = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	// Metadata and payload probes both use explicit redirects, even when a
 	// caller installed an automatically redirecting HTTP client.
 	client := *s.client.Client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	probe := &StreamProxy{cfg: s.cfg, client: &Client{Client: &client}}
+	// Try the strictly bounded shared header/record path first, so V3 never
+	// inherits permissive legacy parsing or a separate unaccounted tail probe.
+	if ciphertextSize >= encryption.V3HeaderSize {
+		s.mediaRecognitionMu.Lock()
+		if s.mediaRecognition == nil {
+			large := false
+			if s.cfg != nil {
+				large = s.cfg.AlistServerSnapshot().MediaRecognitionLargeRecordOptIn
+			}
+			s.mediaRecognition = encryption.NewMediaRecognizer(encryption.MediaRecognitionConfig{LargeRecordOptIn: large})
+		}
+		owner := s.mediaRecognition
+		large := false
+		if s.cfg != nil {
+			large = s.cfg.AlistServerSnapshot().MediaRecognitionLargeRecordOptIn
+		}
+		owner.SetConfig(encryption.MediaRecognitionConfig{LargeRecordOptIn: large})
+		s.mediaRecognitionMu.Unlock()
+		v3, err := owner.RecognizeV3(ctx, &client, targetURL, passwdInfo.Password, authHeaders, ciphertextSize)
+		out.Meta, out.UpstreamStatus = v3.Meta, v3.Status
+		out.Meta.EncType = encryption.EncType(passwdInfo.EncType)
+		out.V3Layout, out.Reason = v3.Layout, v3.Reason
+		out.Ext, out.MIME = v3.Ext, v3.MIME
+		out.ETag, out.LastModified, out.ValidatorScope = v3.ETag, v3.LastModified, v3.ValidatorScope
+		out.BytesRead, out.RecordBytes, out.RecordAuthenticated = v3.BytesRead, v3.RecordBytes, v3.RecordAuthenticated
+		out.Reusable = err == nil && v3.RecordAuthenticated && v3.ETag != "" && !strings.HasPrefix(strings.TrimSpace(v3.ETag), "W/")
+		if v3.Meta.Version == encryption.ContentVersionV3 || v3.Reason != "invalid_header" {
+			return out, err
+		}
+	}
 	inspection := probe.InspectEncryptedContentResult(ctx, targetURL, authHeaders, passwdInfo, ciphertextSize)
-	out.Meta, out.UpstreamStatus = inspection.Meta, inspection.StatusCode
+	out = MediaIdentityResult{Meta: inspection.Meta, UpstreamStatus: inspection.StatusCode}
 	meta := inspection.Meta
 	if !inspection.Confirmed || meta.CiphertextSize <= 0 || meta.PlainSize <= 0 {
 		return out, fmt.Errorf("media identity: unconfirmed geometry")
 	}
 	if ciphertextSize > 0 && ciphertextSize != meta.CiphertextSize {
 		return out, fmt.Errorf("media identity: observed ciphertext size changed")
-	}
-	if meta.Version == encryption.ContentVersionV3 {
-		return out, fmt.Errorf("media identity: V3 authenticated prefix inspection unsupported")
 	}
 	if meta.HeaderLen < 0 || meta.HeaderLen > 32 || meta.CiphertextSize != meta.HeaderLen+meta.PlainSize {
 		return out, fmt.Errorf("media identity: invalid geometry")
