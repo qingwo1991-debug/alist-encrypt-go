@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 )
 
 type ownedListener struct {
@@ -23,14 +22,18 @@ func (l *ownedListener) Accept() (net.Conn, error) {
 
 type ownedConnection struct {
 	net.Conn
-	owner *Server
-	once  sync.Once
+	owner  *Server
+	closed bool // guarded by owner's lifecycleMu, including state publication
 }
 
 func (c *ownedConnection) Close() error {
-	err := c.Conn.Close()
-	c.once.Do(func() { c.owner.lifecycleMu.Lock(); delete(c.owner.connections, c); c.owner.lifecycleMu.Unlock() })
-	return err
+	// Mark closed before the OS call: a delayed ConnState callback cannot
+	// re-register this socket while Close blocks or after Close already returned.
+	c.owner.lifecycleMu.Lock()
+	c.closed = true
+	delete(c.owner.connections, c)
+	c.owner.lifecycleMu.Unlock()
+	return c.Conn.Close()
 }
 
 type serverEndpoint struct {
@@ -117,15 +120,20 @@ func (s *Server) ownedConnState(conn net.Conn, state http.ConnState) {
 		s.lifecycleMu.Unlock()
 		return
 	}
+	owned, isOwned := conn.(*ownedConnection)
+	if s.stopping || (isOwned && owned.closed) {
+		// No state (including Active/Idle) can repopulate the registry after
+		// sealing, and no late Hijacked callback can resurrect a closed socket.
+		delete(s.connections, conn)
+		s.lifecycleMu.Unlock()
+		_ = conn.Close()
+		return
+	}
 	if s.connections == nil {
 		s.connections = make(map[net.Conn]http.ConnState)
 	}
 	s.connections[conn] = state
-	stopping := s.stopping
 	s.lifecycleMu.Unlock()
-	if stopping && (state == http.StateNew || state == http.StateHijacked) {
-		_ = conn.Close()
-	}
 }
 func (s *Server) closeOwnedConnections() {
 	s.lifecycleMu.Lock()
