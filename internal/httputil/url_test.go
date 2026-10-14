@@ -58,19 +58,20 @@ func TestBuildTargetURLStrippedSignBug(t *testing.T) {
 	base := "http://alist:5244"
 
 	originalPath := "/d/%E7%A7%BB%E5%8A%A8%E4%BA%91%E7%9B%98192/encrypt/oceans.mp4"
-	encryptedPath := "/d/%E7%A7%BB%E5%8A%A8%E4%BA%91%E7%9B%98192/encrypt/I6O1l9Hp5V+YO0--P.bin"
+	encryptedPath := "/d/移动云盘192/encrypt/I6O1l9Hp5V+YO0--P.bin"
+	escapedPath := "/d/%E7%A7%BB%E5%8A%A8%E4%BA%91%E7%9B%98192/encrypt/I6O1l9Hp5V+YO0--P.bin"
 
 	r, _ := http.NewRequest("GET", originalPath+"?sign=valid_for_original_path", nil)
 
 	// Old behavior (bug): sign forwarded with new path
 	oldURL := BuildTargetURL(base, encryptedPath, r)
-	if oldURL != base+encryptedPath+"?sign=valid_for_original_path" {
+	if oldURL != base+escapedPath+"?sign=valid_for_original_path" {
 		t.Errorf("old URL should include query, got %q", oldURL)
 	}
 
 	// New behavior (fixed): sign stripped
 	newURL := BuildTargetURLStripped(base, encryptedPath)
-	if newURL != base+encryptedPath {
+	if newURL != base+escapedPath {
 		t.Errorf("new URL should NOT include query, got %q", newURL)
 	}
 
