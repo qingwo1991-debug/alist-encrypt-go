@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"path"
 	"strings"
 	"unicode"
@@ -43,51 +42,21 @@ func invalidMutation(operation string) error {
 	return &protectedMutationError{http.StatusBadRequest, "invalid_mutation_path", operation}
 }
 
-// mutationPathVariants compares both literal and percent-decoded spellings.
-// Repeated encodings are bounded and fail closed rather than hiding a protected
-// subtree. '+' is a literal path character, not a query-string space.
+// Paths are actual storage values: API JSON is literal and DAV URL.Path has
+// already been decoded by net/url. Do not decode '%' again or reinterpret '+';
+// that would confuse unrelated literal objects with protected objects.
 func mutationPathVariants(value string) ([]string, error) {
-	var variants []string
-	for depth := 0; depth < 8; depth++ {
-		if !utf8.ValidString(value) || !strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsFunc(value, unicode.IsControl) {
-			return nil, fmt.Errorf("invalid absolute path")
-		}
-		variants = append(variants, path.Clean(value))
-		if !strings.Contains(value, "%") {
-			return variants, nil
-		}
-		decoded, err := url.PathUnescape(value)
-		if err != nil {
-			return nil, err
-		}
-		value = decoded
+	if !utf8.ValidString(value) || !strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsFunc(value, unicode.IsControl) {
+		return nil, fmt.Errorf("invalid absolute path")
 	}
-	return nil, fmt.Errorf("excessively encoded path")
+	return []string{path.Clean(value)}, nil
 }
 
 func mutationNameVariants(value string) ([]string, error) {
-	paths, err := mutationPathVariants("/" + value)
-	if err != nil {
-		return nil, err
+	if !utf8.ValidString(value) || value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\") || strings.ContainsFunc(value, unicode.IsControl) {
+		return nil, fmt.Errorf("invalid basename")
 	}
-	var names []string
-	// Check the unclean spelling too: dot components must not silently disappear.
-	for depth := 0; depth < 8; depth++ {
-		if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\") {
-			return nil, fmt.Errorf("invalid basename")
-		}
-		if !strings.Contains(value, "%") {
-			break
-		}
-		value, err = url.PathUnescape(value)
-		if err != nil {
-			return nil, err
-		}
-	}
-	for _, p := range paths {
-		names = append(names, strings.TrimPrefix(p, "/"))
-	}
-	return names, nil
+	return []string{value}, nil
 }
 
 func mutationSubtreesIntersect(a, b string) bool {
@@ -177,6 +146,48 @@ func guardProtectedBatchMutation(cfg *config.Config, operation, srcDir, dstDir s
 		}
 	}
 	return guardProtectedMutation(cfg, operation, affected...)
+}
+
+// guardProtectedProxyMutation closes NoRoute bypasses of the dedicated API
+// handlers. Unknown schemas (including multipart uploads, driver Other actions,
+// offline tasks and direct uploads) cannot establish all affected paths safely.
+// While protection is configured they are refused even for unrelated mounts.
+// No body is read: streamed bodies remain untouched and there is no unbounded
+// parsing or guessed-path authorization. Dedicated PUT/DELETE routes are intact.
+func guardProtectedProxyMutation(cfg *config.Config, r *http.Request) error {
+	if !mutationProtectionEnabled(cfg) || r == nil || r.URL == nil {
+		return nil
+	}
+	variants, err := mutationPathVariants(r.URL.Path)
+	if err != nil {
+		// A malformed endpoint spelling cannot establish that it is outside fs.
+		return invalidMutation("proxy")
+	}
+	isFS := false
+	for _, endpoint := range variants {
+		if endpoint == "/api/fs" || strings.HasPrefix(endpoint, "/api/fs/") {
+			isFS = true
+		}
+	}
+	if !isFS {
+		return nil
+	}
+	// Only exact endpoint spellings may use this allowlist. Otherwise alternate
+	// routing/canonicalization upstream might dispatch a different operation.
+	canonical := len(variants) == 1 && variants[0] == r.URL.Path
+	read := false
+	if canonical {
+		switch r.URL.Path {
+		case "/api/fs/get", "/api/fs/list", "/api/fs/search", "/api/fs/dirs", "/api/fs/archive/meta", "/api/fs/archive/list":
+			read = r.Method == http.MethodPost || r.Method == http.MethodGet || r.Method == http.MethodHead
+		case "/api/fs/link":
+			read = r.Method == http.MethodPost
+		}
+	}
+	if read {
+		return nil
+	}
+	return &protectedMutationError{http.StatusNotImplemented, "protected_operation_unsupported", "proxy_fs_unclassified"}
 }
 
 // Capability refusal is not an authentication failure or upstream failure.

@@ -328,6 +328,21 @@ func (h *WebDAVHandler) mediaRecoveryCoolingDown(raw, auth, rule string, size in
 func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Request, repo mediaAliasRepository, inspector mediaPrefixInspector, ep *config.PasswdInfo, raw, auth, rule string, size int64) (storage.VerifiedMediaAlias, bool) {
 	revision := h.cfg.RuntimeRevision()
 	origin := h.cfg.GetAlistURL()
+	// A caller may hold a rule cached before the latest management update.
+	// Bind the flight to a fresh rule snapshot, not merely a new generation
+	// number paired with an old credential/rule.
+	if fresh, ok := h.passwdDAO.(interface {
+		FindByPathFresh(string) (*config.PasswdInfo, bool)
+	}); ok {
+		current, found := fresh.FindByPathFresh(raw)
+		if !found || current == nil || filenameRuleScope(current) != rule {
+			return storage.VerifiedMediaAlias{}, false
+		}
+		ep = current
+	}
+	if h.cfg.RuntimeRevision() != revision {
+		return storage.VerifiedMediaAlias{}, false
+	}
 	key := filenameScopeDigest(origin, raw, auth, rule, strconv.FormatInt(size, 10))
 	s := &h.mediaRecovery
 	s.mu.Lock()
@@ -359,6 +374,10 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 		worker, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 		s.workers.Add(1)
 		go func() {
+			// Five-minute cooldown is reserved for inspected-but-unknown format.
+			// Transient transport/storage failures retry after a short backoff;
+			// authorization refusal and cancellation are not format evidence.
+			cooldown := 15 * time.Second
 			defer s.workers.Done()
 			defer cancel()
 			defer func() {
@@ -366,11 +385,11 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 				delete(s.flights, key)
 				// Lifecycle cancellation and stale configuration are not format
 				// evidence. Preserve the bounded cooldown for other failures.
-				if !flight.ok && !s.stopped && worker.Err() != context.Canceled && h.cfg.RuntimeRevision() == revision {
+				if !flight.ok && cooldown > 0 && !s.stopped && worker.Err() == nil && h.cfg.RuntimeRevision() == revision {
 					if len(s.failures) >= 2048 {
 						clear(s.failures)
 					}
-					s.failures[key] = time.Now().Add(5 * time.Minute)
+					s.failures[key] = time.Now().Add(cooldown)
 				}
 				close(flight.done)
 				s.mu.Unlock()
@@ -386,7 +405,14 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 			}
 			target := origin + (&url.URL{Path: "/dav" + raw}).EscapedPath()
 			out, err := inspector.InspectDecryptedMediaPrefix(worker, target, headers, &info, size)
-			if err != nil || !out.Reusable || !strings.HasPrefix(out.MIME, "video/") || out.Ext == "" {
+			if err != nil {
+				if out.UpstreamStatus == http.StatusUnauthorized || out.UpstreamStatus == http.StatusForbidden {
+					cooldown = 0
+				}
+				return
+			}
+			if !out.Reusable || !strings.HasPrefix(out.MIME, "video/") || out.Ext == "" {
+				cooldown = 5 * time.Minute
 				return
 			}
 			// Serialize publication against Stop; cancellation-ignoring readers
@@ -394,6 +420,11 @@ func (h *WebDAVHandler) resolveMediaRecovery(ctx context.Context, r *http.Reques
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			current, ok := h.passwdDAO.FindByPath(raw)
+			if fresh, supported := h.passwdDAO.(interface {
+				FindByPathFresh(string) (*config.PasswdInfo, bool)
+			}); supported {
+				current, ok = fresh.FindByPathFresh(raw)
+			}
 			if s.stopped || worker.Err() != nil || !ok || current == nil || h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin || filenameRuleScope(current) != rule || protectedFilenameLimit(h.cfg, raw) != limit {
 				return
 			}

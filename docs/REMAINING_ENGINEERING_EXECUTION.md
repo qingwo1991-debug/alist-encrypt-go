@@ -14,7 +14,7 @@
 
 | 阶段 | 状态 | 分支/PR/发布证据 | 待完成 |
 |---|---|---|---|
-| P0-A 操作守卫、worker生命周期 | 实施中 | `agent/p0-write-lifecycle` | 实现、review、focused gates、Draft完整云矩阵、main发布 |
+| P0-A 操作守卫、worker生命周期 | 实施及review修正中 | `agent/p0-write-lifecycle` / Draft PR #78；首head `aec6c3f`完整PR矩阵成功（run 38543191485） | review发现catchall/orig_转换绕过及literal百分号误判，须修正后重新完整验证；未合并/发布 |
 | P0-B 导出、契约及文档 | 待开始 | — | 实施稳定过滤/分页，明确增量限制 |
 | P1 一致快照/restore | 待开始 | — | SQLite/Bolt/MySQL组件一致性、离线恢复 |
 | P2 实例/挂载所有权 | 待开始 | — | 工厂/epoch/pool预算 |

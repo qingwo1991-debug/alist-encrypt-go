@@ -165,9 +165,15 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.handleMove(w, r, davPath)
 	case "COPY":
 		h.handleCopy(w, r, davPath)
-	case "MKCOL", "PROPPATCH", "LOCK", "UNLOCK", "OPTIONS":
+	case "OPTIONS":
 		h.handlePassthrough(w, r)
 	default:
+		// Unknown/extension methods and directory/property/lock mutations have
+		// no protected-name audit contract. Do not route them around the guard.
+		if err := guardProtectedMutation(h.cfg, r.Method, davPath); err != nil {
+			respondProtectedMutationError(w, err)
+			return
+		}
 		h.handlePassthrough(w, r)
 	}
 }
@@ -769,6 +775,23 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	if mutationProtectionEnabled(h.cfg) {
+		// orig_ passthrough and cached path resolution can change the actual
+		// object. Check both display and final raw paths before dispatch.
+		destURL, err := url.Parse(destination)
+		if err != nil {
+			respondProtectedMutationError(w, invalidMutation(method))
+			return
+		}
+		rawDest := strings.TrimPrefix(destURL.Path, "/dav")
+		if rawDest == "" {
+			rawDest = "/"
+		}
+		if err := guardProtectedMutation(h.cfg, method, realSrcPath, rawDest); err != nil {
+			respondProtectedMutationError(w, err)
+			return
+		}
+	}
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realSrcPath)
 
 	body, err := readLimitedRequestBody(r)

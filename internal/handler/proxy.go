@@ -882,6 +882,10 @@ func (h *ProxyHandler) upstreamStalenessThreshold() time.Duration {
 
 // HandleProxy handles catch-all proxy to Alist
 func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
+	if err := guardProtectedProxyMutation(h.cfg, r); err != nil {
+		respondProtectedMutationError(w, err)
+		return
+	}
 	log.Debug().Str("path", r.URL.Path).Str("method", r.Method).Msg("Proxying request")
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), r.URL.Path, r)
 	log.Debug().Str("target", targetURL).Msg("Target URL")

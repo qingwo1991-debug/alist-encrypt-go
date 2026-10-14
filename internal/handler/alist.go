@@ -1582,6 +1582,12 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 			}
 
 			realOldName := converter.ToRealName(reqData.Path)
+			if mutationProtectionEnabled(h.cfg) {
+				if _, err := mutationNameVariants(realOldName); err != nil {
+					respondProtectedMutationError(w, invalidMutation("rename"))
+					return
+				}
+			}
 			newEncName := converter.EncryptFileName(reqData.Name)
 
 			modifiedReq["path"] = path.Dir(reqData.Path) + "/" + realOldName
@@ -1593,6 +1599,12 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Display aliases and orig_ spellings can resolve to another physical
+	// subtree. Check the actual outbound paths as well as the display request.
+	if err := guardProtectedRename(h.cfg, modifiedReq["path"].(string), modifiedReq["name"].(string)); err != nil {
+		respondProtectedMutationError(w, err)
+		return
+	}
 	modifiedBody, _ := json.Marshal(modifiedReq)
 
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/rename", nil)
@@ -1699,6 +1711,12 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// orig_ names may strip into a protected directory even when their display
+	// spelling was outside it. Always guard the final outbound batch too.
+	if err := guardProtectedBatchMutation(h.cfg, path.Base(endpoint), reqData.SrcDir, reqData.DstDir, fileNames); err != nil {
+		respondProtectedMutationError(w, err)
+		return
+	}
 	modifiedReq := map[string]interface{}{
 		"src_dir": reqData.SrcDir,
 		"dst_dir": reqData.DstDir,

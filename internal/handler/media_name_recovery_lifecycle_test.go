@@ -228,6 +228,32 @@ func TestMediaRecoveryPreservesBoundedNegativeCooldown(t *testing.T) {
 	}
 }
 
+func TestMediaRecoveryRejectsOldRuleBeforeAdmission(t *testing.T) {
+	t.Setenv("ALIST_ENCRYPT_BASE_DIR", t.TempDir())
+	h, _, _ := newWebDAVSnapshotTestHandler(t)
+	defer h.Stop()
+	raw := "/156联通云盘/encrypt/stale.bin"
+	old, _ := h.passwdDAO.FindByPath(raw)
+	rule := filenameRuleScope(old)
+	changed := h.cfg.AlistServerSnapshot()
+	changed.PasswdList[0].Password = "new-rule-secret"
+	if err := h.cfg.UpdateAlistServer(changed); err != nil {
+		t.Fatal(err)
+	}
+	repo := &lifecycleAliasRepo{}
+	inspector := lifecycleInspectorFunc(func(context.Context, string, http.Header, *config.PasswdInfo, int64) (proxy.MediaIdentityResult, error) {
+		t.Error("stale pre-admission rule reached inspector")
+		return lifecycleResult(), nil
+	})
+	r := httptest.NewRequest("PROPFIND", "http://proxy/dav/", nil)
+	_, ok := h.resolveMediaRecovery(context.Background(), r, repo, inspector, old, raw, filenameRequestScope(r), rule, 132)
+	if ok {
+		t.Fatal("stale pre-admission rule published")
+	}
+	h.Stop()
+	assertLifecycleDrained(t, h, repo)
+}
+
 func TestMediaRecoveryRejectsReconfiguredFlight(t *testing.T) {
 	for _, change := range []string{"origin", "rule", "mount", "aba"} {
 		t.Run(change, func(t *testing.T) {
