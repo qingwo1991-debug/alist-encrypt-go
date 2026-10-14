@@ -94,6 +94,7 @@ type AlistServer struct {
 	ProbeMinSizeBytes           int64          `json:"probeMinSizeBytes"`
 	PlayFirstFallback           bool           `json:"playFirstFallback"`
 	SizeUnknownStrict           bool           `json:"sizeUnknownStrict"`
+	StrictFreshness             bool           `json:"strictFreshness"`          // opt-in authorized metadata revalidation, never TTL proof
 	UpstreamStalenessMinutes    int            `json:"upstreamStalenessMinutes"` // 0 = use default (30 min)
 	ChunkedSeekMaxDiscardBytes  int64          `json:"chunkedSeekMaxDiscardBytes"`
 	EnableSniff                 bool           `json:"enableSniff"`

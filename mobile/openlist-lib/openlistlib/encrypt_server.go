@@ -666,6 +666,7 @@ func GetEncryptConfigJson() string {
 		DbExportUsername         string     `json:"dbExportUsername"`
 		DbExportPassword         string     `json:"dbExportPassword"`
 		DbExportPasswordSet      bool       `json:"dbExportPasswordSet"`
+		StrictFreshness          bool       `json:"strictFreshness"`
 		PlayFirstFallback        bool       `json:"playFirstFallback"`
 		EnableRangeCompatCache   bool       `json:"enableRangeCompatCache"`
 		RangeCompatTtlMinutes    int        `json:"rangeCompatTtlMinutes"`
@@ -708,6 +709,7 @@ func GetEncryptConfigJson() string {
 		DbExportUsername:         config.DBExportUsername,
 		DbExportPassword:         "",
 		DbExportPasswordSet:      strings.TrimSpace(config.DBExportPassword) != "",
+		StrictFreshness:          config.StrictFreshness,
 		PlayFirstFallback:        config.PlayFirstFallback,
 		EnableRangeCompatCache:   config.EnableRangeCompatCache,
 		RangeCompatTtlMinutes:    config.RangeCompatTTL,

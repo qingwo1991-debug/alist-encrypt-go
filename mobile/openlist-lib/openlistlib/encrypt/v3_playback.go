@@ -47,6 +47,9 @@ var mobileV3Records = core.NewV3AuthenticatedRecordCache(64<<20, 30*time.Second)
 // Exact URLs (including query/userinfo) remain bound until trusted revisions are
 // available. Neither metadata nor an earlier cache hit is authorization proof.
 func (p *ProxyServer) v3PlaybackCacheKey(r *http.Request, info *RedirectInfo, meta ContentMeta) (core.V3RecordCacheKey, error) {
+	if p.strictFreshnessEnabled() {
+		return core.V3RecordCacheKey{}, errors.New("v3: strict freshness has no trusted object revision")
+	}
 	target, err := url.Parse(info.RedirectURL)
 	if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") {
 		return core.V3RecordCacheKey{}, errors.New("v3: unknown cache target scope")

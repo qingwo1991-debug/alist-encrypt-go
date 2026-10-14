@@ -684,6 +684,9 @@ type ProxyConfig struct {
 	StreamBufferKB int `json:"streamBufferKb,omitempty"`
 	// StreamEngineVersion: 播放内核版本，1=legacy，2=v2
 	StreamEngineVersion int `json:"streamEngineVersion,omitempty"`
+	// StrictFreshness rechecks caller-authorized geometry on each request. It does
+	// not promise an atomic snapshot and disables cross-request hot content reuse.
+	StrictFreshness bool `json:"strictFreshness"`
 	// EnableDecryptedBlockCache: 启用解密块缓存（重复 seek 命中内存缓存，避免反复回源 CDN）
 	EnableDecryptedBlockCache bool `json:"enableDecryptedBlockCache,omitempty"`
 	// DecryptedBlockCacheMB: 解密块缓存上限（MB）

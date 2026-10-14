@@ -32,6 +32,9 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	if failure := s.strictFreshnessFailure(r, targetURL); failure != nil {
+		return failure
+	}
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := r.Header.Get("Range")
@@ -148,6 +151,9 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 
 // ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	if failure := s.strictFreshnessFailure(req, targetURL); failure != nil {
+		return failure
+	}
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := req.Header.Get("Range")
@@ -275,7 +281,7 @@ func (s *StreamProxy) tryServeDecryptedCache(w http.ResponseWriter, req *http.Re
 }
 
 func (s *StreamProxy) decryptedCacheBaseKey(targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, compatStorageKey string) string {
-	if passwdInfo == nil || !passwdInfo.Enable || fileSize <= 0 {
+	if strictFreshnessEnabled(s.cfg) || passwdInfo == nil || !passwdInfo.Enable || fileSize <= 0 {
 		return ""
 	}
 	stableID := strings.TrimSpace(compatStorageKey)
@@ -313,6 +319,9 @@ func (s *StreamProxy) DecryptedBlockCacheStats() map[string]interface{} {
 }
 
 func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Request, resp *http.Response, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, rangeHeader string, strategy StreamStrategy, targetURL, compatStorageKey string) *StreamOutcome {
+	if failure := s.strictFreshnessFailure(req, targetURL); failure != nil {
+		return failure
+	}
 	result := &StreamOutcome{}
 	// 墙钟起点：成功写出时用于统计播放时长（近似）。
 	streamStart := time.Now()

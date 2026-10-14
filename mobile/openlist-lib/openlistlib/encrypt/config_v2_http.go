@@ -64,6 +64,7 @@ func configV2Docs() []configDocItem {
 		{Key: "rangeSkipMaxBytes", Label: "Range跳过上限", Description: "上游忽略Range时本地可跳过字节上限", Min: int64(1 << 20), Max: int64(2 << 30), Default: defaults.RangeSkipMaxBytes, Unit: "字节"},
 		{Key: "parallelDecryptConcurrency", Label: "并行解密并发", Description: "大文件并行解密线程数", Min: 1, Max: 32, Default: defaults.ParallelDecryptConcurrency},
 		{Key: "streamBufferKb", Label: "流缓冲", Description: "流式解密缓冲区大小", Min: 64, Max: 4096, Default: defaults.StreamBufferKB, Unit: "KB"},
+		{Key: "strictFreshness", Label: "严格新鲜度", Description: "每次请求重新验证调用者授权并读取格式头/尾；禁用跨请求内容缓存，不保证原子快照", Default: defaults.StrictFreshness},
 		{Key: "enableDecryptedBlockCache", Label: "解密块缓存", Description: "重复 seek 时从内存直接返回已解密的字节，避免反复回源 CDN", Default: defaults.EnableDecryptedBlockCache},
 		{Key: "decryptedBlockCacheMb", Label: "解密块缓存上限", Description: "解密块缓存最大占用内存", Min: 16, Max: 2048, Default: defaults.DecryptedBlockCacheMB, Unit: "MB"},
 		{Key: "decryptedBlockSizeKb", Label: "解密块大小", Description: "解密块缓存单个块大小", Min: 32, Max: 4096, Default: defaults.DecryptedBlockSizeKB, Unit: "KB"},
@@ -145,6 +146,7 @@ func (p *ProxyServer) exportConfigV2() map[string]any {
 		"debugMaskSensitive":              cfg.DebugMaskSensitive,
 		"debugSampleRate":                 cfg.DebugSampleRate,
 		"debugLogBodyBytes":               cfg.DebugLogBodyBytes,
+		"strictFreshness":                 cfg.StrictFreshness,
 		"enableDecryptedBlockCache":       cfg.EnableDecryptedBlockCache,
 		"decryptedBlockCacheMb":           cfg.DecryptedBlockCacheMB,
 		"decryptedBlockSizeKb":            cfg.DecryptedBlockSizeKB,
@@ -295,6 +297,9 @@ func (p *ProxyServer) applyConfigV2Body(body map[string]any) {
 	}
 	if v, ok := parseIntAny(body["webdavNegativeCacheTtlMinutes"]); ok {
 		p.config.WebDAVNegativeCacheTTLMinutes = clampInt(v, 1, 1440)
+	}
+	if v, ok := body["strictFreshness"].(bool); ok {
+		p.config.StrictFreshness = v
 	}
 	if v, ok := body["enableDecryptedBlockCache"].(bool); ok {
 		p.config.EnableDecryptedBlockCache = v
