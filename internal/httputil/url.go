@@ -2,25 +2,30 @@ package httputil
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 // BuildTargetURL constructs the target URL from base URL, path, and query string
 func BuildTargetURL(baseURL, path string, r *http.Request) string {
-	url := baseURL + path
+	// path is a decoded, literal storage/route path, not a URL reference.
+	// Escape once so '%' cannot be reinterpreted by NewRequest downstream.
+	u := baseURL + (&url.URL{Path: path}).EscapedPath()
 	if r != nil && r.URL.RawQuery != "" {
-		url += "?" + r.URL.RawQuery
+		u += "?" + r.URL.RawQuery
 	}
-	return url
+	return u
 }
 
 // BuildTargetURLWithQuery constructs the target URL with explicit query string
 func BuildTargetURLWithQuery(baseURL, path, query string) string {
-	url := baseURL + path
+	// path is a decoded, literal storage/route path, not a URL reference.
+	// Escape once so '%' cannot be reinterpreted by NewRequest downstream.
+	u := baseURL + (&url.URL{Path: path}).EscapedPath()
 	if query != "" {
-		url += "?" + query
+		u += "?" + query
 	}
-	return url
+	return u
 }
 
 // BuildTargetURLStripped constructs the target URL WITHOUT query parameters.
