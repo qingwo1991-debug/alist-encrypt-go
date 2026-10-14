@@ -245,6 +245,7 @@ func (h *ProxyHandler) cleanupRedirectKeys() {
 
 // HandleRedirect handles /redirect/:key for 302 redirect decryption
 func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
+	r = withPlaybackAdmission(r, h.cfg)
 	r = withPlaybackRequestStart(r)
 	key := strings.TrimPrefix(r.URL.Path, "/redirect/")
 	if key == "" {
@@ -282,12 +283,12 @@ func (h *ProxyHandler) HandleRedirect(w http.ResponseWriter, r *http.Request) {
 	if displayPath == "" {
 		displayPath = resolveRedirectDisplayPath(r)
 	}
-	if displayPath != "" {
+	if displayPath != "" && !h.cfg.AlistServerSnapshot().StrictFreshness {
 		if refreshed := h.refreshRedirectMetadata(r, key, displayPath, info); refreshed != nil {
 			info = refreshed
 		}
 	}
-	if info.FileSize == 0 {
+	if info.FileSize == 0 && !h.cfg.AlistServerSnapshot().StrictFreshness {
 		// When decryption is explicitly requested (decode=1), we must not
 		// silently return encrypted content. SizeUnknownStrict only
 		// controls non-decrypt paths.
@@ -490,6 +491,9 @@ func (h *ProxyHandler) refreshRedirectMetadata(r *http.Request, key, displayPath
 // freshness" fix). The caller should invoke it right after it resolves a fresh
 // cached URL, so the refresh races ahead of the next Range request.
 func (h *ProxyHandler) maybeProactivelyRefreshRawURL(r *http.Request, displayPath, realPath string) {
+	if h.cfg != nil && h.cfg.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	if h == nil || h.fileDAO == nil || h.cfg == nil || displayPath == "" {
 		return
 	}
@@ -654,6 +658,7 @@ func (h *ProxyHandler) convertDisplayToRealPath(displayPath string, passwdInfo *
 
 // HandleDownload handles /d/* and /p/* download requests with decryption
 func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	r = withPlaybackAdmission(r, h.cfg)
 	r = withPlaybackRequestStart(r)
 	displayPath := strings.TrimPrefix(r.URL.Path, "/d")
 	displayPath = strings.TrimPrefix(displayPath, "/p")
@@ -689,6 +694,10 @@ func (h *ProxyHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		trace.Logf(r.Context(), "download", "Path converted: %s -> %s", displayPath, realPath)
 	}
 
+	if h.cfg.AlistServerSnapshot().StrictFreshness {
+		executeDecryptPlayback(decryptPlaybackRequest{ResponseWriter: w, Request: r, Config: h.cfg, StreamProxy: h.streamProxy, PasswdInfo: passwdInfo, FileItem: FileItem{DisplayPath: displayPath, EncryptedPath: realPath}, TargetURL: httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/d"+realPath), Path: displayPath, ConsumerScenario: consumerScenarioHTTP})
+		return
+	}
 	// Determine URL prefix first (needed for HEAD request)
 	urlPrefix := "/d"
 	if strings.HasPrefix(r.URL.Path, "/p") {
@@ -777,6 +786,9 @@ type metadataPrefetchResult struct {
 }
 
 func (h *ProxyHandler) prefetchDownloadMetadata(r *http.Request, displayPath, realPath string, stale bool) {
+	if h.cfg != nil && h.cfg.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	atomic.AddUint64(&h.prefetchTotal, 1)
 	if stale {
 		atomic.AddUint64(&h.prefetchStaleTriggers, 1)

@@ -417,11 +417,11 @@ func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHea
 	if apiPath == "" {
 		apiPath = "/"
 	}
-	payload := map[string]interface{}{"path": apiPath}
+	requestPayload := map[string]interface{}{"path": apiPath}
 	if p.strictFreshnessEnabled() {
-		payload["refresh"] = true
+		requestPayload["refresh"] = true
 	}
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(requestPayload)
 	if err != nil {
 		return "", 0
 	}

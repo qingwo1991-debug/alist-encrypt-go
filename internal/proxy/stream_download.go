@@ -35,6 +35,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	if failure := s.strictFreshnessFailure(r, targetURL); failure != nil {
 		return failure
 	}
+	w = s.guardStrictFreshnessWriter(w, r, targetURL)
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := r.Header.Get("Range")
@@ -154,6 +155,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 	if failure := s.strictFreshnessFailure(req, targetURL); failure != nil {
 		return failure
 	}
+	w = s.guardStrictFreshnessWriter(w, req, targetURL)
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := req.Header.Get("Range")

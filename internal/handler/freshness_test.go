@@ -6,12 +6,46 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/proxy"
 )
+
+func TestStrictOldRuleAdmissionRejectsBeforeAuthorizationOrPlaintext(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer upstream.Close()
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	current := cfg.AlistServerSnapshot()
+	current.StrictFreshness = true
+	if err := cfg.UpdateAlistServer(current); err != nil {
+		t.Fatal(err)
+	}
+	r := withPlaybackAdmission(httptest.NewRequest(http.MethodGet, "http://local/d/old", nil), cfg)
+	oldRule := &config.PasswdInfo{Enable: true, EncType: "aesctr", Password: "old-rule"}
+	next := current
+	next.ServerHost = "changed.example"
+	if err := cfg.UpdateAlistServer(next); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	executeDecryptPlayback(decryptPlaybackRequest{ResponseWriter: w, Request: r, Config: cfg, StreamProxy: proxy.NewStreamProxy(cfg), PasswdInfo: oldRule, FileItem: FileItem{EncryptedPath: "/old"}, TargetURL: upstream.URL, ConsumerScenario: consumerScenarioHTTP})
+	if calls.Load() != 0 || w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "revalidation failed") {
+		t.Fatalf("authorizedquery_count=%d status=%d body=%q", calls.Load(), w.Code, w.Body.String())
+	}
+}
+
+func TestPlaybackCredentialOriginRejectsDowngrade(t *testing.T) {
+	if samePlaybackOrigin("https://example.test:443/a", "http://example.test:443/b") {
+		t.Fatal("HTTPS downgrade kept caller credentials")
+	}
+	if !samePlaybackOrigin("https://example.test/a", "https://example.test:443/b") {
+		t.Fatal("equivalent origin mismatch")
+	}
+}
 
 func TestStrictMetadataAlwaysQueriesCallerAuthorization(t *testing.T) {
 	var authorizedQueries, geometryQueries atomic.Int32
@@ -42,6 +76,7 @@ func TestStrictMetadataAlwaysQueriesCallerAuthorization(t *testing.T) {
 	sp := proxy.NewStreamProxy(cfg)
 	r := httptest.NewRequest(http.MethodGet, "http://local/d/enc", nil)
 	r.Header.Set("Authorization", "caller")
+	r = withPlaybackAdmission(r, cfg)
 	req := decryptPlaybackRequest{Config: cfg, Request: r, StreamProxy: sp, PasswdInfo: &config.PasswdInfo{Enable: true, EncType: "aesctr"}, FileItem: FileItem{EncryptedPath: "/enc"}}
 	for i := 0; i < 2; i++ {
 		_, _, _, err := strictPlaybackMetadata(req, r.Header)

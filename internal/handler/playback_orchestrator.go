@@ -105,7 +105,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			return
 		}
 		req.TargetURL = target
-		if hostOfURL(target) != hostOfURL(req.Config.GetAlistURL()) {
+		if !samePlaybackOrigin(target, req.Config.GetAlistURL()) {
 			r = r.Clone(r.Context())
 			r.Header.Del("Authorization")
 			r.Header.Del("Cookie")
@@ -492,7 +492,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		return
 	}
 
-	if shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
+	if !alist.StrictFreshness && shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
 		logDecryptFailure(req, strategy, lastFailure, true)
 		retryWithFreshState := false
 		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP) &&
@@ -946,6 +946,9 @@ func cloneHeader(src http.Header) http.Header {
 }
 
 func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.Header, firstFrameHint bool, size int64, expectedBytes int64) {
+	if req.Config != nil && req.Config.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	if !firstFrameHint || req.Probe == nil || req.Request == nil || req.Request.Method != http.MethodGet {
 		return
 	}
@@ -971,6 +974,9 @@ func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.H
 // guessed, non-existent sibling is therefore never turned into an upstream
 // metadata request.
 func maybeEnqueueNextEpisodeWarmup(req decryptPlaybackRequest, authHeaders http.Header) {
+	if req.Config != nil && req.Config.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	if req.Probe == nil || req.FileDAO == nil || req.Config == nil {
 		return
 	}
