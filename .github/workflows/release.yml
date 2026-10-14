@@ -47,6 +47,9 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Check core release artifact selection
+        run: python3 tools/test_release_artifact_selection.py
+
       - name: Run unit tests
         run: |
           go test ./...
@@ -761,9 +764,18 @@ jobs:
       contents: write
 
     steps:
-      - name: Download binary artifacts
+      # Download only publishable binary ZIPs. Buildx .dockerbuild records are
+      # not ZIP artifacts and must never reach download-artifact extraction.
+      - name: Download server binary artifacts
         uses: actions/download-artifact@v7
         with:
+          pattern: alist-encrypt-go-*
+          path: release-artifacts
+
+      - name: Download encryption tool artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: encrypt-tool-*
           path: release-artifacts
 
       - name: List release artifacts
