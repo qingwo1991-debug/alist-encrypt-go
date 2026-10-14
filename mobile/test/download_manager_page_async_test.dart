@@ -43,14 +43,17 @@ Future<void> requestInfo(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 400));
 }
 
-// Drain microtasks plus frames until an observable lifecycle gate is reached.
-// No time-based sleeps or pumpAndSettle (the loading spinner never settles).
-Future<void> pumpUntil(WidgetTester tester, bool Function() ready) async {
+// Advance bounded simulated frames, not real sleeps. Stream cancellation may
+// schedule an event-queue turn, and tap/route animations need frame time; pumping
+// repeatedly at the identical timestamp cannot advance those timers. Never use
+// pumpAndSettle while the loading spinner is active.
+Future<void> pumpUntil(WidgetTester tester, bool Function() ready,
+    {String gate = 'lifecycle'}) async {
   for (var frames = 0; frames < 20; frames++) {
-    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 16));
     if (ready()) return;
   }
-  fail('Lifecycle gate was not reached within 20 zero-time frames');
+  fail('$gate was not reached within 20 simulated frames');
 }
 
 Future<void> disposePage(WidgetTester tester) async {
@@ -84,11 +87,11 @@ void main() {
     var secondCancelled = false;
     var secondListening = false;
     final first = StreamController<List<DownloadedFile>>(
-      onCancel: () => firstCancelled = true,
+      onCancel: () { firstCancelled = true; },
     );
     final second = StreamController<List<DownloadedFile>>(
       onListen: () => secondListening = true,
-      onCancel: () => secondCancelled = true,
+      onCancel: () { secondCancelled = true; },
     );
     var scans = 0;
     await showPage(tester,
@@ -96,7 +99,9 @@ void main() {
     first.add([file(0)]);
     await tester.pump();
     await tester.tap(find.byIcon(Icons.refresh));
-    await pumpUntil(tester, () => secondListening);
+    await pumpUntil(tester, () => firstCancelled, gate: 'first scan cancellation');
+    await pumpUntil(tester, () => secondListening, gate: 'second scan subscription');
+    expect(scans, 2);
     expect(firstCancelled, isTrue);
     first.add([file(99)]);
     second.add([file(1)]);
@@ -113,6 +118,9 @@ void main() {
   testWidgets('overlapping refreshes join cancellation before newest scan',
       (tester) async {
     final cancellation = Completer<void>();
+    addTearDown(() {
+      if (!cancellation.isCompleted) cancellation.complete();
+    });
     var cancelStarted = false;
     var latestListening = false;
     final first = StreamController<List<DownloadedFile>>(
@@ -125,24 +133,30 @@ void main() {
       onListen: () => latestListening = true,
     );
     var scans = 0;
-    await showPage(tester,
-        scan: () => ++scans == 1 ? first.stream : latest.stream);
-    await tester.tap(find.byIcon(Icons.refresh));
-    await pumpUntil(tester, () => cancelStarted);
-    await tester.tap(find.byIcon(Icons.refresh));
-    await tester.pump();
-    await tester.pump();
-    expect(scans, 1);
-    expect(latestListening, isFalse);
-    cancellation.complete();
-    await pumpUntil(tester, () => latestListening);
-    expect(scans, 2);
-    latest.add([file(7)]);
-    await pumpUntil(tester, () => find.text('file-7.txt').evaluate().isNotEmpty);
-    await disposePage(tester);
-    await first.close();
-    await latest.close();
-    expect(tester.takeException(), isNull);
+    try {
+      await showPage(tester,
+          scan: () => ++scans == 1 ? first.stream : latest.stream);
+      await tester.tap(find.byIcon(Icons.refresh));
+      await pumpUntil(tester, () => cancelStarted, gate: 'gated cancellation started');
+      await tester.tap(find.byIcon(Icons.refresh));
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(scans, 1);
+      expect(latestListening, isFalse);
+      cancellation.complete();
+      await pumpUntil(tester, () => latestListening, gate: 'newest subscription');
+      expect(scans, 2);
+      latest.add([file(7)]);
+      await pumpUntil(tester, () => find.text('file-7.txt').evaluate().isNotEmpty);
+      expect(tester.takeException(), isNull);
+    } finally {
+      // Release before dispose/close even if an assertion fails. Closing an
+      // unopened single-subscription controller otherwise waits for a listener.
+      if (!cancellation.isCompleted) cancellation.complete();
+      await disposePage(tester);
+      await first.close();
+      if (!latestListening) await latest.stream.listen((_) {}).cancel();
+      await latest.close();
+    }
   });
 
   testWidgets('scan failure remains visible and refresh recovers', (tester) async {
@@ -153,7 +167,9 @@ void main() {
             : Stream.value([file(0)]));
     expect(find.textContaining('scan denied'), findsOneWidget);
     await tester.tap(find.byIcon(Icons.refresh).first);
-    await pumpUntil(tester, () => find.text('file-0.txt').evaluate().isNotEmpty);
+    await pumpUntil(tester, () => scans == 2, gate: 'recovery scan started');
+    await pumpUntil(tester, () => find.text('file-0.txt').evaluate().isNotEmpty,
+        gate: 'recovery row rendered');
     expect(scans, 2);
     expect(find.text('file-0.txt'), findsOneWidget);
     expect(find.textContaining('scan denied'), findsNothing);

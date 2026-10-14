@@ -99,8 +99,11 @@ class _DownloadManagerPageState extends State<DownloadManagerPage>
     _scanSubscription = null;
     // Later refreshes must also join any earlier cancellation, even while the
     // subscription field is empty. Only the newest epoch may start a scan.
-    final cancellation = _scanCancellation.then((_) async {
-      await previous?.cancel();
+    final pendingCancellation = _scanCancellation;
+    final cancellation = pendingCancellation.then((_) async {
+      // A completed/error-cancelled scan has no live subscription to join.
+      // Capture the predecessor explicitly; never read the updated tail here.
+      if (previous != null) await previous.cancel();
     });
     // Report this epoch's error below, but do not poison future refreshes.
     _scanCancellation = cancellation.then<void>((_) {},
