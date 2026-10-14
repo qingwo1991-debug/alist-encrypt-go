@@ -48,8 +48,10 @@ func TestMediaIdentityPrefixV1V2AndNegative(t *testing.T) {
 				} else if err != nil || out.Ext != ".mp4" || out.MIME != "video/mp4" || !out.Reusable || strings.Contains(out.ValidatorScope, "token") {
 					t.Fatalf("result=%+v err=%v", out, err)
 				}
-				if calls.Load() != 2 {
-					t.Fatalf("requests=%d want2", calls.Load())
+				// One strict 48-byte V3 sniff, one legacy 32-byte metadata
+				// probe, and one bounded payload probe (including the V2 header).
+				if calls.Load() != 3 {
+					t.Fatalf("requests=%d want3", calls.Load())
 				}
 			})
 		}
@@ -94,8 +96,14 @@ func TestMediaIdentityRejectsChangedRangeAndBoundsIgnoredRange(t *testing.T) {
 			sp := NewStreamProxy(config.DefaultConfig())
 			var readBytes atomic.Int64
 			sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+				if r.Header.Get("Range") == "bytes=0-47" {
+					return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {fmt.Sprintf("bytes 0-47/%d", len(blob))}}, ContentLength: 48, Body: io.NopCloser(&mediaIdentityCountReader{Reader: bytes.NewReader(blob[:48]), count: &readBytes}), Request: r}, nil
+				}
 				if r.Header.Get("Range") == "bytes=0-31" {
 					return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {fmt.Sprintf("bytes 0-31/%d", len(blob))}}, ContentLength: 32, Body: io.NopCloser(bytes.NewReader(blob[:32])), Request: r}, nil
+				}
+				if r.Header.Get("Range") != "bytes=0-4127" {
+					t.Fatalf("payload range=%q", r.Header.Get("Range"))
 				}
 				if bad {
 					return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {fmt.Sprintf("bytes 0-4127/%d", len(blob)+1)}}, ContentLength: 4128, Body: io.NopCloser(bytes.NewReader(blob[:4128])), Request: r}, nil
@@ -111,8 +119,8 @@ func TestMediaIdentityRejectsChangedRangeAndBoundsIgnoredRange(t *testing.T) {
 				if err != nil || out.Ext != ".mp4" {
 					t.Fatalf("%+v %v", out, err)
 				}
-				if readBytes.Load() != 4128 {
-					t.Fatalf("read=%d want4128", readBytes.Load())
+				if readBytes.Load() != 4176 {
+					t.Fatalf("read=%d want4176 (48-byte sniff + 4128-byte ignored-Range prefix)", readBytes.Load())
 				}
 			}
 		})
@@ -143,6 +151,9 @@ func TestMediaIdentityRejectsSameSizeNonceReplacement(t *testing.T) {
 	}
 	sp := NewStreamProxy(config.DefaultConfig())
 	sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Range") == "bytes=0-47" {
+			return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {fmt.Sprintf("bytes 0-47/%d", len(first))}}, ContentLength: 48, Body: io.NopCloser(bytes.NewReader(first[:48])), Request: r}, nil
+		}
 		if r.Header.Get("Range") == "bytes=0-31" {
 			return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {fmt.Sprintf("bytes 0-31/%d", len(first))}}, ContentLength: 32, Body: io.NopCloser(bytes.NewReader(first[:32])), Request: r}, nil
 		}

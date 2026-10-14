@@ -32,6 +32,7 @@ type MediaRecognitionResult struct {
 	Status                                                        int
 	BytesRead, RecordBytes                                        int64
 	RecordAuthenticated                                           bool
+	StrongETag                                                    bool
 }
 
 // MediaRecognizer owns admission, bytes and cancellation; Stop joins HTTP/record
@@ -122,6 +123,7 @@ func (m *MediaRecognizer) RecognizeV3(ctx context.Context, client *http.Client, 
 	c := *client
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	var scope, etag, last string
+	strongETag := true
 	fetch := func(start, end int64) ([]byte, error) {
 		current := target
 		headers := auth.Clone()
@@ -187,7 +189,8 @@ func (m *MediaRecognizer) RecognizeV3(ctx context.Context, client *http.Client, 
 			u.Fragment = ""
 			u.User = nil
 			s := u.String()
-			eTag := resp.Header.Get("ETag")
+			eTag, validETag := SingleStrongETag(resp.Header)
+			strongETag = strongETag && validETag
 			l := resp.Header.Get("Last-Modified")
 			for _, vary := range resp.Header.Values("Vary") {
 				for _, f := range strings.Split(vary, ",") {
@@ -314,6 +317,7 @@ func (m *MediaRecognizer) RecognizeV3(ctx context.Context, client *http.Client, 
 	if chunk < n {
 		n = chunk
 	}
+	out.StrongETag = strongETag
 	out.Ext, out.MIME, _ = DetectVideoFormat(p[:n])
 	out.ETag, out.LastModified, out.ValidatorScope = etag, last, scope
 	if out.Ext == "" {

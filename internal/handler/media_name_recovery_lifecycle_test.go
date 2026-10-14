@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,8 +86,9 @@ func TestMediaRecoveryStopTransportAndQueued(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			h, _, _ := newWebDAVSnapshotTestHandler(t)
 			repo := &lifecycleAliasRepo{}
-			started := make(chan struct{}, 2)
-			exited := make(chan struct{}, 2)
+			started := make(chan struct{}, 3)
+			exited := make(chan struct{}, 3)
+			var inspectorCalls atomic.Int64
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if phase == "body" {
 					w.WriteHeader(200)
@@ -99,6 +101,7 @@ func TestMediaRecoveryStopTransportAndQueued(t *testing.T) {
 			defer upstream.Close()
 			defer h.Stop()
 			inspector := lifecycleInspectorFunc(func(ctx context.Context, _ string, _ http.Header, _ *config.PasswdInfo, _ int64) (proxy.MediaIdentityResult, error) {
+				inspectorCalls.Add(1)
 				req, _ := http.NewRequestWithContext(ctx, "GET", upstream.URL, nil)
 				resp, err := upstream.Client().Do(req)
 				if err != nil {
@@ -109,10 +112,11 @@ func TestMediaRecoveryStopTransportAndQueued(t *testing.T) {
 				return lifecycleResult(), err
 			})
 			first := launchLifecycle(h, repo, inspector, "/156联通云盘/encrypt/first.bin")
+			awaitLifecycle(t, started)
+			// P6 admits one running operation and two pending flights. The first
+			// transport cannot finish until Stop cancels its context, so neither
+			// pending flight can enter the inspector before the admission fence.
 			second := launchLifecycle(h, repo, inspector, "/156联通云盘/encrypt/second.bin")
-			awaitLifecycle(t, started)
-			awaitLifecycle(t, started)
-			// Admit a third worker while both semaphore slots are occupied.
 			queued := launchLifecycle(h, repo, inspector, "/156联通云盘/encrypt/queued.bin")
 			deadline := time.NewTimer(2 * time.Second)
 			defer deadline.Stop()
@@ -131,6 +135,17 @@ func TestMediaRecoveryStopTransportAndQueued(t *testing.T) {
 					t.Fatal("queued flight not admitted")
 				}
 			}
+			h.mediaRecovery.mu.Lock()
+			running, capacity := len(h.mediaRecovery.sem), cap(h.mediaRecovery.sem)
+			h.mediaRecovery.mu.Unlock()
+			if running != 1 || capacity != 1 || inspectorCalls.Load() != 1 {
+				t.Fatalf("expected one running + two pending: running=%d capacity=%d calls=%d", running, capacity, inspectorCalls.Load())
+			}
+			// A fourth distinct flight must be refused without starting I/O.
+			awaitLifecycle(t, launchLifecycle(h, repo, inspector, "/156联通云盘/encrypt/over-budget.bin"))
+			if inspectorCalls.Load() != 1 {
+				t.Fatal("over-budget flight entered inspector")
+			}
 			stopped := make(chan struct{})
 			go func() { h.Stop(); close(stopped) }()
 			awaitLifecycle(t, stopped)
@@ -138,7 +153,14 @@ func TestMediaRecoveryStopTransportAndQueued(t *testing.T) {
 			awaitLifecycle(t, second)
 			awaitLifecycle(t, queued)
 			awaitLifecycle(t, exited)
-			awaitLifecycle(t, exited)
+			if inspectorCalls.Load() != 1 {
+				t.Fatal("pending flight started I/O during Stop")
+			}
+			select {
+			case <-started:
+				t.Fatal("queued transport unexpectedly started")
+			default:
+			}
 			repo.mu.Lock()
 			repo.closed = true
 			repo.mu.Unlock()

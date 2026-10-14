@@ -83,7 +83,7 @@ func (s *StreamProxy) InspectDecryptedMediaPrefix(ctx context.Context, targetURL
 		out.Ext, out.MIME = v3.Ext, v3.MIME
 		out.ETag, out.LastModified, out.ValidatorScope = v3.ETag, v3.LastModified, v3.ValidatorScope
 		out.BytesRead, out.RecordBytes, out.RecordAuthenticated = v3.BytesRead, v3.RecordBytes, v3.RecordAuthenticated
-		out.Reusable = err == nil && v3.RecordAuthenticated && v3.ETag != "" && !strings.HasPrefix(strings.TrimSpace(v3.ETag), "W/")
+		out.Reusable = err == nil && v3.RecordAuthenticated && v3.StrongETag
 		if v3.Meta.Version == encryption.ContentVersionV3 || v3.Reason != "invalid_header" {
 			return out, err
 		}
