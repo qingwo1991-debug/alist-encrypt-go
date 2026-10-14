@@ -4,6 +4,15 @@ This document describes only `internal/storage` root Bolt support. It does not
 claim SQLite/MySQL/mobile backup, a cross-store point-in-time snapshot, restore
 integration, a running backup scheduler, retention, or completed P1 acceptance.
 
+Root runtime configuration (`cfg.configJSON`) is an independently atomically
+published JSON file, **not** the Bolt `BucketConfig` bucket. This component copies
+that bucket only as database content; it does not capture the external runtime
+configuration JSON or promise a full-configuration/whole-site backup. A future
+owner/API integration must explicitly include that external configuration and
+coordinate its publication boundary with the relevant database snapshots before
+claiming a coordinated backup. Owner/API integration is outside this library-only
+phase and must not be inferred from the presence of a bucket named `config`.
+
 ## APIs and exact consistency promise
 
 - `(*Store).Snapshot(ctx, io.Writer, SnapshotOptions) (SnapshotManifest, error)`:
