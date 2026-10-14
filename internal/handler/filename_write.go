@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -118,6 +119,11 @@ func (w *protectedFilenameWrite) verify(r *http.Request, client *http.Client) er
 	return w.finish(storage.FilenameComplete)
 }
 func filenameRemoteHead(r *http.Request, origin, raw string, client *http.Client) (int, int64, error) {
+	// API bearer credentials are not DAV credentials. Never substitute configured
+	// administrator credentials: inspect the parent via the caller's API scope.
+	if r.URL != nil && r.URL.Path == "/api/fs/put" {
+		return filenameRemoteAPIList(r, origin, raw, client)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	u, err := url.Parse(origin)
@@ -149,6 +155,84 @@ func filenameRemoteHead(r *http.Request, origin, raw string, client *http.Client
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode, resp.ContentLength, nil
+}
+
+// A successful complete fresh listing is authoritative for existence. Neither
+// transport HTTP 200 alone nor a partial page may establish absence.
+func filenameRemoteAPIList(r *http.Request, origin, raw string, client *http.Client) (int, int64, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	u, err := url.Parse(origin)
+	if err != nil {
+		return 0, 0, err
+	}
+	u.Path = "/api/fs/list"
+	u.RawPath = ""
+	u.RawQuery = ""
+	payload, _ := json.Marshal(map[string]interface{}{"path": path.Dir(raw), "page": 1, "per_page": 0, "refresh": true, "password": ""})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header = r.Header.Clone()
+	for _, k := range []string{"Range", "Content-Length", "File-Path", "If-Match", "If-None-Match", "If", "Destination", "Overwrite", "Lock-Token"} {
+		req.Header.Del(k)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	if client == nil {
+		client = http.DefaultClient
+	}
+	snapshot := *client
+	snapshot.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := snapshot.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, 0, fmt.Errorf("filename API verification HTTP status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024+1))
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(body) > 2*1024*1024 {
+		return 0, 0, fmt.Errorf("filename API verification response too large")
+	}
+	var listing struct {
+		Code int `json:"code"`
+		Data *struct {
+			Total   *int `json:"total"`
+			Content *[]struct {
+				Name  string `json:"name"`
+				Size  *int64 `json:"size"`
+				IsDir bool   `json:"is_dir"`
+			} `json:"content"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return 0, 0, err
+	}
+	if listing.Code != 200 || listing.Data == nil || listing.Data.Total == nil || listing.Data.Content == nil || *listing.Data.Total < 0 || *listing.Data.Total != len(*listing.Data.Content) {
+		return 0, 0, fmt.Errorf("filename API verification lacks a complete successful listing")
+	}
+	var found bool
+	var size int64
+	for _, entry := range *listing.Data.Content {
+		if entry.Name != path.Base(raw) {
+			continue
+		}
+		if found || entry.IsDir || entry.Size == nil || *entry.Size < 0 {
+			return 0, 0, fmt.Errorf("filename API verification ambiguous destination")
+		}
+		found = true
+		size = *entry.Size
+	}
+	if found {
+		return http.StatusOK, size, nil
+	}
+	return http.StatusNotFound, 0, nil
 }
 
 // Verify the canonical DAV resource without following a signed CDN redirect.

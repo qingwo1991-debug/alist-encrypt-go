@@ -22,18 +22,21 @@ func TestProtectedFilenamePutBoundedReservedAndVerified(t *testing.T) {
 	var stored []byte
 	puts := 0
 	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
+		if r.URL.Path == "/api/fs/list" {
+			if r.Header.Get("Authorization") != "Bearer unit" {
+				t.Errorf("API verification lost caller authorization")
+			}
+			w.Header().Set("Content-Type", "application/json")
 			if len(stored) == 0 {
-				w.WriteHeader(404)
+				_, _ = io.WriteString(w, `{"code":200,"data":{"total":0,"content":[]}}`)
 				return
 			}
-			if r.URL.Path != "/dav"+raw {
-				t.Errorf("postflight path %q != %q", r.URL.Path, "/dav"+raw)
-				w.WriteHeader(404)
-				return
-			}
-			w.Header().Set("Content-Length", strconv.Itoa(len(stored)))
-			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"code":200,"data":{"total":1,"content":[{"name":%q,"size":%d,"is_dir":false}]}}`, pathBase(raw), len(stored))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/dav") {
+			t.Errorf("API credentials incorrectly used on DAV")
+			w.WriteHeader(401)
 			return
 		}
 		if r.URL.Path != "/api/fs/put" {
@@ -146,6 +149,47 @@ func TestProtectedFilenamePropfindVerifiesExactResource(t *testing.T) {
 			n, err := filenameRemotePropfind(r, upstream.URL, "/limited/cipher%2f.bin", upstream.Client())
 			if (err == nil) != tc.want || (tc.want && n != 37) {
 				t.Errorf("size=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+func TestProtectedFilenameAPIListingRequiresFreshCompleteEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		wantStatus int
+	}{
+		{"absent", `{"code":200,"data":{"total":0,"content":[]}}`, 200, 404},
+		{"present", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":37}]}}`, 200, 200},
+		{"app-error", `{"code":500,"data":null}`, 200, 0},
+		{"partial", `{"code":200,"data":{"total":2,"content":[{"name":"other.bin","size":37}]}}`, 200, 0},
+		{"missing-content", `{"code":200,"data":{"total":0}}`, 200, 0},
+		{"missing-total", `{"code":200,"data":{"content":[]}}`, 200, 0},
+		{"revoked", `{"code":401}`, 401, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/fs/list" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer user" {
+					t.Errorf("wrong API verification %s %s", r.Method, r.URL.Path)
+				}
+				data, _ := io.ReadAll(r.Body)
+				if !strings.Contains(string(data), `"refresh":true`) || !strings.Contains(string(data), `"per_page":0`) {
+					t.Errorf("not fresh complete request: %s", data)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer upstream.Close()
+			r := httptest.NewRequest(http.MethodPut, "http://proxy/api/fs/put", nil)
+			r.Header.Set("Authorization", "Bearer user")
+			status, size, err := filenameRemoteHead(r, upstream.URL, "/limited/cipher.bin", upstream.Client())
+			if tc.wantStatus == 0 {
+				if err == nil {
+					t.Errorf("unsafe listing accepted status=%d size=%d", status, size)
+				}
+			} else if err != nil || status != tc.wantStatus || (status == 200 && size != 37) {
+				t.Errorf("status=%d size=%d err=%v", status, size, err)
 			}
 		})
 	}

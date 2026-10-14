@@ -48,7 +48,7 @@ func recoveryXML(raw string, size int64) []byte {
 	return []byte(fmt.Sprintf(`<D:multistatus xmlns:D="DAV:"><D:response><D:href>/dav%s</D:href><D:propstat><D:prop><D:displayname>orig_%s</D:displayname><D:getcontentlength>%d</D:getcontentlength><D:getcontenttype>application/octet-stream</D:getcontenttype><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>`, raw, strings.TrimPrefix(raw, "/156联通云盘/encrypt/"), size))
 }
 func TestMediaNameRecoveryPersistentScopedAliasAndSnapshot(t *testing.T) {
-	h, _, _ := newWebDAVSnapshotTestHandler(t)
+	h, snapshots, _ := newWebDAVSnapshotTestHandler(t)
 	h.cfg.AlistServer.FilenameWriteLimits = map[string]int{"/156联通云盘": 100}
 	meta := encryption.ContentMeta{EncType: encryption.EncTypeAESCTR, Version: encryption.ContentVersionV2, HeaderLen: 32, PlainSize: 100, CiphertextSize: 132, NonceField: bytes.Repeat([]byte{7}, 16)}
 	mock := &recoveryInspectorMock{result: proxy.MediaIdentityResult{Meta: meta, Ext: ".mp4", MIME: "video/mp4", Reusable: true}}
@@ -65,6 +65,11 @@ func TestMediaNameRecoveryPersistentScopedAliasAndSnapshot(t *testing.T) {
 		t.Fatal("cold probe count", mock.calls.Load())
 	}
 	snapshot := recoveryXML("/156联通云盘/encrypt/orig_"+strings.Repeat("x", 96)+".bin", 100)
+	h.persistWebDAVSnapshot(r, "/156联通云盘/encrypt/", h.parsePropfindEntries(snapshot))
+	saved, present, err := snapshots.GetSnapshot(r.Context(), buildDirScopeKey("/156联通云盘/encrypt", authScopeHash(h.webdavAuthHeaders(r))))
+	if err != nil || !present || bytes.Contains(saved.PayloadJSON, []byte(".mp4")) || !bytes.Contains(saved.PayloadJSON, []byte(".bin")) {
+		t.Fatalf("snapshot must retain unverified raw-name identity: present=%v err=%v", present, err)
+	}
 	if got := h.recoverMediaNames(r, snapshot, true); !bytes.Contains(got, []byte(".mp4")) {
 		t.Fatalf("snapshot=%s", got)
 	}

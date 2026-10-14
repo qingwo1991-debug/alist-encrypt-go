@@ -949,15 +949,15 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		// and adjust V2 getcontentlength. Replaces the previous two-pass
 		// decryptPropfindResponse + adjustPropfindContentLengthForV2.
 		originalPropfindBody := respBody
-		respBody = h.rewritePropfindBody(respBody, passwdInfo)
-		respBody = h.recoverMediaNames(r, respBody, false, originalPropfindBody)
+		snapshotBody := h.rewritePropfindBody(respBody, passwdInfo)
+		respBody = h.recoverMediaNames(r, snapshotBody, false, originalPropfindBody)
 
 		// Populate the shared dir-sync snapshot on a whitelisted directory
 		// listing miss so subsequent HTTP fs/list and WebDAV reads hit the
-		// fast path (极速). Re-parse the rewritten body: hrefs and display
-		// names here are already the decrypted display form the client sees.
+		// fast path (极速). Store the name-decrypted body without media aliases:
+		// those are scoped, expiring evidence and must be overlaid on each read.
 		if isDirRequest && h.dirSyncStore != nil {
-			if davEntries := h.parsePropfindEntries(respBody); len(davEntries) > 0 {
+			if davEntries := h.parsePropfindEntries(snapshotBody); len(davEntries) > 0 {
 				h.persistWebDAVSnapshot(r, requestPath, davEntries)
 				trace.Logf(r.Context(), "propfind", "Snapshot populated: %s entries=%d", requestPath, len(davEntries))
 			}
