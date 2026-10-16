@@ -2,8 +2,11 @@ package storage
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
+	bolt "go.etcd.io/bbolt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,10 +174,113 @@ func TestVerifiedMediaAliasValidationAndExpiry(t *testing.T) {
 		t.Fatalf("expired reverse returned: %v %v", ok, err)
 	}
 }
+func TestVerifiedMediaAliasV3LayoutEvidence(t *testing.T) {
+	for _, layout := range []string{VerifiedMediaAliasV3LayoutFixed, VerifiedMediaAliasV3LayoutTrailer} {
+		t.Run(layout, func(t *testing.T) {
+			s := filenameTestStore(t)
+			r := filenameTestAlias()
+			r.ContentVersion = encryption.ContentVersionV3
+			r.V3Layout = layout
+			r.HeaderLen = encryption.V3HeaderSize
+			r.ChunkSize = 4096
+			r.KDFIterations = 1
+			r.CiphertextSize = encryption.V3HeaderSize + 4096 + 16
+			if layout == VerifiedMediaAliasV3LayoutTrailer {
+				r.CiphertextSize += 16
+			}
+			if err := s.PutVerifiedMediaAlias(r); err != nil {
+				t.Fatal(err)
+			}
+			for _, reverse := range []bool{false, true} {
+				p := r.EncryptedPath
+				if reverse {
+					p = r.DisplayPath
+				}
+				got, ok, err := s.getVerifiedMediaAlias(r.Origin, p, r.AuthScope, r.RuleFingerprint, r.CiphertextSize, reverse)
+				if err != nil || !ok || got.V3Layout != layout || got.SchemaVersion != VerifiedMediaAliasSchemaVersion {
+					t.Fatalf("layout/schema roundtrip: %+v %v %v", got, ok, err)
+				}
+			}
+			for _, change := range []func(*VerifiedMediaAlias){
+				func(r *VerifiedMediaAlias) { r.V3Layout = "" },
+				func(r *VerifiedMediaAlias) { r.V3Layout = "unknown" },
+				func(r *VerifiedMediaAlias) { r.CiphertextSize++ },
+				func(r *VerifiedMediaAlias) { r.PlainSize = 4097 },
+				func(r *VerifiedMediaAlias) { r.PlainSize = math.MaxInt64 },
+				func(r *VerifiedMediaAlias) { r.ChunkSize = 0 },
+				func(r *VerifiedMediaAlias) { r.ChunkSize = 1<<30 + 1 },
+				func(r *VerifiedMediaAlias) { r.KDFIterations = 0 },
+				func(r *VerifiedMediaAlias) { r.KDFIterations = 10000001 },
+				func(r *VerifiedMediaAlias) { r.NonceField = r.NonceField[:15] },
+				func(r *VerifiedMediaAlias) { r.SchemaVersion = 99 },
+			} {
+				bad := r
+				change(&bad)
+				if err := s.PutVerifiedMediaAlias(bad); err == nil {
+					t.Fatalf("invalid V3 evidence admitted: %+v", bad)
+				}
+			}
+		})
+	}
+	v2 := filenameTestAlias()
+	v2.V3Layout = VerifiedMediaAliasV3LayoutFixed
+	if validMediaAlias(v2) {
+		t.Fatal("V3 layout accepted on V2")
+	}
+}
+
+func TestVerifiedMediaAliasLegacySchemaRead(t *testing.T) {
+	for _, version := range []int{encryption.ContentVersionV2, encryption.ContentVersionV3} {
+		t.Run(string(rune('0'+version)), func(t *testing.T) {
+			s := filenameTestStore(t)
+			r := filenameTestAlias()
+			r.ContentVersion = version
+			if version == encryption.ContentVersionV3 {
+				r.HeaderLen = 48
+				r.ChunkSize = 4096
+				r.KDFIterations = 1
+				r.CiphertextSize = 48 + 4096 + 16
+			}
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.update(func(tx *bolt.Tx) error {
+				b, err := tx.CreateBucketIfNotExists(verifiedMediaAliases)
+				if err != nil {
+					return err
+				}
+				idx, err := tx.CreateBucketIfNotExists(verifiedMediaReverse)
+				if err != nil {
+					return err
+				}
+				key := filenameKey(r.Origin, r.EncryptedPath, r.AuthScope, r.RuleFingerprint)
+				if err = b.Put(key, raw); err != nil {
+					return err
+				}
+				return idx.Put(filenameKey(r.Origin, r.DisplayPath, r.AuthScope, r.RuleFingerprint), key)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for _, reverse := range []bool{false, true} {
+				p := r.EncryptedPath
+				if reverse {
+					p = r.DisplayPath
+				}
+				_, ok, err := s.getVerifiedMediaAlias(r.Origin, p, r.AuthScope, r.RuleFingerprint, 0, reverse)
+				if err != nil || ok != (version == encryption.ContentVersionV2) {
+					t.Fatalf("legacy read v%d reverse=%v: %v %v", version, reverse, ok, err)
+				}
+			}
+		})
+	}
+}
+
 func TestVerifiedMediaAliasEmptyV3(t *testing.T) {
 	s := filenameTestStore(t)
 	r := filenameTestAlias()
 	r.ContentVersion = encryption.ContentVersionV3
+	r.V3Layout = VerifiedMediaAliasV3LayoutFixed
 	r.PlainSize = 0
 	r.HeaderLen = encryption.V3HeaderSize
 	r.CiphertextSize = encryption.V3HeaderSize

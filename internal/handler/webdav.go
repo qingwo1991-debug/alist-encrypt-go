@@ -203,6 +203,9 @@ func (h *WebDAVHandler) Stop() {
 		// Join our I/O before stopping shared proxy dependencies or letting
 		// the caller close the store. Concurrent/repeated Stop calls join too.
 		h.mediaRecovery.stop()
+		if owner, ok := h.streamProxy.(interface{ StopMediaRecognition() }); ok {
+			owner.StopMediaRecognition()
+		}
 		if h.proxyHandler != nil {
 			h.proxyHandler.Stop()
 		}

@@ -66,43 +66,46 @@ type AlistServer struct {
 	RedirectMaxHops            int                      `json:"redirectMaxHops"`
 	AllowLooseDecode           bool                     `json:"allowLooseDecode"`
 	// FilenameWriteLimits enables explicit per-mount safe naming. No global cloud limit is assumed.
-	FilenameWriteLimits         map[string]int `json:"filenameWriteLimits,omitempty"`
-	RequestTimeoutSeconds       int            `json:"requestTimeoutSeconds"`
-	EnableStartupProbe          bool           `json:"enableStartupProbe"`
-	StartupProbeDelaySeconds    int            `json:"startupProbeDelaySeconds"`
-	StartupProbeIntervalMinutes int            `json:"startupProbeIntervalMinutes"`
-	NegativeCacheMinutes        int            `json:"negativeCacheMinutes"`
-	StartupProbeDeepScan        bool           `json:"startupProbeDeepScan"`
-	ScanUsername                string         `json:"scanUsername"`
-	ScanPassword                string         `json:"scanPassword"`
-	ScanAuthHeader              string         `json:"scanAuthHeader"`
-	ScanVideoOnly               bool           `json:"scanVideoOnly"`
-	ScanMaxDepth                int            `json:"scanMaxDepth"`
-	ScanConcurrency             int            `json:"scanConcurrency"`
-	EnableStrategyStore         bool           `json:"enableStrategyStore"`
-	StrategyStoreFile           string         `json:"strategyStoreFile"`
-	StrategyFailToDowngrade     int            `json:"strategyFailToDowngrade"`
-	StrategySuccessToRecover    int            `json:"strategySuccessToRecover"`
-	StrategyCooldownMinutes     int            `json:"strategyCooldownMinutes"`
-	EnableBackgroundProbe       bool           `json:"enableBackgroundProbe"`
-	ProbeConcurrency            int            `json:"probeConcurrency"`
-	ProbeProviderConcurrency    int            `json:"probeProviderConcurrency"`
-	ProbeMinDelayMs             int            `json:"probeMinDelayMs"`
-	ProbeMaxDelayMs             int            `json:"probeMaxDelayMs"`
-	ProbeCooldownMinutes        int            `json:"probeCooldownMinutes"`
-	ProbeQueueSize              int            `json:"probeQueueSize"`
-	ProbeMinSizeBytes           int64          `json:"probeMinSizeBytes"`
-	PlayFirstFallback           bool           `json:"playFirstFallback"`
-	SizeUnknownStrict           bool           `json:"sizeUnknownStrict"`
-	UpstreamStalenessMinutes    int            `json:"upstreamStalenessMinutes"` // 0 = use default (30 min)
-	ChunkedSeekMaxDiscardBytes  int64          `json:"chunkedSeekMaxDiscardBytes"`
-	EnableSniff                 bool           `json:"enableSniff"`
-	CircuitBreakerThreshold     int            `json:"circuitBreakerThreshold"`
-	CircuitBreakerCooldownSecs  int            `json:"circuitBreakerCooldownSecs"`
-	RetryMaxAttempts            int            `json:"retryMaxAttempts"`
-	MaxActiveStreams            int            `json:"maxActiveStreams"`
-	StreamOverloadStatus        int            `json:"streamOverloadStatus"`
-	V2KeyCacheTTLMinutes        int            `json:"v2KeyCacheTtlMinutes"`
+	// MediaRecognitionLargeRecordOptIn authorizes recognize-record0 (up to 32MiB)
+	// for opted-in protected mounts. Trusted operator configuration only; never a range hint.
+	MediaRecognitionLargeRecordOptIn bool           `json:"mediaRecognitionLargeRecordOptIn,omitempty"`
+	FilenameWriteLimits              map[string]int `json:"filenameWriteLimits,omitempty"`
+	RequestTimeoutSeconds            int            `json:"requestTimeoutSeconds"`
+	EnableStartupProbe               bool           `json:"enableStartupProbe"`
+	StartupProbeDelaySeconds         int            `json:"startupProbeDelaySeconds"`
+	StartupProbeIntervalMinutes      int            `json:"startupProbeIntervalMinutes"`
+	NegativeCacheMinutes             int            `json:"negativeCacheMinutes"`
+	StartupProbeDeepScan             bool           `json:"startupProbeDeepScan"`
+	ScanUsername                     string         `json:"scanUsername"`
+	ScanPassword                     string         `json:"scanPassword"`
+	ScanAuthHeader                   string         `json:"scanAuthHeader"`
+	ScanVideoOnly                    bool           `json:"scanVideoOnly"`
+	ScanMaxDepth                     int            `json:"scanMaxDepth"`
+	ScanConcurrency                  int            `json:"scanConcurrency"`
+	EnableStrategyStore              bool           `json:"enableStrategyStore"`
+	StrategyStoreFile                string         `json:"strategyStoreFile"`
+	StrategyFailToDowngrade          int            `json:"strategyFailToDowngrade"`
+	StrategySuccessToRecover         int            `json:"strategySuccessToRecover"`
+	StrategyCooldownMinutes          int            `json:"strategyCooldownMinutes"`
+	EnableBackgroundProbe            bool           `json:"enableBackgroundProbe"`
+	ProbeConcurrency                 int            `json:"probeConcurrency"`
+	ProbeProviderConcurrency         int            `json:"probeProviderConcurrency"`
+	ProbeMinDelayMs                  int            `json:"probeMinDelayMs"`
+	ProbeMaxDelayMs                  int            `json:"probeMaxDelayMs"`
+	ProbeCooldownMinutes             int            `json:"probeCooldownMinutes"`
+	ProbeQueueSize                   int            `json:"probeQueueSize"`
+	ProbeMinSizeBytes                int64          `json:"probeMinSizeBytes"`
+	PlayFirstFallback                bool           `json:"playFirstFallback"`
+	SizeUnknownStrict                bool           `json:"sizeUnknownStrict"`
+	UpstreamStalenessMinutes         int            `json:"upstreamStalenessMinutes"` // 0 = use default (30 min)
+	ChunkedSeekMaxDiscardBytes       int64          `json:"chunkedSeekMaxDiscardBytes"`
+	EnableSniff                      bool           `json:"enableSniff"`
+	CircuitBreakerThreshold          int            `json:"circuitBreakerThreshold"`
+	CircuitBreakerCooldownSecs       int            `json:"circuitBreakerCooldownSecs"`
+	RetryMaxAttempts                 int            `json:"retryMaxAttempts"`
+	MaxActiveStreams                 int            `json:"maxActiveStreams"`
+	StreamOverloadStatus             int            `json:"streamOverloadStatus"`
+	V2KeyCacheTTLMinutes             int            `json:"v2KeyCacheTtlMinutes"`
 }
 
 // WebDAVServer represents a WebDAV server configuration
