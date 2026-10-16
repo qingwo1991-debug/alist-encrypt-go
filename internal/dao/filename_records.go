@@ -25,6 +25,15 @@ func (d *FileDAO) GetFilenameReservationByOriginal(origin, original, auth, rule 
 	}
 	return d.store.GetFilenameReservationByOriginal(origin, original, auth, rule)
 }
+
+// FindFilenameReservationForRead supplies only a candidate raw path. Callers
+// must authorize that exact resource using the current request credentials.
+func (d *FileDAO) FindFilenameReservationForRead(origin, original string) (storage.FilenameRecord, bool, error) {
+	if d == nil || d.store == nil {
+		return storage.FilenameRecord{}, false, nil
+	}
+	return d.store.FindFilenameReservationForRead(origin, original)
+}
 func (d *FileDAO) FinishFilenameReservation(origin, raw, token, status string) error {
 	if d == nil || d.store == nil {
 		return errors.New("filename reservation store unavailable")

@@ -80,23 +80,67 @@ func (h *WebDAVHandler) resolveRealPathForRequest(r *http.Request, display strin
 	}
 	return h.resolveRealPathWithMode(display, ep)
 }
-func (h *WebDAVHandler) hasInvalidProtectedFilenameScope(r *http.Request, display string) bool {
+func (h *WebDAVHandler) hasInvalidProtectedFilenameScope(r *http.Request, display string) (invalid bool, lookupErr error) {
 	getter, ok := h.fileDAO.(interface {
-		GetFilenameReservation(string, string) (storage.FilenameRecord, bool, error)
+		FindFilenameReservationForRead(string, string) (storage.FilenameRecord, bool, error)
 	})
-	if !ok || h.cfg == nil || h.passwdDAO == nil {
-		return false
+	if !ok || h.cfg == nil || h.passwdDAO == nil || strings.HasSuffix(display, "/") || display == "/" {
+		return false, nil
 	}
-	raw, ok := h.fileDAO.GetEncPath(display)
-	if !ok {
-		return false
-	}
-	saved, found, err := getter.GetFilenameReservation(h.cfg.GetAlistURL(), raw)
-	if err != nil || !found || saved.OriginalPath != display {
-		return false
-	}
+	// This lookup is only a private candidate. Never publish it to the global
+	// display cache: credentials used for upload are not read authorization.
+	revision, origin := h.cfg.RuntimeRevision(), h.cfg.GetAlistURL()
 	ep, found := h.passwdDAO.FindByPath(display)
-	return !found || ep == nil || saved.Status != storage.FilenameComplete || saved.AuthScope != filenameRequestScope(r) || saved.RuleFingerprint != filenameRuleScope(ep)
+	if fresh, ok := h.passwdDAO.(interface {
+		FindByPathFresh(string) (*config.PasswdInfo, bool)
+	}); ok {
+		ep, found = fresh.FindByPathFresh(display)
+	}
+	if !found || ep == nil || !ep.Enable || !ep.EncName {
+		// Ordinary paths must not depend on scanning the audit database. A
+		// known cached protected mapping still fails closed after rule removal.
+		if raw, cached := h.fileDAO.GetEncPath(display); cached {
+			if records, ok := h.fileDAO.(interface {
+				GetFilenameReservation(string, string) (storage.FilenameRecord, bool, error)
+			}); ok {
+				record, present, err := records.GetFilenameReservation(origin, raw)
+				if err != nil {
+					return true, err
+				}
+				if present && record.OriginalPath == display {
+					return true, nil
+				}
+			}
+		}
+		return false, nil
+	}
+	saved, present, err := getter.FindFilenameReservationForRead(origin, display)
+	if err != nil {
+		return true, err
+	}
+	if !present {
+		return false, nil
+	}
+	if !found || ep == nil || !ep.Enable || !ep.EncName || saved.Status != storage.FilenameComplete || saved.RuleFingerprint != filenameRuleScope(ep) {
+		return true, nil
+	}
+	if h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin || saved.Origin != origin {
+		return true, nil
+	}
+	if _, err := filenameRemotePropfind(r, origin, saved.EncryptedPath, h.getShortClient()); err != nil {
+		return true, nil
+	}
+	current, found := h.passwdDAO.FindByPath(display)
+	if fresh, ok := h.passwdDAO.(interface {
+		FindByPathFresh(string) (*config.PasswdInfo, bool)
+	}); ok {
+		current, found = fresh.FindByPathFresh(display)
+	}
+	if !found || current == nil || !current.Enable || !current.EncName || h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin || filenameRuleScope(current) != saved.RuleFingerprint {
+		return true, nil
+	}
+	rememberVerifiedFilenamePath(r, display, saved.EncryptedPath)
+	return false, nil
 }
 
 // Alias restoration is credential/rule scoped and precedes generic orig_ passthrough.
@@ -110,20 +154,42 @@ func (h *WebDAVHandler) restoreVerifiedAliasMapping(r *http.Request, display str
 	if !found || ep == nil {
 		return storage.VerifiedMediaAlias{}, false
 	}
-	if reservations, ok := h.fileDAO.(interface {
-		GetFilenameReservationByOriginal(string, string, string, string) (storage.FilenameRecord, bool, error)
-	}); ok {
-		saved, present, err := reservations.GetFilenameReservationByOriginal(h.cfg.GetAlistURL(), display, filenameRequestScope(r), filenameRuleScope(ep))
-		if err == nil && present && saved.Status == storage.FilenameComplete {
-			rememberVerifiedFilenamePath(r, display, saved.EncryptedPath)
-		}
-	}
 	rec, found, err := repo.GetVerifiedMediaAliasByDisplay(h.cfg.GetAlistURL(), display, filenameRequestScope(r), filenameRuleScope(ep), 0)
 	if err != nil || !found {
 		return storage.VerifiedMediaAlias{}, false
 	}
 	rememberVerifiedFilenamePath(r, display, rec.EncryptedPath)
 	return rec, true
+}
+
+// Overlay the original name only for the exact resource authorized in this
+// request. Directory snapshots and global caches never receive this overlay.
+func restoreBoundFilenameResponse(r *http.Request, body, original []byte) []byte {
+	bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath)
+	if !ok {
+		return body
+	}
+	blocks := mediaResponseRE.FindAll(original, -1)
+	index := 0
+	return mediaResponseRE.ReplaceAllFunc(body, func(block []byte) []byte {
+		i := index
+		index++
+		if i >= len(blocks) {
+			return block
+		}
+		var entry struct {
+			Href string `xml:"href"`
+		}
+		if xml.Unmarshal(blocks[i], &entry) != nil {
+			return block
+		}
+		u, err := url.Parse(entry.Href)
+		if err != nil || u.Host != "" || u.RawQuery != "" || u.Fragment != "" || u.Path != "/dav"+bound.raw {
+			return block
+		}
+		block = replaceMediaProperty(block, mediaHrefRE, (&url.URL{Path: "/dav" + bound.display}).EscapedPath())
+		return replaceMediaProperty(block, mediaDisplayRE, path.Base(bound.display))
+	})
 }
 
 type mediaAliasResponseWriter struct {
