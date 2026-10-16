@@ -867,6 +867,15 @@ func (p *ProxyServer) UpdateConfig(config *ProxyConfig) {
 		p.mutex.Unlock()
 		return
 	}
+	// Configuration publication and metadata invalidation share lock ordering
+	// (server then metadata). Delayed inspections cannot republish old rules.
+	p.confirmedMetadata.mu.Lock()
+	p.confirmedMetadata.nextGeneration++
+	p.confirmedMetadata.entries = nil
+	if p.localStore != nil {
+		_ = p.localStore.DeleteAllConfirmedMetadata()
+	}
+	p.confirmedMetadata.mu.Unlock()
 	p.config = workingConfig
 	p.runtimeConfig = config
 	p.rebuildEncryptPathIndex()

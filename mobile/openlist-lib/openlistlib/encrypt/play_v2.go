@@ -417,7 +417,11 @@ func (p *ProxyServer) resolveEncryptedRawURLViaFsGet(ctx context.Context, srcHea
 	if apiPath == "" {
 		apiPath = "/"
 	}
-	body, err := json.Marshal(map[string]string{"path": apiPath})
+	requestPayload := map[string]interface{}{"path": apiPath}
+	if p.strictFreshnessEnabled() {
+		requestPayload["refresh"] = true
+	}
+	body, err := json.Marshal(requestPayload)
 	if err != nil {
 		return "", 0
 	}
@@ -1103,6 +1107,14 @@ func (o *PlayOrchestrator) resolveFileSize(ctx context.Context, r *http.Request,
 // resolvePlaybackContentMeta resolves the representation before legacy range,
 // cache and strategy handling. Recognized but incomplete V3 never becomes V1.
 func (p *ProxyServer) resolvePlaybackContentMeta(r *http.Request, info *RedirectInfo, size int64) (ContentMeta, bool) {
+	if p.strictFreshnessEnabled() {
+		meta, confirmed := p.resolveConfirmedMetadata(r.Context(), info.RedirectURL, r.Header, info.PasswdInfo, size)
+		if confirmed {
+			info.RedirectURL = strictConfirmedMetadataTarget(r.Context(), info.RedirectURL)
+			info.Headers = r.Header.Clone()
+		}
+		return meta, confirmed
+	}
 	if confirmedMetadataRequestFromContext(r.Context()) != nil {
 		headers := headersWithStoredOriginCredentials(r.Header, info.Headers)
 		ctx := withConfirmedMetadataFallback(r.Context())
@@ -1153,6 +1165,9 @@ func (p *ProxyServer) persistPlaybackContentMeta(key string, info *RedirectInfo,
 	updated.NonceField = cloneNonceField(meta.NonceField)
 	updated.ChunkSize, updated.KDFIterations = meta.ChunkSize, meta.KDFIterations
 	updated.CiphertextSize, updated.FileSize = meta.CiphertextSize, meta.PlainSize
+	if p.strictFreshnessEnabled() {
+		return updated // Request-local geometry; do not publish strict tuples.
+	}
 	if key != "" {
 		p.storeRedirectCache(key, updated)
 	}
@@ -1870,7 +1885,7 @@ func (o *PlayOrchestrator) proxyDownloadDecryptWithStrategy(
 		streamStart = 0
 	}
 	var streamSource io.Reader = decryptReader
-	if cache := p.decryptedBlockCache; cache != nil {
+	if cache := p.decryptedBlockCache; cache != nil && !p.strictFreshnessEnabled() {
 		streamSource = newDecryptedCacheReader(decryptReader, cache, p.decryptedCacheBaseKey(info, meta), streamStart)
 	}
 	// Preserve the existing per-strategy pre-header latency, independent of
@@ -1978,6 +1993,9 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	}()
 	if shouldDecryptRedirect(r, info) {
 		meta, confirmed := o.proxy.resolvePlaybackContentMeta(r, info, info.FileSize)
+		if confirmed {
+			o.proxy.setMetadataFreshnessHeaders(w)
+		}
 		if meta.IsV3() {
 			info = o.proxy.persistPlaybackContentMeta(key, info, meta)
 			statsEnabled = true
@@ -2112,7 +2130,7 @@ func (o *PlayOrchestrator) ServeRedirect(w http.ResponseWriter, r *http.Request)
 	// Decrypted block cache hit: if the requested range is entirely inside an
 	// already-played (and therefore already-decrypted) region, serve it straight
 	// from memory. No upstream fetch, no CDN re-handshake, no re-decrypt.
-	if cache := o.proxy.decryptedBlockCache; cache != nil && !decodeDisabled && r.Method == http.MethodGet && fileSize > 0 && shouldDecryptRedirect(r, info) && info.PasswdInfo != nil {
+	if cache := o.proxy.decryptedBlockCache; cache != nil && !o.proxy.strictFreshnessEnabled() && !decodeDisabled && r.Method == http.MethodGet && fileSize > 0 && shouldDecryptRedirect(r, info) && info.PasswdInfo != nil {
 		if start, end, hasRange, rangeErr := parseSingleRange(rangeHeader, fileSize); rangeErr == nil && hasRange {
 			meta := ContentMeta{
 				EncType:        normalizeContentEncType(EncryptionType(info.PasswdInfo.EncType)),

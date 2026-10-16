@@ -901,6 +901,11 @@ func (p *ProxyServer) handleFsGetOrLink(w http.ResponseWriter, r *http.Request, 
 						proofRequest := p.withConfirmedMetadataIdentity(r, canonicalMetadataDAVPath(filePath), encPath)
 						proofContext := withConfirmedMetadataFreshTarget(withConfirmedMetadataFallback(proofRequest.Context()))
 						meta, confirmed = p.resolveConfirmedMetadata(proofContext, rawURL, r.Header, encPath, ciphertextSize)
+						if confirmed {
+							rawURL = strictConfirmedMetadataTarget(proofContext, rawURL)
+							data["raw_url"] = rawURL
+							p.setMetadataFreshnessHeaders(w)
+						}
 						// Metadata errors must not turn recognized V3 into a legacy
 						// redirect token or persist an incomplete encryption tuple.
 						if !confirmed || (recognizedCachedV3 && !meta.IsV3()) || (meta.IsV3() && ValidateV3ContentMeta(meta) != nil) {

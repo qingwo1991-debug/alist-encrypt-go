@@ -123,11 +123,13 @@ func withConfirmedMetadataProbeBudget(ctx context.Context, budget time.Duration)
 }
 
 type confirmedMetadataRequest struct {
-	identity confirmedMetadataIdentity
-	davPath  string // Canonical decoded encrypted DAV object path; never a CDN URL.
-	mu       sync.Mutex
-	record   confirmedMetadataRecord
-	attached bool
+	identity      confirmedMetadataIdentity
+	davPath       string // Canonical decoded encrypted DAV object path; never a CDN URL.
+	mu            sync.Mutex
+	record        confirmedMetadataRecord
+	attached      bool
+	callerHeaders http.Header // Current caller only; never stored/service credentials.
+	strictTarget  string
 }
 type confirmedMetadataProof struct {
 	captured                  bool
@@ -202,7 +204,7 @@ func (p *ProxyServer) withConfirmedMetadataIdentity(r *http.Request, encryptedPa
 	// Hash all values rather than Header.Get: duplicate credential headers must
 	// not accidentally share an identity with a differently authenticated request.
 	id.CredentialScope = confirmedMetadataDigest(strings.Join(r.Header.Values("Authorization"), "\x00"), strings.Join(r.Header.Values("Cookie"), "\x00"), strings.Join(r.Header.Values("Proxy-Authorization"), "\x00"))
-	holder := &confirmedMetadataRequest{identity: id, davPath: encryptedPath}
+	holder := &confirmedMetadataRequest{identity: id, davPath: encryptedPath, callerHeaders: r.Header.Clone()}
 	return r.WithContext(context.WithValue(r.Context(), confirmedMetadataRequestKey{}, holder))
 }
 func confirmedMetadataRequestFromContext(ctx context.Context) *confirmedMetadataRequest {
@@ -219,7 +221,7 @@ func confirmedMetadataRequestFromContext(ctx context.Context) *confirmedMetadata
 // or stale/unknown-size records are used by this cheap directory rewrite path.
 func (p *ProxyServer) confirmedMetadataForObject(ctx context.Context, encryptedDAVPath string, size int64) (ContentMeta, bool) {
 	holder := confirmedMetadataRequestFromContext(ctx)
-	if p == nil || holder == nil || size <= 0 || ctx.Err() != nil {
+	if p == nil || holder == nil || size <= 0 || ctx.Err() != nil || p.strictFreshnessEnabled() {
 		return ContentMeta{}, false
 	}
 	objectID := p.confirmedMetadataObjectID(encryptedDAVPath)
@@ -323,6 +325,9 @@ func (p *ProxyServer) resolveConfirmedMetadata(ctx context.Context, target strin
 		ctx = context.Background()
 	}
 	holder := confirmedMetadataRequestFromContext(ctx)
+	if p.strictFreshnessEnabled() && enc != nil {
+		return p.resolveStrictConfirmedMetadata(ctx, holder, enc, size)
+	}
 	if p == nil || holder == nil || enc == nil || holder.identity.CryptoFingerprint != confirmedMetadataCryptoFingerprint(enc) {
 		return p.inspectEncryptedContentConfirmed(ctx, target, headers, enc, size)
 	}
@@ -595,7 +600,23 @@ func (p *ProxyServer) validateConfirmedMetadataResponse(ctx context.Context, res
 	rec, attached := cloneConfirmedMetadataRecord(holder.record), holder.attached
 	holder.mu.Unlock()
 	if !attached {
-		return true
+		return !p.strictFreshnessEnabled()
+	}
+	if p.strictFreshnessEnabled() {
+		state := &p.confirmedMetadata
+		state.mu.Lock()
+		entry := state.entries[holder.identity]
+		current := entry != nil && entry.generation == rec.Generation
+		state.mu.Unlock()
+		if !current {
+			return false
+		}
+		holder.mu.Lock()
+		target := holder.strictTarget
+		holder.mu.Unlock()
+		if target == "" || resp.Request == nil || resp.Request.URL == nil || resp.Request.URL.String() != target {
+			return false // No trusted revision to equate rotated/redirected targets.
+		}
 	}
 	conflict := false
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {

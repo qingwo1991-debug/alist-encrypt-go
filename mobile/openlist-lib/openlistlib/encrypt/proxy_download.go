@@ -146,7 +146,15 @@ func (p *ProxyServer) inspectLegacyV3Download(w http.ResponseWriter, r *http.Req
 		// Never let probe failure select V1 or leak the encrypted object.
 		return false, false
 	}
+	if confirmed {
+		p.setMetadataFreshnessHeaders(w)
+	}
 	if !meta.IsV3() {
+		if p.strictFreshnessEnabled() && strictConfirmedMetadataTarget(r.Context(), "") != target {
+			// The legacy route cannot substitute the fresh target for all later
+			// decryption stages. Fail closed instead of decoding an old URL.
+			return false, false
+		}
 		// A failed re-probe must not reinterpret a previously recognized V3
 		// object as V1, even when its saved metadata is incomplete.
 		for _, key := range []string{r.URL.Path, strings.TrimPrefix(r.URL.Path, "/d"), strings.TrimPrefix(r.URL.Path, "/p"), strings.TrimPrefix(r.URL.Path, "/dav")} {
@@ -159,7 +167,8 @@ func (p *ProxyServer) inspectLegacyV3Download(w http.ResponseWriter, r *http.Req
 			return false, true
 		}
 	}
-	p.serveLegacyResolvedV3(w, r, target, headers, encPath, encryptedPath, meta)
+	p.setMetadataFreshnessHeaders(w)
+	p.serveLegacyResolvedV3(w, r, strictConfirmedMetadataTarget(r.Context(), target), headers, encPath, encryptedPath, meta)
 	return true, true
 }
 

@@ -486,6 +486,7 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 		StreamEngineVersion           *int   `json:"streamEngineVersion"`
 		WebDAVNegativeCacheTTLMinutes *int   `json:"webdavNegativeCacheTtlMinutes"`
 		ProxyListenLocalOnly          *bool  `json:"proxyListenLocalOnly"`
+		StrictFreshness               *bool  `json:"strictFreshness"`
 	}
 	var payload advancedConfigPayload
 	if err := json.Unmarshal([]byte(configJSON), &payload); err != nil {
@@ -498,6 +499,9 @@ func (m *ConfigManager) SetAdvancedConfigFromJSON(configJSON string) error {
 	// Advanced fields below are scalar values; keep the previous snapshot until
 	// persistence succeeds so a failed save cannot masquerade as applied config.
 	previous := *m.config
+	if payload.StrictFreshness != nil {
+		m.config.StrictFreshness = *payload.StrictFreshness
+	}
 	if payload.PlayFirstFallback != nil {
 		m.config.PlayFirstFallback = *payload.PlayFirstFallback
 	}

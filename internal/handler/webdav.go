@@ -127,6 +127,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO po
 
 // Handle routes WebDAV requests
 func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	r = withPlaybackAdmission(r, h.cfg)
 	davPath := strings.TrimPrefix(r.URL.Path, "/dav")
 	if davPath == "" {
 		davPath = "/"
@@ -329,6 +330,7 @@ func (h *WebDAVHandler) resolveRealPathWithMode(davPath string, passwdInfo *conf
 
 // handleGet handles GET requests with decryption
 func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPath string) {
+	r = withPlaybackAdmission(r, h.cfg)
 	trace.Logf(r.Context(), "webdav-get", "Processing: %s", davPath)
 
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
@@ -355,6 +357,10 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// Convert display path to real encrypted path
 	realPath, pathMode := h.resolveRealPathForRequest(r, davPath, passwdInfo)
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
+	if h.cfg.AlistServerSnapshot().StrictFreshness {
+		executeDecryptPlayback(decryptPlaybackRequest{ResponseWriter: w, Request: r, Config: h.cfg, StreamProxy: h.streamProxy, PasswdInfo: passwdInfo, FileItem: FileItem{DisplayPath: davPath, EncryptedPath: realPath}, TargetURL: httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath), Path: davPath, ConsumerScenario: consumerScenarioWebDAV})
+		return
+	}
 
 	// WebDAV clients often start playback without a Range header. Some signed
 	// CDN URLs reject that full-file GET, and some providers reject deep seek
@@ -540,6 +546,9 @@ func (h *WebDAVHandler) preferCachedV2PlainSize(displayPath string, resolvedSize
 }
 
 func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, realPath string) {
+	if h.cfg != nil && h.cfg.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	if h == nil || h.cfg == nil || strings.TrimSpace(displayPath) == "" || strings.TrimSpace(realPath) == "" {
 		return
 	}

@@ -53,6 +53,11 @@ func v3Plan(req *http.Request) *v3CachePlan {
 
 func v3CacheIdentity(req *http.Request, target string, passwd *config.PasswdInfo, meta encryption.ContentMeta, object string) (encryption.V3RecordCacheKey, bool) {
 	var zero encryption.V3RecordCacheKey
+	if req != nil {
+		if _, strict := req.Context().Value(strictFreshnessKey{}).(strictFreshnessCheck); strict {
+			return zero, false
+		}
+	}
 	if req == nil || passwd == nil || !passwd.Enable || !meta.IsV3() {
 		return zero, false
 	}
@@ -86,7 +91,8 @@ func v3CacheIdentity(req *http.Request, target string, passwd *config.PasswdInfo
 // prepareV3Cache pins only a bounded contiguous prefix. Its original interval is
 // never changed: only the upstream Range begins at the first missing record.
 func prepareV3Cache(req *http.Request, target string, passwd *config.PasswdInfo, meta encryption.ContentMeta, rangeHeader, object string, strategy StreamStrategy) (*http.Request, string, *v3CachePlan) {
-	if req.Method != http.MethodGet || rangeHeader == "" || !meta.IsV3() {
+	_, strict := req.Context().Value(strictFreshnessKey{}).(strictFreshnessCheck)
+	if strict || req.Method != http.MethodGet || rangeHeader == "" || !meta.IsV3() {
 		return req, rangeHeader, nil
 	}
 	key, ok := v3CacheIdentity(req, target, passwd, meta, object)

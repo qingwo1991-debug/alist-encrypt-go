@@ -98,7 +98,38 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	metaLoaded := false
 	emptyContent := false
-	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
+	if alist.StrictFreshness {
+		target, meta, revision, err := strictPlaybackMetadata(req, authHeaders)
+		if err != nil {
+			RespondHTTPErrorWithStatus(w, "Strict freshness metadata revalidation failed", http.StatusBadGateway)
+			return
+		}
+		req.TargetURL = target
+		if !samePlaybackOrigin(target, req.Config.GetAlistURL()) {
+			r = r.Clone(r.Context())
+			r.Header.Del("Authorization")
+			r.Header.Del("Cookie")
+			r.Header.Del("Proxy-Authorization")
+		}
+		// Strict evidence remains request-local; legacy size caches have no
+		// credential/config publication fence and must not learn this flight.
+		req.SizeResolver = nil
+		r = r.WithContext(proxy.WithStrictFreshnessCheck(proxy.WithContentMeta(r.Context(), meta), revision, target))
+		req.Request = r
+		fileSize = meta.PlainSize
+		metaLoaded = true
+		emptyContent = emptyPlaybackV3Meta(meta)
+		w.Header().Set("X-Encrypt-Freshness-Evidence", string(encryption.EvidenceConfirmedMetadata))
+		w.Header().Set("X-Encrypt-Freshness-Policy", string(encryption.PolicyStrictFreshness))
+		w.Header().Set("X-Encrypt-Atomic-Snapshot", "false")
+		w.Header().Set("X-Encrypt-Stable-Object-Assumption", "between-requests")
+	} else {
+		// Compatibility cache evidence is a stable-object assumption, never a
+		// provider revision or proof of current upstream permission.
+		w.Header().Set("X-Encrypt-Freshness-Evidence", string(encryption.EvidenceLocalHint))
+		w.Header().Set("X-Encrypt-Freshness-Policy", string(encryption.PolicyBoundedCache))
+	}
+	if !metaLoaded && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
 			if meta, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); complete {
 				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
@@ -461,7 +492,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		return
 	}
 
-	if shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
+	if !alist.StrictFreshness && shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
 		logDecryptFailure(req, strategy, lastFailure, true)
 		retryWithFreshState := false
 		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP) &&
@@ -837,6 +868,9 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 }
 
 func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.ContentMeta) {
+	if req.Config != nil && req.Config.AlistServerSnapshot().StrictFreshness {
+		return // unscoped legacy persistence is never strict publication
+	}
 	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || (!meta.IsV2() && !meta.IsV3()) || (meta.PlainSize <= 0 && !emptyPlaybackV3Meta(meta)) {
 		return
 	}
@@ -912,6 +946,9 @@ func cloneHeader(src http.Header) http.Header {
 }
 
 func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.Header, firstFrameHint bool, size int64, expectedBytes int64) {
+	if req.Config != nil && req.Config.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	if !firstFrameHint || req.Probe == nil || req.Request == nil || req.Request.Method != http.MethodGet {
 		return
 	}
@@ -937,6 +974,9 @@ func maybeEnqueueFirstFrameWarmup(req decryptPlaybackRequest, authHeaders http.H
 // guessed, non-existent sibling is therefore never turned into an upstream
 // metadata request.
 func maybeEnqueueNextEpisodeWarmup(req decryptPlaybackRequest, authHeaders http.Header) {
+	if req.Config != nil && req.Config.AlistServerSnapshot().StrictFreshness {
+		return
+	}
 	if req.Probe == nil || req.FileDAO == nil || req.Config == nil {
 		return
 	}
