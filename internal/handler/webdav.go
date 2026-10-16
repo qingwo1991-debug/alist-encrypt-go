@@ -138,7 +138,12 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == "PROPFIND" {
-		if h.hasInvalidProtectedFilenameScope(r, davPath) {
+		invalid, lookupErr := h.hasInvalidProtectedFilenameScope(r, davPath)
+		if lookupErr != nil {
+			http.Error(w, "Protected filename lookup unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if invalid {
 			http.Error(w, "Protected filename unavailable for this scope", http.StatusNotFound)
 			return
 		}
@@ -998,6 +1003,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		originalPropfindBody := respBody
 		snapshotBody := h.rewritePropfindBody(respBody, passwdInfo)
 		respBody = h.recoverMediaNames(r, snapshotBody, false, originalPropfindBody)
+		respBody = restoreBoundFilenameResponse(r, respBody, originalPropfindBody)
 
 		// Populate the shared dir-sync snapshot on a whitelisted directory
 		// listing miss so subsequent HTTP fs/list and WebDAV reads hit the
