@@ -38,8 +38,8 @@
 
 | 阶段 | 工作分支 | 状态 | 下一门槛 |
 |---|---|---|---|
-| LP0 协议及测量 | `agent/lp0-protocol` | 实施中：长度、EOF/416及目录兼容回归 | 独立review、Draft PR完整云门禁 |
-| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96；实现head `0ae727d`，补充实际Handle GET/HEAD及rebuild并发回归后head `0546dd6` | 最终head完整云门禁，不以旧head绿结果替代 |
+| LP0 协议及测量 | `agent/lp0-protocol` | PR #97；head `2dbde59`，长度、EOF/416及目录兼容；独立复审发现的unknown/snapshot/XML及重复404均已修 | run `38991346614` 完整门禁；核心Go首轮已通过，仍不可称整体绿 |
+| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96；head `0607d59`，补实际Handle GET/HEAD及rebuild并发回归；修复云端定位的测试夹具漏初始化resolver | run `38991083213` 核心/race/Web/Flutter/mobile Go已过，等待最终Android native等门禁 |
 | LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | 实施中：完整确认身份、失效epoch、并发合并与传输字段分离 | 失效期间旧flight不能发布、冷热请求计数 |
 | LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | 分析与实施中；已有KDF完成key缓存，不重复建设 | 基准与实际资源admission回归 |
 | LP5 发布与本机验收 | — | 待前置验证 | 固定digest、备份、仅重建本服务、复测和回滚 |
@@ -50,3 +50,4 @@
 - 无新增功能已通过完整云门禁的声明。
 - 手机帧事件、完整60分钟播放、真实拖动恢复、Android对照：`device_unverified`。
 - 后续每批记录确切head、PR run、main run及部署digest；不得把旧绿结果算作新代码验证。
+- 部署前只读核对：本服务仍为基线latest镜像；Watchtower容器运行中，24h轮询且没有发现label-only启用约束。最终compose仅本服务固定digest并加显式自动更新排除标签，避免验收中漂移，不停止/升级其他服务。
