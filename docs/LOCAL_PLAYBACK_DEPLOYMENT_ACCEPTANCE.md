@@ -53,4 +53,5 @@
 - `385b2b4` 实际云测试已运行：redirect复用/不同locator隔离无失败；余下失败为旧空V3夹具仍要求1次上游（新契约应0次），以及新越界夹具误把LP0明确保留的V2 bounded ciphertext-tail兼容区间要求为416。修夹具保留该兼容边界，验证真正open-ended EOF与超过完整密文几何的bounded EOF；不改变协议成功断言掩盖错误。
 - V2边界：无歧义open-ended明文EOF必须416；旧播放器的容器尾部bounded坐标兼容仍保留，不承诺所有歧义bounded请求都按明文EOF拒绝。
 - 夹具修订head `286474c`、run `39031359943` 检出空V3测试计数器 `int64` 与期望变量 `int32` 不匹配，测试未执行；继续原PR修正静态类型，不冒充协议回归失败或成功。
+- 最新head `a111f97`、run `39031847066` 核心Go、race/performance、移动Go、MySQL、两套Web、Flutter与探针均success；仍待AAR/native/container完整门禁，旧成功不代替最终全矩阵。
 - 下一步：修后最终head完整矩阵→main发布→更新固定摘要，再重新验收。
