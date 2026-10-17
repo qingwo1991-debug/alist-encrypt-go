@@ -146,7 +146,7 @@ func (s *Store) ReserveFilename(rec FilenameRecord) (FilenameRecord, error) {
 		if old := idx.Get(reverse); old != nil {
 			return ErrFilenameReserved
 		}
-		if err = b.Put(k, raw); err != nil {
+		if err = putFilenamePrimary(tx, k, raw); err != nil {
 			return err
 		}
 		return idx.Put(reverse, k)
@@ -161,50 +161,6 @@ func (s *Store) GetFilenameReservation(origin, encryptedPath string) (FilenameRe
 }
 func (s *Store) GetFilenameReservationByOriginal(origin, originalPath, authScope, ruleFingerprint string) (FilenameRecord, bool, error) {
 	return s.getFilenameReservation(origin, originalPath, authScope, ruleFingerprint, true)
-}
-
-// FindFilenameReservationForRead is a private routing hint, NOT authorization.
-// It never changes the credential-scoped write index. Legacy stores have only
-// hashed indexes, so bound the read-only scan and fail closed on budget overflow
-// or ambiguous original paths (including records from different write scopes).
-func (s *Store) FindFilenameReservationForRead(origin, original string) (FilenameRecord, bool, error) {
-	var result FilenameRecord
-	found := false
-	if err := s.filenameReady(); err != nil {
-		return result, false, err
-	}
-	if !validFilenameOrigin(origin) || !validFilenamePath(original) {
-		return result, false, errors.New("invalid filename read lookup")
-	}
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(filenameReservations)
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		deadline := time.Now().Add(250 * time.Millisecond)
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			if time.Now().After(deadline) {
-				return errors.New("filename read lookup budget exceeded")
-			}
-			var rec FilenameRecord
-			if err := json.Unmarshal(v, &rec); err != nil {
-				return err
-			}
-			if rec.Origin != origin || rec.OriginalPath != original {
-				continue
-			}
-			if found {
-				return errors.New("ambiguous filename read mapping")
-			}
-			result, found = rec, true
-		}
-		return nil
-	})
-	if err != nil {
-		return FilenameRecord{}, false, err
-	}
-	return result, found, nil
 }
 
 func (s *Store) getFilenameReservation(origin, p, auth, rule string, reverse bool) (FilenameRecord, bool, error) {
@@ -280,7 +236,7 @@ func (s *Store) FinishFilenameReservation(origin, encryptedPath, token, status s
 		if err != nil {
 			return err
 		}
-		return b.Put(k, raw)
+		return putFilenamePrimary(tx, k, raw)
 	})
 }
 func validMediaAlias(rec VerifiedMediaAlias) bool {

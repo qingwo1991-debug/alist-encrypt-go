@@ -120,6 +120,7 @@ func ParseAlistServerFromMap(raw map[string]interface{}) AlistServer {
 		ServerPort:                  getIntField(raw, "serverPort"),
 		HTTPS:                       getBoolField(raw, "https"),
 		EnableH2C:                   getBoolField(raw, "enableH2c"),
+		PlaybackProfile:             normalizePlaybackProfile(getStringField(raw, "playbackProfile")),
 		EnableSizeMap:               getBoolField(raw, "enableSizeMap"),
 		SizeMapTtlMinutes:           getIntField(raw, "sizeMapTtlMinutes"),
 		EnableRangeCompatCache:      getBoolField(raw, "enableRangeCompatCache"),

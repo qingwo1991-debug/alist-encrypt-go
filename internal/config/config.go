@@ -46,7 +46,8 @@ type AlistServer struct {
 	ServerHost                 string                   `json:"serverHost"`
 	ServerPort                 int                      `json:"serverPort"`
 	HTTPS                      bool                     `json:"https"`
-	EnableH2C                  bool                     `json:"enableH2c"` // Enable HTTP/2 cleartext to backend
+	EnableH2C                  bool                     `json:"enableH2c"`       // Enable HTTP/2 cleartext to backend
+	PlaybackProfile            string                   `json:"playbackProfile"` // standard (default) or explicitly opted-in trusted_local
 	PasswdList                 []PasswdInfo             `json:"passwdList"`
 	StreamStrategyOverrides    []StreamStrategyOverride `json:"streamStrategyOverrides"`
 	EnableSizeMap              bool                     `json:"enableSizeMap"`
@@ -399,6 +400,7 @@ func DefaultConfig() *Config {
 			ServerHost:                  getDefaultAlistHost(),
 			ServerPort:                  getDefaultAlistPort(),
 			HTTPS:                       false,
+			PlaybackProfile:             PlaybackProfileStandard,
 			EnableSizeMap:               true,
 			SizeMapTtlMinutes:           1440,
 			EnableRangeCompatCache:      true,
@@ -610,6 +612,10 @@ func loadConfigAt(configPath string) *Config {
 	if err := validateFilenameWriteLimits(cfg.AlistServer.FilenameWriteLimits); err != nil {
 		log.Fatal().Err(err).Msg("Invalid explicit filename write limits; refusing unsafe startup")
 	}
+	if err := validatePlaybackProfile(cfg.AlistServer.PlaybackProfile); err != nil {
+		log.Error().Err(err).Msg("Invalid playback profile; using standard playback")
+		cfg.AlistServer.PlaybackProfile = PlaybackProfileStandard
+	}
 	cfg.applyEnvOverrides()
 	cfg.normalizeAlistServerTuning()
 	encryption.SetV2KeyCacheTTL(time.Duration(cfg.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
@@ -703,6 +709,9 @@ func (c *Config) Save() error {
 // lock through the atomic rename makes runtime updates and their disk state a
 // single transaction from other goroutines' perspective.
 func (c *Config) saveLocked() error {
+	if err := validatePlaybackProfile(c.AlistServer.PlaybackProfile); err != nil {
+		return err
+	}
 	configPath := c.configPath
 	if configPath == "" {
 		configPath = filepath.Join(resolveBaseDir(), "conf", "config.json")
@@ -710,6 +719,7 @@ func (c *Config) saveLocked() error {
 
 	// Create a snapshot for saving (without expanded paths)
 	snapshot := c.snapshotLocked()
+	snapshot.AlistServer.PlaybackProfile = normalizePlaybackProfile(snapshot.AlistServer.PlaybackProfile)
 	snapshot.normalizeEncPaths()
 
 	data, err := json.MarshalIndent(snapshot, "", "\t")
@@ -792,6 +802,9 @@ func (c *Config) ReplaceFromJSON(data []byte) error {
 		return err
 	}
 	if err := validateServerEndpoint(candidate.AlistServer.ServerHost, candidate.AlistServer.ServerPort, "alist"); err != nil {
+		return err
+	}
+	if err := validatePlaybackProfile(candidate.AlistServer.PlaybackProfile); err != nil {
 		return err
 	}
 	if err := validateEnabledPasswdList(candidate.AlistServer.PasswdList); err != nil {
@@ -1016,6 +1029,7 @@ func (c *Config) normalizeAlistServerTuning() {
 		return
 	}
 	s := &c.AlistServer
+	s.PlaybackProfile = normalizePlaybackProfile(s.PlaybackProfile)
 	if s.RangeFailToDowngrade <= 0 {
 		s.RangeFailToDowngrade = 2
 	}
@@ -1372,6 +1386,9 @@ func (c *Config) IsUnixSocketEnabled() bool {
 
 // UpdateAlistServer updates Alist server config and saves
 func (c *Config) UpdateAlistServer(server AlistServer) error {
+	if err := validatePlaybackProfile(server.PlaybackProfile); err != nil {
+		return err
+	}
 	if err := validateServerEndpoint(server.ServerHost, server.ServerPort, "alist"); err != nil {
 		return err
 	}
