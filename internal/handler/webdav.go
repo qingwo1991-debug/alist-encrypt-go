@@ -158,6 +158,13 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fence in-flight loads both before and after a mutation. A failed mutation
+	// may conservatively evict, but can never retain a deleted/replaced container.
+	// This also covers no-rule passthrough and extension writes.
+	if h.fileDAO != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != "PROPFIND" && r.Method != http.MethodOptions {
+		h.fileDAO.InvalidateDisplayPath(davPath)
+		defer h.fileDAO.InvalidateDisplayPath(davPath)
+	}
 	switch r.Method {
 	case "GET", "HEAD":
 		h.handleGet(w, r, davPath)
