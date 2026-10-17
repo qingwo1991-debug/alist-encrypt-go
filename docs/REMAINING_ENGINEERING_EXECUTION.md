@@ -25,6 +25,7 @@
 | P7 可信适配/预热 | 首批实施中 | `agent/p7-interest-withdraw` | Draft PR #94/2c5a572：root authenticated generation withdraw/capability，shared DTO与Flutter confirmed-choice mock adapter；actual移动endpoint、URL-only chooser与signed-CDN未实现，跨端/App桥后续，独立review/云门禁待验 |
 | P8 审计/安全mutation | 首批实施中 | `agent/p8-audit-management` | Draft PR #93/95a1931：敏感JWT+fresh user、原名只读有界导出、本地一致dry-run；无可信upstream caller的remote核对明确blocked/unknown，rename/copy仍拒绝 |
 | P9 综合验收 | 待开始 | — | 自动证据矩阵、发布签收 |
+| 热修：WebDAV原名读取 | 已交付并部署验证 | `agent/fix-dav-scope` / PR #95 / head95721bc | 用户现场：Docker2753284对`/156联通云盘/encrypt/4k688.com@WA-596.part003.mp4`的PROPFIND长期404 `Protected filename unavailable for this scope`（只读探针正文核实），同手机/网络/源安卓WebDAV正常。根因是旧守卫直接比较上传凭据摘要与DAV读取摘要，把上传token当永久读ACL。修复保留原名占位/写入scope/审计，改为complete+当前规则候选→当前调用者Depth:0精确raw DAV授权成功后才建立请求内绑定，不借用上传或服务凭据；歧义/规则变化/上游拒绝fail closed；非加密普通路径不再全表扫描，无store保持legacy，保护域内250ms有界扫描超限返回503而非假404。独立只读review逐轮确认无剩余确定授权绕过。PR矩阵run38981419894全绿（19 checks），PR95已merge到main b6f2f1b；main发布run38982689703全绿，release v2026.10.17.472 target b6f2f1b、17资产非零。本机已备份`/root/docker/alist-encrypt1`（停容器一致tar，见工作区`.local-backup/`）并保留回滚镜像标签`alist-encrypt-go:rollback-2753284`，pull到镜像rev b6f2f1b后重建容器healthy。只读复测：WA-596.part003 PROPFIND 207含原名与明文长度、Range GET 206且V2解密日志正常、目录Depth:1 207/1800条、抽样40文件40/40通过、无凭据请求仍404不泄露。part004上游确不存在属正常404。未改远端对象、未清理占位或审计 |
 
 ## 验证声明
 
