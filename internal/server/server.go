@@ -43,6 +43,7 @@ type Server struct {
 	proxyHandler       *handler.ProxyHandler
 	alistHandler       *handler.AlistHandler
 	webdavHandler      *handler.WebDAVHandler
+	foreground         *handler.ForegroundTracker
 	probeScheduler     *handler.ProbeScheduler
 	probeCancel        context.CancelFunc
 	probeWG            sync.WaitGroup
@@ -123,6 +124,9 @@ func (s *Server) setupRoutes() {
 	// Create handlers
 	apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler := s.createHandlers()
 
+	// Register actual media demand before handlers perform any upstream lookup.
+	r.Use(s.foregroundPlaybackMiddleware())
+
 	// Register all routes
 	s.registerRoutes(r, apiHandler, proxyHandler, alistHandler, webdavHandler, statsHandler)
 
@@ -165,11 +169,16 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	sizeResolver := handler.NewFileSizeResolver(s.cfg, s.fileDAO, metaStore, 20, handler.MinMetaSize(s.cfg), handler.RedirectMaxHops(s.cfg))
 	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy, s.store, sizeResolver)
 	s.probeScheduler = probeScheduler
+	s.foreground = handler.NewForegroundTracker(func() bool {
+		return s.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal
+	})
+	probeScheduler.SetForegroundTracker(s.foreground)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)
 	proxyHandler.SetProbeScheduler(probeScheduler)
 	proxyHandler.SetSizeResolver(sizeResolver)
 	alistHandler := handler.NewAlistHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, proxyHandler, metaStore, probeScheduler)
 	s.alistHandler = alistHandler
+	alistHandler.SetForegroundTracker(s.foreground)
 	var dirSyncStore handler.DirSyncStore
 	if s.mysqlStore != nil {
 		dirSyncStore = handler.NewMySQLDirSyncStore(s.mysqlStore)
@@ -179,6 +188,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	alistHandler.SetDirSyncStore(dirSyncStore)
 	alistHandler.StartDirSyncLoop()
 	webdavHandler := handler.NewWebDAVHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore, proxyHandler)
+	webdavHandler.SetForegroundTracker(s.foreground)
 	webdavHandler.SetProbeScheduler(probeScheduler)
 	webdavHandler.SetSizeResolver(sizeResolver)
 	// WebDAV shares the same dir-sync snapshot store as the HTTP fs/list path so

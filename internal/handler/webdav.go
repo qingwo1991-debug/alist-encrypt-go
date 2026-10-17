@@ -39,6 +39,7 @@ type WebDAVHandler struct {
 	sizeResolver          *FileSizeResolver
 	strategySel           *StrategySelector
 	metaStore             FileMetaStore
+	foreground            *ForegroundTracker
 	probe                 *ProbeScheduler
 	negCache              *negativePathCache
 	sharedTransport       http.RoundTripper // shared transport for connection pooling
@@ -116,7 +117,7 @@ func NewWebDAVHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO po
 		strategySel:     selector,
 		metaStore:       metaStore,
 		probe:           nil,
-		negCache:        newNegativePathCache(getNegativeCacheTTL(cfg)),
+		negCache:        newWebDAVNegativePathCache(cfg, fileDAO),
 		sharedTransport: sharedTransport,
 		shortClient:     proxy.NewHTTPClientWithTransport(sharedTransport, 10*time.Second),
 		stdClient:       proxy.NewHTTPClientWithTransport(sharedTransport, 30*time.Second),
@@ -1144,6 +1145,9 @@ propfindResponseReady:
 }
 
 func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) []propfindEntry {
+	if err := h.foreground.WaitBackground(ctx); err != nil {
+		return nil
+	}
 	requestPath := normalizeProbeDirPath(dirPath)
 	if requestPath == "" {
 		return nil
@@ -1187,10 +1191,22 @@ func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) []propfin
 	return h.parsePropfindResponse(ctx, body, requestPath)
 }
 
+const negativePathCacheLimit = 2048
+
+type negativePathEntry struct {
+	created  time.Time
+	revision uint64
+	epoch    uint64
+}
+
 type negativePathCache struct {
 	mu   sync.Mutex
 	ttl  time.Duration
-	data map[string]time.Time
+	data map[string]negativePathEntry
+	// policy is evaluated for every operation: switching profile or disabling
+	// the configured cache must also affect entries recorded before the switch.
+	policy func(string) (time.Duration, uint64, uint64, bool)
+	now    func() time.Time
 }
 
 func newNegativePathCache(ttl time.Duration) *negativePathCache {
@@ -1199,21 +1215,54 @@ func newNegativePathCache(ttl time.Duration) *negativePathCache {
 	}
 	return &negativePathCache{
 		ttl:  ttl,
-		data: make(map[string]time.Time),
+		data: make(map[string]negativePathEntry),
+		now:  time.Now,
 	}
+}
+
+// PlaybackEpoch is optional until the confirmed-geometry service is integrated.
+// It advances on mutations/refresh, so stale negative results cannot survive a
+// local successful upload or a user-requested refresh in trusted-local mode.
+func newWebDAVNegativePathCache(cfg *config.Config, fileDAO interface{}) *negativePathCache {
+	c := &negativePathCache{data: make(map[string]negativePathEntry), now: time.Now}
+	c.policy = func(path string) (time.Duration, uint64, uint64, bool) {
+		if cfg == nil {
+			return 0, 0, 0, false
+		}
+		alist := cfg.AlistServerSnapshot()
+		ttl := time.Duration(alist.NegativeCacheMinutes) * time.Minute
+		trusted := alist.PlaybackProfile == config.PlaybackProfileTrustedLocal
+		if trusted && ttl > 2*time.Second {
+			ttl = 2 * time.Second
+		}
+		var epoch uint64
+		if source, ok := fileDAO.(interface{ PlaybackEpoch(string) uint64 }); ok && source != nil {
+			epoch = source.PlaybackEpoch(path)
+		}
+		return ttl, cfg.RuntimeRevision(), epoch, trusted
+	}
+	return c
+}
+
+func (c *negativePathCache) cachePolicy(path string) (time.Duration, uint64, uint64, bool) {
+	if c.policy != nil {
+		return c.policy(path)
+	}
+	return c.ttl, 0, 0, false
 }
 
 func (c *negativePathCache) IsBlocked(path string) bool {
 	if c == nil {
 		return false
 	}
+	ttl, revision, epoch, trusted := c.cachePolicy(path)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	exp, ok := c.data[path]
+	entry, ok := c.data[path]
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	if ttl <= 0 || !c.now().Before(entry.created.Add(ttl)) || (trusted && (entry.revision != revision || entry.epoch != epoch)) {
 		delete(c.data, path)
 		return false
 	}
@@ -1224,9 +1273,48 @@ func (c *negativePathCache) Block(path string) {
 	if c == nil || path == "" {
 		return
 	}
+	ttl, revision, epoch, _ := c.cachePolicy(path)
+	if ttl <= 0 {
+		c.Delete(path)
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.data[path] = time.Now().Add(c.ttl)
+	now := c.now()
+	// Lazy cleanup and a hard bound keep signed/variable paths from growing the
+	// map forever. Eviction only costs a new real request; it cannot deny a file.
+	for key, entry := range c.data {
+		if !now.Before(entry.created.Add(ttl)) {
+			delete(c.data, key)
+		}
+	}
+	if _, exists := c.data[path]; !exists && len(c.data) >= negativePathCacheLimit {
+		for key := range c.data {
+			delete(c.data, key)
+			break
+		}
+	}
+	c.data[path] = negativePathEntry{created: now, revision: revision, epoch: epoch}
+}
+
+func (c *negativePathCache) Delete(paths ...string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, path := range paths {
+		delete(c.data, path)
+	}
+}
+
+func (c *negativePathCache) Clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data = make(map[string]negativePathEntry)
 }
 
 // handlePassthrough passes requests directly to Alist

@@ -870,23 +870,46 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 	// refresh is a pure optimization (pre-warming the snapshot cache); if the cap
 	// is already reached, dropping this one is safe — the next request or the
 	// periodic scan will repopulate the row, and we'd rather shed load than
-	// spawn an unbounded number of full upstream fetches. The semaphore is
-	// acquired INSIDE the goroutine and held for its whole lifetime so the cap
-	// bounds actual concurrent work, not just scheduling.
-	ctx := h.dirSyncCtx
-	if ctx == nil {
-		ctx = context.Background()
+	// spawn an unbounded number of full upstream fetches. Reserve the semaphore
+	// before spawning and hold it until actual work returns, including gate waits.
+	// Coalesce before spawning and reserve capacity before waiting on playback.
+	// Otherwise duplicate keys consume all eight slots while joining one flight.
+	h.dirSyncMu.Lock()
+	if h.dirSyncStopped {
+		h.dirSyncMu.Unlock()
+		return
 	}
-	h.startDirSyncWork(func(ctx context.Context) {
-		select {
-		case h.dirSyncRefreshSem <- struct{}{}:
-			defer func() { <-h.dirSyncRefreshSem }()
-		default:
-			log.Debug().Str("path", dirPath).Msg("Dir-sync refresh cap reached; dropping refresh")
+	if h.dirSyncRefreshPending == nil {
+		h.dirSyncRefreshPending = make(map[string]bool)
+	}
+	if h.dirSyncRefreshPending[scopeKey] {
+		h.dirSyncMu.Unlock()
+		return
+	}
+	select {
+	case h.dirSyncRefreshSem <- struct{}{}:
+		h.dirSyncRefreshPending[scopeKey] = true
+	default:
+		h.dirSyncMu.Unlock()
+		return
+	}
+	h.dirSyncMu.Unlock()
+	release := func() {
+		h.dirSyncMu.Lock()
+		delete(h.dirSyncRefreshPending, scopeKey)
+		<-h.dirSyncRefreshSem
+		h.dirSyncMu.Unlock()
+	}
+	if !h.startDirSyncWork(func(ctx context.Context) {
+		defer release()
+		if err := h.foreground.WaitBackground(ctx); err != nil {
 			return
 		}
 		h.updateSnapshotSyncing(ctx, scopeKey, true, "")
 		_, _, _ = h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
+			if err := h.foreground.WaitBackground(ctx); err != nil {
+				return nil, err
+			}
 			upstreamBody := fullListRequestBody(body)
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(upstreamBody))
 			req.Header = headers.Clone()
@@ -908,7 +931,9 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			h.updateSnapshotSyncing(ctx, scopeKey, false, errText)
 			return nil, nil
 		})
-	})
+	}) {
+		release()
+	}
 }
 
 // learnRootMountsOnce fetches the drive root listing once (using the scan
@@ -918,6 +943,9 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 func (h *AlistHandler) learnRootMountsOnce(ctx context.Context) {
 	h.rootMountsOnce.Do(func() {
 		if h == nil || h.cfg == nil {
+			return
+		}
+		if err := h.foreground.WaitBackground(ctx); err != nil {
 			return
 		}
 		headers := h.scanAuthHeaders()
@@ -1026,6 +1054,10 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 	}
 
 	for len(queue) > 0 {
+		if err := h.foreground.WaitBackground(ctx); err != nil {
+			flushStatus(true)
+			return
+		}
 		select {
 		case <-ctx.Done():
 			flushStatus(true)
