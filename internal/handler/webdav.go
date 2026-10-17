@@ -950,7 +950,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// slash fallback is only attempted after 404, never on the file hot path.
 	// A request-local protected file binding must not escape to another object.
 	_, boundFile := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath)
-	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && !boundFile && !strings.HasSuffix(davPath, "/") {
+	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && !boundFile && !isDirRequest && !strings.HasSuffix(davPath, "/") {
 		fallbackPath := strings.TrimSuffix(davPath, "/") + "/"
 		fallbackURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+fallbackPath)
 		fallbackReq, buildErr := httputil.NewRequest("PROPFIND", fallbackURL).WithContext(r.Context()).WithBody(body).CopyHeaders(r).Build()
@@ -980,7 +980,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 
 	// Step 2: If needed, try a distinct encrypted candidate once, never retry
 	// the same derived 404 target.
-	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && requestPath == davPath {
+	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && !isDirRequest && requestPath == davPath {
 
 		fileName := path.Base(davPath)
 		if fileName != "" && fileName != "/" && fileName != "." {

@@ -183,6 +183,33 @@ func TestLP0MissingPropfindDoesNotRetrySameCandidate(t *testing.T) {
 	}
 }
 
+func TestLP0CachedDirectory404HasOneTarget(t *testing.T) {
+	for _, requested := range []string{"/limited/encrypt", "/limited/encrypt/"} {
+		t.Run(requested, func(t *testing.T) {
+			var targets []string
+			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targets = append(targets, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer upstream.Close()
+			ep := &config.PasswdInfo{Enable: true, Password: "pw", EncType: "aesctr", EncName: true, EncSuffix: ".bin", EncPath: []string{"/limited/*"}}
+			ah, d := newTestAlistHandler(t, upstream.URL, ep)
+			t.Cleanup(ah.Stop)
+			if err := d.Set(&dao.FileInfo{Path: "/limited/encrypt/", Name: "encrypt", IsDir: true}); err != nil {
+				t.Fatal(err)
+			}
+			h := &WebDAVHandler{cfg: ah.cfg, fileDAO: d, passwdDAO: ah.passwdDAO, stdClient: upstream.Client()}
+			r := httptest.NewRequest("PROPFIND", "http://proxy/dav"+requested, nil)
+			r.Header.Set("Depth", "1")
+			rr := httptest.NewRecorder()
+			h.handlePropfind(rr, r, requested)
+			if rr.Code != 404 || len(targets) != 1 || targets[0] != "/dav/limited/encrypt/" {
+				t.Fatalf("known missing collection must not retry/derive file: status=%d targets=%v", rr.Code, targets)
+			}
+		})
+	}
+}
+
 // Real encrypted bytes and loopback HTTP: a cold single-resource PROPFIND
 // confirms V2 rather than guessing 32; subsequent listings reuse that evidence.
 func TestLP0ColdV2PropfindThenGET(t *testing.T) {
