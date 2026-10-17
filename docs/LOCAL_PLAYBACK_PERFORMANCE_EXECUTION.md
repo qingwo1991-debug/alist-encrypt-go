@@ -40,7 +40,7 @@
 |---|---|---|---|
 | LP0 协议及测量 | `agent/lp0-protocol` | PR #97最终head `dfc160f` 完整矩阵成功，已合main `2c586df97089828397dbaf979caec738c9935a91` | 最终PR run `38992365077`、main发布run `38993294613` 均success |
 | LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96最终head `0607d59`完整矩阵成功，已合并main `4f6ad1aa9c708f7516273238ce8ad698cecc69cb` | PR run `38991083213`、main发布run `38991991650` 均success；尚未部署 |
-| LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | PR #99；独立复审要求修URL失效scope、恢复分支epoch旁路及DAV写入失效，正在补HTTP并发计数与旧夹具适配 | 首轮及后续失败已按根因修复；head `36cc6c2`、run `38993019446` 完整矩阵success。最终集成head `22bf744`（含LP0/LP34、手动刷新、共同Depth:0/probe及目标选择expected epoch/revision保护）run `38994512889` 暴露新probe接线的字段名编译错误；独立复审同时确认并在修可信HEAD快返及失败换签时跨代几何复用，最终head需再次全绿 |
+| LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | PR #99；独立复审要求修URL失效scope、恢复分支epoch旁路及DAV写入失效，正在补HTTP并发计数与旧夹具适配 | 首轮及后续失败已按根因修复；head `36cc6c2`、run `38993019446` 完整矩阵success。最终集成head `8d71514`（含LP0/LP34、显式刷新、共同Depth:0/probe、目标选择expected epoch/revision保护）；修复run `38994512889` 新probe字段编译错以及独立复审的HEAD快返/跨代换签旧nonce阻断。复审已确认撤回两项阻断；最终run `38994780077` 待全绿 |
 | LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | PR #98最终head `4eaebca` 全矩阵成功后合main `822de416ac4784b400f2e4965c20a9a9833f26ef`；含可信负缓存最长2秒、revision/epoch失效及2048容量 | 最终PR run `38993342962` success且基准已分析；main发布run `38994347614` 进行中 |
 | LP5 发布与本机验收 | — | 待前置验证 | 固定digest、备份、仅重建本服务、复测和回滚 |
 
