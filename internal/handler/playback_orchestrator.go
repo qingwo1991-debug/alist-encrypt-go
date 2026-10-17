@@ -241,6 +241,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			return false
 		}
 		responseStarted = true
+		// A locally rejected client range is a completed protocol response,
+		// not failed decryption or evidence that valid warm state is stale.
+		if result.StatusCode == http.StatusRequestedRangeNotSatisfiable && result.NoLearning && result.FailureReason == "range_invalid" {
+			return true
+		}
 		reason := result.FailureReason
 		if reason == "" {
 			reason = "stream_error"
