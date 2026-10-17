@@ -39,6 +39,7 @@ type WebDAVHandler struct {
 	sizeResolver          *FileSizeResolver
 	strategySel           *StrategySelector
 	metaStore             FileMetaStore
+	foreground            *ForegroundTracker
 	probe                 *ProbeScheduler
 	negCache              *negativePathCache
 	sharedTransport       http.RoundTripper // shared transport for connection pooling
@@ -1028,6 +1029,9 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 }
 
 func (h *WebDAVHandler) probePath(ctx context.Context, dirPath string) []propfindEntry {
+	if err := h.foreground.WaitBackground(ctx); err != nil {
+		return nil
+	}
 	requestPath := normalizeProbeDirPath(dirPath)
 	if requestPath == "" {
 		return nil

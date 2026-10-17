@@ -26,16 +26,17 @@ import (
 )
 
 type ProbeScheduler struct {
-	cfg       *config.Config
-	resolver  *FileSizeResolver
-	fileDAO   *dao.FileDAO
-	metaStore FileMetaStore
-	stream    *proxy.StreamProxy
-	enabled   bool
-	ctx       context.Context
-	cancel    context.CancelFunc
-	workerWG  sync.WaitGroup
-	stopOnce  sync.Once
+	cfg        *config.Config
+	resolver   *FileSizeResolver
+	fileDAO    *dao.FileDAO
+	metaStore  FileMetaStore
+	stream     *proxy.StreamProxy
+	enabled    bool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	foreground *ForegroundTracker
+	workerWG   sync.WaitGroup
+	stopOnce   sync.Once
 
 	interests     map[playbackSessionKey]*playbackSession
 	interestTasks map[string]*playbackInterestTask
@@ -121,6 +122,7 @@ type probeItem struct {
 	authHeaders http.Header
 	source      string
 	queuedAt    time.Time
+	notBefore   time.Time
 	interest    *playbackInterestTask
 }
 
@@ -323,6 +325,11 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 		return
 	default:
 	}
+	// Trusted-local directory display must not fan out into per-file network/KDF
+	// probes. Actual playback resolves missing geometry on demand.
+	if ps.foreground.Enabled() {
+		return
+	}
 	ps.ensureRecordState()
 	source = normalizeProbeSource(source)
 	if file.DisplayPath == "" || file.TargetURL == "" {
@@ -524,7 +531,15 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		// Admission and draining share the lock, so queue + waiting stays bounded
 		// by the configured capacity, even when all providers are occupied.
 		for len(ps.queue) > 0 {
-			ps.waiting = append(ps.waiting, <-ps.queue)
+			item := <-ps.queue
+			if item.interest == nil && ps.hasSuccessfulWarm(item.file.DisplayPath) && ps.maxDelay > 0 {
+				delay := ps.minDelay
+				if ps.maxDelay > ps.minDelay {
+					delay += time.Duration(rand.Int63n(int64(ps.maxDelay - ps.minDelay)))
+				}
+				item.notBefore = time.Now().Add(delay)
+			}
+			ps.waiting = append(ps.waiting, item)
 		}
 		ps.prunePlaybackInterestsLocked(time.Now())
 		for i := 0; i < len(ps.waiting); {
@@ -540,13 +555,29 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		}
 		// Preserve legacy FIFO within its original classes. Explicit speculative
 		// work never precedes foreground or ordinary directory work.
+		busy, foregroundChanged := ps.foreground.state()
+		var earliest time.Time
 		for _, priority := range []int{0, 1, 2} {
 			for i, item := range ps.waiting {
 				if ps.playbackItemPriorityLocked(item) != priority {
 					continue
 				}
+				if busy && priority != 0 {
+					continue
+				}
+				if time.Now().Before(item.notBefore) {
+					if earliest.IsZero() || item.notBefore.Before(earliest) {
+						earliest = item.notBefore
+					}
+					continue
+				}
 				provider, _ := splitProvider(ProviderKey(item.file.TargetURL, item.file.DisplayPath))
 				sem := ps.getProviderSem(provider)
+				// Leave one scheduler provider slot available for explicit foreground
+				// interests. Actual HTTP playback uses the shared network resolver.
+				if ps.foreground.Enabled() && priority != 0 && cap(sem) > 1 && len(sem) >= cap(sem)-1 {
+					continue
+				}
 				select {
 				case sem <- struct{}{}:
 					copy(ps.waiting[i:], ps.waiting[i+1:])
@@ -560,10 +591,24 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		}
 		wake := ps.wake
 		ps.queueMu.Unlock()
+		var timer *time.Timer
+		var ready <-chan time.Time
+		if !earliest.IsZero() {
+			timer = time.NewTimer(time.Until(earliest))
+			ready = timer.C
+		}
 		select {
 		case <-ps.done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return probeItem{}, nil, false
 		case <-wake:
+		case <-foregroundChanged:
+		case <-ready:
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 	}
 }
@@ -675,27 +720,8 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	ps.recordRunning(item, startedAt)
 	defer atomic.AddUint64(&ps.runningCount, ^uint64(0))
 
-	// Only delay files that were already successfully warmed. A directory
-	// listing populates the size cache before the first warmup, so using size
-	// presence here incorrectly delays every first-time file.
-	// First-time probes execute immediately to warm the cache before user clicks download.
-	if ps.hasSuccessfulWarm(item.file.DisplayPath) && ps.maxDelay > 0 {
-		delay := ps.minDelay
-		if ps.maxDelay > ps.minDelay {
-			delta := ps.maxDelay - ps.minDelay
-			delay += time.Duration(rand.Int63n(int64(delta)))
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-probeCtx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			ps.finishRecord(item, startedAt, probeStatusFailed, probeExecutionResult{failureReason: "scheduler_stopped"})
-			return
-		case <-timer.C:
-		}
-	}
+	// Delay eligibility is checked by dispatch before claiming a provider slot.
+	// The slot remains held until actual work (including CPU work) has returned.
 
 	// Fallback to configured scan credentials if no user auth available
 	var authHeaders http.Header
