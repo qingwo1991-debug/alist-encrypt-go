@@ -487,7 +487,10 @@ func normalizeV2ClientRangeHeader(rangeHeader string, meta encryption.ContentMet
 	}
 	startText := strings.TrimSpace(bounds[0])
 	endText := strings.TrimSpace(bounds[1])
-	if startText == "" {
+	// An open-ended request at plaintext EOF is unambiguously unsatisfiable.
+	// Do not turn it into the last header-sized plaintext block. Retain the
+	// bounded legacy ciphertext-tail compatibility for older players only.
+	if startText == "" || endText == "" {
 		return rangeHeader
 	}
 	start, err := strconv.ParseInt(startText, 10, 64)
