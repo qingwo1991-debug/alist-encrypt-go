@@ -39,12 +39,21 @@
 | 阶段 | 工作分支 | 状态 | 下一门槛 |
 |---|---|---|---|
 | LP0 协议及测量 | `agent/lp0-protocol` | PR #97；head `2dbde59`，长度、EOF/416及目录兼容；独立复审发现的unknown/snapshot/XML及重复404均已修 | run `38991346614` 完整门禁；核心Go首轮已通过，仍不可称整体绿 |
-| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96；head `0607d59`，补实际Handle GET/HEAD及rebuild并发回归；修复云端定位的测试夹具漏初始化resolver | run `38991083213` 核心/race/Web/Flutter/mobile Go已过，等待最终Android native等门禁 |
-| LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | 实施中：完整确认身份、失效epoch、并发合并与传输字段分离 | 失效期间旧flight不能发布、冷热请求计数 |
-| LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | 分析与实施中；已有KDF完成key缓存，不重复建设 | 基准与实际资源admission回归 |
+| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96最终head `0607d59`完整矩阵成功，已合并main `4f6ad1aa9c708f7516273238ce8ad698cecc69cb` | PR run `38991083213` success；main发布 run `38991991650` 进行中，尚未部署 |
+| LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | PR #99；独立复审要求修URL失效scope、恢复分支epoch旁路及DAV写入失效，正在补HTTP并发计数与旧夹具适配 | 首轮run `38991898640` 定位旧mock未适配confirmed缓存而panic，未宣称通过；最终head需重跑完整门禁 |
+| LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | PR #98；head `c2f60b4` 已合最新main；修复review发现的scheduler启动后发布tracker读写race | run `38992104158`；包含LP3/读索引基准artifact，待完整编译/race及结果分析 |
 | LP5 发布与本机验收 | — | 待前置验证 | 固定digest、备份、仅重建本服务、复测和回滚 |
 
-## 4. 当前明确未完成项
+## 4. LP3 真实云基准与取舍
+
+PR #98 head `c2f60b4`、run `38992104158` 的 race/performance job 已成功并产出 `performance-baselines`；全矩阵仍待完成。产物已只读下载到本机 `.local-backup/lp34-c2f60b4-performance/`。
+
+- V2 KDF：冷80ms量级、每次1次真实派生；已有缓存热路径约368–399ns、每次0次派生。**不另造key cache、不降低KDF参数。** 该绝对时间来自云runner，不当作本机首帧数字。
+- V3已认证record缓存：64/256/1024KiB热路径均0次loader调用，nil cipher/loader仍成功读取；分别约0.75/2.03/24.7µs。冷路径约20/94/442µs，每次1次record load；认证次数指标明确是成功fixture预期逻辑次数，不是生产AEAD仪表。几何是合成已有文件参数，不是修改旧文件chunk。
+- record cache热路径24B/op、1alloc/op；key构建约436ns、32B/op。当前证据不支持为本轮增加新缓存、重写加密格式或盲目调大内存。
+- 原名索引1千/1万/10万条：暖正/负缓存100次样本约349–777ns/op，0 Bolt读事务/op；歧义保留，每次1次索引读事务，约1.3–3.9µs。该100次微基准不是本机p95；支持消除热全表扫描，但部署后仍需固定主机测量。
+
+## 5. 当前明确未完成项
 
 - 本轮尚未部署新镜像、启用可信本地模式或改变生产配置。
 - 无新增功能已通过完整云门禁的声明。
