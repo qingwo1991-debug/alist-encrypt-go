@@ -140,6 +140,7 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == "PROPFIND" {
 		invalid, lookupErr := h.hasInvalidProtectedFilenameScope(r, davPath)
 		if lookupErr != nil {
+			w.Header().Set("Retry-After", "2")
 			http.Error(w, "Protected filename lookup unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -877,7 +878,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	requestPath := davPath
 	isDirRequest := strings.HasSuffix(davPath, "/")
 	if found && passwdInfo.EncName && !isDirRequest {
-		if bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath); ok && bound.display == davPath {
+		if bound, ok := r.Context().Value(filenameRawPathKey{}).(filenameRawPath); ok && bound.display == davPath {
 			requestPath = bound.raw
 		} else if encPath, ok := h.fileDAO.GetEncPath(davPath); ok {
 			requestPath = encPath

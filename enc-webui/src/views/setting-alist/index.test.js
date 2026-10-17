@@ -160,6 +160,29 @@ describe('Alist password rule defaults', () => {
     expect(saveProxyRoutingConfigReq).toHaveBeenCalledTimes(1)
   })
 
+  it('defaults legacy playback config to standard and shows the saved profile, not unsaved edits', async () => {
+    const setup = await mountSettings()
+    expect(setup.alistConfigForm.playbackProfile).toBe('standard')
+    expect(setup.currentPlaybackProfile).toBe('standard')
+    expect(wrapper.text()).toContain('Current Playback Profile')
+
+    setup.alistConfigForm.playbackProfile = 'trusted_local'
+    expect(setup.currentPlaybackProfile).toBe('standard')
+    await setup.saveAlistConfig()
+    expect(saveAlistConfigReq.mock.calls[0][0].playbackProfile).toBe('trusted_local')
+    expect(setup.currentPlaybackProfile).toBe('trusted_local')
+  })
+
+  it('loads trusted_local and preserves the current profile when saving fails', async () => {
+    getAlistConfigReq.mockResolvedValueOnce({ data: { passwdList: [], playbackProfile: 'trusted_local' } })
+    const setup = await mountSettings()
+    expect(setup.currentPlaybackProfile).toBe('trusted_local')
+    setup.alistConfigForm.playbackProfile = 'standard'
+    saveAlistConfigReq.mockRejectedValueOnce(new Error('save failed'))
+    await setup.saveAlistConfig()
+    expect(setup.currentPlaybackProfile).toBe('trusted_local')
+  })
+
   it('creates new rules blank and disabled', async () => {
     const setup = await mountSettings()
 
