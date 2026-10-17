@@ -20,6 +20,11 @@
               <div class="hero-pill__meta">优先级低于授权头，适合预热与预览。</div>
             </div>
             <div class="hero-pill">
+              <div class="hero-pill__label">Current Playback Profile</div>
+              <div class="hero-pill__value">{{ currentPlaybackProfile || '读取中' }}</div>
+              <div class="hero-pill__meta">已加载/保存的配置；编辑后需保存生效。</div>
+            </div>
+            <div class="hero-pill">
               <div class="hero-pill__label">Warm Queue</div>
               <div class="hero-pill__value">{{ probeStats.queueLen }}/{{ probeStats.queueCap }}</div>
               <div class="hero-pill__meta">最后更新 {{ probeStats.updatedAt || '-' }}</div>
@@ -79,6 +84,13 @@
               <div class="section-banner">播放与解密</div>
             </template>
             <div class="section-body">
+              <el-form-item label="播放配置">
+                <el-select v-model="alistConfigForm.playbackProfile" style="max-width: 280px">
+                  <el-option label="standard（默认）" value="standard" />
+                  <el-option label="trusted_local（可信本地）" value="trusted_local" />
+                </el-select>
+                <span class="helper-text">仅可信本地上游使用 trusted_local；公网或未知上游保留 standard。</span>
+              </el-form-item>
               <el-form-item label="长期映射">
                 <el-switch v-model="alistConfigForm.enableSizeMap" class="ml-2" />
                 <span class="helper-text">缓存文件大小映射，减少探测请求</span>
@@ -522,6 +534,7 @@ let disposed = false
 let statsRequest = null
 const statsAbortController = new AbortController()
 const savingConfig = ref(false)
+const currentPlaybackProfile = ref('')
 const route = useRoute()
 const router = useRouter()
 
@@ -583,6 +596,7 @@ const alistConfigForm = reactive({
   https: false,
   enableH2c: false,
   proxyH2c: false,
+  playbackProfile: 'standard',
   enableSizeMap: true,
   sizeMapTtlMinutes: 1440,
   enableRangeCompatCache: true,
@@ -761,6 +775,7 @@ const saveAlistConfig = async () => {
     }
   }
 
+  const savedPlaybackProfile = alistConfigForm.playbackProfile || 'standard'
   savingConfig.value = true
   try {
     let res
@@ -770,6 +785,7 @@ const saveAlistConfig = async () => {
       return
     }
     if (disposed) return
+    currentPlaybackProfile.value = savedPlaybackProfile
     try {
       const schemeRes = await getSchemeConfigReq()
       if (disposed) return
@@ -982,6 +998,8 @@ onMounted(async () => {
     }
   }
   Object.assign(alistConfigForm, res.data)
+  alistConfigForm.playbackProfile = res.data.playbackProfile || 'standard'
+  currentPlaybackProfile.value = alistConfigForm.playbackProfile
   try {
     const schemeRes = await getSchemeConfigReq()
     if (disposed) return

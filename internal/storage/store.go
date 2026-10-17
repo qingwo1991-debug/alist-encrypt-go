@@ -31,13 +31,29 @@ type Store struct {
 	// writeTxns counts completed write transactions. It exists so batch-write
 	// paths (e.g. directory listings) can assert the transaction budget they
 	// target rather than blindly trusting benchmarks.
-	writeTxns atomic.Uint64
+	writeTxns          atomic.Uint64
+	filenameReadMu     sync.RWMutex
+	filenameCacheMu    sync.Mutex
+	filenameReadCache  map[string]filenameReadCacheEntry
+	filenameReadTxns   atomic.Uint64
+	filenameProgressMu sync.RWMutex
+	filenameProgress   FilenameReadIndexProgress
+	filenameRebuildMu  sync.Mutex
 }
 
 // update runs fn inside a single BoltDB write transaction and counts it.
 func (s *Store) update(fn func(*bolt.Tx) error) error {
+	// Serialize cache publication with commits: no reader can publish a stale
+	// positive/negative result after a primary mutation. Invalidating on all
+	// writes also covers generic bucket APIs without an unbounded key registry.
+	s.filenameReadMu.Lock()
+	defer s.filenameReadMu.Unlock()
 	s.writeTxns.Add(1)
-	return s.db.Update(fn)
+	err := s.db.Update(fn)
+	s.filenameCacheMu.Lock()
+	s.filenameReadCache = nil
+	s.filenameCacheMu.Unlock()
+	return err
 }
 
 // WriteTxnCount returns the cumulative number of write transactions issued
@@ -51,7 +67,8 @@ func (s *Store) WriteTxnCount() uint64 {
 
 // BucketTx exposes scoped operations within a single BoltDB write transaction.
 type BucketTx struct {
-	b *bolt.Bucket
+	b               *bolt.Bucket
+	primaryFilename bool
 }
 
 // NewStore creates a new BoltDB store
@@ -77,6 +94,12 @@ func NewStore(dataDir string) (*Store, error) {
 		return nil, err
 	}
 
+	// Never trust a previous derived index: an older binary may have written
+	// primary audit records since the last upgrade.
+	if err := store.RebuildFilenameReadIndex(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to rebuild filename read index: %w", err)
+	}
 	return store, nil
 }
 
@@ -127,6 +150,9 @@ func (s *Store) Set(bucket []byte, key string, value []byte) error {
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)
 		}
+		if string(bucket) == string(filenameReservations) {
+			return putFilenamePrimary(tx, []byte(key), value)
+		}
 		return b.Put([]byte(key), value)
 	})
 }
@@ -137,6 +163,9 @@ func (s *Store) Delete(bucket []byte, key string) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)
+		}
+		if string(bucket) == string(filenameReservations) {
+			return putFilenamePrimary(tx, []byte(key), nil)
 		}
 		return b.Delete([]byte(key))
 	})
@@ -149,7 +178,7 @@ func (s *Store) UpdateBucket(bucket []byte, fn func(*BucketTx) error) error {
 		if b == nil {
 			return fmt.Errorf("bucket not found: %s", bucket)
 		}
-		return fn(&BucketTx{b: b})
+		return fn(&BucketTx{b: b, primaryFilename: string(bucket) == string(filenameReservations)})
 	})
 }
 
@@ -168,11 +197,17 @@ func (tx *BucketTx) SetJSON(key string, v interface{}) error {
 	if err != nil {
 		return err
 	}
+	if tx.primaryFilename {
+		return putFilenamePrimary(tx.b.Tx(), []byte(key), data)
+	}
 	return tx.b.Put([]byte(key), data)
 }
 
 // Delete removes a key within the transaction.
 func (tx *BucketTx) Delete(key string) error {
+	if tx.primaryFilename {
+		return putFilenamePrimary(tx.b.Tx(), []byte(key), nil)
+	}
 	return tx.b.Delete([]byte(key))
 }
 
