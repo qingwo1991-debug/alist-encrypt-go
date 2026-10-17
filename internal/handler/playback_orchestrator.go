@@ -3,8 +3,10 @@ package handler
 import (
 	"context"
 	"fmt"
+	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -60,6 +62,15 @@ type StatsRecorder interface {
 	RecordDeletion(path string)
 }
 
+func writeTrustedPlaybackHead(w http.ResponseWriter, name string, size int64) {
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Accept-Ranges", "bytes")
+	if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func executeDecryptPlayback(req decryptPlaybackRequest) {
 	w := req.ResponseWriter
 	r := withPlaybackRequestStart(req.Request)
@@ -89,7 +100,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		authHeaders.Set("Cookie", cookie)
 	}
-	rawURLScope := rawURLAuthScope(authHeaders)
+	rawURLScope := playbackScope(req.Config, authHeaders)
 	// This orchestration boundary has already selected an authorized playback
 	// route. Preserve the original caller scope even when provider headers differ;
 	// an explicit empty scope represents an authorized anonymous route.
@@ -136,7 +147,13 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			if inspectedMeta.PlainSize > 0 || emptyContent {
 				fileSize = inspectedMeta.PlainSize
 			}
-			if !managedGeometry { cachePlaybackContentMeta(req, inspectedMeta) }
+			if !managedGeometry {
+				cachePlaybackContentMeta(req, inspectedMeta)
+			}
+			if r.Method == http.MethodHead && alist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+				writeTrustedPlaybackHead(w, req.FileItem.FileName, inspectedMeta.PlainSize)
+				return
+			}
 		}
 	}
 
@@ -465,7 +482,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
 		logDecryptFailure(req, strategy, lastFailure, true)
 		retryWithFreshState := false
-		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP) &&
+		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP || req.ConsumerScenario == consumerScenarioWebDAV) &&
 			req.FileDAO != nil && req.FileItem.DisplayPath != "" && req.Config != nil {
 			authCopy := cloneHeader(authHeaders)
 			probeFreshContent := true
@@ -485,15 +502,19 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				// suppress detection, then attach the new nonce before retrying.
 				if probeFreshContent {
 					inspectReq := req
-					inspectReq.FileDAO = nil
-					if inspectedMeta, ok := inspectPlaybackContentMeta(inspectReq, authHeaders, freshRaw.Size); ok {
+					if !managedGeometry {
+						inspectReq.FileDAO = nil
+					}
+					if inspectedMeta, ok := confirmedPlaybackMeta(inspectReq, authHeaders, freshRaw.Size); ok {
 						r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
 						req.Request = r
 						metaLoaded = true
 						if inspectedMeta.PlainSize > 0 {
 							fileSize = inspectedMeta.PlainSize
 						}
-						cachePlaybackContentMeta(req, inspectedMeta)
+						if !managedGeometry {
+							cachePlaybackContentMeta(req, inspectedMeta)
+						}
 						retryWithFreshState = true
 					}
 				}
@@ -728,6 +749,15 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 			}
 		}
 	}
+	// The trusted-local warm/cold fast route is already the selected locator.
+	// Inspect it once before launching fallback alternatives; healthy cold loads
+	// must not download the same header through /dav, /d and CDN in parallel.
+	if req.Config != nil && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		result := req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), req.TargetURL, authHeaders, req.PasswdInfo, fallbackSize)
+		if result.Confirmed {
+			return result.Meta, true
+		}
+	}
 	authVariants := buildProbeAuthVariants(req.Config, authHeaders)
 	// Fire all fallback candidates in parallel and take the first confirmed
 	// result. This caps cold-path probe latency at ~one upstream round trip
@@ -843,7 +873,7 @@ func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.Conten
 	}
 	authScope := "anon"
 	if req.Request != nil {
-		authScope = rawURLAuthScope(req.Request.Header)
+		authScope = playbackScope(req.Config, req.Request.Header)
 	}
 	info := &dao.FileInfo{
 		Path:              req.FileItem.DisplayPath,
@@ -989,7 +1019,7 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason errors.FailureRe
 	case "upstream_4xx":
 		authScope := "anon"
 		if req.Request != nil {
-			authScope = rawURLAuthScope(req.Request.Header)
+			authScope = playbackScope(req.Config, req.Request.Header)
 		}
 		req.FileDAO.InvalidateRawURLForScope(req.FileItem.DisplayPath, authScope)
 	case "range_unsatisfiable", "decrypt_validation_failed", "timeout":

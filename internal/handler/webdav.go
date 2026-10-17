@@ -361,6 +361,17 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// Convert display path to real encrypted path
 	realPath, pathMode := h.resolveRealPathForRequest(r, davPath, passwdInfo)
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
+	if r.Method == http.MethodHead && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		if repo, managed := h.fileDAO.(playbackCacheRepository); managed {
+			identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), realPath, passwdInfo, r.Header)
+			if info, hit := repo.GetConfirmedPlayback(identity); hit {
+				if meta, complete := cachedPlaybackMeta(info, passwdInfo.EncType); complete {
+					writeTrustedPlaybackHead(w, path.Base(davPath), meta.PlainSize)
+					return
+				}
+			}
+		}
+	}
 
 	// WebDAV clients often start playback without a Range header. Some signed
 	// CDN URLs reject that full-file GET, and some providers reject deep seek
@@ -378,12 +389,12 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// issue "GET /file" with no Range first). Treat it like a first-frame read
 	// for the purpose of choosing a fresh raw_url, trimming an extra hop.
 	startupFullGET := r.Method == http.MethodGet && rangeHeader == ""
-	preferRawURL := firstFrameRange || startupFullGET
+	preferRawURL := firstFrameRange || startupFullGET || h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal
 	staleThreshold := h.upstreamStalenessThreshold()
-	rawURLScope := rawURLAuthScope(r.Header)
+	rawURLScope := playbackScope(h.cfg, r.Header)
 	needsRawURLWarmup := true
 	if preferRawURL {
-		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && cachedRawURLFresh(cachedInfo, staleThreshold, rawURLScope) && strings.TrimSpace(cachedInfo.RawURL) != "" {
+		if cachedInfo, ok := h.fileDAO.Get(davPath); ok && playbackRawURLMatches(h.fileDAO, h.cfg, realPath, r.Header, cachedInfo) && cachedRawURLFresh(cachedInfo, staleThreshold, rawURLScope) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			targetURL = cachedInfo.RawURL
 			needsRawURLWarmup = false
 			sourceHint := "first-frame"
@@ -421,12 +432,29 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 
 	// Look up file info using DISPLAY path (davPath), not realPath
 	// PROPFIND caches entries by display path after decrypting filenames
-	fileSize, usedStrategy := h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
-	fileSize, usedStrategy = h.preferCachedV2PlainSize(davPath, fileSize, usedStrategy)
-	if fileSize == 0 {
-		if probed := h.fetchWebDAVFileSize(r, davPath, realPath); probed > 0 {
-			fileSize = probed
-			trace.Logf(r.Context(), "webdav-get", "Resolved size via PROPFIND fallback: %d", fileSize)
+	var fileSize int64
+	usedStrategy := StrategyFileInfoCache
+	confirmedGeometry := false
+	if repo, managed := h.fileDAO.(playbackCacheRepository); managed {
+		identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), realPath, passwdInfo, r.Header)
+		if info, hit := repo.GetConfirmedPlayback(identity); hit {
+			if meta, complete := cachedPlaybackMeta(info, passwdInfo.EncType); complete {
+				fileSize, confirmedGeometry = meta.PlainSize, true
+			}
+		}
+	} else {
+		fileSize, usedStrategy = h.getFileSizeWithStrategy(davPath, realPath, targetURL, r)
+		fileSize, usedStrategy = h.preferCachedV2PlainSize(davPath, fileSize, usedStrategy)
+	}
+	if fileSize == 0 && !confirmedGeometry {
+		// Managed repositories inspect geometry once in the shared playback loader;
+		// avoid a separate serialized HEAD/size resolution before that inspection.
+		_, managed := h.fileDAO.(playbackCacheRepository)
+		if !managed {
+			if probed := h.fetchWebDAVFileSize(r, davPath, realPath); probed > 0 {
+				fileSize = probed
+				trace.Logf(r.Context(), "webdav-get", "Resolved size via PROPFIND fallback: %d", fileSize)
+			}
 		}
 	}
 
@@ -551,7 +579,7 @@ func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, r
 	}
 	stalenessThreshold := h.upstreamStalenessThreshold()
 	if h.fileDAO != nil {
-		if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, stalenessThreshold, rawURLAuthScope(r.Header)) && strings.TrimSpace(cachedInfo.RawURL) != "" {
+		if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, stalenessThreshold, playbackScope(h.cfg, r.Header)) && strings.TrimSpace(cachedInfo.RawURL) != "" {
 			trace.Logf(r.Context(), "webdav-get", "Skipped raw_url async warmup, fresh cache exists display=%s", displayPath)
 			return
 		}

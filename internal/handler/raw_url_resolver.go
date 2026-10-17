@@ -38,7 +38,9 @@ func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displ
 			continue
 		}
 		result.Source = candidate.source
-		cacheResolvedRawURL(fileDAO, displayPath, realPath, result.RawURL, result.Size, rawURLAuthScope(authHeaders))
+		if !cachePlaybackRawURL(ctx, fileDAO, displayPath, realPath, result.RawURL, result.Size, authHeaders) {
+			return rawURLFetchResult{FailureReason: "raw_url_invalidated"}
+		}
 		return result
 	}
 	return rawURLFetchResult{FailureReason: errors.ReasonRawURLEmpty}

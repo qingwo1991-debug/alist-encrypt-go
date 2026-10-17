@@ -18,25 +18,25 @@ import (
 
 // FileInfo represents cached file information
 type FileInfo struct {
-	Path              string    `json:"path"`
-	GeometryIdentity  string    `json:"geometry_identity,omitempty"`
+	Path                string    `json:"path"`
+	GeometryIdentity    string    `json:"geometry_identity,omitempty"`
 	GeometryConfirmedAt time.Time `json:"geometry_confirmed_at,omitempty"`
-	RawURLIdentity string `json:"raw_url_identity,omitempty"`
-	EncryptedPath     string    `json:"encrypted_path,omitempty"`
-	Name              string    `json:"name"`
-	Size              int64     `json:"size"`
-	CiphertextSize    int64     `json:"ciphertext_size"`
-	ContentVersion    int       `json:"content_version"`
-	HeaderLen         int64     `json:"header_len"`
-	NonceField        []byte    `json:"nonce_field,omitempty"`
-	ChunkSize         uint32    `json:"chunk_size"`
-	KDFIterations     uint32    `json:"kdf_iterations"`
-	IsDir             bool      `json:"is_dir"`
-	Modified          time.Time `json:"modified"`
-	RawURL            string    `json:"raw_url"`
-	RawURLAuthScope   string    `json:"raw_url_auth_scope,omitempty"`
-	Sign              string    `json:"sign"`
-	UpstreamFetchedAt time.Time `json:"upstream_fetched_at"`
+	RawURLIdentity      string    `json:"raw_url_identity,omitempty"`
+	EncryptedPath       string    `json:"encrypted_path,omitempty"`
+	Name                string    `json:"name"`
+	Size                int64     `json:"size"`
+	CiphertextSize      int64     `json:"ciphertext_size"`
+	ContentVersion      int       `json:"content_version"`
+	HeaderLen           int64     `json:"header_len"`
+	NonceField          []byte    `json:"nonce_field,omitempty"`
+	ChunkSize           uint32    `json:"chunk_size"`
+	KDFIterations       uint32    `json:"kdf_iterations"`
+	IsDir               bool      `json:"is_dir"`
+	Modified            time.Time `json:"modified"`
+	RawURL              string    `json:"raw_url"`
+	RawURLAuthScope     string    `json:"raw_url_auth_scope,omitempty"`
+	Sign                string    `json:"sign"`
+	UpstreamFetchedAt   time.Time `json:"upstream_fetched_at"`
 }
 
 // UpstreamStaleness returns how long ago the upstream metadata was fetched.
@@ -200,23 +200,23 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	// Check unified path cache first
 	if entry, ok := d.pathCache.Get(path); ok {
 		fi := &FileInfo{
-			Path:            entry.DisplayPath,
-			GeometryIdentity: entry.GeometryIdentity,
+			Path:                entry.DisplayPath,
+			GeometryIdentity:    entry.GeometryIdentity,
 			GeometryConfirmedAt: entry.GeometryConfirmedAt,
-			RawURLIdentity: entry.RawURLIdentity,
-			EncryptedPath:   entry.EncryptedPath,
-			Name:            entry.Name,
-			Size:            entry.Size,
-			CiphertextSize:  entry.CiphertextSize,
-			ContentVersion:  entry.ContentVersion,
-			HeaderLen:       entry.HeaderLen,
-			NonceField:      append([]byte(nil), entry.NonceField...),
-			ChunkSize:       entry.ChunkSize,
-			KDFIterations:   entry.KDFIterations,
-			IsDir:           entry.IsDir,
-			RawURL:          entry.RawURL,
-			RawURLAuthScope: entry.RawURLAuthScope,
-			Sign:            entry.Sign,
+			RawURLIdentity:      entry.RawURLIdentity,
+			EncryptedPath:       entry.EncryptedPath,
+			Name:                entry.Name,
+			Size:                entry.Size,
+			CiphertextSize:      entry.CiphertextSize,
+			ContentVersion:      entry.ContentVersion,
+			HeaderLen:           entry.HeaderLen,
+			NonceField:          append([]byte(nil), entry.NonceField...),
+			ChunkSize:           entry.ChunkSize,
+			KDFIterations:       entry.KDFIterations,
+			IsDir:               entry.IsDir,
+			RawURL:              entry.RawURL,
+			RawURLAuthScope:     entry.RawURLAuthScope,
+			Sign:                entry.Sign,
 		}
 		if entry.UpstreamFetchedAt > 0 {
 			fi.UpstreamFetchedAt = time.Unix(0, entry.UpstreamFetchedAt)
@@ -311,24 +311,24 @@ func (d *FileDAO) cacheInfo(info *FileInfo) {
 	}
 	info.UpstreamFetchedAt = upstreamFetchedAt
 	entry := &PathEntry{
-		EncryptedPath:     info.EncryptedPath,
-		DisplayPath:       info.Path,
-		GeometryIdentity: info.GeometryIdentity,
+		EncryptedPath:       info.EncryptedPath,
+		DisplayPath:         info.Path,
+		GeometryIdentity:    info.GeometryIdentity,
 		GeometryConfirmedAt: info.GeometryConfirmedAt,
-		RawURLIdentity: info.RawURLIdentity,
-		Name:              info.Name,
-		Size:              info.Size,
-		CiphertextSize:    info.CiphertextSize,
-		ContentVersion:    info.ContentVersion,
-		HeaderLen:         info.HeaderLen,
-		NonceField:        append([]byte(nil), info.NonceField...),
-		ChunkSize:         info.ChunkSize,
-		KDFIterations:     info.KDFIterations,
-		IsDir:             info.IsDir,
-		RawURL:            info.RawURL,
-		RawURLAuthScope:   info.RawURLAuthScope,
-		Sign:              info.Sign,
-		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
+		RawURLIdentity:      info.RawURLIdentity,
+		Name:                info.Name,
+		Size:                info.Size,
+		CiphertextSize:      info.CiphertextSize,
+		ContentVersion:      info.ContentVersion,
+		HeaderLen:           info.HeaderLen,
+		NonceField:          append([]byte(nil), info.NonceField...),
+		ChunkSize:           info.ChunkSize,
+		KDFIterations:       info.KDFIterations,
+		IsDir:               info.IsDir,
+		RawURL:              info.RawURL,
+		RawURLAuthScope:     info.RawURLAuthScope,
+		Sign:                info.Sign,
+		UpstreamFetchedAt:   upstreamFetchedAt.UnixNano(),
 	}
 	if entry.EncryptedPath == "" {
 		entry.EncryptedPath = info.Path
@@ -426,24 +426,24 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 	info.UpstreamFetchedAt = upstreamFetchedAt
 
 	entry := &PathEntry{
-		EncryptedPath:     info.EncryptedPath,
-		DisplayPath:       info.Path,
-		GeometryIdentity: info.GeometryIdentity,
+		EncryptedPath:       info.EncryptedPath,
+		DisplayPath:         info.Path,
+		GeometryIdentity:    info.GeometryIdentity,
 		GeometryConfirmedAt: info.GeometryConfirmedAt,
-		RawURLIdentity: info.RawURLIdentity,
-		Name:              info.Name,
-		Size:              info.Size,
-		CiphertextSize:    info.CiphertextSize,
-		ContentVersion:    info.ContentVersion,
-		HeaderLen:         info.HeaderLen,
-		NonceField:        append([]byte(nil), info.NonceField...),
-		ChunkSize:         info.ChunkSize,
-		KDFIterations:     info.KDFIterations,
-		IsDir:             info.IsDir,
-		RawURL:            info.RawURL,
-		RawURLAuthScope:   info.RawURLAuthScope,
-		Sign:              info.Sign,
-		UpstreamFetchedAt: upstreamFetchedAt.UnixNano(),
+		RawURLIdentity:      info.RawURLIdentity,
+		Name:                info.Name,
+		Size:                info.Size,
+		CiphertextSize:      info.CiphertextSize,
+		ContentVersion:      info.ContentVersion,
+		HeaderLen:           info.HeaderLen,
+		NonceField:          append([]byte(nil), info.NonceField...),
+		ChunkSize:           info.ChunkSize,
+		KDFIterations:       info.KDFIterations,
+		IsDir:               info.IsDir,
+		RawURL:              info.RawURL,
+		RawURLAuthScope:     info.RawURLAuthScope,
+		Sign:                info.Sign,
+		UpstreamFetchedAt:   upstreamFetchedAt.UnixNano(),
 	}
 	if entry.EncryptedPath == "" {
 		entry.EncryptedPath = info.Path
@@ -680,6 +680,13 @@ func (d *FileDAO) InvalidateRawURLForScope(displayPath, authScope string) bool {
 	displayPath = strings.TrimSpace(displayPath)
 	if displayPath == "" {
 		return false
+	}
+	d.playback.mu.Lock()
+	defer d.playback.mu.Unlock()
+	// Fence prior URL loads without discarding confirmed content geometry.
+	d.playback.epoch++
+	for _, flight := range d.playback.flights {
+		flight.cancel()
 	}
 	authScope = strings.TrimSpace(authScope)
 	if authScope == "" {
