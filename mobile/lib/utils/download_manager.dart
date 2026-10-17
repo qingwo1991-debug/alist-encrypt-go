@@ -11,6 +11,9 @@ import 'package:open_filex/open_filex.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'notification_manager.dart';
 import 'positional_file_writer.dart';
+import 'download_file_owner.dart';
+export 'download_file_owner.dart' show DownloadedFile;
+
 import 'app_shell.dart';
 import '../generated/l10n.dart';
 
@@ -617,7 +620,13 @@ class DownloadManager {
     // 确定文件名和路径
     String finalFilename = sanitizeFilename(filename ?? _getFilenameFromUrl(url));
     String filePath = '${downloadDir.path}/$finalFilename';
-    filePath = _reserveDownloadPath(filePath);
+    try {
+      filePath = await _fileOwner.reserve(filePath);
+    } catch (error) {
+      log('下载路径预约失败: $error');
+      showGlobalSnackBar(SnackBar(content: Text(S.current.downloadFailed)));
+      return false;
+    }
     finalFilename = filePath.split('/').last;
 
     // 创建下载任务
@@ -723,7 +732,8 @@ class DownloadManager {
       return false;
     } finally {
       // The pipeline has joined disk writes before relinquishing this path.
-      _reservedDownloadPaths.remove(filePath);
+      await _fileOwner.release(filePath,
+        discard: task.status != DownloadStatus.completed);
     }
   }
 
@@ -762,7 +772,14 @@ class DownloadManager {
     // 确定文件名和路径
     String finalFilename = sanitizeFilename(filename ?? _getFilenameFromUrl(url));
     String filePath = '${downloadDir.path}/$finalFilename';
-    filePath = _reserveDownloadPath(filePath);
+    try {
+      filePath = await _fileOwner.reserve(filePath,
+        checkCancelled: () => _throwIfCancelled(cancelToken));
+    } catch (error) {
+      if (cancelToken?.isCancelled != true) onError(error.toString());
+      return null;
+    }
+    var completed = false;
 
     // 多源列表非空时以它为准（首个即首选 URL）。
     final primaryUrl =
@@ -784,7 +801,8 @@ class DownloadManager {
         },
       );
 
-      // 下载完成
+      // Pipeline has joined all writers before invoking the callback.
+      completed = true;
       onComplete(filePath);
       log('文件下载完成: $filePath');
       return filePath;
@@ -801,7 +819,7 @@ class DownloadManager {
         return null;
       }
     } finally {
-      _reservedDownloadPaths.remove(filePath);
+      await _fileOwner.release(filePath, discard: !completed);
     }
   }
 
@@ -942,12 +960,17 @@ class DownloadManager {
 
   /// 删除下载任务记录
   static void removeTask(String taskId) {
-    _activeTasks.remove(taskId);
+    // Active tasks retain their lifecycle owner until their workers join.
     _completedTasks.removeWhere((task) => task.id == taskId);
   }
 
   /// 获取OpenList专用下载目录
+  @visibleForTesting
+  static Future<Directory?> Function()? directoryForTesting;
+
   static Future<Directory?> _getOpenListDownloadDirectory() async {
+    final override = directoryForTesting;
+    if (override != null) return override();
     try {
       final configuredPath = await getConfiguredDownloadDirectoryPath();
       if (configuredPath != null && configuredPath.isNotEmpty) {
@@ -1037,52 +1060,15 @@ class DownloadManager {
     return 'download_${DateTime.now().millisecondsSinceEpoch}';
   }
 
-  static final Set<String> _reservedDownloadPaths = <String>{};
-
-  static bool _downloadPathInUse(String path) =>
-      _reservedDownloadPaths.contains(path) ||
-      _activeTasks.values.any((task) => task.filePath == path) ||
-      File(path).existsSync();
-
-  // Selection and reservation contain no await: callback and notification
-  // downloads cannot both claim a path before either has created its file.
-  static String _reserveDownloadPath(String originalPath) {
-    final path = _getUniqueFilePath(originalPath);
-    _reservedDownloadPaths.add(path);
-    return path;
-  }
+  static final DownloadFileOwner _fileOwner = DownloadFileOwner();
 
   @visibleForTesting
-  static String reserveDownloadPathForTesting(String originalPath) =>
-      _reserveDownloadPath(originalPath);
+  static Future<String> reserveDownloadPathForTesting(String originalPath) =>
+      _fileOwner.reserve(originalPath);
 
   @visibleForTesting
-  static void releaseDownloadPathForTesting(String path) {
-    _reservedDownloadPaths.remove(path);
-  }
-
-  /// 获取唯一的文件路径（避免重名）
-  static String _getUniqueFilePath(String originalPath) {
-    File file = File(originalPath);
-    if (!_downloadPathInUse(originalPath)) {
-      return originalPath;
-    }
-
-    String directory = file.parent.path;
-    String nameWithoutExtension = file.path.split('/').last.split('.').first;
-    String extension = file.path.contains('.') 
-        ? '.${file.path.split('.').last}' 
-        : '';
-
-    int counter = 1;
-    String newPath;
-    do {
-      newPath = '$directory/${nameWithoutExtension}_$counter$extension';
-      counter++;
-    } while (_downloadPathInUse(newPath));
-
-    return newPath;
-  }
+  static Future<void> releaseDownloadPathForTesting(String path,
+      {bool discard = false}) => _fileOwner.release(path, discard: discard);
 
   /// 检查是否为 APK 文件
   static bool _isApkFile(String filePath) {
@@ -1265,32 +1251,30 @@ class DownloadManager {
     return dir?.path;
   }
 
-  /// 列出已下载的文件
-  static Future<List<FileSystemEntity>> getDownloadedFiles() async {
-    try {
-      Directory? downloadDir = await _getOpenListDownloadDirectory();
-      if (downloadDir != null && await downloadDir.exists()) {
-        return downloadDir.listSync();
-      }
-    } catch (e) {
-      log('获取下载文件列表失败: $e');
-    }
-    return [];
+  /// Cancellable async enumeration; the page consumes bounded DTO batches.
+  static Stream<List<DownloadedFile>> scanDownloadedFiles() async* {
+    final directory = await _getOpenListDownloadDirectory();
+    if (directory == null) throw StateError('Download directory unavailable');
+    yield* _fileOwner.scan(directory.path);
   }
 
-  /// 清理下载目录
+  static Future<DownloadedFile?> readDownloadedFile(String path) =>
+      _fileOwner.read(path);
+
+  /// Compatibility API, not used by the page's streaming/lazy renderer.
+  static Future<List<DownloadedFile>> getDownloadedFiles() async {
+    final files = <DownloadedFile>[];
+    await for (final batch in scanDownloadedFiles()) { files.addAll(batch); }
+    return files;
+  }
+
+  /// Skip leased paths: cleanup never cancels/deletes live writers.
   static Future<bool> clearDownloadDirectory() async {
     try {
-      Directory? downloadDir = await _getOpenListDownloadDirectory();
-      if (downloadDir != null && await downloadDir.exists()) {
-        for (final entity in downloadDir.listSync()) {
-          await entity.delete(recursive: true);
-        }
-        log('已清理下载目录');
-        return true;
-      }
-    } catch (e) {
-      log('清理下载目录失败: $e');
+      final directory = await _getOpenListDownloadDirectory();
+      if (directory != null) return await _fileOwner.clear(directory.path);
+    } catch (error) {
+      log('清理下载目录失败: $error');
     }
     return false;
   }
@@ -1305,12 +1289,7 @@ class DownloadManager {
       }
       Directory? downloadDir = await _getOpenListDownloadDirectory();
       if (downloadDir != null) {
-        File file = File('${downloadDir.path}/$safeFilename');
-        if (await file.exists()) {
-          await file.delete();
-          log('已删除文件: $filename');
-          return true;
-        }
+        return await _fileOwner.delete('${downloadDir.path}/$safeFilename');
       }
     } catch (e) {
       log('删除文件失败: $e');
