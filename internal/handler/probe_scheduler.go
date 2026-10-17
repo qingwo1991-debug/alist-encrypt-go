@@ -1711,7 +1711,7 @@ func fetchAlistJWTContext(ctx context.Context, alistURL, username, password stri
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
 // staleThreshold: if positive and the cached raw_url is fresher than this,
 // skip the fetch. A zero/negative value explicitly forces an upstream refresh.
-func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository, staleThreshold time.Duration) rawURLFetchResult {
+func fetchRawURLUnshared(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository, staleThreshold time.Duration) rawURLFetchResult {
 	if alistURL == "" || fileDAO == nil {
 		return rawURLFetchResult{}
 	}
@@ -1792,13 +1792,9 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	if ctx.Err() != nil {
 		return rawURLFetchResult{FailureReason: "interest_canceled"}
 	}
-	fileDAO.Set(&dao.FileInfo{
-		Path:              displayPath,
-		Size:              result.Data.Size,
-		RawURL:            result.Data.RawURL,
-		RawURLAuthScope:   rawURLAuthScope(authHeaders),
-		UpstreamFetchedAt: time.Now(),
-	})
+	if !cachePlaybackRawURL(ctx, fileDAO, displayPath, realPath, result.Data.RawURL, result.Data.Size, authHeaders) {
+		return rawURLFetchResult{FailureReason: "raw_url_invalidated"}
+	}
 	return rawURLFetchResult{
 		RawURL:     result.Data.RawURL,
 		Size:       result.Data.Size,

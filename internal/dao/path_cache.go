@@ -15,6 +15,9 @@ import (
 // deep copy, so callers that mutate a returned entry can only corrupt their
 // own copy — there is no shared mutable state and no data race on the entry.
 type PathEntry struct {
+	GeometryIdentity string
+	GeometryConfirmedAt time.Time
+	RawURLIdentity string
 	EncryptedPath     string // Primary key (encrypted/real path)
 	DisplayPath       string // Secondary index (decrypted/display path)
 	Name              string // Display filename

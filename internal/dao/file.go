@@ -19,6 +19,9 @@ import (
 // FileInfo represents cached file information
 type FileInfo struct {
 	Path              string    `json:"path"`
+	GeometryIdentity  string    `json:"geometry_identity,omitempty"`
+	GeometryConfirmedAt time.Time `json:"geometry_confirmed_at,omitempty"`
+	RawURLIdentity string `json:"raw_url_identity,omitempty"`
 	EncryptedPath     string    `json:"encrypted_path,omitempty"`
 	Name              string    `json:"name"`
 	Size              int64     `json:"size"`
@@ -65,6 +68,7 @@ type FileDAO struct {
 	cleanupStop    chan struct{}
 	cleanupOnce    sync.Once
 	cleanupWG      sync.WaitGroup
+	playback       playbackState
 }
 
 const mediaSizePreserveThreshold = 100 * 1024
@@ -180,6 +184,7 @@ func (d *FileDAO) Stop() {
 		return
 	}
 	d.cleanupOnce.Do(func() {
+		d.stopPlayback()
 		close(d.cleanupStop)
 		d.cleanupWG.Wait()
 	})
@@ -196,6 +201,9 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	if entry, ok := d.pathCache.Get(path); ok {
 		fi := &FileInfo{
 			Path:            entry.DisplayPath,
+			GeometryIdentity: entry.GeometryIdentity,
+			GeometryConfirmedAt: entry.GeometryConfirmedAt,
+			RawURLIdentity: entry.RawURLIdentity,
 			EncryptedPath:   entry.EncryptedPath,
 			Name:            entry.Name,
 			Size:            entry.Size,
@@ -245,8 +253,13 @@ func mergeMissingFields(info *FileInfo, existing *FileInfo) {
 	}
 	// A supplied, different nonce/version identifies a replacement container.
 	// Never fill its missing crypto parameters (or size) from the old container.
-	sameContainer := (len(info.NonceField) == 0 || bytes.Equal(info.NonceField, existing.NonceField)) &&
+	sameContainer := (info.GeometryIdentity == "" || existing.GeometryIdentity == "" || info.GeometryIdentity == existing.GeometryIdentity) &&
+		(len(info.NonceField) == 0 || bytes.Equal(info.NonceField, existing.NonceField)) &&
 		(info.ContentVersion <= 0 || existing.ContentVersion <= 0 || info.ContentVersion == existing.ContentVersion)
+	if sameContainer && info.GeometryIdentity == "" {
+		info.GeometryIdentity = existing.GeometryIdentity
+		info.GeometryConfirmedAt = existing.GeometryConfirmedAt
+	}
 	if sameContainer {
 		if info.Size <= 0 && info.ContentVersion != encryption.ContentVersionV3 {
 			info.Size = existing.Size
@@ -277,6 +290,7 @@ func mergeMissingFields(info *FileInfo, existing *FileInfo) {
 	if info.RawURL == "" {
 		info.RawURL = existing.RawURL
 		info.RawURLAuthScope = existing.RawURLAuthScope
+		info.RawURLIdentity = existing.RawURLIdentity
 		if info.Sign == "" {
 			info.Sign = existing.Sign
 		}
@@ -299,6 +313,9 @@ func (d *FileDAO) cacheInfo(info *FileInfo) {
 	entry := &PathEntry{
 		EncryptedPath:     info.EncryptedPath,
 		DisplayPath:       info.Path,
+		GeometryIdentity: info.GeometryIdentity,
+		GeometryConfirmedAt: info.GeometryConfirmedAt,
+		RawURLIdentity: info.RawURLIdentity,
 		Name:              info.Name,
 		Size:              info.Size,
 		CiphertextSize:    info.CiphertextSize,
@@ -411,6 +428,9 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 	entry := &PathEntry{
 		EncryptedPath:     info.EncryptedPath,
 		DisplayPath:       info.Path,
+		GeometryIdentity: info.GeometryIdentity,
+		GeometryConfirmedAt: info.GeometryConfirmedAt,
+		RawURLIdentity: info.RawURLIdentity,
 		Name:              info.Name,
 		Size:              info.Size,
 		CiphertextSize:    info.CiphertextSize,
@@ -442,6 +462,9 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 
 // Delete removes file info
 func (d *FileDAO) Delete(path string) error {
+	d.playback.mu.Lock()
+	defer d.playback.mu.Unlock()
+	d.invalidatePlaybackLocked()
 	d.pathCache.Delete(path)
 	return d.store.Delete(storage.BucketFileInfo, path)
 }
@@ -616,6 +639,9 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	if displayPath == "" {
 		return
 	}
+	d.playback.mu.Lock()
+	defer d.playback.mu.Unlock()
+	d.invalidatePlaybackLocked()
 	d.DeleteFileSize(displayPath)
 	_ = d.store.Delete(storage.BucketFileInfo, displayPath)
 	// Get() already checks both byEncPath and byDispPath maps, so a single
@@ -624,6 +650,15 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	// making it a redundant double-lookup.
 	if entry, ok := d.pathCache.Get(displayPath); ok {
 		entry.Size = 0
+		entry.CiphertextSize = 0
+		entry.ContentVersion = 0
+		entry.HeaderLen = 0
+		entry.NonceField = nil
+		entry.ChunkSize = 0
+		entry.KDFIterations = 0
+		entry.GeometryIdentity = ""
+		entry.GeometryConfirmedAt = time.Time{}
+		entry.RawURLIdentity = ""
 		entry.RawURL = ""
 		entry.RawURLAuthScope = ""
 		entry.Sign = ""

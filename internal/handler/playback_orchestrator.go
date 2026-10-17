@@ -98,7 +98,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	metaLoaded := false
 	emptyContent := false
-	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
+	_, managedGeometry := req.FileDAO.(playbackCacheRepository)
+	if !managedGeometry && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
 			if meta, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); complete {
 				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
@@ -128,14 +129,14 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 	}
 	if !metaLoaded {
-		if inspectedMeta, ok := inspectPlaybackContentMeta(req, authHeaders, fileSize); ok {
+		if inspectedMeta, ok := confirmedPlaybackMeta(req, authHeaders, fileSize); ok {
 			r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
 			req.Request = r
 			emptyContent = emptyPlaybackV3Meta(inspectedMeta)
 			if inspectedMeta.PlainSize > 0 || emptyContent {
 				fileSize = inspectedMeta.PlainSize
 			}
-			cachePlaybackContentMeta(req, inspectedMeta)
+			if !managedGeometry { cachePlaybackContentMeta(req, inspectedMeta) }
 		}
 	}
 
@@ -703,7 +704,7 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	default:
 		return encryption.ContentMeta{}, false
 	}
-	if shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
+	if _, managed := req.FileDAO.(playbackCacheRepository); !managed && shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
 		return encryption.ContentMeta{}, false
 	}
 	candidateURLs := make([]string, 0, 3)
@@ -837,7 +838,7 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 }
 
 func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.ContentMeta) {
-	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || (!meta.IsV2() && !meta.IsV3()) || (meta.PlainSize <= 0 && !emptyPlaybackV3Meta(meta)) {
+	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || (meta.Version != encryption.ContentVersionV1 && !meta.IsV2() && !meta.IsV3()) || (meta.PlainSize <= 0 && !emptyPlaybackV3Meta(meta)) {
 		return
 	}
 	authScope := "anon"
