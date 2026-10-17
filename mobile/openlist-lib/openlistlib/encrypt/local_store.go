@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -79,7 +78,6 @@ type localStore struct {
 	buffer         []storeRecord
 	flushThreshold int
 	flushing       bool
-	backupDone     <-chan struct{}
 	closeDone      chan struct{}
 	closeErr       error
 	closed         bool
@@ -169,21 +167,11 @@ func newLocalStoreWithBackup(baseDir string, backup func(string) error) (*localS
 		return nil, err
 	}
 	dbPath := filepath.Join(baseDir, "local_media.db")
-	// This best-effort main-file copy is owned, not a WAL-consistent SQLite
-	// snapshot. Startup can overlap its I/O; Close and failed construction join it.
-	backupDone := make(chan struct{})
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			<-backupDone
-		}
-	}()
-	go func() {
-		defer close(backupDone)
-		if err := backup(dbPath); err != nil {
-			log.Warnf("[%s] local store backup failed: %v", internal.TagCache, err)
-		}
-	}()
+	// Complete and verify the pre-migration snapshot before opening any writer.
+	// A real backup failure must not silently permit schema migration.
+	if err := backup(dbPath); err != nil {
+		return nil, fmt.Errorf("pre-migration local store snapshot: %w", err)
+	}
 	dsn := dbPath + "?_journal=WAL&_busy_timeout=5000&_foreign_keys=ON"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
@@ -205,82 +193,10 @@ func newLocalStoreWithBackup(baseDir string, backup func(string) error) (*localS
 		_ = db.Close()
 		return nil, err
 	}
-	succeeded = true
 	return &localStore{
 		db:             db,
-		backupDone:     backupDone,
 		flushThreshold: defaultFlushThreshold,
 	}, nil
-}
-
-func backupLocalStoreDB(dbPath string) error {
-	info, err := os.Stat(dbPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if info.Size() <= 0 {
-		return nil
-	}
-	dir := filepath.Dir(dbPath)
-	base := filepath.Base(dbPath)
-	// O_EXCL unique suffix prevents rapid/concurrent startup truncating a backup.
-	pattern := base + ".bak-" + time.Now().Format("20060102150405.000000000") + "-*"
-
-	src, err := os.Open(dbPath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	dst, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return err
-	}
-	complete := false
-	defer func() {
-		_ = dst.Close()
-		if !complete {
-			_ = os.Remove(dst.Name())
-		}
-	}()
-	if _, err := io.Copy(dst, src); err != nil {
-		return err
-	}
-	// Close dst before cleanup to avoid file lock issues on Windows.
-	if err := dst.Close(); err != nil {
-		return err
-	}
-	complete = true
-	src.Close()
-
-	// Clean up old backup files, keeping only the 2 most recent.
-	cleanupOldBackups(dir, base, 2)
-	return nil
-}
-
-// cleanupOldBackups removes old .bak-* backup files, keeping only the newest `keep` files.
-func cleanupOldBackups(dir, baseName string, keep int) {
-	pattern := filepath.Join(dir, baseName+".bak-*")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) <= keep {
-		return
-	}
-	// Sort by name descending (timestamp format ensures lexicographic = chronological order).
-	for i := 0; i < len(matches)-1; i++ {
-		for j := i + 1; j < len(matches); j++ {
-			if matches[i] < matches[j] {
-				matches[i], matches[j] = matches[j], matches[i]
-			}
-		}
-	}
-	// Remove all but the newest `keep` files.
-	for _, old := range matches[keep:] {
-		if err := os.Remove(old); err != nil {
-			log.Warnf("[%s] failed to remove old backup %s: %v", internal.TagCache, old, err)
-		}
-	}
 }
 
 func initLocalSchema(db *sql.DB) error {
@@ -407,9 +323,6 @@ func initLocalSchema(db *sql.DB) error {
 	            value TEXT NOT NULL,
 	            updated_at INTEGER NOT NULL
 	        );`,
-		`INSERT INTO local_db_meta (key, value, updated_at)
-	        VALUES ('schema_version', '7', strftime('%s','now'))
-	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -419,7 +332,15 @@ func initLocalSchema(db *sql.DB) error {
 	if err := migrateLocalSchema(db); err != nil {
 		return err
 	}
-	return initConfirmedMetadataSchema(db)
+	if err := initConfirmedMetadataSchema(db); err != nil {
+		return err
+	}
+	// Publish the version only after every migration succeeds. These legacy
+	// migrations are not yet atomic, but failure must never claim version 7.
+	_, err := db.Exec(`INSERT INTO local_db_meta (key, value, updated_at)
+	        VALUES ('schema_version', '7', strftime('%s','now'))
+	        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;`)
+	return err
 }
 
 func migrateLocalSchema(db *sql.DB) error {
@@ -468,9 +389,6 @@ func (s *localStore) Close() error {
 	s.closeDone = make(chan struct{})
 	s.closed = true
 	s.mu.Unlock()
-	if s.backupDone != nil {
-		<-s.backupDone
-	}
 	err := s.Flush(true)
 	if s.db != nil {
 		if closeErr := s.db.Close(); err == nil {
