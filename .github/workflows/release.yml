@@ -184,6 +184,8 @@ jobs:
           bash -n mobile/openlist-lib/scripts/init_openlist.sh
           python3 mobile/openlist-lib/scripts/test_source_overlay.py
           python3 mobile/openlist-lib/scripts/verify_source_overlay.py --check-mirrors
+          python3 tools/test_driver_inventory.py
+          python3 tools/check_driver_inventory.py
           # Emit checksum evidence for newly selected transitive modules; the
           # readonly overlay check below still rejects unreviewed checksum drift.
           GOWORK=off go -C mobile/openlist-lib mod download -json golang.org/x/net@v0.53.0 golang.org/x/term@v0.43.0
