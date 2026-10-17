@@ -38,10 +38,10 @@
 
 | 阶段 | 工作分支 | 状态 | 下一门槛 |
 |---|---|---|---|
-| LP0 协议及测量 | `agent/lp0-protocol` | PR #97；`2dbde59` 完整矩阵success后合入LP1主线，修请求绑定命名，最终head `dfc160f` | 旧run `38991346614` success；集成后run `38992365077` 仍需全绿再合并 |
-| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96最终head `0607d59`完整矩阵成功，已合并main `4f6ad1aa9c708f7516273238ce8ad698cecc69cb` | PR run `38991083213` success；main发布 run `38991991650` 进行中，尚未部署 |
+| LP0 协议及测量 | `agent/lp0-protocol` | PR #97最终head `dfc160f` 完整矩阵成功，已合main `2c586df97089828397dbaf979caec738c9935a91` | 最终PR run `38992365077` success；main发布run `38993294613` 进行中 |
+| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96最终head `0607d59`完整矩阵成功，已合并main `4f6ad1aa9c708f7516273238ce8ad698cecc69cb` | PR run `38991083213`、main发布run `38991991650` 均success；尚未部署 |
 | LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | PR #99；独立复审要求修URL失效scope、恢复分支epoch旁路及DAV写入失效，正在补HTTP并发计数与旧夹具适配 | 首轮run `38991898640` 定位旧mock未适配confirmed缓存而panic；后run `38992224936` 暴露显式origin误判与标准模式兼容退化，正在按根因修复，最终head需全绿 |
-| LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | PR #98；head `c2f60b4` 已合最新main；修复review发现的scheduler启动后发布tracker读写race | run `38992104158`；包含LP3/读索引基准artifact，待完整编译/race及结果分析 |
+| LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | PR #98；`c2f60b4` 全矩阵成功后，补可信负缓存最长2秒、revision/epoch失效及2048容量，合入LP0得到最终head `4eaebca` | 旧run `38992104158` success且基准已分析；最终run `38993342962` 待全绿 |
 | LP5 发布与本机验收 | — | 待前置验证 | 固定digest、备份、仅重建本服务、复测和回滚 |
 
 ## 4. LP3 真实云基准与取舍
