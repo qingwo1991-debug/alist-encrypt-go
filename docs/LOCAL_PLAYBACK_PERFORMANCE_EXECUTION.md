@@ -39,10 +39,10 @@
 | 阶段 | 工作分支 | 状态 | 下一门槛 |
 |---|---|---|---|
 | LP0 协议及测量 | `agent/lp0-protocol` | PR #97最终head `dfc160f` 完整矩阵成功，已合main `2c586df97089828397dbaf979caec738c9935a91` | 最终PR run `38992365077`、main发布run `38993294613` 均success |
-| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96最终head `0607d59`完整矩阵成功，已合并main `4f6ad1aa9c708f7516273238ce8ad698cecc69cb` | PR run `38991083213`、main发布run `38991991650` 均success；尚未部署 |
-| LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | PR #99；独立复审要求修URL失效scope、恢复分支epoch旁路及DAV写入失效，正在补HTTP并发计数与旧夹具适配 | 首轮及后续失败已按根因修复；head `36cc6c2`、run `38993019446` 完整矩阵success。最终head `499e8fe` 完整矩阵run `38994970817` success；独立复审已确认HEAD快返及跨代换签旧nonce阻断修复。PR #99 已合main `628424f48298fdde808ac7536151972ce3547a32`；最终main发布run `38995940238` 进行中，尚未部署 |
-| LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | PR #98最终head `4eaebca` 全矩阵成功后合main `822de416ac4784b400f2e4965c20a9a9833f26ef`；含可信负缓存最长2秒、revision/epoch失效及2048容量 | 最终PR run `38993342962` success且基准已分析；main发布run `38994347614` success；现场仍未切镜像 |
-| LP5 发布与本机验收 | — | 待前置验证 | 固定digest、备份、仅重建本服务、复测和回滚 |
+| LP1 索引/本地快读 | `agent/lp1-local-fastread` | PR #96最终head `0607d59`完整矩阵成功，已合并main `4f6ad1aa9c708f7516273238ce8ad698cecc69cb` | PR run `38991083213`、main发布run `38991991650` 均success；已随最终628424f固定镜像部署 |
+| LP2 元数据/直链复用 | `agent/lp2-playback-reuse` | PR #99；独立复审要求修URL失效scope、恢复分支epoch旁路及DAV写入失效，正在补HTTP并发计数与旧夹具适配 | 首轮及后续失败已按根因修复；head `36cc6c2`、run `38993019446` 完整矩阵success。最终head `499e8fe` 完整矩阵run `38994970817` success；独立复审已确认HEAD快返及跨代换签旧nonce阻断修复。PR #99 已合main `628424f48298fdde808ac7536151972ce3547a32`；最终main发布run `38995940238` success，已固定摘要部署，详见 `LOCAL_PLAYBACK_DEPLOYMENT_ACCEPTANCE.md` |
+| LP3/LP4 解密热点/前台优先 | `agent/lp34-foreground` | PR #98最终head `4eaebca` 全矩阵成功后合main `822de416ac4784b400f2e4965c20a9a9833f26ef`；含可信负缓存最长2秒、revision/epoch失效及2048容量 | 最终PR run `38993342962` success且基准已分析；main发布run `38994347614` success；已随628424f固定镜像部署 |
+| LP5 发布与本机验收 | `agent/lp5-acceptance-fixes` | 最终main完整成功后备份并固定digest、启用trusted_local；现场两轮30样本未通过 | EOF404与302缓存身份不一致导致GET回退已定位，正在修复并补针对性夹具 |
 
 ## 4. LP3 真实云基准与取舍
 
@@ -55,8 +55,8 @@ PR #98 head `c2f60b4`、run `38992104158` 的 race/performance job 已成功并�
 
 ## 5. 当前明确未完成项
 
-- 本轮尚未部署新镜像、启用可信本地模式或改变生产配置。
-- LP0/LP1 已按最终head完整云门禁合并；LP2/LP3/LP4 最终集成仍在验证，不能把旧head成功当成本机已更新。
+- LP0–LP4已按最终head完整云门禁合并，最终main发布亦成功；已部署固定digest并启用trusted_local，仅该服务排除Watchtower自动更新。
+- 现场验收仍未通过：热HEAD降至毫秒，但热GET因302缓存身份错位稳定回退，EOF404未达416；正在独立分支修复，不宣称整体完成。
 - 手机帧事件、完整60分钟播放、真实拖动恢复、Android对照：`device_unverified`。
 - 后续每批记录确切head、PR run、main run及部署digest；不得把旧绿结果算作新代码验证。
 - 部署前只读核对：本服务仍为基线latest镜像；Watchtower容器运行中，24h轮询且没有发现label-only启用约束。最终compose仅本服务固定digest并加显式自动更新排除标签，避免验收中漂移，不停止/升级其他服务。
