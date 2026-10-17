@@ -56,7 +56,7 @@ PR #98 head `c2f60b4`、run `38992104158` 的 race/performance job 已成功并�
 ## 5. 当前明确未完成项
 
 - 本轮尚未部署新镜像、启用可信本地模式或改变生产配置。
-- 无新增功能已通过完整云门禁的声明。
+- LP0/LP1 已按最终head完整云门禁合并；LP2/LP3/LP4 最终集成仍在验证，不能把旧head成功当成本机已更新。
 - 手机帧事件、完整60分钟播放、真实拖动恢复、Android对照：`device_unverified`。
 - 后续每批记录确切head、PR run、main run及部署digest；不得把旧绿结果算作新代码验证。
 - 部署前只读核对：本服务仍为基线latest镜像；Watchtower容器运行中，24h轮询且没有发现label-only启用约束。最终compose仅本服务固定digest并加显式自动更新排除标签，避免验收中漂移，不停止/升级其他服务。
