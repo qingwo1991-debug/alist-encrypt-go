@@ -90,7 +90,7 @@ func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size 
 		writeDavEscaped(b, creationDate)
 		b.WriteString(`</D:creationdate>`)
 	}
-	if !isDir {
+	if !isDir && size >= 0 {
 		b.WriteString(`<D:getcontentlength>`)
 		b.WriteString(strconv.FormatInt(size, 10))
 		b.WriteString(`</D:getcontentlength>`)
@@ -116,6 +116,9 @@ func writeSnapshotResponse(b *bytes.Buffer, href, name string, isDir bool, size 
 	b.WriteString(`</D:prop>`)
 	b.WriteString(`<D:status>HTTP/1.1 200 OK</D:status>`)
 	b.WriteString(`</D:propstat>`)
+	if !isDir && size < 0 {
+		b.WriteString(`<D:propstat><D:prop><D:getcontentlength/></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>`)
+	}
 	b.WriteString(`</D:response>`)
 }
 
