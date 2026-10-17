@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/recovery"
 	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/rs/zerolog/log"
 )
@@ -225,6 +226,36 @@ type Config struct {
 	// Successful management updates advance it even when values return to A
 	// after an intervening B, so background work cannot miss an ABA change.
 	runtimeRevision uint64
+	// Startup-only recovery state is never JSON persisted or managed-updated.
+	recoveryState *recovery.State
+}
+
+// BindRecoveryState binds startup state monotonically. A required state cannot
+// be replaced with an unfenced state. Management updates cannot clear it.
+// This is not a live fence installation API: callers bind before serving traffic.
+func (c *Config) BindRecoveryState(state *recovery.State) *recovery.State {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.recoveryState == nil || state.Required() {
+		c.recoveryState = state
+	}
+	return c.recoveryState
+}
+func (c *Config) RecoveryRequired() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.recoveryState.Required()
+}
+func (c *Config) RecoveryStatus() recovery.Status {
+	if c == nil {
+		return (*recovery.State)(nil).Status()
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.recoveryState.Status()
 }
 
 // RuntimeRevision returns the configuration publication generation. It is not

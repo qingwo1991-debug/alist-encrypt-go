@@ -23,6 +23,7 @@ import (
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/handler"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/internal/recovery"
 	"github.com/alist-encrypt-go/internal/storage"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
 )
@@ -54,6 +55,8 @@ type Server struct {
 
 // New creates a new server instance
 func New(cfg *config.Config) (*Server, error) {
+	state := recovery.Load(cfg.DataDir)
+	state = cfg.BindRecoveryState(state)
 	// When MySQL is explicitly configured it is the authoritative persistence
 	// backend. Starting with a silent BoltDB fallback would split runtime state
 	// and make the failure easy to miss.
@@ -63,7 +66,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// BoltDB is always created for users/passwd/config (minimal, always needed).
-	store, err := storage.NewStore(cfg.DataDir)
+	store, err := storage.NewStoreWithRecovery(cfg.DataDir, state)
 	if err != nil {
 		if mysqlStore != nil {
 			_ = mysqlStore.Close()
@@ -234,6 +237,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		protected := encAPI.Group("")
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
 		{
+			protected.GET("/admin/reconciliation-status", func(c *gin.Context) { c.JSON(http.StatusOK, s.cfg.RecoveryStatus()) })
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
 			protected.Any("/updatePasswd", ginWrap(apiHandler.UpdatePasswd))

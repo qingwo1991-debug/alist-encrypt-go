@@ -67,6 +67,9 @@ func mutationSubtreesIntersect(a, b string) bool {
 // a file or a directory; conservatively regard it as a subtree without probing
 // upstream. Unknown paths are rejected only when protection is configured.
 func guardProtectedMutation(cfg *config.Config, operation string, affectedPaths ...string) error {
+	if err := recoveryMutationError(cfg, operation); err != nil {
+		return err
+	}
 	if !mutationProtectionEnabled(cfg) {
 		return nil
 	}
@@ -155,6 +158,11 @@ func guardProtectedBatchMutation(cfg *config.Config, operation, srcDir, dstDir s
 // No body is read: streamed bodies remain untouched and there is no unbounded
 // parsing or guessed-path authorization. Dedicated PUT/DELETE routes are intact.
 func guardProtectedProxyMutation(cfg *config.Config, r *http.Request) error {
+	if !RecoveryProxyReadAllowed(r) {
+		if err := recoveryMutationError(cfg, "proxy_unclassified"); err != nil {
+			return err
+		}
+	}
 	if !mutationProtectionEnabled(cfg) || r == nil || r.URL == nil {
 		return nil
 	}

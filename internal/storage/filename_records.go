@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/recovery"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 	bolt "go.etcd.io/bbolt"
 )
@@ -130,6 +131,9 @@ func (s *Store) ReserveFilename(rec FilenameRecord) (FilenameRecord, error) {
 		return FilenameRecord{}, err
 	}
 	err = s.update(func(tx *bolt.Tx) error {
+		if s.recoveryState.Required() {
+			return recovery.ErrRequired
+		}
 		b, err := tx.CreateBucketIfNotExists(filenameReservations)
 		if err != nil {
 			return err
