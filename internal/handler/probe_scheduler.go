@@ -532,7 +532,7 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		// by the configured capacity, even when all providers are occupied.
 		for len(ps.queue) > 0 {
 			item := <-ps.queue
-			if item.interest == nil && ps.hasSuccessfulWarm(item.file.DisplayPath) && ps.maxDelay > 0 {
+			if item.interest == nil && item.source != probeSourceFirstFrame && item.notBefore.IsZero() && ps.hasSuccessfulWarm(item.file.DisplayPath) && ps.maxDelay > 0 {
 				delay := ps.minDelay
 				if ps.maxDelay > ps.minDelay {
 					delay += time.Duration(rand.Int63n(int64(ps.maxDelay - ps.minDelay)))
@@ -591,6 +591,14 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		}
 		wake := ps.wake
 		ps.queueMu.Unlock()
+		// Mode changes need not close a streaming request's foreground channel.
+		// Bound that wait too, so switching back to standard resumes dispatch.
+		if busy {
+			recheck := time.Now().Add(250 * time.Millisecond)
+			if earliest.IsZero() || recheck.Before(earliest) {
+				earliest = recheck
+			}
+		}
 		var timer *time.Timer
 		var ready <-chan time.Time
 		if !earliest.IsZero() {

@@ -170,7 +170,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	probeScheduler := handler.NewProbeScheduler(s.cfg, s.fileDAO, metaStore, s.streamProxy, s.store, sizeResolver)
 	s.probeScheduler = probeScheduler
 	s.foreground = handler.NewForegroundTracker(func() bool {
-		return s.cfg.AlistServerSnapshot().PlaybackProfile == "trusted_local"
+		return s.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal
 	})
 	probeScheduler.SetForegroundTracker(s.foreground)
 	proxyHandler := handler.NewProxyHandler(s.cfg, s.streamProxy, s.fileDAO, s.passwdDAO, strategySelector, metaStore)

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // ForegroundTracker pauses new background work while actual playback requests
@@ -53,6 +54,15 @@ func (f *ForegroundTracker) state() (bool, <-chan struct{}) {
 
 // WaitBackground is an admission boundary, not a CPU cancellation boundary.
 func (f *ForegroundTracker) WaitBackground(ctx context.Context) error {
+	// A profile change does not finish an active streaming request. Recheck the
+	// mode periodically so disabling this policy cannot block scans until EOF.
+	// One timer per actual blocked waiter; no polling goroutine is retained.
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -61,10 +71,22 @@ func (f *ForegroundTracker) WaitBackground(ctx context.Context) error {
 		if !busy {
 			return nil
 		}
+		if timer == nil {
+			timer = time.NewTimer(250 * time.Millisecond)
+		} else {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(250 * time.Millisecond)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-changed:
+		case <-timer.C:
 		}
 	}
 }

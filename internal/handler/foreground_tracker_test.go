@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,6 +28,38 @@ func TestForegroundTrackerNestedAndIdempotentRelease(t *testing.T) {
 	}
 	if busy, _ := f.state(); busy {
 		t.Fatal("foreground leaked")
+	}
+}
+
+func TestForegroundTrackerProfileChangeReleasesActiveWait(t *testing.T) {
+	var enabled atomic.Bool
+	enabled.Store(true)
+	var observeWait atomic.Bool
+	observed := make(chan struct{})
+	var once sync.Once
+	f := NewForegroundTracker(func() bool {
+		value := enabled.Load()
+		if observeWait.Load() {
+			once.Do(func() { close(observed) })
+		}
+		return value
+	})
+	finish := f.Begin()
+	defer finish()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	observeWait.Store(true)
+	go func() { result <- f.WaitBackground(ctx) }()
+	select {
+	case <-observed:
+	case <-ctx.Done():
+		t.Fatal("waiter did not start")
+	}
+	// Do not finish the stream: the profile change itself must release admission.
+	enabled.Store(false)
+	if err := <-result; err != nil {
+		t.Fatalf("disabled profile retained background waiter: %v", err)
 	}
 }
 
@@ -71,6 +105,53 @@ func TestForegroundGatePausesDispatchButNotExplicitForeground(t *testing.T) {
 	}
 	ps.releaseProviderSlot(sem)
 	ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+}
+
+func TestSnapshotRefreshCoalescesBeforeSpawningAndStopJoins(t *testing.T) {
+	webdav, store, _ := newWebDAVSnapshotTestHandler(t)
+	f := NewForegroundTracker(func() bool { return true })
+	finish := f.Begin()
+	defer finish()
+	h := &AlistHandler{
+		cfg: webdav.cfg, dirSyncStore: store, foreground: f,
+		dirSyncRefreshSem: make(chan struct{}, 8),
+	}
+	defer h.Stop()
+	for i := 0; i < 100; i++ {
+		h.refreshDirSnapshotAsync("/directory", nil, nil, "scope", dirSyncModeReq)
+	}
+	h.dirSyncMu.Lock()
+	pending, slots := len(h.dirSyncRefreshPending), len(h.dirSyncRefreshSem)
+	h.dirSyncMu.Unlock()
+	if pending != 1 || slots != 1 {
+		t.Fatalf("duplicate refresh admission: pending=%d slots=%d", pending, slots)
+	}
+	// Stop must cancel the actual blocked worker and wait for its deferred release.
+	h.Stop()
+	h.refreshDirSnapshotAsync("/directory", nil, nil, "scope", dirSyncModeReq)
+	h.dirSyncMu.Lock()
+	pending, slots = len(h.dirSyncRefreshPending), len(h.dirSyncRefreshSem)
+	h.dirSyncMu.Unlock()
+	if pending != 0 || slots != 0 {
+		t.Fatalf("refresh leaked or restarted after stop: pending=%d slots=%d", pending, slots)
+	}
+}
+
+func TestTrustedSchedulerReservesProviderSlotForForeground(t *testing.T) {
+	ps := fairDispatchScheduler(t, 4)
+	ps.providerLimit = 2
+	ps.EnqueueWithSource(fairDispatchFile("ready.example", "background.mp4"), nil, 4096, probeSourceStartupScan)
+	ps.EnqueueWithSource(fairDispatchFile("ready.example", "foreground.mp4"), nil, 4096, probeSourceFirstFrame)
+	ps.SetForegroundTracker(NewForegroundTracker(func() bool { return true }))
+	sem := ps.getProviderSem("ready.example")
+	sem <- struct{}{} // An already-running background request keeps its actual slot.
+	item, claimed, ok := ps.nextReadyItem()
+	if !ok || item.file.DisplayPath != "/foreground.mp4" {
+		t.Fatalf("reserved slot was not available to foreground: %+v", item)
+	}
+	ps.releaseProviderSlot(claimed)
+	ps.releaseProbeReservation(probeCooldownKey(item.file), time.Time{}, false)
+	ps.releaseProviderSlot(sem)
 }
 
 func TestProbeDelayDoesNotClaimProviderOrBlockReadyItem(t *testing.T) {

@@ -875,6 +875,10 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 	// Coalesce before spawning and reserve capacity before waiting on playback.
 	// Otherwise duplicate keys consume all eight slots while joining one flight.
 	h.dirSyncMu.Lock()
+	if h.dirSyncStopped {
+		h.dirSyncMu.Unlock()
+		return
+	}
 	if h.dirSyncRefreshPending == nil {
 		h.dirSyncRefreshPending = make(map[string]bool)
 	}
@@ -898,7 +902,9 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 	}
 	if !h.startDirSyncWork(func(ctx context.Context) {
 		defer release()
-		if err := h.foreground.WaitBackground(ctx); err != nil { return }
+		if err := h.foreground.WaitBackground(ctx); err != nil {
+			return
+		}
 		h.updateSnapshotSyncing(ctx, scopeKey, true, "")
 		_, _, _ = h.dirSyncGroup.Do(scopeKey, func() (interface{}, error) {
 			if err := h.foreground.WaitBackground(ctx); err != nil {

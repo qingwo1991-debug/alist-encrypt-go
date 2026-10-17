@@ -95,8 +95,9 @@ jobs:
           mkdir -p performance-results
           go version > performance-results/environment.txt
           lscpu >> performance-results/environment.txt
-          (cd shared/encryptcore && go test -mod=readonly -run '^$' -bench 'Benchmark(V3|Playback)' -benchmem -benchtime=200ms -count=3 ./...) | tee performance-results/encryptcore.txt
+          (cd shared/encryptcore && go test -mod=readonly -run '^$' -bench 'Benchmark(V3|Playback|LocalPlayback)' -benchmem -benchtime=200ms -count=3 ./...) | tee performance-results/encryptcore.txt
           go test -mod=readonly -run '^$' -bench 'Benchmark(Decrypted|Probe)' -benchmem -benchtime=200ms -count=3 ./internal/proxy ./internal/handler | tee performance-results/proxy-handler.txt
+          go test -mod=readonly -run '^$' -bench '^BenchmarkFilenameReadIndex$' -benchmem -benchtime=100x -count=1 ./internal/storage | tee performance-results/filename-read-index.txt
       - name: Upload performance results
         if: always()
         uses: actions/upload-artifact@v4
