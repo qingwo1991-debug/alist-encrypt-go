@@ -759,6 +759,9 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dirPath, _ := reqData["path"].(string)
+	if refresh, _ := reqData["refresh"].(bool); refresh && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal && h.fileDAO != nil {
+		h.fileDAO.InvalidateDisplayPath(dirPath)
+	}
 	page, perPage := listPaginationFromBody(reqData)
 	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
 	h.ensureDirSyncLoop()
@@ -971,6 +974,9 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	cacheAllowed := true
 	if refresh, ok := reqData["refresh"].(bool); ok && refresh {
 		cacheAllowed = false
+		if h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal && h.fileDAO != nil {
+			h.fileDAO.InvalidateDisplayPath(originalPath)
+		}
 	}
 	upstream, cacheHit, shared, err := h.fetchFSMetaUpstream(r, apiPath, targetURL, modifiedBody, cacheAllowed)
 	if err != nil {

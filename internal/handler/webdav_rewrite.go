@@ -189,7 +189,7 @@ func (h *WebDAVHandler) rewritePropfindBody(body []byte, passwdInfo *config.Pass
 		case kindLength:
 			out := value
 			if size, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
-				if plain, ok := h.propfindPlainSize(activePath, size); ok {
+				if plain, ok := h.propfindPlainSize(activePath, size, passwdInfo); ok {
 					out = strconv.FormatInt(plain, 10)
 				}
 			}
@@ -235,7 +235,7 @@ func (h *WebDAVHandler) hideUnknownPropfindLengths(body, original []byte, rule *
 				index++
 				inResponse, sawLength, known = index < len(entries), false, false
 				if inResponse && !entries[index].IsDir {
-					plain, known = h.propfindPlainSize(entries[index].Path, entries[index].Size)
+					plain, known = h.propfindPlainSize(entries[index].Path, entries[index].Size, rule)
 				}
 			}
 			if !inResponse || entries[index].IsDir || t.Name.Local != "getcontentlength" || (t.Name.Space != "DAV:" && t.Name.Space != "") {
@@ -284,7 +284,7 @@ func (h *WebDAVHandler) hideUnknownPropfindLengths(body, original []byte, rule *
 // A DAV listing reports transport size, not container geometry. Only reuse an
 // observed container when its ciphertext length agrees; never infer a version,
 // nonce, chunk size or KDF from a directory entry (and never subtract twice).
-func (h *WebDAVHandler) propfindPlainSize(rawPath string, reported int64) (int64, bool) {
+func (h *WebDAVHandler) propfindPlainSize(rawPath string, reported int64, rules ...*config.PasswdInfo) (int64, bool) {
 	if h.fileDAO == nil || rawPath == "" {
 		return 0, false
 	}
@@ -294,6 +294,20 @@ func (h *WebDAVHandler) propfindPlainSize(rawPath string, reported int64) (int64
 	}
 	if fi.ContentVersion < encryption.ContentVersionV1 || fi.ContentVersion > encryption.ContentVersionV3 {
 		return 0, false
+	}
+	if h.cfg != nil && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		if repo, managed := h.fileDAO.(playbackCacheRepository); managed {
+			var rule *config.PasswdInfo
+			if len(rules) > 0 {
+				rule = rules[0]
+			}
+			identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), rawPath, rule, nil)
+			confirmed, hit := repo.GetConfirmedPlayback(identity)
+			if !hit || confirmed == nil || confirmed.EncryptedPath != rawPath || confirmed.CiphertextSize != reported {
+				return 0, false
+			}
+			return confirmed.Size, true
+		}
 	}
 	if fi.CiphertextSize > 0 && reported == fi.CiphertextSize {
 		return fi.Size, true

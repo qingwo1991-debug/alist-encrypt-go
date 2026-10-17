@@ -15,22 +15,25 @@ import (
 // deep copy, so callers that mutate a returned entry can only corrupt their
 // own copy — there is no shared mutable state and no data race on the entry.
 type PathEntry struct {
-	EncryptedPath     string // Primary key (encrypted/real path)
-	DisplayPath       string // Secondary index (decrypted/display path)
-	Name              string // Display filename
-	Size              int64  // File size
-	CiphertextSize    int64  // Upstream ciphertext size
-	ContentVersion    int    // 1 legacy, 2 stream cipher, 3 chunked AEAD
-	HeaderLen         int64  // Container header bytes
-	NonceField        []byte // Container nonce for direct decrypt reuse
-	ChunkSize         uint32 // V3 plaintext bytes per record
-	KDFIterations     uint32 // V3 per-container key derivation parameters
-	IsDir             bool   // Is directory
-	RawURL            string // Cached upstream direct URL
-	RawURLAuthScope   string // Irreversible Authorization+Cookie scope for RawURL
-	Sign              string // Cached upstream sign
-	ExpiresAt         int64  // Unix nano timestamp for TTL expiration
-	UpstreamFetchedAt int64  // Unix nano timestamp when upstream metadata was last fetched
+	GeometryIdentity    string
+	GeometryConfirmedAt time.Time
+	RawURLIdentity      string
+	EncryptedPath       string // Primary key (encrypted/real path)
+	DisplayPath         string // Secondary index (decrypted/display path)
+	Name                string // Display filename
+	Size                int64  // File size
+	CiphertextSize      int64  // Upstream ciphertext size
+	ContentVersion      int    // 1 legacy, 2 stream cipher, 3 chunked AEAD
+	HeaderLen           int64  // Container header bytes
+	NonceField          []byte // Container nonce for direct decrypt reuse
+	ChunkSize           uint32 // V3 plaintext bytes per record
+	KDFIterations       uint32 // V3 per-container key derivation parameters
+	IsDir               bool   // Is directory
+	RawURL              string // Cached upstream direct URL
+	RawURLAuthScope     string // Irreversible Authorization+Cookie scope for RawURL
+	Sign                string // Cached upstream sign
+	ExpiresAt           int64  // Unix nano timestamp for TTL expiration
+	UpstreamFetchedAt   int64  // Unix nano timestamp when upstream metadata was last fetched
 }
 
 // IsExpired checks if the entry has expired.

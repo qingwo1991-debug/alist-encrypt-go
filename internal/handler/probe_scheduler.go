@@ -785,6 +785,11 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 		}
 	}
+	var confirmationEpoch, confirmationRevision *uint64
+	if repo := ps.fileDAO; repo != nil && ps.cfg != nil && boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		epoch, revision := repo.PlaybackEpoch(item.file.DisplayPath), ps.cfg.RuntimeRevision()
+		confirmationEpoch, confirmationRevision = &epoch, &revision
+	}
 	if (ps.rawURLFetcher == nil || item.interest != nil) && (ps.cfg != nil || item.interest != nil && boundAlist.ServerHost != "") {
 		// Fallback: use built-in raw_url fetcher via alist fs/get. Trusted work
 		// uses its admission snapshot, never later configured credentials/origin.
@@ -794,35 +799,48 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 			if item.file.PasswdInfo != nil && ps.stream != nil {
-				inspected := ps.stream.InspectEncryptedContentResult(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
-				meta := inspected.Meta
-				// Persist confirmed V1/V2/V3 metadata, including V3 record geometry
-				// and KDF parameters. Requiring Confirmed guards against caching a
-				// truncated or failed probe as a confirmed legacy file.
-				if probeCtx.Err() == nil && inspected.Confirmed && meta.PlainSize > 0 {
-					cached := &dao.FileInfo{
-						Path:              item.file.DisplayPath,
-						EncryptedPath:     item.file.EncryptedPath,
-						Name:              item.file.FileName,
-						Size:              meta.PlainSize,
-						CiphertextSize:    meta.TotalCiphertextSize(),
-						ContentVersion:    meta.Version,
-						HeaderLen:         meta.HeaderLen,
-						NonceField:        append([]byte(nil), meta.NonceField...),
-						ChunkSize:         meta.ChunkSize,
-						KDFIterations:     meta.KDFIterations,
-						RawURL:            rawURLResult.RawURL,
-						RawURLAuthScope:   rawURLAuthScope(authHeaders),
-						UpstreamFetchedAt: time.Now(),
-					}
-					if existing, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && existing != nil {
-						if strings.TrimSpace(existing.Name) != "" {
-							cached.Name = existing.Name
+				if boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+					if ps.cfg != nil {
+						// Join the same scoped/fenced confirmation as foreground reads.
+						// The current configuration revision is checked by the shared loader;
+						// an obsolete admitted origin cannot publish into its successor.
+						if config.BuildAlistURL(boundAlist) == ps.cfg.GetAlistURL() {
+							request, _ := http.NewRequestWithContext(probeCtx, http.MethodGet, rawURLResult.RawURL, nil)
+							request.Header = authHeaders.Clone()
+							confirmedPlaybackMeta(decryptPlaybackRequest{Request: request, Config: ps.cfg, FileDAO: ps.fileDAO, StreamProxy: ps.stream, PasswdInfo: item.file.PasswdInfo, FileItem: item.file, TargetURL: rawURLResult.RawURL, ConsumerScenario: consumerScenarioWebDAV, ExpectedGeometryEpoch: confirmationEpoch, ExpectedConfigRevision: confirmationRevision}, authHeaders, rawURLResult.Size)
 						}
-						cached.Sign = existing.Sign
-						cached.IsDir = existing.IsDir
 					}
-					_ = ps.fileDAO.Set(cached)
+				} else {
+					inspected := ps.stream.InspectEncryptedContentResult(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
+					meta := inspected.Meta
+					// Persist confirmed V1/V2/V3 metadata, including V3 record geometry
+					// and KDF parameters. Requiring Confirmed guards against caching a
+					// truncated or failed probe as a confirmed legacy file.
+					if probeCtx.Err() == nil && inspected.Confirmed && meta.PlainSize > 0 {
+						cached := &dao.FileInfo{
+							Path:              item.file.DisplayPath,
+							EncryptedPath:     item.file.EncryptedPath,
+							Name:              item.file.FileName,
+							Size:              meta.PlainSize,
+							CiphertextSize:    meta.TotalCiphertextSize(),
+							ContentVersion:    meta.Version,
+							HeaderLen:         meta.HeaderLen,
+							NonceField:        append([]byte(nil), meta.NonceField...),
+							ChunkSize:         meta.ChunkSize,
+							KDFIterations:     meta.KDFIterations,
+							RawURL:            rawURLResult.RawURL,
+							RawURLAuthScope:   rawURLAuthScope(authHeaders),
+							UpstreamFetchedAt: time.Now(),
+						}
+						if existing, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && existing != nil {
+							if strings.TrimSpace(existing.Name) != "" {
+								cached.Name = existing.Name
+							}
+							cached.Sign = existing.Sign
+							cached.IsDir = existing.IsDir
+						}
+						_ = ps.fileDAO.Set(cached)
+					}
 				}
 			}
 		} else if resultState.failureReason == "" && rawURLResult.FailureReason != "" {
@@ -1745,7 +1763,7 @@ func fetchAlistJWTContext(ctx context.Context, alistURL, username, password stri
 // Used by ProbeScheduler to pre-warm raw_url for WebDAV zero-latency playback.
 // staleThreshold: if positive and the cached raw_url is fresher than this,
 // skip the fetch. A zero/negative value explicitly forces an upstream refresh.
-func fetchRawURL(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository, staleThreshold time.Duration) rawURLFetchResult {
+func fetchRawURLUnshared(ctx context.Context, alistURL, displayPath, realPath string, authHeaders http.Header, fileDAO ports.FileRepository, staleThreshold time.Duration) rawURLFetchResult {
 	if alistURL == "" || fileDAO == nil {
 		return rawURLFetchResult{}
 	}
@@ -1802,7 +1820,11 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		return rawURLFetchResult{FailureReason: "interest_canceled"}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		fileDAO.InvalidateRawURLForScope(displayPath, rawURLAuthScope(authHeaders))
+		// The failed resolver owns a flight; do not cancel its own fallback
+		// admission here. The playback failure boundary invalidates rejected URLs.
+		if _, managed := ctx.Value(playbackTransportKey{}).(playbackTransportAdmission); !managed {
+			fileDAO.InvalidateRawURLForScope(displayPath, playbackScope(fileDAO.Config(), authHeaders))
+		}
 		return rawURLFetchResult{
 			StatusCode:    resp.StatusCode,
 			Source:        rawURLSourceFromAPIPath(apiPath),
@@ -1826,13 +1848,9 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	if ctx.Err() != nil {
 		return rawURLFetchResult{FailureReason: "interest_canceled"}
 	}
-	fileDAO.Set(&dao.FileInfo{
-		Path:              displayPath,
-		Size:              result.Data.Size,
-		RawURL:            result.Data.RawURL,
-		RawURLAuthScope:   rawURLAuthScope(authHeaders),
-		UpstreamFetchedAt: time.Now(),
-	})
+	if !cachePlaybackRawURL(ctx, fileDAO, displayPath, realPath, result.Data.RawURL, result.Data.Size, authHeaders) {
+		return rawURLFetchResult{FailureReason: "raw_url_invalidated"}
+	}
 	return rawURLFetchResult{
 		RawURL:     result.Data.RawURL,
 		Size:       result.Data.Size,
