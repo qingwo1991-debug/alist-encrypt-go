@@ -1449,7 +1449,11 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 			}
 		}
 
-		plainSize, knownSize := h.propfindPlainSize(encryptedPath, entry.Size)
+		var contentRule *config.PasswdInfo
+		if h.passwdDAO != nil {
+			contentRule, _ = h.passwdDAO.FindByPath(entry.Path)
+		}
+		plainSize, knownSize := h.propfindPlainSize(encryptedPath, entry.Size, contentRule)
 		info := &dao.FileInfo{
 			Path: displayPath, EncryptedPath: encryptedPath,
 			Name: displayName, Size: entry.Size, IsDir: entry.IsDir,
