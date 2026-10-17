@@ -82,8 +82,9 @@ func TestProtectedFilenameFullHandleGetHead(t *testing.T) {
 				r.Header.Set("Authorization", "Basic current-account")
 				// Complete hot geometry and fresh transport ensure no unrelated LP2
 				// metadata/warmup requests obscure the LP1 routing contract.
-				if err = d.Set(&dao.FileInfo{Path: original, Size: 4096, CiphertextSize: 4096, ContentVersion: 1, RawURL: upstream.URL + (&url.URL{Path: "/dav" + raw}).EscapedPath(), RawURLAuthScope: rawURLAuthScope(r.Header), UpstreamFetchedAt: time.Now()}); err != nil {
-					t.Fatal(err)
+				info := &dao.FileInfo{Path: original, EncryptedPath: raw, Size: 4096, CiphertextSize: 4096, ContentVersion: 1, RawURL: upstream.URL + (&url.URL{Path: "/dav" + raw}).EscapedPath(), RawURLAuthScope: playbackScope(ah.cfg, r.Header), UpstreamFetchedAt: time.Now(), GeometryIdentity: playbackIdentity(ah.cfg, ah.cfg.GetAlistURL(), raw, ep, r.Header), GeometryConfirmedAt: time.Now(), RawURLIdentity: playbackIdentity(ah.cfg, ah.cfg.GetAlistURL(), raw, nil, r.Header)}
+				if !d.PublishConfirmedPlayback(info, d.PlaybackEpoch(original)) {
+					t.Fatal("publish confirmed hot fixture")
 				}
 				rr := httptest.NewRecorder()
 				before := preflights
@@ -102,8 +103,12 @@ func TestProtectedFilenameFullHandleGetHead(t *testing.T) {
 					t.Fatal("HEAD emitted body")
 				}
 			}
-			if sp.calls != 2 {
-				t.Fatalf("actual stream port calls=%d", sp.calls)
+			wantStreamCalls := 2
+			if profile == config.PlaybackProfileTrustedLocal {
+				wantStreamCalls = 1
+			} // confirmed HEAD is deliberately network/cache-only
+			if sp.calls != wantStreamCalls {
+				t.Fatalf("actual stream port calls=%d want=%d", sp.calls, wantStreamCalls)
 			}
 		})
 	}
