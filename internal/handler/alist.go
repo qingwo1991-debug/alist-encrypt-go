@@ -35,6 +35,7 @@ type AlistHandler struct {
 	passwdDAO      ports.KeyRepository
 	proxyHandler   *ProxyHandler
 	metaStore      FileMetaStore
+	foreground     *ForegroundTracker
 	probe          *ProbeScheduler
 	dirSyncStore   DirSyncStore
 	dirSyncStart   sync.Once
@@ -49,17 +50,18 @@ type AlistHandler struct {
 	// fs/list + persist); without this cap, sustained cold/miss load spawns
 	// unbounded goroutines and DB writes. Refreshes are pure optimization, so
 	// when the cap is reached new ones are simply dropped.
-	dirSyncRefreshSem chan struct{}
-	dirSyncCtx        context.Context
-	dirSyncCancel     context.CancelFunc
-	dirSyncMu         sync.Mutex
-	dirSyncStopped    bool
-	dirSyncWG         sync.WaitGroup
-	dirSyncStop       sync.Once
-	fsMetaGroup       singleflight.Group
-	fsMetaMu          sync.Mutex
-	statsRecorder     StatsRecorder
-	fsMetaCache       map[string]fsMetaCacheEntry
+	dirSyncRefreshPending map[string]bool // guarded by dirSyncMu; coalesce before spawning
+	dirSyncRefreshSem     chan struct{}
+	dirSyncCtx            context.Context
+	dirSyncCancel         context.CancelFunc
+	dirSyncMu             sync.Mutex
+	dirSyncStopped        bool
+	dirSyncWG             sync.WaitGroup
+	dirSyncStop           sync.Once
+	fsMetaGroup           singleflight.Group
+	fsMetaMu              sync.Mutex
+	statsRecorder         StatsRecorder
+	fsMetaCache           map[string]fsMetaCacheEntry
 
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
