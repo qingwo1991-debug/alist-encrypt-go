@@ -148,6 +148,46 @@ func TestExpiredRawURLSixteenCallersShareRefreshAndKeepGeometry(t *testing.T) {
 	}
 }
 
+func TestExplicitFSMetaRefreshInvalidatesConfirmedGeometry(t *testing.T) {
+	for _, endpoint := range []string{"get", "list"} {
+		t.Run(endpoint, func(t *testing.T) {
+			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if endpoint == "list" {
+					_, _ = w.Write([]byte(`{"code":200,"data":{"content":[],"total":0}}`))
+				} else {
+					_, _ = w.Write([]byte(`{"code":200,"data":{"name":"plain","size":132,"raw_url":"https://cdn/plain"}}`))
+				}
+			}))
+			defer upstream.Close()
+			ah, files := newTestAlistHandler(t, upstream.URL, &config.PasswdInfo{Enable: false})
+			defer ah.Stop()
+			ah.cfg.AlistServer.PlaybackProfile = config.PlaybackProfileTrustedLocal
+			info := &dao.FileInfo{Path: "/plain", EncryptedPath: "/raw", Size: 100, GeometryIdentity: "old", GeometryConfirmedAt: time.Now()}
+			epoch := files.PlaybackEpoch(info.Path)
+			if !files.PublishConfirmedPlayback(info, epoch) {
+				t.Fatal("publish")
+			}
+			rr := httptest.NewRecorder()
+			r := httptest.NewRequest("POST", "/api/fs/"+endpoint, bytes.NewBufferString(`{"path":"/plain","refresh":true}`))
+			if endpoint == "list" {
+				ah.HandleFsList(rr, r)
+			} else {
+				ah.HandleFsGet(rr, r)
+			}
+			if rr.Code != 200 {
+				t.Fatalf("status=%d", rr.Code)
+			}
+			if _, hit := files.GetConfirmedPlayback("old"); hit {
+				t.Fatal("explicit refresh retained confirmation")
+			}
+			if files.PublishConfirmedPlayback(info, epoch) {
+				t.Fatal("old flight published after refresh")
+			}
+		})
+	}
+}
+
 func TestWebDAVMutationFencesConfirmedGeometry(t *testing.T) {
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
