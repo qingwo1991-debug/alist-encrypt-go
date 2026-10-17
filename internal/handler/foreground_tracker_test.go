@@ -7,7 +7,39 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/alist-encrypt-go/internal/config"
 )
+
+// NewProbeScheduler starts dispatch before the server attaches its tracker.
+// Repeated publication overlaps the real workers' empty-queue state reads; the
+// race matrix verifies both initial nil publication and subsequent replacements.
+func TestProbeSchedulerTrackerPublicationAfterWorkersStart(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.AlistServer.EnableBackgroundProbe = true
+	cfg.AlistServer.ProbeConcurrency = 4
+	ps := NewProbeScheduler(cfg, nil, nil, nil, nil)
+	defer ps.Stop()
+	first := NewForegroundTracker(func() bool { return true })
+	second := NewForegroundTracker(func() bool { return false })
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				ps.SetForegroundTracker(first)
+				ps.SetForegroundTracker(second)
+				ps.SetForegroundTracker(nil)
+			}
+		}()
+	}
+	wg.Wait()
+	ps.SetForegroundTracker(first)
+	if ps.foreground.Load() != first {
+		t.Fatal("published tracker not visible")
+	}
+}
 
 func TestForegroundTrackerNestedAndIdempotentRelease(t *testing.T) {
 	f := NewForegroundTracker(func() bool { return true })

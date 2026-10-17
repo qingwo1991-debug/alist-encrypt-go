@@ -91,6 +91,14 @@ func (f *ForegroundTracker) WaitBackground(ctx context.Context) error {
 	}
 }
 
-func (ps *ProbeScheduler) SetForegroundTracker(f *ForegroundTracker) { ps.foreground = f }
-func (h *AlistHandler) SetForegroundTracker(f *ForegroundTracker)    { h.foreground = f }
-func (h *WebDAVHandler) SetForegroundTracker(f *ForegroundTracker)   { h.foreground = f }
+// NewProbeScheduler starts its workers before server wiring is complete. Publish
+// the tracker atomically, and wake dispatchers so replacing a busy tracker cannot
+// leave them blocked on the previous tracker's change channel.
+func (ps *ProbeScheduler) SetForegroundTracker(f *ForegroundTracker) {
+	ps.foreground.Store(f)
+	ps.queueMu.Lock()
+	ps.notifyDispatchLocked()
+	ps.queueMu.Unlock()
+}
+func (h *AlistHandler) SetForegroundTracker(f *ForegroundTracker)  { h.foreground = f }
+func (h *WebDAVHandler) SetForegroundTracker(f *ForegroundTracker) { h.foreground = f }

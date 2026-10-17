@@ -34,7 +34,7 @@ type ProbeScheduler struct {
 	enabled    bool
 	ctx        context.Context
 	cancel     context.CancelFunc
-	foreground *ForegroundTracker
+	foreground atomic.Pointer[ForegroundTracker]
 	workerWG   sync.WaitGroup
 	stopOnce   sync.Once
 
@@ -327,7 +327,7 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 	}
 	// Trusted-local directory display must not fan out into per-file network/KDF
 	// probes. Actual playback resolves missing geometry on demand.
-	if ps.foreground.Enabled() {
+	if ps.foreground.Load().Enabled() {
 		return
 	}
 	ps.ensureRecordState()
@@ -555,7 +555,7 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 		}
 		// Preserve legacy FIFO within its original classes. Explicit speculative
 		// work never precedes foreground or ordinary directory work.
-		busy, foregroundChanged := ps.foreground.state()
+		busy, foregroundChanged := ps.foreground.Load().state()
 		var earliest time.Time
 		for _, priority := range []int{0, 1, 2} {
 			for i, item := range ps.waiting {
@@ -575,7 +575,7 @@ func (ps *ProbeScheduler) nextReadyItem() (probeItem, chan struct{}, bool) {
 				sem := ps.getProviderSem(provider)
 				// Leave one scheduler provider slot available for explicit foreground
 				// interests. Actual HTTP playback uses the shared network resolver.
-				if ps.foreground.Enabled() && priority != 0 && cap(sem) > 1 && len(sem) >= cap(sem)-1 {
+				if ps.foreground.Load().Enabled() && priority != 0 && cap(sem) > 1 && len(sem) >= cap(sem)-1 {
 					continue
 				}
 				select {
