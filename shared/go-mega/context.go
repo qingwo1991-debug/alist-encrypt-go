@@ -66,11 +66,16 @@ func (m *Mega) startPoller() {
 // Close cancels actual session HTTP and joins the event poller. It never waits
 // on a mutex held by network I/O, and successful login's session outlives the
 // caller's login deadline until this explicit owner shutdown.
-func (m *Mega) Close() error {
+// CancelSession closes admission and cancels real I/O, without pretending to
+// join it. The generation owner calls Close to join before retiring resources.
+func (m *Mega) CancelSession() {
 	m.lifeMu.Lock()
 	m.closed = true
 	m.lifeCancel()
 	m.lifeMu.Unlock()
+}
+func (m *Mega) Close() error {
+	m.CancelSession()
 	m.pollWG.Wait()
 	m.opWG.Wait()
 	m.waitEventsFire()

@@ -3,7 +3,15 @@
   "upstream_tag": "v4.2.2",
   "upstream_commit": "b28208bd76ee19c49dabc7f68c1f4e863f571fc6",
   "files": {
+    "cmd/instance_owner_test.go": null,
+    "cmd/common.go": "aba75679007b27d803619b7f69398f8393dadc5ea6ae68f38eb0510cd09fb18b",
+    "cmd/server.go": "1114b63ffea4df6391b3bf0497835d235d455bc5f5abdc724fd363cbc65286df",
+    "internal/bootstrap/run.go": "f55274565c7ac855df555226a65a69a594e24ded8d58460dbdfe4a72b8b84c94",
     "internal/bootstrap/storage.go": "f31e7ca829031623191932f4ba25fb9937a0edf193dbbcde8a1fbc7da7562051",
+    "internal/bootstrap/storage_generation_test.go": null,
+    "internal/bootstrap/instance_owner_test.go": null,
+    "internal/bootstrap/endpoint_generation.go": null,
+    "internal/bootstrap/endpoint_generation_test.go": null,
     "internal/fs/list.go": "8dbf5fc86c73cd484553d3e5f412dc9d81a061490f41b2e38f2deac1b779b097",
     "internal/fs/readiness_navigation_test.go": null,
     "internal/op/fs.go": "bb532362c5b545dff90e4eaa0bfc29fc864bc2f075f865ee2a8fe9702b4e090a",
@@ -11,6 +19,7 @@
     "internal/op/storage.go": "3df98f98e95116d92e2521cf8471f830506745189daee377094ee7f0846e2e2b",
     "internal/op/readiness.go": null,
     "internal/op/readiness_test.go": null,
+    "internal/op/storage_generation_test.go": null,
     "pkg/singleflight/singleflight.go": "1064fb436435861476e5f3b9a9e57056c9aae031293bed04d9678043b31edb5f",
     "pkg/singleflight/context_test.go": null,
     "server/handles/storage.go": "b43365b5211e6a4944cdbaa9adcf2a7e10fc4b98b2701e3e5e0c63f66ff80f49",
@@ -27,6 +36,8 @@
     "drivers/mega/new_context_test.go": null,
     "internal/net/driver_client.go": null,
     "internal/net/driver_client_test.go": null,
+    "internal/net/instance_owner.go": null,
+    "internal/net/instance_owner_test.go": null,
     "pkg/utils/io.go": "eb574613a1c4c8246fb9085167e4609ab85f0f46e6bc490e07528437fefe2c7d",
     "pkg/utils/new_retry_context_test.go": null
   }

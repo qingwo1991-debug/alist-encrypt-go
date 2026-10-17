@@ -14,6 +14,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	internalnet "github.com/OpenListTeam/OpenList/v4/internal/net"
 	"github.com/OpenListTeam/OpenList/v4/pkg/generic_sync"
 	"github.com/OpenListTeam/OpenList/v4/pkg/singleflight"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
@@ -25,6 +26,23 @@ import (
 // there is a storage in each driver,
 // so it should actually be a storage, just wrapped by the driver
 var storagesMap generic_sync.MapOf[string, driver.Driver]
+
+// ResetOwnedStorageGeneration is legal only after endpoints/loaders/Drop and
+// managed bodies joined. The lease holds the ownership fence through cleanup.
+func ResetOwnedStorageGeneration(owner *internalnet.EmbeddedLease) error {
+	return owner.JoinThenCleanup(func() {
+		storagesMap.Range(func(mount string, d driver.Driver) bool {
+			Cache.DeleteDirectoryTree(d, "/")
+			Cache.InvalidateStorageDetails(d)
+			storagesMap.Delete(mount)
+			return true
+		})
+		balanceMap.Range(func(mount string, _ int) bool { balanceMap.Delete(mount); return true })
+		readiness.Lock()
+		readiness.mounts = make(map[string]*storageReadiness)
+		readiness.Unlock()
+	})
+}
 
 func GetAllStorages() []driver.Driver {
 	return storagesMap.Values()
@@ -121,6 +139,7 @@ func getCurrentGoroutineStack() string {
 
 // initStorage initialize the driver and store to storagesMap
 func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
+	ctx = internalnet.BootstrapStorageContext(ctx, storage.Driver, "", fmt.Sprint(storage.ID))
 	state := beginStorageLoad(ctx, storage.MountPath)
 	defer func() {
 		readiness.Lock()
@@ -135,6 +154,7 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 		if recovered := recover(); recovered != nil {
 			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", recovered, getCurrentGoroutineStack())
 			err = errors.New(errInfo)
+			_ = storageDriver.Drop(context.Background())
 			log.Errorf("panic init storage: %s", errInfo)
 			driverStorage.SetStatus(errInfo)
 			MustSaveDriverStorage(storageDriver)
@@ -186,6 +206,10 @@ func initStorage(ctx context.Context, storage model.Storage, storageDriver drive
 		err = ctx.Err()
 	}
 	if err != nil {
+		// Failed Init must drop its own partial session, never clear global factory.
+		if dropErr := storageDriver.Drop(context.Background()); dropErr != nil {
+			log.Errorf("failed Init cleanup: %v", dropErr)
+		}
 		if IsUseOnlineAPI(storageDriver) {
 			driverStorage.SetStatus(utils.SanitizeHTML(err.Error()))
 		} else {

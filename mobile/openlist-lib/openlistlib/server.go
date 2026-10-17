@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	internalnet "github.com/OpenListTeam/OpenList/v4/internal/net"
+	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
@@ -31,7 +34,32 @@ var startFailedHookUuid = ""
 var shutdownHookUuid = ""
 var logFormatter *internal.MyFormatter
 
-func Init(event Event, cb LogCallback) error {
+var embeddedLifecycle sync.Mutex
+var embeddedLease *internalnet.EmbeddedLease
+var embeddedStarted bool
+
+func Init(event Event, cb LogCallback) (err error) {
+	embeddedLifecycle.Lock()
+	defer embeddedLifecycle.Unlock()
+	lease, err := internalnet.AcquireEmbeddedLease()
+	if err != nil {
+		return err
+	}
+	embeddedLease = lease
+	defer func() {
+		if err != nil {
+			_ = lease.BeginStop()
+			if releaseErr := lease.Release(); releaseErr == nil {
+				embeddedLease = nil
+			} else {
+				err = fmt.Errorf("%w; cleanup: %v", err, releaseErr)
+			}
+		}
+	}()
+	// Acquire before hooks, configuration, logging or DB initialization.
+	if event == nil || cb == nil {
+		return errors.New("embedded_instance_callbacks_required")
+	}
 	if startFailedHookUuid != "" {
 		bootstrap.RemoveEndpointStartFailedHook(startFailedHookUuid)
 		startFailedHookUuid = ""
@@ -40,7 +68,9 @@ func Init(event Event, cb LogCallback) error {
 		bootstrap.RemoveEndpointShutdownHook(shutdownHookUuid)
 		shutdownHookUuid = ""
 	}
-	bootstrap.Init()
+	if err = bootstrap.InitOwned(lease); err != nil {
+		return err
+	}
 	startFailedHookUuid = bootstrap.RegisterEndpointStartFailedHook(event.OnStartError)
 	shutdownHookUuid = bootstrap.RegisterEndpointShutdownHook(event.OnShutdown)
 	logFormatter = &internal.MyFormatter{
@@ -90,25 +120,84 @@ func IsRunning(t string) bool {
 
 // Start starts the server
 func Start() {
+	if err := StartEmbedded(); err != nil {
+		log.Error(err)
+	}
+}
+
+// StartEmbedded rejects overlap synchronously; Start retains the mobile ABI.
+func StartEmbedded() error {
+	config := GetEncryptManager().GetConfig()
+	embeddedLifecycle.Lock()
+	defer embeddedLifecycle.Unlock()
+	if embeddedLease == nil {
+		return errors.New("embedded_instance_not_initialized")
+	}
+	if embeddedStarted {
+		return errors.New("embedded_instance_overlap")
+	}
 	// Storage initialization/login precedes starting the optional media proxy.
 	// Register its independent driver transport factory before bootstrap loads drivers.
-	config := GetEncryptManager().GetConfig()
 	if config == nil {
 		config = encrypt.DefaultConfig()
 	}
-	encrypt.InstallDriverRouteFactory(config)
-	bootstrap.Start()
+	if err := encrypt.PublishDriverRouteFactory(embeddedLease, config); err != nil {
+		return err
+	}
+	bootstrap.PrepareStorageLoadGeneration()
+	embeddedStarted = true
+	return bootstrap.StartOwned(embeddedLease)
+}
+
+func publishEmbeddedFactory(config *encrypt.ProxyConfig) {
+	embeddedLifecycle.Lock()
+	defer embeddedLifecycle.Unlock()
+	if embeddedLease != nil && embeddedStarted {
+		_ = encrypt.PublishDriverRouteFactory(embeddedLease, config)
+	}
+}
+
+// DriverConfigurationPendingEpoch reports the snapshot for new sessions;
+// existing driver sessions require explicit reinitialization (not hot update).
+func DriverConfigurationPendingEpoch() int64 {
+	embeddedLifecycle.Lock()
+	defer embeddedLifecycle.Unlock()
+	if embeddedLease == nil {
+		return 0
+	}
+	return int64(embeddedLease.PendingEpoch())
 }
 
 // Shutdown timeout 毫秒
 func Shutdown(timeout int64) (err error) {
+	embeddedLifecycle.Lock()
+	defer embeddedLifecycle.Unlock()
+	if embeddedLease == nil {
+		return nil
+	}
+	if err := embeddedLease.BeginStop(); err != nil {
+		return err
+	}
 	timeoutDuration := time.Duration(timeout) * time.Millisecond
-	bootstrap.Shutdown(timeoutDuration)
-	encrypt.UninstallDriverRouteFactory()
-
-	// Force database sync before shutdown
+	if embeddedStarted {
+		if err := bootstrap.ShutdownOwned(embeddedLease, timeoutDuration); err != nil {
+			return err
+		}
+	}
+	bootstrap.JoinStorageLoads()
+	// These actual Drop calls provide driver-specific cleanup. Unsupported driver
+	// cancellation/join remains P3; never pretend the global lease proves it.
+	for _, storage := range op.GetAllStorages() {
+		if err := storage.Drop(context.Background()); err != nil {
+			return err
+		}
+	}
 	ForceDBSync()
-	//bootstrap.Release()
+	if err := op.ResetOwnedStorageGeneration(embeddedLease); err != nil {
+		return err
+	}
+	embeddedLease = nil
+	embeddedStarted = false
 	return nil
 }
 

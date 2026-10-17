@@ -10,6 +10,8 @@ import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
+# The three cmd paths are reviewed bootstrap-entry fences, not a cmd-wide overlay.
+REVIEWED_CMD_PATHS = {"cmd/common.go", "cmd/server.go", "cmd/instance_owner_test.go"}
 PREFIXES = ("internal/", "pkg/singleflight/", "pkg/utils/", "server/",
             "drivers/google_drive/", "drivers/onedrive/", "drivers/mega/")
 
@@ -32,7 +34,7 @@ def load_manifest(path, file_list):
         raise OverlayError("overlay file list and fingerprint manifest disagree")
     for name, digest in files.items():
         parts = PurePosixPath(name)
-        if (not name.startswith(PREFIXES) or parts.is_absolute() or ".." in parts.parts
+        if ((not name.startswith(PREFIXES) and name not in REVIEWED_CMD_PATHS) or parts.is_absolute() or ".." in parts.parts
                 or str(parts) != name or "\\" in name):
             raise OverlayError("invalid overlay path: " + name)
         if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):

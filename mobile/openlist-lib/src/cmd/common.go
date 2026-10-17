@@ -10,12 +10,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func Init() {
-	bootstrap.Init()
+func Init() error {
+	return bootstrap.Init()
 }
 
-func Release() {
-	bootstrap.Release()
+func Release() error {
+	return bootstrap.Release()
 }
 
 var pid = -1
