@@ -77,7 +77,7 @@ func TestExecuteDecryptPlaybackCachedEmptyV3(t *testing.T) {
 					PasswdInfo:  &config.PasswdInfo{Password: "pw", EncType: "aesctr", Enable: true},
 					InitialSize: int64(len(body)),
 				})
-				wantHits := int32(1)
+				wantHits := int64(1)
 				if tc.status == http.StatusRequestedRangeNotSatisfiable {
 					// Confirmed empty geometry rejects a GET Range locally, before
 					// any upstream permission/status can mask its protocol result.
