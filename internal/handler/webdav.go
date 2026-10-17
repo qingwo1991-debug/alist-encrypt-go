@@ -379,6 +379,13 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 			identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), realPath, passwdInfo, r.Header)
 			if info, hit := repo.GetConfirmedPlayback(identity); hit {
 				if meta, complete := cachedPlaybackMeta(info, passwdInfo.EncType); complete {
+					// Cache-only HEAD bypasses the orchestrator, so enforce the same
+					// admission fence after lookup and before committing its response.
+					if expectedEpoch == nil || expectedRevision == nil || *expectedEpoch != repo.PlaybackEpoch(davPath) || *expectedRevision != h.cfg.RuntimeRevision() {
+						w.Header().Set("Retry-After", "1")
+						http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+						return
+					}
 					writeTrustedPlaybackHead(w, path.Base(davPath), meta.PlainSize)
 					return
 				}
