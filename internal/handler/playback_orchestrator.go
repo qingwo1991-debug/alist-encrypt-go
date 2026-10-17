@@ -94,6 +94,16 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 		defer release()
 	}
+	if repo, ok := req.FileDAO.(playbackCacheRepository); ok && req.Config != nil && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		if req.ExpectedGeometryEpoch == nil {
+			epoch := repo.PlaybackEpoch(req.FileItem.DisplayPath)
+			req.ExpectedGeometryEpoch = &epoch
+		}
+		if req.ExpectedConfigRevision == nil {
+			revision := req.Config.RuntimeRevision()
+			req.ExpectedConfigRevision = &revision
+		}
+	}
 	if repo, ok := req.FileDAO.(playbackCacheRepository); ok && (req.ExpectedGeometryEpoch != nil && *req.ExpectedGeometryEpoch != repo.PlaybackEpoch(req.FileItem.DisplayPath) || req.ExpectedConfigRevision != nil && req.Config != nil && *req.ExpectedConfigRevision != req.Config.RuntimeRevision()) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
@@ -273,6 +283,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		})
 	}
 	trySingle := func(size int64) (bool, errors.FailureReason, error) {
+		if !playbackAdmissionCurrent(req) {
+			return false, errors.FailureReason("playback_admission_changed"), fmt.Errorf("playback object changed; new request required")
+		}
 		log.Info().
 			Str("category", "playback").
 			Str("consumer_scenario", req.ConsumerScenario).
@@ -504,10 +517,18 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				probeFreshContent = !complete
 			}
 			if repo, ok := req.FileDAO.(playbackCacheRepository); ok && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
-				epoch, revision := repo.PlaybackEpoch(req.FileItem.DisplayPath), req.Config.RuntimeRevision()
-				req.ExpectedGeometryEpoch, req.ExpectedConfigRevision = &epoch, &revision
+				if req.ExpectedGeometryEpoch == nil || req.ExpectedConfigRevision == nil || *req.ExpectedGeometryEpoch != repo.PlaybackEpoch(req.FileItem.DisplayPath) || *req.ExpectedConfigRevision != req.Config.RuntimeRevision() {
+					w.Header().Set("Retry-After", "1")
+					http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+					return
+				}
 			}
 			freshRaw := fetchRawURL(r.Context(), req.Config.GetAlistURL(), req.FileItem.DisplayPath, req.FileItem.EncryptedPath, authCopy, req.FileDAO, 0)
+			if !playbackAdmissionCurrent(req) {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+				return
+			}
 			if strings.TrimSpace(freshRaw.RawURL) != "" {
 				retryWithFreshState = !strings.EqualFold(req.TargetURL, freshRaw.RawURL)
 				req.TargetURL = freshRaw.RawURL

@@ -15,6 +15,14 @@ import (
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 )
 
+func playbackAdmissionCurrent(req decryptPlaybackRequest) bool {
+	repo, ok := req.FileDAO.(playbackCacheRepository)
+	if !ok {
+		return true
+	}
+	return (req.ExpectedGeometryEpoch == nil || *req.ExpectedGeometryEpoch == repo.PlaybackEpoch(req.FileItem.DisplayPath)) && (req.ExpectedConfigRevision == nil || req.Config != nil && *req.ExpectedConfigRevision == req.Config.RuntimeRevision())
+}
+
 type playbackCacheRepository interface {
 	PlaybackEpoch(string) uint64
 	GetConfirmedPlayback(string) (*dao.FileInfo, bool)

@@ -800,11 +800,11 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 			if item.file.PasswdInfo != nil && ps.stream != nil {
 				if boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
-					if ps.passwdDAO != nil {
+					if ps.cfg != nil {
 						// Join the same scoped/fenced confirmation as foreground reads.
 						// The current configuration revision is checked by the shared loader;
 						// an obsolete admitted origin cannot publish into its successor.
-						if currentRule, found := ps.passwdDAO.FindByPath(item.file.DisplayPath); ps.cfg != nil && ps.passwdDAO != nil && found && filenameRuleScope(currentRule) == filenameRuleScope(item.file.PasswdInfo) && config.BuildAlistURL(boundAlist) == ps.cfg.GetAlistURL() {
+						if config.BuildAlistURL(boundAlist) == ps.cfg.GetAlistURL() {
 							request, _ := http.NewRequestWithContext(probeCtx, http.MethodGet, rawURLResult.RawURL, nil)
 							request.Header = authHeaders.Clone()
 							confirmedPlaybackMeta(decryptPlaybackRequest{Request: request, Config: ps.cfg, FileDAO: ps.fileDAO, StreamProxy: ps.stream, PasswdInfo: item.file.PasswdInfo, FileItem: item.file, TargetURL: rawURLResult.RawURL, ConsumerScenario: consumerScenarioWebDAV, ExpectedGeometryEpoch: confirmationEpoch, ExpectedConfigRevision: confirmationRevision}, authHeaders, rawURLResult.Size)
