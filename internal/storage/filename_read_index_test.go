@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -244,6 +246,91 @@ func TestFilenameReadIndexConcurrentFinish(t *testing.T) {
 	wg.Wait()
 	if got, ok, err := s.FindFilenameReservationForRead(rec.Origin, rec.OriginalPath); err != nil || !ok || got.Status != FilenameFailed {
 		t.Fatal("stale finalized state")
+	}
+}
+
+// Hold the shared transaction gate to pause rebuild after its BUILDING state
+// publication, without adding production hooks or relying on timed sleeps.
+func TestFilenameReadIndexRebuildConcurrentMutations(t *testing.T) {
+	for _, finalStatus := range []string{FilenameComplete, FilenameFailed} {
+		t.Run(finalStatus, func(t *testing.T) {
+			s := filenameTestStore(t)
+			rec, err := s.ReserveFilename(filenameTestRecord())
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := filenameTestRecord()
+			next.EncryptedPath = "/enc/next.bin"
+			next.OriginalPath = "/enc/next original.mp4"
+			if _, ok, err := s.FindFilenameReservationForRead(rec.Origin, rec.OriginalPath); err != nil || !ok {
+				t.Fatal(ok, err)
+			}
+			if _, ok, err := s.FindFilenameReservationForRead(next.Origin, next.OriginalPath); err != nil || ok {
+				t.Fatal(ok, err)
+			}
+
+			s.filenameReadMu.RLock()
+			locked := true
+			defer func() {
+				if locked {
+					s.filenameReadMu.RUnlock()
+				}
+			}()
+			rebuilt := make(chan error, 1)
+			go func() { rebuilt <- s.RebuildFilenameReadIndex() }()
+			// State is published before rebuild takes filenameReadMu. Yield only to
+			// allow that publication; timeout is a deadlock guard, not synchronization.
+			deadline := time.After(5 * time.Second)
+			for s.FilenameReadIndexStatus().State != FilenameReadIndexBuilding {
+				select {
+				case err := <-rebuilt:
+					t.Fatalf("rebuild escaped held gate: %v", err)
+				case <-deadline:
+					t.Fatal("building state never published")
+				default:
+					runtime.Gosched()
+				}
+			}
+			before := s.FilenameReadTxnCount()
+			for _, p := range []string{rec.OriginalPath, next.OriginalPath, "/absent"} {
+				if _, ok, err := s.FindFilenameReservationForRead(rec.Origin, p); ok || !errors.Is(err, ErrFilenameReadIndexNotReady) {
+					t.Fatalf("building lookup returned false miss or stale cache: %v %v", ok, err)
+				}
+			}
+			if s.FilenameReadTxnCount() != before {
+				t.Fatal("building lookup touched Bolt")
+			}
+			start := make(chan struct{})
+			reserved := make(chan error, 1)
+			finished := make(chan error, 1)
+			go func() { <-start; _, err := s.ReserveFilename(next); reserved <- err }()
+			go func() {
+				<-start
+				finished <- s.FinishFilenameReservation(rec.Origin, rec.EncryptedPath, rec.Token, finalStatus)
+			}()
+			close(start)
+			s.filenameReadMu.RUnlock()
+			locked = false
+			for _, done := range []chan error{rebuilt, reserved, finished} {
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("rebuild/mutation deadlock")
+				}
+			}
+			if s.FilenameReadIndexStatus().State != FilenameReadIndexReady {
+				t.Fatal("index not republished")
+			}
+			if got, ok, err := s.FindFilenameReservationForRead(rec.Origin, rec.OriginalPath); err != nil || !ok || got.Status != finalStatus {
+				t.Fatalf("stale positive after rebuild/finish: %+v %v %v", got, ok, err)
+			}
+			if got, ok, err := s.FindFilenameReservationForRead(next.Origin, next.OriginalPath); err != nil || !ok || got.EncryptedPath != next.EncryptedPath {
+				t.Fatalf("lost candidate or stale negative: %+v %v %v", got, ok, err)
+			}
+		})
 	}
 }
 
