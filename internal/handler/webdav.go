@@ -876,6 +876,13 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// For files with encrypted names, use cached encrypted path
 	requestPath := davPath
 	isDirRequest := strings.HasSuffix(davPath, "/")
+	for _, candidate := range []string{davPath, strings.TrimSuffix(davPath, "/") + "/"} {
+		if cached, ok := h.fileDAO.Get(candidate); ok && cached != nil && cached.IsDir {
+			isDirRequest = true
+			requestPath = strings.TrimSuffix(davPath, "/") + "/"
+			break
+		}
+	}
 	if found && passwdInfo.EncName && !isDirRequest {
 		if bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath); ok && bound.display == davPath {
 			requestPath = bound.raw
@@ -939,14 +946,50 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		h.negCache.Block(requestPath)
 	}
 
-	// Step 2: If 404 and encryption enabled, retry with encrypted filename
-	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName {
-		resp.Body.Close()
+	// Derived names may actually denote a literal collection. A single literal
+	// slash fallback is only attempted after 404, never on the file hot path.
+	// A request-local protected file binding must not escape to another object.
+	_, boundFile := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath)
+	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && !boundFile && !strings.HasSuffix(davPath, "/") {
+		fallbackPath := strings.TrimSuffix(davPath, "/") + "/"
+		fallbackURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+fallbackPath)
+		fallbackReq, buildErr := httputil.NewRequest("PROPFIND", fallbackURL).WithContext(r.Context()).WithBody(body).CopyHeaders(r).Build()
+		if buildErr == nil {
+			if fallbackResp, fetchErr := h.getStdClient().Do(fallbackReq); fetchErr == nil {
+				fallbackBody, readErr := readLimitedBody(fallbackResp, maxProxyResponseBody)
+				fallbackResp.Body.Close()
+				collection := false
+				if readErr == nil && fallbackResp.StatusCode == http.StatusMultiStatus {
+					for _, entry := range h.parsePropfindEntries(fallbackBody) {
+						if entry.IsDir && strings.TrimSuffix(entry.Path, "/") == strings.TrimSuffix(davPath, "/") {
+							collection = true
+							break
+						}
+					}
+				}
+				if collection {
+					resp.Body.Close()
+					fallbackResp.Body = io.NopCloser(bytes.NewReader(fallbackBody))
+					resp = fallbackResp
+					requestPath = fallbackPath
+					isDirRequest = true
+				}
+			}
+		}
+	}
+
+	// Step 2: If needed, try a distinct encrypted candidate once, never retry
+	// the same derived 404 target.
+	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && requestPath == davPath {
 
 		fileName := path.Base(davPath)
 		if fileName != "" && fileName != "/" && fileName != "." {
 			// Convert to encrypted path and retry
 			realPath, _ := h.resolveRealPathForRequest(r, davPath, passwdInfo)
+			if realPath == requestPath {
+				// No distinct candidate remains; retain the original 404 body.
+				goto propfindResponseReady
+			}
 			retryURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 			trace.Logf(r.Context(), "propfind", "404 retry: request=%s retry=%s rule=%s", requestPath, realPath, ruleSource)
@@ -959,6 +1002,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 			if err == nil {
 				retryResp, err := h.getStdClient().Do(retryReq)
 				if err == nil {
+					resp.Body.Close()
 					resp = retryResp
 					if retryResp.StatusCode == http.StatusMultiStatus {
 						h.fileDAO.SetEncPathMapping(davPath, realPath)
@@ -967,6 +1011,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 			}
 		}
 	}
+propfindResponseReady:
 	defer resp.Body.Close()
 
 	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
@@ -989,6 +1034,30 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 	upstreamCost := time.Since(startAt)
+
+	// Depth:0 is the on-demand size boundary. Inspect the exact resource, not
+	// every member of a directory listing; transport lengths cannot identify
+	// V1/V2/V3. Reuse complete metadata without another network request.
+	if found && passwdInfo.Enable && resp.StatusCode == http.StatusMultiStatus && strings.TrimSpace(r.Header.Get("Depth")) == "0" {
+		for _, entry := range h.parsePropfindEntries(respBody) {
+			if entry.IsDir || strings.TrimSuffix(entry.Path, "/") != strings.TrimSuffix(requestPath, "/") {
+				continue
+			}
+			cached, _ := h.fileDAO.Get(entry.Path)
+			if _, complete := cachedPlaybackMeta(cached, passwdInfo.EncType); complete && cached.CiphertextSize == entry.Size {
+				continue
+			}
+			if h.streamProxy == nil {
+				continue
+			}
+			target := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+entry.Path)
+			result := h.streamProxy.InspectEncryptedContentResult(r.Context(), target, r.Header, passwdInfo, entry.Size)
+			if result.Confirmed {
+				meta := result.Meta
+				_ = h.fileDAO.Set(&dao.FileInfo{Path: entry.Path, EncryptedPath: entry.Path, Name: path.Base(entry.Path), Size: meta.PlainSize, CiphertextSize: meta.CiphertextSize, ContentVersion: meta.Version, HeaderLen: meta.HeaderLen, NonceField: append([]byte(nil), meta.NonceField...), ChunkSize: meta.ChunkSize, KDFIterations: meta.KDFIterations})
+			}
+		}
+	}
 
 	// Step 3: Parse and cache file info from PROPFIND response
 	parseStart := time.Now()
@@ -1137,9 +1206,10 @@ func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 		Response []struct {
 			Href     string `xml:"href"`
 			PropStat []struct {
-				Prop struct {
+				Status string `xml:"status"`
+				Prop   struct {
 					DisplayName   string `xml:"displayname"`
-					ContentLength int64  `xml:"getcontentlength"`
+					ContentLength *int64 `xml:"getcontentlength"`
 					LastModified  string `xml:"getlastmodified"`
 					ResourceType  struct {
 						Collection *struct{} `xml:"collection"`
@@ -1168,15 +1238,20 @@ func (h *WebDAVHandler) parsePropfindEntries(body []byte) []propfindEntry {
 		}
 
 		displayName := ""
-		contentLength := int64(0)
+		// -1 denotes an absent/unavailable property, distinct from a known empty file.
+		contentLength := int64(-1)
 		hasCollection := false
 		resourceTypeText := ""
 		for _, propStat := range resp.PropStat {
+			fields := strings.Fields(propStat.Status)
+			if len(fields) > 0 && (len(fields) < 2 || fields[1] != "200") {
+				continue
+			}
 			if propStat.Prop.DisplayName != "" {
 				displayName = propStat.Prop.DisplayName
 			}
-			if propStat.Prop.ContentLength > 0 {
-				contentLength = propStat.Prop.ContentLength
+			if propStat.Prop.ContentLength != nil && *propStat.Prop.ContentLength >= 0 {
+				contentLength = *propStat.Prop.ContentLength
 			}
 			if propStat.Prop.ResourceType.Collection != nil {
 				hasCollection = true
@@ -1230,7 +1305,7 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 		displayName := entry.Name
 		encryptedPath := entry.Path
 
-		if h.passwdDAO != nil {
+		if h.passwdDAO != nil && !entry.IsDir {
 			if passwdInfo, found := h.passwdDAO.FindByPath(entry.Path); found && passwdInfo != nil && passwdInfo.EncName {
 				if decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, entry.Name, passwdInfo.EncSuffix, allowLoose); decryptedName != "" && decryptedName != entry.Name {
 					displayName = decryptedName
@@ -1239,11 +1314,21 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 			}
 		}
 
+		plainSize, knownSize := h.propfindPlainSize(encryptedPath, entry.Size)
 		info := &dao.FileInfo{
-			Path:  displayPath,
-			Name:  displayName,
-			Size:  entry.Size,
-			IsDir: entry.IsDir,
+			Path: displayPath, EncryptedPath: encryptedPath,
+			Name: displayName, Size: entry.Size, IsDir: entry.IsDir,
+		}
+		if knownSize {
+			info.Size = plainSize
+		}
+		// Preserve confirmed container fields even when the listing introduces
+		// a new display alias for a raw object already read through GET.
+		if existing, ok := h.fileDAO.Get(encryptedPath); ok && existing != nil && knownSize {
+			info.ContentVersion, info.HeaderLen = existing.ContentVersion, existing.HeaderLen
+			info.CiphertextSize = existing.CiphertextSize
+			info.NonceField = append([]byte(nil), existing.NonceField...)
+			info.ChunkSize, info.KDFIterations = existing.ChunkSize, existing.KDFIterations
 		}
 
 		if hugeDir {
@@ -1253,13 +1338,13 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 		if persistToStore {
 			_ = h.fileDAO.Set(info)
 		} else {
-			h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, displayName, entry.Size, entry.IsDir)
+			h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, displayName, info.Size, entry.IsDir)
 		}
 		if displayPath != encryptedPath {
-			h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, displayName, entry.Size, entry.IsDir)
+			h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, displayName, info.Size, entry.IsDir)
 		}
 		if !info.IsDir {
-			if info.Size > 0 {
+			if knownSize {
 				h.upsertMetaFromListing(ctx, displayPath, info.Size)
 			}
 			h.enqueueProbeFromPropfind(ctx, displayPath, info.Size)
