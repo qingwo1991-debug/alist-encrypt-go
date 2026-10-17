@@ -786,7 +786,7 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 		}
 	}
 	var confirmationEpoch, confirmationRevision *uint64
-	if repo, ok := ps.fileDAO.(playbackCacheRepository); ok && ps.cfg != nil && boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+	if repo := ps.fileDAO; repo != nil && ps.cfg != nil && boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
 		epoch, revision := repo.PlaybackEpoch(item.file.DisplayPath), ps.cfg.RuntimeRevision()
 		confirmationEpoch, confirmationRevision = &epoch, &revision
 	}
