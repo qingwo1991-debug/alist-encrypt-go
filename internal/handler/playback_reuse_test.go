@@ -3,10 +3,13 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"github.com/alist-encrypt-go/internal/proxy"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,7 +25,18 @@ func TestConfirmedColdV2InspectionSixteenCallersAndWarmReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := append(header, make([]byte, 4096)...)
+	testSharedInspectionBody(t, append(header, make([]byte, 4096)...), 2, 1, 4096)
+}
+func TestConfirmedColdNonDefaultV3InspectionSixteenCallersAndWarmReuse(t *testing.T) {
+	header, err := encryption.NewV3Header(4096, bytes.Repeat([]byte{7}, int(encryption.V3NonceFieldLen())), 73, 1234)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := encryption.V3CiphertextSize(4096, 73)
+	testSharedInspectionBody(t, append(header, make([]byte, int(total)-len(header))...), 3, 2, 4096)
+}
+func testSharedInspectionBody(t *testing.T, body []byte, version int, wantRequests int32, plainSize int64) {
+	t.Helper()
 	var hits atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -53,7 +67,7 @@ func TestConfirmedColdV2InspectionSixteenCallersAndWarmReuse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			meta, ok := confirmedPlaybackMeta(request, nil, int64(len(body)))
-			if !ok || meta.PlainSize != 4096 || meta.Version != 2 {
+			if !ok || meta.PlainSize != plainSize || meta.Version != version || (version == 3 && (meta.ChunkSize != 73 || meta.KDFIterations != 1234)) {
 				t.Errorf("meta=%+v confirmed=%v", meta, ok)
 			}
 		}()
@@ -61,7 +75,7 @@ func TestConfirmedColdV2InspectionSixteenCallersAndWarmReuse(t *testing.T) {
 	<-entered
 	close(release)
 	wg.Wait()
-	if hits.Load() != 1 {
+	if hits.Load() != wantRequests {
 		t.Fatalf("cold inspection requests=%d want1", hits.Load())
 	}
 	for i := 0; i < 3; i++ {
@@ -69,8 +83,68 @@ func TestConfirmedColdV2InspectionSixteenCallersAndWarmReuse(t *testing.T) {
 			t.Fatal("warm miss")
 		}
 	}
-	if hits.Load() != 1 {
+	if hits.Load() != wantRequests {
 		t.Fatalf("warm reprobed count=%d", hits.Load())
+	}
+}
+
+func TestExpiredRawURLSixteenCallersShareRefreshAndKeepGeometry(t *testing.T) {
+	var hits atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/fs/get" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(404)
+			return
+		}
+		if hits.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"raw_url": "https://cdn/fresh?Expires=9999999999", "size": 132}})
+	}))
+	defer upstream.Close()
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	server := cfg.AlistServerSnapshot()
+	server.PlaybackProfile = config.PlaybackProfileTrustedLocal
+	parsed, _ := url.Parse(upstream.URL)
+	server.ServerHost = parsed.Hostname()
+	server.ServerPort, _ = strconv.Atoi(parsed.Port())
+	server.HTTPS = false
+	if err := cfg.UpdateAlistServer(server); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := dao.NewFileDAO(store, cfg)
+	defer func() { files.Stop(); store.Close() }()
+	info := &dao.FileInfo{Path: "/plain", EncryptedPath: "/raw", Size: 100, CiphertextSize: 132, ContentVersion: 2, HeaderLen: 32, NonceField: make([]byte, 16), GeometryIdentity: "geo", GeometryConfirmedAt: time.Now(), RawURL: "https://cdn/old?Expires=1", RawURLAuthScope: "trusted_local", RawURLIdentity: playbackIdentity(cfg, upstream.URL, "/raw", nil, nil), UpstreamFetchedAt: time.Now()}
+	if !files.PublishConfirmedPlayback(info, files.PlaybackEpoch(info.Path)) {
+		t.Fatal("publish")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := fetchRawURL(context.Background(), upstream.URL, info.Path, info.EncryptedPath, nil, files, 30*time.Minute)
+			if result.RawURL != "https://cdn/fresh?Expires=9999999999" {
+				t.Errorf("resolve=%+v", result)
+			}
+		}()
+	}
+	<-entered
+	close(release)
+	wg.Wait()
+	if hits.Load() != 1 {
+		t.Fatalf("refreshes=%d", hits.Load())
+	}
+	got, ok := files.GetConfirmedPlayback("geo")
+	if !ok || got.Size != 100 || got.CiphertextSize != 132 {
+		t.Fatalf("geometry lost: %+v", got)
 	}
 }
 

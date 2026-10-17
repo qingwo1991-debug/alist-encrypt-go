@@ -1768,7 +1768,11 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		return rawURLFetchResult{FailureReason: "interest_canceled"}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		fileDAO.InvalidateRawURLForScope(displayPath, rawURLAuthScope(authHeaders))
+		// The failed resolver owns a flight; do not cancel its own fallback
+		// admission here. The playback failure boundary invalidates rejected URLs.
+		if _, managed := ctx.Value(playbackTransportKey{}).(playbackTransportAdmission); !managed {
+			fileDAO.InvalidateRawURLForScope(displayPath, playbackScope(fileDAO.Config(), authHeaders))
+		}
 		return rawURLFetchResult{
 			StatusCode:    resp.StatusCode,
 			Source:        rawURLSourceFromAPIPath(apiPath),
