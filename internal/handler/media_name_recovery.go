@@ -68,14 +68,20 @@ func (s *mediaRecoveryState) stop() {
 	s.workers.Wait()
 }
 
-type verifiedFilenameRawPathKey struct{}
-type verifiedFilenameRawPath struct{ display, raw string }
+// A durable routing candidate is not proof of remote authorization. In the
+// explicitly trusted local profile the actual upstream operation (if any) is
+// the only remote check; do not label that binding as remotely verified.
+type filenameRawPathKey struct{}
+type filenameRawPath struct {
+	display, raw     string
+	remoteAuthorized bool
+}
 
-func rememberVerifiedFilenamePath(r *http.Request, display, raw string) {
-	*r = *r.WithContext(context.WithValue(r.Context(), verifiedFilenameRawPathKey{}, verifiedFilenameRawPath{display, raw}))
+func rememberFilenamePath(r *http.Request, display, raw string, remoteAuthorized bool) {
+	*r = *r.WithContext(context.WithValue(r.Context(), filenameRawPathKey{}, filenameRawPath{display: display, raw: raw, remoteAuthorized: remoteAuthorized}))
 }
 func (h *WebDAVHandler) resolveRealPathForRequest(r *http.Request, display string, ep *config.PasswdInfo) (string, string) {
-	if bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath); ok && bound.display == display {
+	if bound, ok := r.Context().Value(filenameRawPathKey{}).(filenameRawPath); ok && bound.display == display {
 		return bound.raw, pathModeCacheMapping
 	}
 	return h.resolveRealPathWithMode(display, ep)
@@ -96,24 +102,9 @@ func (h *WebDAVHandler) hasInvalidProtectedFilenameScope(r *http.Request, displa
 	}); ok {
 		ep, found = fresh.FindByPathFresh(display)
 	}
-	if !found || ep == nil || !ep.Enable || !ep.EncName {
-		// Ordinary paths must not depend on scanning the audit database. A
-		// known cached protected mapping still fails closed after rule removal.
-		if raw, cached := h.fileDAO.GetEncPath(display); cached {
-			if records, ok := h.fileDAO.(interface {
-				GetFilenameReservation(string, string) (storage.FilenameRecord, bool, error)
-			}); ok {
-				record, present, err := records.GetFilenameReservation(origin, raw)
-				if err != nil {
-					return true, err
-				}
-				if present && record.OriginalPath == display {
-					return true, nil
-				}
-			}
-		}
-		return false, nil
-	}
+	// The independent read index is a bounded lookup, including after rule
+	// removal. Do not let an uncached historical name bypass the rule guard,
+	// and never treat an unavailable index as evidence that no record exists.
 	saved, present, err := getter.FindFilenameReservationForRead(origin, display)
 	if err != nil {
 		return true, err
@@ -127,8 +118,12 @@ func (h *WebDAVHandler) hasInvalidProtectedFilenameScope(r *http.Request, displa
 	if h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin || saved.Origin != origin {
 		return true, nil
 	}
-	if _, err := filenameRemotePropfind(r, origin, saved.EncryptedPath, h.getShortClient()); err != nil {
-		return true, nil
+	remoteAuthorized := false
+	if h.cfg.AlistServerSnapshot().PlaybackProfile != config.PlaybackProfileTrustedLocal {
+		if _, err := filenameRemotePropfind(r, origin, saved.EncryptedPath, h.getShortClient()); err != nil {
+			return true, nil
+		}
+		remoteAuthorized = true
 	}
 	current, found := h.passwdDAO.FindByPath(display)
 	if fresh, ok := h.passwdDAO.(interface {
@@ -139,7 +134,7 @@ func (h *WebDAVHandler) hasInvalidProtectedFilenameScope(r *http.Request, displa
 	if !found || current == nil || !current.Enable || !current.EncName || h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin || filenameRuleScope(current) != saved.RuleFingerprint {
 		return true, nil
 	}
-	rememberVerifiedFilenamePath(r, display, saved.EncryptedPath)
+	rememberFilenamePath(r, display, saved.EncryptedPath, remoteAuthorized)
 	return false, nil
 }
 
@@ -158,14 +153,15 @@ func (h *WebDAVHandler) restoreVerifiedAliasMapping(r *http.Request, display str
 	if err != nil || !found {
 		return storage.VerifiedMediaAlias{}, false
 	}
-	rememberVerifiedFilenamePath(r, display, rec.EncryptedPath)
+	rememberFilenamePath(r, display, rec.EncryptedPath, false)
 	return rec, true
 }
 
-// Overlay the original name only for the exact resource authorized in this
-// request. Directory snapshots and global caches never receive this overlay.
+// Overlay the original name only for the exact resource bound in this request
+// and returned by the actual upstream operation. A local binding is deliberately
+// not remote authorization. Directory snapshots/global caches never get this overlay.
 func restoreBoundFilenameResponse(r *http.Request, body, original []byte) []byte {
-	bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath)
+	bound, ok := r.Context().Value(filenameRawPathKey{}).(filenameRawPath)
 	if !ok {
 		return body
 	}
