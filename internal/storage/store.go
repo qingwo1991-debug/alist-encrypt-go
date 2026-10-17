@@ -3,10 +3,12 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/alist-encrypt-go/internal/recovery"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -24,10 +26,11 @@ var (
 
 // Store represents the BoltDB storage
 type Store struct {
-	db        *bolt.DB
-	path      string
-	closeOnce sync.Once
-	closeErr  error
+	db            *bolt.DB
+	path          string
+	closeOnce     sync.Once
+	closeErr      error
+	recoveryState *recovery.State
 	// writeTxns counts completed write transactions. It exists so batch-write
 	// paths (e.g. directory listings) can assert the transaction budget they
 	// target rather than blindly trusting benchmarks.
@@ -73,19 +76,43 @@ type BucketTx struct {
 
 // NewStore creates a new BoltDB store
 func NewStore(dataDir string) (*Store, error) {
+	return NewStoreWithRecovery(dataDir, recovery.Load(dataDir))
+}
+
+// NewStoreWithRecovery shares the immutable startup state with the server.
+// It must not be used to install or remove a fence on a running instance.
+func NewStoreWithRecovery(dataDir string, state *recovery.State) (*Store, error) {
+	if state == nil {
+		state = recovery.Load(dataDir)
+	}
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
 	dbPath := filepath.Join(dataDir, "alist-encrypt.db")
-	db, err := bolt.Open(dbPath, 0600, nil)
+	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	err = db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(BucketConfig); b != nil {
+			raw := b.Get([]byte(recovery.StickyKey))
+			if b.Bucket([]byte(recovery.StickyKey)) != nil {
+				raw = []byte("invalid nested recovery marker")
+			}
+			state = recovery.WithSticky(state, raw)
+		}
+		return nil
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	store := &Store{
-		db:   db,
-		path: dbPath,
+		db:            db,
+		path:          dbPath,
+		recoveryState: state,
 	}
 
 	// Initialize buckets
@@ -114,6 +141,9 @@ func (s *Store) initBuckets() error {
 		return nil
 	})
 }
+
+// RecoveryState returns the immutable state after sticky database inspection.
+func (s *Store) RecoveryState() *recovery.State { return s.recoveryState }
 
 // Close closes the database
 func (s *Store) Close() error {
