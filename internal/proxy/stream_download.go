@@ -186,7 +186,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 		fileSize = meta.PlainSize
 	}
 	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
-	if outcome := rejectKnownUnsatisfiableRange(w, r, rangeHeader, fileSize, meta); outcome != nil {
+	if outcome := rejectKnownUnsatisfiableRange(w, req, rangeHeader, fileSize, meta); outcome != nil {
 		return outcome
 	}
 	req, upstreamClientRange, cachePlan := prepareV3Cache(req, targetURL, passwdInfo, meta, rangeHeader, compatStorageKey, strategy)
