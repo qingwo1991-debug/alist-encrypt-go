@@ -67,7 +67,10 @@ func TestKnownPlaintextEOFNeedsNoUpstream(t *testing.T) {
 	for _, container := range acceptanceContainers(t, plain) {
 		t.Run(container.name, func(t *testing.T) {
 			sp := NewStreamProxy(config.DefaultConfig())
-			for _, rangeHeader := range []string{"bytes=1024-", "bytes=1024-2048", "bytes=4096-"} {
+			// V2 retains bounded ciphertext-tail compatibility for starts in its
+			// header-sized tail window. Open plaintext EOF and bounded starts
+			// beyond both geometries are unambiguously unsatisfiable.
+			for _, rangeHeader := range []string{"bytes=1024-", "bytes=4096-8192", "bytes=4096-"} {
 				r := httptest.NewRequest("GET", "/movie", nil)
 				r.Header.Set("Range", rangeHeader)
 				r = r.WithContext(WithContentMeta(r.Context(), container.meta))

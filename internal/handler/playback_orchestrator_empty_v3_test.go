@@ -77,8 +77,14 @@ func TestExecuteDecryptPlaybackCachedEmptyV3(t *testing.T) {
 					PasswdInfo:  &config.PasswdInfo{Password: "pw", EncType: "aesctr", Enable: true},
 					InitialSize: int64(len(body)),
 				})
-				if hits.Load() != 1 || rr.Code != tc.status || rr.Body.Len() != 0 {
-					t.Fatalf("hits=%d status=%d body=%q, want one request/status%d/no appended JSON", hits.Load(), rr.Code, rr.Body.Bytes(), tc.status)
+				wantHits := int32(1)
+				if tc.status == http.StatusRequestedRangeNotSatisfiable {
+					// Confirmed empty geometry rejects a GET Range locally, before
+					// any upstream permission/status can mask its protocol result.
+					wantHits = 0
+				}
+				if hits.Load() != wantHits || rr.Code != tc.status || rr.Body.Len() != 0 {
+					t.Fatalf("hits=%d status=%d body=%q, want %d requests/status%d/no appended JSON", hits.Load(), rr.Code, rr.Body.Bytes(), wantHits, tc.status)
 				}
 				if tc.status == http.StatusOK && rr.Header().Get("Content-Length") != "0" {
 					t.Fatalf("empty Content-Length=%q", rr.Header().Get("Content-Length"))
