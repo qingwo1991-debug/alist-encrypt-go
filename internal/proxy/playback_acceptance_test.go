@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -82,7 +83,7 @@ func TestPlaybackAcceptanceExactPlaintextMatrix(t *testing.T) {
 				name, header string
 				start, end   int
 			}{
-				{"full", "", 0, len(plain)}, {"initial", "bytes=0-31", 0, 32}, {"seek", "bytes=127-190", 127, 191}, {"suffix", "bytes=-19", len(plain) - 19, len(plain)},
+				{"full", "", 0, len(plain)}, {"initial", "bytes=0-31", 0, 32}, {"seek", "bytes=127-190", 127, 191}, {"suffix", "bytes=-19", len(plain) - 19, len(plain)}, {"open-ended", "bytes=127-", 127, len(plain)},
 			} {
 				name := container.name + "/" + string(mode) + "/" + interval.name
 				t.Run(name, func(t *testing.T) {
@@ -158,6 +159,33 @@ func TestPlaybackAcceptanceExactPlaintextMatrix(t *testing.T) {
 		}{1, "HTTP plaintext and upstream write-side bytes; no rendered-frame claims", metrics}
 		if err := playbacktest.WriteJSON(path, artifact); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestLP0PlaybackEOFAndHeadMatrix(t *testing.T) {
+	plain := bytes.Repeat([]byte("protocol-size"), 64)
+	for _, container := range acceptanceContainers(t, plain) {
+		for _, method := range []string{http.MethodHead, http.MethodGet} {
+			t.Run(container.name+"/"+method, func(t *testing.T) {
+				u := playbacktest.New(container.body, playbacktest.Behavior{Range: playbacktest.RangeAccept}, nil)
+				defer u.Close()
+				sp := acceptanceProxy(u)
+				r := httptest.NewRequest(method, "/d/protocol.mp4", nil)
+				if method == http.MethodGet {
+					r.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(plain)))
+				}
+				r = r.WithContext(WithContentMeta(r.Context(), container.meta))
+				rr := httptest.NewRecorder()
+				out := sp.ProxyDownloadDecryptWithStrategy(rr, r, u.URL("/object"), &config.PasswdInfo{Enable: true, Password: "pw", EncType: "aesctr"}, int64(len(plain)), StreamStrategyRange)
+				if method == http.MethodHead {
+					if out.Err != nil || rr.Code != 200 || rr.Body.Len() != 0 || rr.Header().Get("Content-Length") != strconv.Itoa(len(plain)) {
+						t.Fatalf("HEAD outcome=%+v status=%d headers=%v body=%d", out, rr.Code, rr.Header(), rr.Body.Len())
+					}
+				} else if rr.Code != 416 || rr.Header().Get("Content-Range") != fmt.Sprintf("bytes */%d", len(plain)) {
+					t.Fatalf("EOF outcome=%+v status=%d headers=%v body=%d", out, rr.Code, rr.Header(), rr.Body.Len())
+				}
+			})
 		}
 	}
 }
