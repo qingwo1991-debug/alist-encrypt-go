@@ -76,7 +76,7 @@ func TestProtectedFilenameFullHandleGetHead(t *testing.T) {
 				t.Fatal(err)
 			}
 			sp := &filenamePlaybackStreamer{t: t, raw: raw}
-			h := &WebDAVHandler{cfg: ah.cfg, fileDAO: d, passwdDAO: ah.passwdDAO, streamProxy: sp, strategyCache: NewStrategyCache(10), stdClient: upstream.Client(), shortClient: upstream.Client()}
+			h := &WebDAVHandler{cfg: ah.cfg, fileDAO: d, passwdDAO: ah.passwdDAO, streamProxy: sp, strategyCache: NewStrategyCache(10), sizeResolver: NewFileSizeResolver(ah.cfg, d, nil, 1, MinMetaSize(ah.cfg), RedirectMaxHops(ah.cfg)), stdClient: upstream.Client(), shortClient: upstream.Client()}
 			for _, method := range []string{http.MethodGet, http.MethodHead} {
 				r := httptest.NewRequest(method, "http://proxy"+(&url.URL{Path: "/dav" + original}).EscapedPath(), nil)
 				r.Header.Set("Authorization", "Basic current-account")
