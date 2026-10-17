@@ -65,7 +65,7 @@ func TestProtectedFilenameReadAuthorizesCurrentCaller(t *testing.T) {
 					if calls != before+1 {
 						t.Fatal("read skipped fresh upstream authorization")
 					}
-					bound, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath)
+					bound, ok := r.Context().Value(filenameRawPathKey{}).(filenameRawPath)
 					if ok != want || ok && bound.raw != raw {
 						t.Fatalf("unexpected request-local binding %+v", bound)
 					}
@@ -119,7 +119,7 @@ func TestProtectedFilenameReadRejectsIncompleteAndChangedRule(t *testing.T) {
 			if !invalid || err != nil {
 				t.Fatalf("invalid=%v err=%v", invalid, err)
 			}
-			if _, ok := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath); ok {
+			if _, ok := r.Context().Value(filenameRawPathKey{}).(filenameRawPath); ok {
 				t.Fatal("rejected record bound")
 			}
 		})
