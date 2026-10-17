@@ -1079,6 +1079,10 @@ propfindResponseReady:
 			if entry.IsDir || strings.TrimSuffix(entry.Path, "/") != strings.TrimSuffix(requestPath, "/") {
 				continue
 			}
+			if h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+				h.confirmPropfindGeometry(r, davPath, entry.Path, passwdInfo, entry.Size)
+				continue
+			}
 			cached, _ := h.fileDAO.Get(entry.Path)
 			if _, complete := cachedPlaybackMeta(cached, passwdInfo.EncType); complete && cached.CiphertextSize == entry.Size {
 				continue

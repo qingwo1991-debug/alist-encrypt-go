@@ -760,35 +760,48 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			resultState.rawURLFetched = true
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 			if item.file.PasswdInfo != nil && ps.stream != nil {
-				inspected := ps.stream.InspectEncryptedContentResult(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
-				meta := inspected.Meta
-				// Persist confirmed V1/V2/V3 metadata, including V3 record geometry
-				// and KDF parameters. Requiring Confirmed guards against caching a
-				// truncated or failed probe as a confirmed legacy file.
-				if probeCtx.Err() == nil && inspected.Confirmed && meta.PlainSize > 0 {
-					cached := &dao.FileInfo{
-						Path:              item.file.DisplayPath,
-						EncryptedPath:     item.file.EncryptedPath,
-						Name:              item.file.FileName,
-						Size:              meta.PlainSize,
-						CiphertextSize:    meta.TotalCiphertextSize(),
-						ContentVersion:    meta.Version,
-						HeaderLen:         meta.HeaderLen,
-						NonceField:        append([]byte(nil), meta.NonceField...),
-						ChunkSize:         meta.ChunkSize,
-						KDFIterations:     meta.KDFIterations,
-						RawURL:            rawURLResult.RawURL,
-						RawURLAuthScope:   rawURLAuthScope(authHeaders),
-						UpstreamFetchedAt: time.Now(),
-					}
-					if existing, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && existing != nil {
-						if strings.TrimSpace(existing.Name) != "" {
-							cached.Name = existing.Name
+				if boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+					if ps.passwdDAO != nil {
+						// Join the same scoped/fenced confirmation as foreground reads.
+						// The current configuration revision is checked by the shared loader;
+						// an obsolete admitted origin cannot publish into its successor.
+						if currentRule, found := ps.passwdDAO.FindByPath(item.file.DisplayPath); ps.cfg != nil && ps.passwdDAO != nil && found && filenameRuleScope(currentRule) == filenameRuleScope(item.file.PasswdInfo) && config.BuildAlistURL(boundAlist) == ps.cfg.GetAlistURL() {
+							request, _ := http.NewRequestWithContext(probeCtx, http.MethodGet, rawURLResult.RawURL, nil)
+							request.Header = authHeaders.Clone()
+							confirmedPlaybackMeta(decryptPlaybackRequest{Request: request, Config: ps.cfg, FileDAO: ps.fileDAO, StreamProxy: ps.stream, PasswdInfo: item.file.PasswdInfo, FileItem: item.file, TargetURL: rawURLResult.RawURL, ConsumerScenario: consumerScenarioWebDAV}, authHeaders, rawURLResult.Size)
 						}
-						cached.Sign = existing.Sign
-						cached.IsDir = existing.IsDir
 					}
-					_ = ps.fileDAO.Set(cached)
+				} else {
+					inspected := ps.stream.InspectEncryptedContentResult(probeCtx, rawURLResult.RawURL, authHeaders, item.file.PasswdInfo, rawURLResult.Size)
+					meta := inspected.Meta
+					// Persist confirmed V1/V2/V3 metadata, including V3 record geometry
+					// and KDF parameters. Requiring Confirmed guards against caching a
+					// truncated or failed probe as a confirmed legacy file.
+					if probeCtx.Err() == nil && inspected.Confirmed && meta.PlainSize > 0 {
+						cached := &dao.FileInfo{
+							Path:              item.file.DisplayPath,
+							EncryptedPath:     item.file.EncryptedPath,
+							Name:              item.file.FileName,
+							Size:              meta.PlainSize,
+							CiphertextSize:    meta.TotalCiphertextSize(),
+							ContentVersion:    meta.Version,
+							HeaderLen:         meta.HeaderLen,
+							NonceField:        append([]byte(nil), meta.NonceField...),
+							ChunkSize:         meta.ChunkSize,
+							KDFIterations:     meta.KDFIterations,
+							RawURL:            rawURLResult.RawURL,
+							RawURLAuthScope:   rawURLAuthScope(authHeaders),
+							UpstreamFetchedAt: time.Now(),
+						}
+						if existing, ok := ps.fileDAO.Get(item.file.DisplayPath); ok && existing != nil {
+							if strings.TrimSpace(existing.Name) != "" {
+								cached.Name = existing.Name
+							}
+							cached.Sign = existing.Sign
+							cached.IsDir = existing.IsDir
+						}
+						_ = ps.fileDAO.Set(cached)
+					}
 				}
 			}
 		} else if resultState.failureReason == "" && rawURLResult.FailureReason != "" {

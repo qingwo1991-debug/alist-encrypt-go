@@ -10,6 +10,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/ports"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 )
@@ -94,6 +95,44 @@ func confirmedPlaybackMeta(req decryptPlaybackRequest, headers http.Header, fall
 }
 func playbackMetaInfo(req decryptPlaybackRequest, meta encryption.ContentMeta) *dao.FileInfo {
 	return &dao.FileInfo{Path: req.FileItem.DisplayPath, EncryptedPath: req.FileItem.EncryptedPath, Name: req.FileItem.FileName, Size: meta.PlainSize, CiphertextSize: meta.TotalCiphertextSize(), ContentVersion: meta.Version, HeaderLen: meta.HeaderLen, NonceField: append([]byte(nil), meta.NonceField...), ChunkSize: meta.ChunkSize, KDFIterations: meta.KDFIterations}
+}
+
+// confirmPropfindGeometry joins playback's logical-object loader. A signed URL
+// may work when DAV media GET is disabled even though DAV metadata is available.
+func (h *WebDAVHandler) confirmPropfindGeometry(r *http.Request, display, raw string, rule *config.PasswdInfo, observed int64) {
+	repo, ok := h.fileDAO.(playbackCacheRepository)
+	if !ok || h.streamProxy == nil {
+		return
+	}
+	epoch := repo.PlaybackEpoch(display)
+	revision, origin := h.cfg.RuntimeRevision(), h.cfg.GetAlistURL()
+	identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), raw, rule, r.Header)
+	var meta encryption.ContentMeta
+	var confirmed bool
+	if info, hit := repo.GetConfirmedPlayback(identity); hit {
+		meta, confirmed = cachedPlaybackMeta(info, rule.EncType)
+		if confirmed && observed > 0 && meta.TotalCiphertextSize() != observed {
+			h.fileDAO.InvalidateDisplayPath(display)
+			epoch = repo.PlaybackEpoch(display)
+			confirmed = false
+		}
+	}
+	if !confirmed {
+		target := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+raw)
+		result := fetchRawURL(r.Context(), h.cfg.GetAlistURL(), display, raw, r.Header, h.fileDAO, h.upstreamStalenessThreshold())
+		if result.RawURL != "" {
+			target = result.RawURL
+		}
+		req := decryptPlaybackRequest{Request: r, Config: h.cfg, FileDAO: h.fileDAO, StreamProxy: h.streamProxy, PasswdInfo: rule, FileItem: FileItem{DisplayPath: display, EncryptedPath: raw}, TargetURL: target, ConsumerScenario: consumerScenarioWebDAV}
+		meta, confirmed = confirmedPlaybackMeta(req, r.Header, observed)
+	}
+	if !confirmed || r.Context().Err() != nil || h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin {
+		return
+	}
+	// LP0's XML rewrite keys by the exact raw href. Mirror only through the same
+	// epoch fence; GET/HEAD keep the canonical confirmed record under display.
+	mirror := &dao.FileInfo{Path: raw, EncryptedPath: raw, Size: meta.PlainSize, CiphertextSize: meta.TotalCiphertextSize(), ContentVersion: meta.Version, HeaderLen: meta.HeaderLen, NonceField: append([]byte(nil), meta.NonceField...), ChunkSize: meta.ChunkSize, KDFIterations: meta.KDFIterations, GeometryIdentity: identity, GeometryConfirmedAt: time.Now()}
+	repo.PublishPlaybackInfo(mirror, epoch)
 }
 
 // No raw URL response size may overwrite confirmed plaintext/container geometry.

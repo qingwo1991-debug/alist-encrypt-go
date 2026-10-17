@@ -148,6 +148,66 @@ func TestExpiredRawURLSixteenCallersShareRefreshAndKeepGeometry(t *testing.T) {
 	}
 }
 
+func TestPropfindSignedURLConfirmationSharedWithPlayback(t *testing.T) {
+	header, err := encryption.BuildV2Header(encryption.EncTypeAESCTR, 4096, bytes.Repeat([]byte{7}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append(header, make([]byte, 4096)...)
+	var api, media, dav atomic.Int32
+	var upstreamURL string
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get":
+			api.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"raw_url": upstreamURL + "/signed", "size": len(body)}})
+		case "/signed":
+			media.Add(1)
+			http.ServeContent(w, r, "raw.bin", time.Time{}, bytes.NewReader(body))
+		default:
+			dav.Add(1)
+			w.WriteHeader(401)
+		}
+	}))
+	defer upstream.Close()
+	upstreamURL = upstream.URL
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	server := cfg.AlistServerSnapshot()
+	server.PlaybackProfile = config.PlaybackProfileTrustedLocal
+	parsed, _ := url.Parse(upstream.URL)
+	server.ServerHost = parsed.Hostname()
+	server.ServerPort, _ = strconv.Atoi(parsed.Port())
+	server.HTTPS = false
+	if err := cfg.UpdateAlistServer(server); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := dao.NewFileDAO(store, cfg)
+	defer func() { files.Stop(); store.Close() }()
+	rule := &config.PasswdInfo{Enable: true, Password: "pw", EncType: "aesctr"}
+	h := &WebDAVHandler{cfg: cfg, fileDAO: files, streamProxy: proxy.NewStreamProxy(cfg)}
+	r := httptest.NewRequest("PROPFIND", "/dav/plain.mp4", nil)
+	h.confirmPropfindGeometry(r, "/plain.mp4", "/raw", rule, int64(len(body)))
+	if size, ok := h.propfindPlainSize("/raw", int64(len(body)), rule); !ok || size != 4096 {
+		t.Fatalf("rewrite size=%d known=%v", size, ok)
+	}
+	h.confirmPropfindGeometry(r, "/plain.mp4", "/raw", rule, int64(len(body)))
+	req := decryptPlaybackRequest{Request: httptest.NewRequest("GET", "/dav/plain.mp4", nil), Config: cfg, FileDAO: files, StreamProxy: h.streamProxy, PasswdInfo: rule, FileItem: FileItem{DisplayPath: "/plain.mp4", EncryptedPath: "/raw"}, TargetURL: upstreamURL + "/signed", ConsumerScenario: consumerScenarioWebDAV}
+	if _, ok := confirmedPlaybackMeta(req, nil, 0); !ok {
+		t.Fatal("playback failed to reuse PF confirmation")
+	}
+	if api.Load() != 1 || media.Load() != 1 || dav.Load() != 0 {
+		t.Fatalf("api=%d inspect=%d DAV=%d", api.Load(), media.Load(), dav.Load())
+	}
+	files.InvalidateDisplayPath("/plain.mp4")
+	if _, known := h.propfindPlainSize("/raw", int64(len(body)), rule); known {
+		t.Fatal("legacy raw mirror survived confirmed invalidation")
+	}
+}
+
 func TestExplicitFSMetaRefreshInvalidatesConfirmedGeometry(t *testing.T) {
 	for _, endpoint := range []string{"get", "list"} {
 		t.Run(endpoint, func(t *testing.T) {
