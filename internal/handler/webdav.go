@@ -950,7 +950,7 @@ func (h *WebDAVHandler) handlePropfind(w http.ResponseWriter, r *http.Request, d
 	// Derived names may actually denote a literal collection. A single literal
 	// slash fallback is only attempted after 404, never on the file hot path.
 	// A request-local protected file binding must not escape to another object.
-	_, boundFile := r.Context().Value(verifiedFilenameRawPathKey{}).(verifiedFilenameRawPath)
+	_, boundFile := r.Context().Value(filenameRawPathKey{}).(filenameRawPath)
 	if resp.StatusCode == http.StatusNotFound && found && passwdInfo.EncName && !boundFile && !isDirRequest && !strings.HasSuffix(davPath, "/") {
 		fallbackPath := strings.TrimSuffix(davPath, "/") + "/"
 		fallbackURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+fallbackPath)

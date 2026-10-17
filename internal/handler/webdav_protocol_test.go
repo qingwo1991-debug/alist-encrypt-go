@@ -67,7 +67,7 @@ func TestLP0ConfirmedPropfindGeometryAndBinding(t *testing.T) {
 				t.Fatalf("listing corrupted geometry: %+v", fi)
 			}
 			r := httptest.NewRequest("PROPFIND", "http://proxy/dav/limited/original.mp4", nil)
-			rememberVerifiedFilenamePath(r, "/limited/original.mp4", raw)
+			rememberFilenamePath(r, "/limited/original.mp4", raw, true)
 			out = restoreBoundFilenameResponse(r, out, body)
 			if !bytes.Contains(out, []byte("original.mp4")) || !bytes.Contains(out, []byte(fmt.Sprintf("<D:getcontentlength>%d</D:getcontentlength>", tc.plain))) {
 				t.Fatalf("overlay corrupted length: %s", out)
