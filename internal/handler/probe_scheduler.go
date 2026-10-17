@@ -751,6 +751,11 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 			atomic.AddUint64(&ps.filesRawURLFetched, 1)
 		}
 	}
+	var confirmationEpoch, confirmationRevision *uint64
+	if repo, ok := ps.fileDAO.(playbackCacheRepository); ok && ps.cfg != nil && boundAlist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		epoch, revision := repo.PlaybackEpoch(item.file.DisplayPath), ps.cfg.RuntimeRevision()
+		confirmationEpoch, confirmationRevision = &epoch, &revision
+	}
 	if (ps.rawURLFetcher == nil || item.interest != nil) && (ps.cfg != nil || item.interest != nil && boundAlist.ServerHost != "") {
 		// Fallback: use built-in raw_url fetcher via alist fs/get. Trusted work
 		// uses its admission snapshot, never later configured credentials/origin.
@@ -768,7 +773,7 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 						if currentRule, found := ps.passwdDAO.FindByPath(item.file.DisplayPath); ps.cfg != nil && ps.passwdDAO != nil && found && filenameRuleScope(currentRule) == filenameRuleScope(item.file.PasswdInfo) && config.BuildAlistURL(boundAlist) == ps.cfg.GetAlistURL() {
 							request, _ := http.NewRequestWithContext(probeCtx, http.MethodGet, rawURLResult.RawURL, nil)
 							request.Header = authHeaders.Clone()
-							confirmedPlaybackMeta(decryptPlaybackRequest{Request: request, Config: ps.cfg, FileDAO: ps.fileDAO, StreamProxy: ps.stream, PasswdInfo: item.file.PasswdInfo, FileItem: item.file, TargetURL: rawURLResult.RawURL, ConsumerScenario: consumerScenarioWebDAV}, authHeaders, rawURLResult.Size)
+							confirmedPlaybackMeta(decryptPlaybackRequest{Request: request, Config: ps.cfg, FileDAO: ps.fileDAO, StreamProxy: ps.stream, PasswdInfo: item.file.PasswdInfo, FileItem: item.file, TargetURL: rawURLResult.RawURL, ConsumerScenario: consumerScenarioWebDAV, ExpectedGeometryEpoch: confirmationEpoch, ExpectedConfigRevision: confirmationRevision}, authHeaders, rawURLResult.Size)
 						}
 					}
 				} else {

@@ -20,6 +20,44 @@ import (
 	"github.com/alist-encrypt-go/internal/storage"
 )
 
+func TestOldLocatorAdmissionCannotPublishIntoNewEpoch(t *testing.T) {
+	cfg := config.LoadFromBaseDir(t.TempDir())
+	server := cfg.AlistServerSnapshot()
+	server.PlaybackProfile = config.PlaybackProfileTrustedLocal
+	if err := cfg.UpdateAlistServer(server); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := dao.NewFileDAO(store, cfg)
+	defer func() { files.Stop(); store.Close() }()
+	epoch, revision := files.PlaybackEpoch("/plain"), cfg.RuntimeRevision()
+	var hits atomic.Int32
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(500) }))
+	defer upstream.Close()
+	req := decryptPlaybackRequest{Request: httptest.NewRequest("GET", "/dav/plain", nil), Config: cfg, FileDAO: files, StreamProxy: proxy.NewStreamProxy(cfg), PasswdInfo: &config.PasswdInfo{Enable: true, Password: "pw", EncType: "aesctr"}, FileItem: FileItem{DisplayPath: "/plain", EncryptedPath: "/raw"}, TargetURL: upstream.URL, ConsumerScenario: consumerScenarioWebDAV, ExpectedGeometryEpoch: &epoch, ExpectedConfigRevision: &revision}
+	// The transport locator was selected, then a write/refresh invalidated it.
+	files.InvalidateDisplayPath("/plain")
+	if _, ok := confirmedPlaybackMeta(req, nil, 4096); ok {
+		t.Fatal("old admission accepted")
+	}
+	if hits.Load() != 0 {
+		t.Fatal("old locator was inspected")
+	}
+	rr := httptest.NewRecorder()
+	req.ResponseWriter = rr
+	executeDecryptPlayback(req)
+	if rr.Code != 503 || hits.Load() != 0 {
+		t.Fatalf("status=%d network=%d", rr.Code, hits.Load())
+	}
+	identity := playbackIdentity(cfg, cfg.GetAlistURL(), "/raw", req.PasswdInfo, nil)
+	if _, hit := files.GetConfirmedPlayback(identity); hit {
+		t.Fatal("old admission published into new epoch")
+	}
+}
+
 func TestConfirmedColdV2InspectionSixteenCallersAndWarmReuse(t *testing.T) {
 	header, err := encryption.BuildV2Header(encryption.EncTypeAESCTR, 4096, bytes.Repeat([]byte{7}, 16))
 	if err != nil {

@@ -365,6 +365,11 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		return
 	}
 
+	var expectedEpoch, expectedRevision *uint64
+	if repo, ok := h.fileDAO.(playbackCacheRepository); ok && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		epoch, revision := repo.PlaybackEpoch(davPath), h.cfg.RuntimeRevision()
+		expectedEpoch, expectedRevision = &epoch, &revision
+	}
 	// Convert display path to real encrypted path
 	realPath, pathMode := h.resolveRealPathForRequest(r, davPath, passwdInfo)
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
@@ -476,30 +481,32 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	}
 	trace.Logf(r.Context(), "webdav-get", "Proxying with decryption, target=%s", targetURL)
 	executeDecryptPlayback(decryptPlaybackRequest{
-		ResponseWriter:        w,
-		Request:               r,
-		Config:                h.cfg,
-		Probe:                 h.probe,
-		StreamProxy:           h.streamProxy,
-		FileDAO:               h.fileDAO,
-		SizeResolver:          h.sizeResolver,
-		StrategySel:           h.strategySel,
-		PasswdInfo:            passwdInfo,
-		FileItem:              fileItem,
-		TargetURL:             targetURL,
-		ProviderKey:           ProviderKey(targetURL, davPath),
-		Path:                  davPath,
-		InitialSize:           fileSize,
-		OverridePath:          davPath,
-		CompatKey:             buildRangeCompatStorageKey(passwdInfo, davPath),
-		ConsumerScenario:      consumerScenarioWebDAV,
-		FailureLogMsg:         "WebDAV GET decryption failed",
-		FinalPassthroughCount: &h.finalPassthroughCount,
-		SizeConflictCount:     &h.sizeConflictCount,
-		FirstFrameCount:       &h.firstFrameCount,
-		FirstFrameFallbacks:   &h.firstFrameFallbacks,
-		WarmupEnqueueCount:    &h.warmupEnqueueCount,
-		StatsRecorder:         h.statsRecorder,
+		ResponseWriter:         w,
+		Request:                r,
+		Config:                 h.cfg,
+		Probe:                  h.probe,
+		StreamProxy:            h.streamProxy,
+		FileDAO:                h.fileDAO,
+		SizeResolver:           h.sizeResolver,
+		StrategySel:            h.strategySel,
+		PasswdInfo:             passwdInfo,
+		FileItem:               fileItem,
+		TargetURL:              targetURL,
+		ExpectedGeometryEpoch:  expectedEpoch,
+		ExpectedConfigRevision: expectedRevision,
+		ProviderKey:            ProviderKey(targetURL, davPath),
+		Path:                   davPath,
+		InitialSize:            fileSize,
+		OverridePath:           davPath,
+		CompatKey:              buildRangeCompatStorageKey(passwdInfo, davPath),
+		ConsumerScenario:       consumerScenarioWebDAV,
+		FailureLogMsg:          "WebDAV GET decryption failed",
+		FinalPassthroughCount:  &h.finalPassthroughCount,
+		SizeConflictCount:      &h.sizeConflictCount,
+		FirstFrameCount:        &h.firstFrameCount,
+		FirstFrameFallbacks:    &h.firstFrameFallbacks,
+		WarmupEnqueueCount:     &h.warmupEnqueueCount,
+		StatsRecorder:          h.statsRecorder,
 	})
 }
 

@@ -26,23 +26,25 @@ type decryptPlaybackRequest struct {
 	ResponseWriter http.ResponseWriter
 	Request        *http.Request
 
-	Config           *config.Config
-	Probe            *ProbeScheduler
-	StreamProxy      ports.Streamer
-	FileDAO          ports.FileRepository
-	SizeResolver     *FileSizeResolver
-	StrategySel      *StrategySelector
-	PasswdInfo       *config.PasswdInfo
-	FileItem         FileItem
-	TargetURL        string
-	ProviderKey      string
-	Path             string
-	InitialSize      int64
-	OverridePath     string
-	CompatKey        string
-	ConsumerScenario string
-	FailureLogMsg    string
-	LogCategory      string
+	Config                 *config.Config
+	Probe                  *ProbeScheduler
+	StreamProxy            ports.Streamer
+	FileDAO                ports.FileRepository
+	SizeResolver           *FileSizeResolver
+	StrategySel            *StrategySelector
+	PasswdInfo             *config.PasswdInfo
+	FileItem               FileItem
+	TargetURL              string
+	ExpectedGeometryEpoch  *uint64
+	ExpectedConfigRevision *uint64
+	ProviderKey            string
+	Path                   string
+	InitialSize            int64
+	OverridePath           string
+	CompatKey              string
+	ConsumerScenario       string
+	FailureLogMsg          string
+	LogCategory            string
 
 	FinalPassthroughCount *uint64
 	SizeConflictCount     *uint64
@@ -91,6 +93,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			return
 		}
 		defer release()
+	}
+	if repo, ok := req.FileDAO.(playbackCacheRepository); ok && (req.ExpectedGeometryEpoch != nil && *req.ExpectedGeometryEpoch != repo.PlaybackEpoch(req.FileItem.DisplayPath) || req.ExpectedConfigRevision != nil && req.Config != nil && *req.ExpectedConfigRevision != req.Config.RuntimeRevision()) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+		return
 	}
 	fileSize := req.InitialSize
 	authHeaders := make(http.Header)
@@ -143,6 +150,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		if inspectedMeta, ok := confirmedPlaybackMeta(req, authHeaders, fileSize); ok {
 			r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
 			req.Request = r
+			metaLoaded = true
 			emptyContent = emptyPlaybackV3Meta(inspectedMeta)
 			if inspectedMeta.PlainSize > 0 || emptyContent {
 				fileSize = inspectedMeta.PlainSize
@@ -157,6 +165,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 	}
 
+	if managedGeometry && !metaLoaded {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Playback metadata unavailable or invalidated; retry", http.StatusServiceUnavailable)
+		return
+	}
 	// 2.2 hot-path short-circuit: prefer cached sizes (hot cache, meta store,
 	// fileDAO) via ResolveSingle and only fall through to a fresh upstream
 	// HEAD/Range when nothing is known yet. The previously-used
@@ -489,6 +502,10 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			if cached, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && cached != nil {
 				_, complete := cachedPlaybackMeta(cached, req.PasswdInfo.EncType)
 				probeFreshContent = !complete
+			}
+			if repo, ok := req.FileDAO.(playbackCacheRepository); ok && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+				epoch, revision := repo.PlaybackEpoch(req.FileItem.DisplayPath), req.Config.RuntimeRevision()
+				req.ExpectedGeometryEpoch, req.ExpectedConfigRevision = &epoch, &revision
 			}
 			freshRaw := fetchRawURL(r.Context(), req.Config.GetAlistURL(), req.FileItem.DisplayPath, req.FileItem.EncryptedPath, authCopy, req.FileDAO, 0)
 			if strings.TrimSpace(freshRaw.RawURL) != "" {

@@ -53,6 +53,9 @@ func confirmedPlaybackMeta(req decryptPlaybackRequest, headers http.Header, fall
 	origin, revision := req.Config.GetAlistURL(), req.Config.RuntimeRevision()
 	identity := playbackIdentity(req.Config, origin, req.FileItem.EncryptedPath, req.PasswdInfo, headers)
 	epoch := repo.PlaybackEpoch(req.FileItem.DisplayPath)
+	if req.ExpectedGeometryEpoch != nil && *req.ExpectedGeometryEpoch != epoch || req.ExpectedConfigRevision != nil && *req.ExpectedConfigRevision != revision {
+		return encryption.ContentMeta{}, false
+	}
 	if info, hit := repo.GetConfirmedPlayback(identity); hit {
 		if meta, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); complete {
 			return meta, true
@@ -123,7 +126,7 @@ func (h *WebDAVHandler) confirmPropfindGeometry(r *http.Request, display, raw st
 		if result.RawURL != "" {
 			target = result.RawURL
 		}
-		req := decryptPlaybackRequest{Request: r, Config: h.cfg, FileDAO: h.fileDAO, StreamProxy: h.streamProxy, PasswdInfo: rule, FileItem: FileItem{DisplayPath: display, EncryptedPath: raw}, TargetURL: target, ConsumerScenario: consumerScenarioWebDAV}
+		req := decryptPlaybackRequest{Request: r, Config: h.cfg, FileDAO: h.fileDAO, StreamProxy: h.streamProxy, PasswdInfo: rule, FileItem: FileItem{DisplayPath: display, EncryptedPath: raw}, TargetURL: target, ConsumerScenario: consumerScenarioWebDAV, ExpectedGeometryEpoch: &epoch, ExpectedConfigRevision: &revision}
 		meta, confirmed = confirmedPlaybackMeta(req, r.Header, observed)
 	}
 	if !confirmed || r.Context().Err() != nil || h.cfg.RuntimeRevision() != revision || h.cfg.GetAlistURL() != origin {
