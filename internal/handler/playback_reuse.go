@@ -40,9 +40,13 @@ func playbackIdentity(cfg *config.Config, origin, raw string, passwd *config.Pas
 	sum := sha256.Sum256([]byte(origin + "\x00" + raw + "\x00" + rule + "\x00" + profile + "\x00" + playbackScope(cfg, headers)))
 	return hex.EncodeToString(sum[:])
 }
+func managedPlaybackGeometry(req decryptPlaybackRequest) bool {
+	_, ok := req.FileDAO.(playbackCacheRepository)
+	return ok && req.Config != nil && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal && req.Request != nil && req.PasswdInfo != nil && req.FileItem.DisplayPath != "" && req.FileItem.EncryptedPath != ""
+}
 func confirmedPlaybackMeta(req decryptPlaybackRequest, headers http.Header, fallback int64) (encryption.ContentMeta, bool) {
 	repo, ok := req.FileDAO.(playbackCacheRepository)
-	if !ok || req.Config == nil || req.Request == nil || req.PasswdInfo == nil || req.FileItem.DisplayPath == "" || req.FileItem.EncryptedPath == "" {
+	if !ok || !managedPlaybackGeometry(req) {
 		return inspectPlaybackContentMeta(req, headers, fallback)
 	}
 	origin, revision := req.Config.GetAlistURL(), req.Config.RuntimeRevision()

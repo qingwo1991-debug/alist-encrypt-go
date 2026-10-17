@@ -442,7 +442,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	var fileSize int64
 	usedStrategy := StrategyFileInfoCache
 	confirmedGeometry := false
-	if repo, managed := h.fileDAO.(playbackCacheRepository); managed {
+	if repo, managed := h.fileDAO.(playbackCacheRepository); managed && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
 		identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), realPath, passwdInfo, r.Header)
 		if info, hit := repo.GetConfirmedPlayback(identity); hit {
 			if meta, complete := cachedPlaybackMeta(info, passwdInfo.EncType); complete {
@@ -457,7 +457,7 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		// Managed repositories inspect geometry once in the shared playback loader;
 		// avoid a separate serialized HEAD/size resolution before that inspection.
 		_, managed := h.fileDAO.(playbackCacheRepository)
-		if !managed {
+		if !managed || h.cfg.AlistServerSnapshot().PlaybackProfile != config.PlaybackProfileTrustedLocal {
 			if probed := h.fetchWebDAVFileSize(r, davPath, realPath); probed > 0 {
 				fileSize = probed
 				trace.Logf(r.Context(), "webdav-get", "Resolved size via PROPFIND fallback: %d", fileSize)

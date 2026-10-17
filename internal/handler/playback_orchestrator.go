@@ -109,7 +109,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	metaLoaded := false
 	emptyContent := false
-	_, managedGeometry := req.FileDAO.(playbackCacheRepository)
+	managedGeometry := managedPlaybackGeometry(req)
 	if !managedGeometry && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
 			if meta, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); complete {
@@ -725,7 +725,7 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	default:
 		return encryption.ContentMeta{}, false
 	}
-	if _, managed := req.FileDAO.(playbackCacheRepository); !managed && shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
+	if !managedPlaybackGeometry(req) && shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
 		return encryption.ContentMeta{}, false
 	}
 	candidateURLs := make([]string, 0, 3)

@@ -23,6 +23,9 @@ func playbackRawURLMatches(files ports.FileRepository, cfg *config.Config, raw s
 	if _, managed := files.(playbackCacheRepository); !managed {
 		return true
 	}
+	if cfg != nil && cfg.AlistServerSnapshot().PlaybackProfile != config.PlaybackProfileTrustedLocal && info != nil && info.RawURLIdentity == "" {
+		return true
+	}
 	return cfg != nil && info != nil && info.RawURLIdentity == playbackIdentity(cfg, cfg.GetAlistURL(), raw, nil, headers)
 }
 
@@ -36,15 +39,17 @@ func fetchRawURL(ctx context.Context, origin, display, raw string, headers http.
 	}
 	cfg := files.Config()
 	revision := uint64(0)
+	configOrigin := ""
 	if cfg != nil {
 		revision = cfg.RuntimeRevision()
+		configOrigin = cfg.GetAlistURL()
 	}
 	scope := playbackScope(cfg, headers)
 	identity := playbackIdentity(cfg, origin, raw, nil, headers)
 	epoch := repo.PlaybackEpoch(display)
 	fresh := func() (rawURLFetchResult, bool) {
 		if ttl > 0 {
-			if info, hit := files.Get(display); hit && info != nil && info.RawURLIdentity == identity && cachedRawURLFresh(info, ttl, scope) {
+			if info, hit := files.Get(display); hit && info != nil && (info.RawURLIdentity == identity || (info.RawURLIdentity == "" && scope != "trusted_local")) && cachedRawURLFresh(info, ttl, scope) {
 				return rawURLFetchResult{RawURL: info.RawURL, Size: info.CiphertextSize, Source: "cache"}, true
 			}
 		}
@@ -61,7 +66,7 @@ func fetchRawURL(ctx context.Context, origin, display, raw string, headers http.
 		}
 		work = context.WithValue(work, playbackTransportKey{}, playbackTransportAdmission{epoch: epoch, identity: identity, scope: scope, revision: revision})
 		result := fetchRawURLUnshared(work, origin, display, raw, headers, files, 0)
-		if work.Err() != nil || repo.PlaybackEpoch(display) != epoch || cfg != nil && (cfg.RuntimeRevision() != revision || cfg.GetAlistURL() != origin) {
+		if work.Err() != nil || repo.PlaybackEpoch(display) != epoch || cfg != nil && (cfg.RuntimeRevision() != revision || cfg.GetAlistURL() != configOrigin) {
 			return rawURLFetchResult{FailureReason: "raw_url_invalidated"}, nil
 		}
 		return result, nil
