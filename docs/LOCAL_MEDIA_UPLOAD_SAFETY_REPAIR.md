@@ -50,6 +50,13 @@
 
 SNOS第三元数据GID已complete，仅120386字节，不是视频完成；其payload子GID `699aafeb41ca9c47`已开始真实下载，总1563688960字节，采样411516928字节、约1.6MB/s，已对payload在MySQL补保护。该替代源体积小于原6.5GiB源，待完成后必须核验时长、分辨率、完整内容，不以小文件冒称同画质恢复。IPZZ增加另一1.95GiB中文字幕候选 `f37c45ee652cc8e3`，独立recovery目录、创建时即MySQL保护；旧8GiB候选保留。
 
+## PR101后续验证与恢复载荷进展
+
+- PR101修复PF重写映射丢失RawURLIdentity/GeometryIdentity，以及预留前未先检查远端不存在的问题；保留失败记录隔离，物理路径/类型/观察到的大小改变不得继承旧验收信息。
+- 首轮完整云矩阵发现新增测试按旧单返回值调用已升级的双返回值guard，已修正为同时检查invalid及lookupErr并更新同一PR。第二轮head `ccc4dff` 的Go全测、MySQL、Web两端、Flutter、probe均已通过，移动Go及并发性能仍在执行；尚未称完整门禁通过。
+- IPZZ高活跃替代源已取得真实视频载荷，子GID `c475560ef6703093`，已MySQL保护，随后仅选择精确`IPZZ-172_FHD_CH.mp4`，不选广告影片、APK、CHM、ZIP。该文件长度2061432089与旧云坏片相同，但同长不代表新源一定好，仍须piece完成、结构和全解码验收。
+- 最新采样SNOS有效任务1542848512/1563688960字节；IPZZ76103680/2063597568字节，两者均仍active，不能提前当完成。独立审查同时发现观察到文件大小变化后还需失效独立持久几何缓存，正补durable/epoch回归后继续同PR完整重验。
+
 ## 与原播放性能任务关系
 
 PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
