@@ -41,4 +41,6 @@
 
 ## 与原播放性能任务关系
 
-PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。缓存热读仍未达到目标，正继续定位，原性能计划未完成且保留device_unverified。
+PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
+
+续轮还将真实坏片头/索引映射到临时稀疏夹具（未伪称完整原件）：部署版校验器拒绝IPZZ夹具`invalid zero-sized MP4 metadata box`，拒绝SNOS夹具解码错误。SNOS第二恢复GID再次消失，已换第三候选`3dbc8f2cc6f5dae7`、目录`/downloads/recovery-snos397-alt-20261018`并保护，最近仍waiting/0字节。IPZZ仍active/0字节，无peer；未恢复完成。
