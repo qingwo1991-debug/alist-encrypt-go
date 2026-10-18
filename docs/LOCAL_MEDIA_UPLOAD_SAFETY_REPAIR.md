@@ -39,6 +39,17 @@
 - 恢复目录成品入库使用 `_recovered_20261018` 后缀，避免与已知损坏云文件同名冲突/历史误认。
 - 后续需真实piece下载完成→入库媒体验收→上传前全解码→分片验收→全量云端解密回读→实际播放验收；如片源无数据继续换源，不能冒报完成。
 
+## 外部清理旁路补漏与真实标签后端
+
+续轮检查实际cron发现两处可绕过上述门禁的旧脚本，已直接修正：
+
+- `/root/AI/cloud_dedup_clean.py`：原每20分钟仅按云端大小/分片累加删除本地、写成功历史。现main安全退出，停止这类删源与历史伪成功。cron保留但执行为非破坏性安全提示，实跑通过。
+- `/root/AI/download_watchdog.py`：原每10分钟直接删除mtime超过30分钟的分片，既无实际上传锁也无回读证明。现移除该清理段，删源只归上传器验收事务；AST检查main无os.remove/unlink/rmdir调用。全量解码/回读可超过30分钟，旧年龄清理尤其危险。
+
+恢复任务标签早先写入JSON，但统一管理器真实使用**MySQL**元数据后端，JSON标签不能保护该管理器清理。现通过create_download_client(load_config())给IPZZ/SNOS当前GID写入并回读manual_keep,pin。此为确认的保护配置错误；先前GID消失具体是哪条清理仍无独立日志归因，不冒充已证明。
+
+SNOS第三元数据GID已complete，仅120386字节，不是视频完成；其payload子GID `699aafeb41ca9c47`已开始真实下载，总1563688960字节，采样411516928字节、约1.6MB/s，已对payload在MySQL补保护。该替代源体积小于原6.5GiB源，待完成后必须核验时长、分辨率、完整内容，不以小文件冒称同画质恢复。IPZZ增加另一1.95GiB中文字幕候选 `f37c45ee652cc8e3`，独立recovery目录、创建时即MySQL保护；旧8GiB候选保留。
+
 ## 与原播放性能任务关系
 
 PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
