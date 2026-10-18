@@ -88,6 +88,14 @@ func prepareFilenameWrite(cfg *config.Config, repository interface{}, r *http.Re
 	if !ok {
 		return nil, "", fmt.Errorf("filename reservation store unavailable")
 	}
+	// Reject existing or uninspectable destinations before creating a durable
+	// reservation: a rejected write must not fence a pre-existing legacy read.
+	// This is not a lock; retain the post-reservation absence check below for
+	// concurrent local writers and destinations changed by an external writer.
+	status, _, err := filenameRemoteHead(r, cfg.GetAlistURL(), raw, client)
+	if err != nil || status != http.StatusNotFound {
+		return nil, "", fmt.Errorf("filename destination must be verified absent before reservation (status %d): %v", status, err)
+	}
 	rec, err := repo.ReserveFilename(storage.FilenameRecord{Origin: cfg.GetAlistURL(), EncryptedPath: raw, OriginalPath: displayPath, DisplayName: short, RuleFingerprint: filenameRuleScope(info), AuthScope: filenameRequestScope(r), CiphertextSize: plainSize + 32})
 	if err != nil {
 		return nil, "", fmt.Errorf("filename destination cannot be reserved: %w", err)
