@@ -71,6 +71,12 @@ SNOS真实下载文件ffprobe为1280×720、H264/AAC、时长8764.367秒（约14
 
 最新PR101 `fefe617` 的Go、MySQL、并发性能、移动Go、两端Web、Flutter、三架构AAR绑定和容器构建全部通过，原生Android最终门禁仍在运行，尚未合并。
 
+## PR101完整通过并已合并
+
+最终PR head `fefe6177efd06180333795b9a0acd33cdcd5790d` 完整云run `39091310626` 为success，包含最后原生Android实际桥接APK编译、三架构绑定和容器构建。确认全部通过后已将Draft转ready并squash合并，main提交`4f1668e25b09435c227c8dab9d2d33561e7839b9`；main完整发布run `39092090767`已启动，尚未完成，不提前切换未验收镜像。主机当前全部上传/回读23项和入库32项共55项回归再次通过。
+
+SNOS严格全解码仍执行中，读取位置已超过10亿字节；IPZZ有效载荷持续增长到约3亿字节，尚未完成。留存源、入库成品与临时timer状态仍按上节处理，不将PR通过等同媒体恢复成功。
+
 ## 与原播放性能任务关系
 
 PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
