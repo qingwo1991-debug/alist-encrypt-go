@@ -112,6 +112,9 @@ func (h *WebDAVHandler) hasInvalidProtectedFilenameScope(r *http.Request, displa
 	if !present {
 		return false, nil
 	}
+	if saved.Status == storage.FilenameFailed && h.bindRecoveredFilename(r, saved, revision) {
+		return false, nil
+	}
 	if !found || ep == nil || !ep.Enable || !ep.EncName || saved.Status != storage.FilenameComplete || saved.RuleFingerprint != filenameRuleScope(ep) {
 		return true, nil
 	}

@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +22,8 @@ type MediaIdentityResult struct {
 	Ext, MIME, ETag, LastModified, ValidatorScope string
 	UpstreamStatus                                int
 	Reusable                                      bool
+	// PrefixSHA256 binds bounded plaintext evidence; it is not a full-file digest.
+	PrefixSHA256 string
 }
 
 // InspectDecryptedMediaPrefix is optional and deliberately not part of proxy
@@ -144,6 +148,8 @@ func (s *StreamProxy) InspectDecryptedMediaPrefix(ctx context.Context, targetURL
 		}
 		plain := b[offset:]
 		cipher.Decrypt(plain)
+		prefixSum := sha256.Sum256(plain)
+		out.PrefixSHA256 = hex.EncodeToString(prefixSum[:])
 		out.Ext, out.MIME, _ = encryption.DetectVideoFormat(plain)
 		out.ETag, out.LastModified = resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
 		u, err := url.Parse(current)

@@ -235,6 +235,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
 		{
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
+			protected.POST("/recoverFilename", ginWrap(webdavHandler.HandleRecoverFilename))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
 			protected.Any("/updatePasswd", ginWrap(apiHandler.UpdatePasswd))
 			protected.Any("/updateUsername", ginWrap(apiHandler.UpdateUsername))
