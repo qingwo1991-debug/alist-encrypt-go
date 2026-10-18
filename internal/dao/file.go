@@ -471,14 +471,16 @@ func (d *FileDAO) Delete(path string) error {
 
 // SetEncPathMapping caches the display path to encrypted path mapping with file info
 func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
-	// Check if we already have this mapping with file info
+	// Only the exact same physical mapping may retain its file information.
+	// PROPFIND calls this before SetEncPathMappingWithInfo; mutating the old
+	// path in place would disguise replacement metadata as a same-object hit.
 	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok {
-		// Update encrypted path if needed (value copy: safe to mutate the copy)
-		if existing.EncryptedPath != encryptedPath {
-			existing.EncryptedPath = encryptedPath
-			d.pathCache.Set(&existing, 24*time.Hour)
+		if existing.EncryptedPath == encryptedPath {
+			return
 		}
-		return
+		// Replacing only PathEntry leaves durable confirmations and pending
+		// loaders alive. Fence them before publishing the new mapping.
+		d.InvalidateDisplayPath(displayPath)
 	}
 
 	// Create new entry
@@ -496,11 +498,30 @@ func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name string, size int64, isDir bool) {
 	var existing PathEntry
 	hasExisting := false
-	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok {
+	// Confirmed admissions cannot survive an observed object-size change.
+	// Listings may legitimately report either plaintext or ciphertext size.
+	sameAdmission := func(cached PathEntry) bool {
+		if cached.EncryptedPath != encryptedPath || cached.IsDir != isDir {
+			return false
+		}
+		if cached.GeometryIdentity == "" && cached.RawURLIdentity == "" || size <= 0 {
+			return true
+		}
+		return size == cached.Size || cached.CiphertextSize > 0 && size == cached.CiphertextSize || cached.HeaderLen > 0 && size == cached.Size+cached.HeaderLen
+	}
+	// A positively observed path/type/size change also invalidates the separate
+	// confirmed-playback repository (including Bolt) and fences pending loads.
+	// Clearing the path entry alone lets trusted playback resurrect old geometry.
+	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok && !sameAdmission(cached) {
+		d.InvalidateDisplayPath(displayPath)
+	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok && !sameAdmission(cached) {
+		d.InvalidateDisplayPath(cached.DisplayPath)
+	}
+	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok && sameAdmission(cached) {
 		existing = cached
 		hasExisting = true
 		size = mergeCachedPathSize(&existing, size, isDir, displayPath, encryptedPath, name)
-	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok {
+	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok && sameAdmission(cached) {
 		existing = cached
 		hasExisting = true
 		size = mergeCachedPathSize(&existing, size, isDir, displayPath, encryptedPath, name)
@@ -513,6 +534,12 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 		IsDir:         isDir,
 	}
 	if hasExisting {
+		// A listing refresh changes the display mapping, not the admission
+		// identity of an unchanged physical object. Losing these fences forces
+		// every subsequent GET to resolve a new signed locator and miss cache.
+		entry.GeometryIdentity = existing.GeometryIdentity
+		entry.GeometryConfirmedAt = existing.GeometryConfirmedAt
+		entry.RawURLIdentity = existing.RawURLIdentity
 		entry.CiphertextSize = existing.CiphertextSize
 		entry.ContentVersion = existing.ContentVersion
 		entry.HeaderLen = existing.HeaderLen

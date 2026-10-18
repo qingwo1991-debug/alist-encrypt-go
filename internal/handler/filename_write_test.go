@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -117,7 +118,7 @@ func TestProtectedFilenameMissingStoreAndAmbiguousHeadFailClosed(t *testing.T) {
 		t.Fatal("403 treated as absent")
 	}
 	if _, _, err := prepareFilenameWrite(cfg, d, r, ep, "/limited/movie.mp4", "/raw", 5, false, upstream.Client()); err == nil {
-		t.Fatal("failed reservation released")
+		t.Fatal("uninspectable destination unexpectedly allowed")
 	}
 	if _, _, err := prepareFilenameWrite(cfg, d, r, ep, "/limited/other.mp4", "/raw", 5, true, upstream.Client()); err == nil {
 		t.Fatal("resumed protected upload allowed")
@@ -195,6 +196,120 @@ func TestProtectedFilenameAPIListingRequiresFreshCompleteEnvelope(t *testing.T) 
 				t.Errorf("status=%d size=%d err=%v", status, size, err)
 			}
 		})
+	}
+}
+
+// A failed preflight has not admitted a write and must not create audit state
+// that later blocks an unrelated pre-existing legacy object.
+func TestProtectedFilenamePreflightRejectDoesNotReserve(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			requests := 0
+			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.WriteHeader(status)
+			}))
+			defer upstream.Close()
+			ep := &config.PasswdInfo{Password: "test", EncType: "aesctr", EncName: true, EncSuffix: ".bin", Enable: true, EncPath: []string{"/limited/*"}}
+			h, d := newTestAlistHandler(t, upstream.URL, ep)
+			t.Cleanup(h.Stop)
+			h.cfg.AlistServer.FilenameWriteLimits = map[string]int{"/limited": 100}
+			display := "/limited/legacy.mp4"
+			encoded, _, err := encryption.BoundEncryptedFilename(ep.Password, ep.EncType, "legacy.mp4", ep.EncSuffix, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := "/limited/" + encoded
+			d.SetEncPathMapping(display, raw)
+			r := httptest.NewRequest(http.MethodPut, "/dav"+display, nil)
+			if _, _, err := prepareFilenameWrite(h.cfg, d, r, ep, display, raw, 5, false, upstream.Client()); err == nil {
+				t.Fatal("existing or uninspectable destination admitted")
+			}
+			if _, found, err := d.GetFilenameReservation(h.cfg.GetAlistURL(), raw); err != nil || found {
+				t.Fatalf("rejected preflight created reservation: found=%v err=%v", found, err)
+			}
+			if got, ok := d.GetEncPath(display); !ok || got != raw {
+				t.Fatal("rejected write changed legacy mapping")
+			}
+			guard := &WebDAVHandler{cfg: h.cfg, fileDAO: d, passwdDAO: dao.NewPasswdDAO(nil, h.cfg)}
+			if invalid, lookupErr := guard.hasInvalidProtectedFilenameScope(r, display); lookupErr != nil || invalid {
+				t.Fatal("rejected preflight fenced the legacy read")
+			}
+			if requests != 1 {
+				t.Fatalf("unexpected requests=%d", requests)
+			}
+		})
+	}
+}
+
+func TestProtectedFilenameCancelledPreflightDoesNotReserve(t *testing.T) {
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("cancelled preflight unexpectedly reached upstream")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+	ep := &config.PasswdInfo{Password: "test", EncType: "aesctr", EncName: true, EncSuffix: ".bin", Enable: true, EncPath: []string{"/limited/*"}}
+	h, d := newTestAlistHandler(t, upstream.URL, ep)
+	t.Cleanup(h.Stop)
+	h.cfg.AlistServer.FilenameWriteLimits = map[string]int{"/limited": 100}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest(http.MethodPut, "/dav/limited/cancelled.mp4", nil).WithContext(ctx)
+	if _, _, err := prepareFilenameWrite(h.cfg, d, r, ep, "/limited/cancelled.mp4", "/raw", 5, false, upstream.Client()); err == nil {
+		t.Fatal("cancelled preflight admitted")
+	}
+	encoded, _, err := encryption.BoundEncryptedFilename(ep.Password, ep.EncType, "cancelled.mp4", ep.EncSuffix, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := d.GetFilenameReservation(h.cfg.GetAlistURL(), "/limited/"+encoded); err != nil || found {
+		t.Fatalf("cancelled preflight reserved destination: found=%v err=%v", found, err)
+	}
+}
+
+func TestProtectedFilenamePostReservationFailureRemainsFenced(t *testing.T) {
+	requests := 0
+	upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusNotFound)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer upstream.Close()
+	ep := &config.PasswdInfo{Password: "test", EncType: "aesctr", EncName: true, EncSuffix: ".bin", Enable: true, EncPath: []string{"/limited/*"}}
+	h, d := newTestAlistHandler(t, upstream.URL, ep)
+	t.Cleanup(h.Stop)
+	h.cfg.AlistServer.FilenameWriteLimits = map[string]int{"/limited": 100}
+	display := "/limited/raced.mp4"
+	encoded, _, err := encryption.BoundEncryptedFilename(ep.Password, ep.EncType, "raced.mp4", ep.EncSuffix, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "/limited/" + encoded
+	r := httptest.NewRequest(http.MethodPut, "/dav"+display, nil)
+	if _, _, err := prepareFilenameWrite(h.cfg, d, r, ep, display, raw, 5, false, upstream.Client()); err == nil {
+		t.Fatal("post-reservation existence change admitted")
+	}
+	rec, found, err := d.GetFilenameReservation(h.cfg.GetAlistURL(), raw)
+	if err != nil || !found || rec.Status != storage.FilenameFailed {
+		t.Fatalf("post-admission failure not retained: found=%v status=%s err=%v", found, rec.Status, err)
+	}
+	if _, err := d.ReserveFilename(rec); err == nil {
+		t.Fatal("existing failed reservation released")
+	}
+	d.SetEncPathMapping(display, raw)
+	guard := &WebDAVHandler{cfg: h.cfg, fileDAO: d, passwdDAO: dao.NewPasswdDAO(nil, h.cfg)}
+	for _, authorization := range []string{"", "Basic test", "Bearer test"} {
+		read := httptest.NewRequest(http.MethodGet, "/dav"+display, nil)
+		read.Header.Set("Authorization", authorization)
+		if invalid, lookupErr := guard.hasInvalidProtectedFilenameScope(read, display); lookupErr != nil || !invalid {
+			t.Fatal("failed reservation read guard relaxed")
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("absence must be checked both before and after reservation: requests=%d", requests)
 	}
 }
 
