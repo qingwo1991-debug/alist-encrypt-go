@@ -232,7 +232,7 @@ func TestProtectedFilenamePreflightRejectDoesNotReserve(t *testing.T) {
 				t.Fatal("rejected write changed legacy mapping")
 			}
 			guard := &WebDAVHandler{cfg: h.cfg, fileDAO: d, passwdDAO: dao.NewPasswdDAO(nil, h.cfg)}
-			if guard.hasInvalidProtectedFilenameScope(r, display) {
+			if invalid, lookupErr := guard.hasInvalidProtectedFilenameScope(r, display); lookupErr != nil || invalid {
 				t.Fatal("rejected preflight fenced the legacy read")
 			}
 			if requests != 1 {
@@ -304,7 +304,7 @@ func TestProtectedFilenamePostReservationFailureRemainsFenced(t *testing.T) {
 	for _, authorization := range []string{"", "Basic test", "Bearer test"} {
 		read := httptest.NewRequest(http.MethodGet, "/dav"+display, nil)
 		read.Header.Set("Authorization", authorization)
-		if !guard.hasInvalidProtectedFilenameScope(read, display) {
+		if invalid, lookupErr := guard.hasInvalidProtectedFilenameScope(read, display); lookupErr != nil || !invalid {
 			t.Fatal("failed reservation read guard relaxed")
 		}
 	}
