@@ -19,6 +19,64 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
+# Never emit XML names or text supplied by the server unless explicitly allowed.
+DAV_TAGS = frozenset(('multistatus', 'response', 'href', 'propstat', 'prop',
+                      'status', 'getcontentlength', 'resourcetype', 'collection',
+                      'error', 'responsedescription'))
+DAV_SUMMARY_CAP = 32
+
+
+def dav_summary(body, expected):
+    """Bounded structural diagnostics, with no hrefs, error text or property text."""
+    try:
+        root = ET.fromstring(body)
+    except (ET.ParseError, ValueError):
+        return {'xml_parse_ok': False}
+
+    def tag_name(element):
+        tag = element.tag
+        if tag.startswith('{DAV:}') and tag[6:] in DAV_TAGS:
+            return tag[6:]
+        return 'other'
+
+    def child_tags(element):
+        # The output vocabulary and count are fixed, even for hostile tag names.
+        return sorted({tag_name(child) for child in element})
+
+    def status_code(element):
+        words = (element.findtext('{DAV:}status') or '').split()
+        if (len(words) >= 2 and words[0] in ('HTTP/1.0', 'HTTP/1.1', 'HTTP/2', 'HTTP/2.0', 'HTTP/3', 'HTTP/3.0')
+                and re.fullmatch(r'[1-5][0-9]{2}', words[1])):
+            return int(words[1])
+        return None
+
+    responses = root.findall('{DAV:}response')
+    result = {'xml_parse_ok': True, 'root_tag': tag_name(root),
+              'child_tags': child_tags(root),
+              'responses_truncated': len(responses) > DAV_SUMMARY_CAP, 'responses': []}
+    for response in responses[:DAV_SUMMARY_CAP]:
+        try:
+            href = response.findtext('{DAV:}href') or ''
+            target_match = urllib.parse.unquote(urllib.parse.urlsplit(href).path) == expected
+        except ValueError:
+            target_match = False
+        propstats = response.findall('{DAV:}propstat')
+        item = {'target_match': target_match, 'status': status_code(response),
+                'child_tags': child_tags(response),
+                'propstats_truncated': len(propstats) > DAV_SUMMARY_CAP, 'propstats': []}
+        for propstat in propstats[:DAV_SUMMARY_CAP]:
+            prop = propstat.find('{DAV:}prop')
+            length = propstat.findtext('{DAV:}prop/{DAV:}getcontentlength')
+            # Bound numeric output too; arbitrary property values never survive.
+            length = length.strip() if length is not None else ''
+            numeric_length = int(length) if re.fullmatch(r'[0-9]{1,20}', length) else None
+            item['propstats'].append({'status': status_code(propstat), 'length': numeric_length,
+                                      'child_tags': child_tags(propstat),
+                                      'prop_child_tags': child_tags(prop) if prop is not None else []})
+        result['responses'].append(item)
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--base', default='http://127.0.0.1:5344')
@@ -101,6 +159,8 @@ def main():
     for sample in range(args.samples):
         rec, body = request(f'propfind_{sample}', 'PROPFIND', args.path, {'Depth': '0'})
         rec['dav_lengths'] = dav_length(body, args.path)
+        if len(rec['dav_lengths']) != 1 or rec['dav_lengths'][0] < 0:
+            rec['dav_summary'] = dav_summary(body, args.path)
         request(f'head_{sample}', 'HEAD', args.path, cap=0)
         rec, body = request(f'prefix_{sample}', 'GET', args.path, {'Range': 'bytes=0-1023'}, cap=1024)
         match = re.fullmatch(r'bytes 0-(\d+)/(\d+)', rec.get('headers', {}).get('Content-Range', ''))
@@ -118,6 +178,8 @@ def main():
         for path in (parent, parent + '/'):
             rec, body = request('directory', 'PROPFIND', path, {'Depth': '1'}, cap=16 * 1024 * 1024)
             rec['target_dav_lengths'] = dav_length(body, args.path)
+            if len(rec['target_dav_lengths']) != 1 or rec['target_dav_lengths'][0] < 0:
+                rec['dav_summary'] = dav_summary(body, args.path)
 
     groups = {}
     for prefix in ('propfind', 'head', 'prefix'):
@@ -136,7 +198,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
     print(json.dumps({'output': str(out), 'range_total': total, 'timings': groups,
-                      'results': [{k: v for k, v in r.items() if k in ('label', 'status', 'dav_lengths', 'target_dav_lengths', 'error_type')} for r in records]}, ensure_ascii=False))
+                      'results': [{k: v for k, v in r.items() if k in ('label', 'status', 'dav_lengths', 'target_dav_lengths', 'dav_summary', 'error_type')} for r in records]}, ensure_ascii=False))
 
 
 if __name__ == '__main__':
