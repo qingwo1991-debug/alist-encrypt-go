@@ -77,6 +77,14 @@ SNOS真实下载文件ffprobe为1280×720、H264/AAC、时长8764.367秒（约14
 
 SNOS严格全解码仍执行中，读取位置已超过10亿字节；IPZZ有效载荷持续增长到约3亿字节，尚未完成。留存源、入库成品与临时timer状态仍按上节处理，不将PR通过等同媒体恢复成功。
 
+## 当前恢复与服务状态更新（优先于以下历史快照）
+
+main发布`39092090767`已完整success，当前固定镜像`sha256:298029c63cd9fc22a9d4372a2ffb0a801df8f1902ba61895058c2ddb9f59b0a2`（4f1668e）已部署并通过100组混合和实际重启30组协议复验，详见部署验收文档。入库timer已恢复active/waiting；诊断临时下载路径链接不再保留，保留目录与movies成品仍在。
+
+旧诊断后台任务恢复会话后无最终报告，**不能算通过**。已于稳定保留路径重启全文件严格解码，记录将原子写入`.local-backup/snos-recovery-stable-decode.json`；现在仍执行中。真实本地seek 0/23/60/4380/8700秒均无错误解出1280×720 YUV420帧，每帧1382400字节，五个SHA256均不同，证明替代源这些时间点存在有效帧，不代表手机或云播放通过。完整源SHA256为`af85a9b3e7dcc4350c721d0b52731fd41154e44925bffe949a5d8b17b462f0d2`，1563588318字节，哈希前后dev/ino/size/mtime/ctime稳定；仅是本地身份，不冒充云端回读。
+
+只读核对新名`SNOS-397_recovered_20261018.mp4`在启用目标尚不存在，上传前不与旧对象重名。IPZZ正在实下约14.3亿/20.6亿字节，active，不按当前落盘大小冒称完成。现有55项安全回归全部通过。
+
 ## 与原播放性能任务关系
 
 PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
