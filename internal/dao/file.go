@@ -474,8 +474,13 @@ func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 	// Only the exact same physical mapping may retain its file information.
 	// PROPFIND calls this before SetEncPathMappingWithInfo; mutating the old
 	// path in place would disguise replacement metadata as a same-object hit.
-	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok && existing.EncryptedPath == encryptedPath {
-		return
+	if existing, ok := d.pathCache.GetByDispPath(displayPath); ok {
+		if existing.EncryptedPath == encryptedPath {
+			return
+		}
+		// Replacing only PathEntry leaves durable confirmations and pending
+		// loaders alive. Fence them before publishing the new mapping.
+		d.InvalidateDisplayPath(displayPath)
 	}
 
 	// Create new entry
@@ -503,6 +508,14 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 			return true
 		}
 		return size == cached.Size || cached.CiphertextSize > 0 && size == cached.CiphertextSize || cached.HeaderLen > 0 && size == cached.Size+cached.HeaderLen
+	}
+	// A positively observed path/type/size change also invalidates the separate
+	// confirmed-playback repository (including Bolt) and fences pending loads.
+	// Clearing the path entry alone lets trusted playback resurrect old geometry.
+	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok && !sameAdmission(cached) {
+		d.InvalidateDisplayPath(displayPath)
+	} else if cached, ok := d.pathCache.GetByEncPath(encryptedPath); ok && !sameAdmission(cached) {
+		d.InvalidateDisplayPath(cached.DisplayPath)
 	}
 	if cached, ok := d.pathCache.GetByDispPath(displayPath); ok && sameAdmission(cached) {
 		existing = cached
