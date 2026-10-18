@@ -19,6 +19,12 @@
 - 与旧镜像同对象prefix/middle/tail各1024字节SHA256一致。无秘密报告保存在`.local-backup/lp-final-mixed30-4f1668e.json`及`lp-final-mixed100-4f1668e.json`。
 - 保留原回滚镜像及备份，旧云文件未覆盖删除。SNOS720p替代成品已入库，全解码仍执行；IPZZ重下载继续。入库timer已恢复active，独立保留源未删。
 
+### 实际重启复验
+
+已对最终镜像执行`docker restart alist-encrypt`，随后30组95请求全部符合协议、所有单文件PF明文长度正确。PF p50/p95为7.312/17.745ms，HEAD为3.264/10.202ms，prefix为3.868/11.624ms。首个数据块在重启后冷填充耗时1862.343ms，不能拿暖p50掩盖首次网络成本；PF首请求19.630ms、HEAD3.873ms。仅凭客户端时延不能证明上游探测计数为0，不冒称完整持久几何命中审计。
+
+重启前100组和重启后30组各自所有prefix SHA256唯一且相同。现场空闲采样65.2MiB、CPU0.14%、11 PIDs，无意外重启；这只是采样，不是60分钟稳定内存结论。回滚镜像`alist-encrypt-go:rollback-b6f2f1b`仍可inspect，image ID为`556d8bd3996d4568fec22fec8369369feb352cee4451d8e041caebbf2cab3932`。偶发PF缺长度另开只读专项调查，不改写原异常。
+
 以下为第一轮历史记录，不代表当前仍运行628424f。
 
 ## 发布与部署
