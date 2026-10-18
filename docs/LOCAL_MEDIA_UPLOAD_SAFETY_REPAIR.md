@@ -63,6 +63,14 @@ SNOS payload现已raw status=complete且总字节相等，但aria2停止任务�
 
 SNOS真实下载文件ffprobe为1280×720、H264/AAC、时长8764.367秒（约146分钟）、大小1563588318字节。它是720p替代版本，不冒称原FHD版本。已启动独立全文件音视频严格解码，进程仍运行，未宣称解码通过、未删侧车、未授权删源。PR101最新head `fefe617` 已补独立持久几何缓存失效及epoch/restart回归；其Go全测等多数门禁通过，但移动Go及并发性能仍待完成。
 
+## 终态选择下载兼容补丁已实际部署
+
+新增32项入库回归全部通过，包括逐选中分块、未选广告缺块、共享边界、畸形位图、active不降级、metadata父子反向关系、真实`[METADATA]`占位符。真实SNOS只读快照已得到eligible=true且仅视频/字幕；部署后oneshot成功，实际产物`SNOS-397_recovered_20261018.mp4`及同名字幕已入movies，不覆盖旧云文件。
+
+保留了一份同盘硬链接在`/srv/dev-disk-by-uuid-9C2CFC3E2CFC154C/omv/recovery-retained-20261018/SNOS-397_720p.mp4`（不增加第二份视频存储）。全解码先于入库启动，诊断进程持有原inode继续读取；为完成其路径复核临时恢复原下载路径硬链接并暂时停止入库timer，避免重复搬移。**这是明确待恢复的临时服务状态**：收集解码结果后移除临时路径链接（保留隔离硬链接和movies成品）并重新启动downloads-to-movies.timer。移动/硬链接改变ctime，诊断原指纹可能不再相等；不能将解码通过擅自当成上传删源许可，上传器必须在最终路径重新验收。
+
+最新PR101 `fefe617` 的Go、MySQL、并发性能、移动Go、两端Web、Flutter、三架构AAR绑定和容器构建全部通过，原生Android最终门禁仍在运行，尚未合并。
+
 ## 与原播放性能任务关系
 
 PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
