@@ -130,7 +130,7 @@ func TestProtectedFilenamePropfindVerifiesExactResource(t *testing.T) {
 		name, href string
 		status     int
 		want       bool
-	}{{"matching", "/dav/limited/cipher%252f.bin", 207, true}, {"wrong-path", "/dav/limited/other.bin", 207, false}, {"foreign-origin", "https://foreign.example/dav/limited/cipher%252f.bin", 207, false}, {"revoked", "/dav/limited/cipher%252f.bin", 403, false}} {
+	}{{"matching", "/dav/limited/cipher%252f.bin", 207, true}, {"wrong-path", "/dav/limited/other.bin", 207, false}, {"foreign-origin", "https://foreign.example/dav/limited/cipher%252f.bin", 207, false}, {"revoked", "/dav/limited/cipher%252f.bin", 403, false}, {"stale", "/dav/limited/cipher%252f.bin", 404, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != "PROPFIND" || r.Header.Get("Depth") != "0" {

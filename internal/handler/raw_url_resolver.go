@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/errors"
 	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/ports"
@@ -38,7 +37,9 @@ func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displ
 			continue
 		}
 		result.Source = candidate.source
-		cacheResolvedRawURL(fileDAO, displayPath, realPath, result.RawURL, result.Size, rawURLAuthScope(authHeaders))
+		if !cachePlaybackRawURL(ctx, fileDAO, displayPath, realPath, result.RawURL, result.Size, authHeaders) {
+			return rawURLFetchResult{FailureReason: "raw_url_invalidated"}
+		}
 		return result
 	}
 	return rawURLFetchResult{FailureReason: errors.ReasonRawURLEmpty}
@@ -109,23 +110,6 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 		}
 	}
 	return rawURLFetchResult{FailureReason: errors.ReasonRawURLEmpty}
-}
-
-func cacheResolvedRawURL(fileDAO ports.FileRepository, displayPath, realPath, rawURL string, size int64, authScope string) {
-	if fileDAO == nil || strings.TrimSpace(displayPath) == "" || strings.TrimSpace(rawURL) == "" {
-		return
-	}
-	info := &dao.FileInfo{
-		Path:              displayPath,
-		EncryptedPath:     realPath,
-		RawURL:            rawURL,
-		RawURLAuthScope:   authScope,
-		UpstreamFetchedAt: time.Now(),
-	}
-	if size > 0 {
-		info.Size = size
-	}
-	_ = fileDAO.Set(info)
 }
 
 func responseSize(resp *http.Response) int64 {

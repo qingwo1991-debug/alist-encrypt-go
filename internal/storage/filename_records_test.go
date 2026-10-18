@@ -23,6 +23,30 @@ func filenameTestStore(t *testing.T) *Store {
 func filenameTestRecord() FilenameRecord {
 	return FilenameRecord{Origin: "http://alist:5244", EncryptedPath: "/enc/short.bin", OriginalPath: "/enc/long original.mp4", DisplayName: "short.bin", AuthScope: strings.Repeat("a", 64), RuleFingerprint: strings.Repeat("b", 64), CiphertextSize: 132}
 }
+func TestFilenameReadLookupDoesNotRelaxWriteScope(t *testing.T) {
+	s := filenameTestStore(t)
+	rec, err := s.ReserveFilename(filenameTestRecord())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.FindFilenameReservationForRead(rec.Origin, rec.OriginalPath)
+	if err != nil || !ok || got.EncryptedPath != rec.EncryptedPath {
+		t.Fatalf("read hint=%+v ok=%v err=%v", got, ok, err)
+	}
+	if _, ok, err := s.GetFilenameReservationByOriginal(rec.Origin, rec.OriginalPath, strings.Repeat("c", 64), rec.RuleFingerprint); err != nil || ok {
+		t.Fatal("read lookup relaxed write scope")
+	}
+	other := filenameTestRecord()
+	other.EncryptedPath = "/enc/different.bin"
+	other.AuthScope = strings.Repeat("c", 64)
+	if _, err := s.ReserveFilename(other); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.FindFilenameReservationForRead(rec.Origin, rec.OriginalPath); err == nil || ok {
+		t.Fatal("ambiguous original accepted")
+	}
+}
+
 func TestFilenameReservationDurability(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(dir)

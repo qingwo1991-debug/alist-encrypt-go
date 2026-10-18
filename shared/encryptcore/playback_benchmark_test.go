@@ -146,7 +146,7 @@ func BenchmarkPlaybackDecryptThroughput(b *testing.B) {
 	const plainSize = int64(4 * 1024 * 1024 * 1024)
 	nonce := bytes.Repeat([]byte{0x19}, 16)
 
-	for _, size := range []int{64 * 1024, 1024 * 1024} {
+	for _, size := range []int{64 * 1024, 256 * 1024, 1024 * 1024} {
 		b.Run(fmt.Sprintf("aesctr_v2_%dKiB", size/1024), func(b *testing.B) {
 			cipherImpl, err := NewCipherV2(EncTypeAESCTR, "playback-benchmark-throughput", plainSize, nonce)
 			if err != nil {

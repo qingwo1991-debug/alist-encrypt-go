@@ -270,13 +270,16 @@ func filenameRemotePropfind(r *http.Request, origin, raw string, client *http.Cl
 	u.Path = "/dav" + raw
 	u.RawPath = ""
 	u.RawQuery = ""
-	req, err := http.NewRequestWithContext(ctx, "PROPFIND", u.String(), strings.NewReader(`<d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/></d:prop></d:propfind>`))
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", u.String(), strings.NewReader(`<d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/><d:resourcetype/></d:prop></d:propfind>`))
 	if err != nil {
 		return 0, err
 	}
-	req.Header = r.Header.Clone()
-	for _, k := range []string{"Range", "Content-Length", "File-Path", "If-Match", "If-None-Match", "If", "Destination", "Overwrite", "Lock-Token"} {
-		req.Header.Del(k)
+	// Never borrow configured service credentials or forward unrelated mutation
+	// headers. This check proves access using only this caller's credentials.
+	for _, k := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
+		for _, value := range r.Header.Values(k) {
+			req.Header.Add(k, value)
+		}
 	}
 	req.Header.Set("Depth", "0")
 	req.Header.Set("Content-Type", "application/xml")
@@ -307,7 +310,10 @@ func filenameRemotePropfind(r *http.Request, origin, raw string, client *http.Cl
 			Props []struct {
 				Status string `xml:"DAV: status"`
 				Prop   struct {
-					Length string `xml:"DAV: getcontentlength"`
+					Length   string `xml:"DAV: getcontentlength"`
+					Resource struct {
+						Collection *struct{} `xml:"DAV: collection"`
+					} `xml:"DAV: resourcetype"`
 				} `xml:"DAV: prop"`
 			} `xml:"DAV: propstat"`
 		} `xml:"DAV: response"`
@@ -328,7 +334,7 @@ func filenameRemotePropfind(r *http.Request, origin, raw string, client *http.Cl
 		}
 		for _, ps := range entry.Props {
 			fields := strings.Fields(ps.Status)
-			if len(fields) < 2 || fields[1] != "200" {
+			if len(fields) < 2 || fields[1] != "200" || ps.Prop.Resource.Collection != nil {
 				continue
 			}
 			n, err := strconv.ParseInt(strings.TrimSpace(ps.Prop.Length), 10, 64)

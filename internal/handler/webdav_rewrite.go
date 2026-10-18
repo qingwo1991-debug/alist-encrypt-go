@@ -2,6 +2,8 @@ package handler
 
 import (
 	"bytes"
+	"encoding/xml"
+	"io"
 	"net/url"
 	"path"
 	"strconv"
@@ -11,26 +13,22 @@ import (
 	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
-// rewritePropfindBody decrypts filenames and adjusts V2 getcontentlength in a
+// rewritePropfindBody decrypts filenames and adjusts confirmed getcontentlength in a
 // single linear pass over a WebDAV multi-status XML body.
 //
-// It replaces the old two-pass sequence (decryptPropfindResponse then
-// adjustPropfindContentLengthForV2) and is byte-for-byte output-equivalent to
-// it, while walking the document only once. For very large listings (tens of
-// thousands of entries) this keeps the whole rewrite O(input) with no repeated
-// whole-document scans.
+// Name rewriting remains linear. A second block-local pass marks unknown
+// encrypted lengths unavailable rather than exposing ciphertext as plaintext.
 //
 // Recognized tag families (all case-variants D:/d:/no-prefix are supported):
 //   - <displayname>: value decrypted with the password when EncName is set;
 //   - <href>: /dav/ paths get the file name component decrypted, and the
 //     display→encrypted mapping is recorded in the DAO;
-//   - <getcontentlength>: for the file in the current <response> block, if the
-//     cached metadata confirms ContentVersion==2, subtract the header size;
+//   - <getcontentlength>: reuse confirmed plaintext size when the current
+//     response agrees with the observed container's ciphertext size;
 //   - <response> / </response>: delimit blocks and reset the tracked path.
 //
 // Any other tag is copied through verbatim.
 func (h *WebDAVHandler) rewritePropfindBody(body []byte, passwdInfo *config.PasswdInfo) []byte {
-	headerSize := encryption.ContentHeaderSize()
 	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
 	encryptNames := passwdInfo != nil && passwdInfo.EncName
 
@@ -190,11 +188,9 @@ func (h *WebDAVHandler) rewritePropfindBody(body []byte, passwdInfo *config.Pass
 
 		case kindLength:
 			out := value
-			if headerSize > 0 && activePath != "" && h.fileDAO != nil {
-				if fi, ok := h.fileDAO.Get(activePath); ok && fi != nil && fi.ContentVersion == 2 {
-					if size, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && size > headerSize {
-						out = strconv.FormatInt(size-headerSize, 10)
-					}
+			if size, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+				if plain, ok := h.propfindPlainSize(activePath, size, passwdInfo); ok {
+					out = strconv.FormatInt(plain, 10)
 				}
 			}
 			b.WriteString(oi.open)
@@ -205,5 +201,116 @@ func (h *WebDAVHandler) rewritePropfindBody(body []byte, passwdInfo *config.Pass
 		pos = valueStart + relEnd + len(oi.close)
 	}
 
-	return b.Bytes()
+	return h.hideUnknownPropfindLengths(b.Bytes(), body, passwdInfo)
+}
+
+// Unknown encrypted lengths are unavailable DAV properties, not ciphertext
+// advertised as plaintext. Preserve collection properties and do not probe each
+// member of a Depth:1 listing. A later Depth:0/GET confirms the container.
+func (h *WebDAVHandler) hideUnknownPropfindLengths(body, original []byte, rule *config.PasswdInfo) []byte {
+	if rule == nil || !rule.Enable {
+		return body
+	}
+	// Token offsets preserve the upstream XML byte-for-byte except for the
+	// length properties. Namespace prefixes and attributes are not fixed DAV
+	// spellings; regexes limited to D: silently expose ciphertext for valid XML.
+	entries := h.parsePropfindEntries(original)
+	decoder := xml.NewDecoder(bytes.NewReader(body))
+	var out bytes.Buffer
+	cursor, index := 0, -1
+	inResponse, sawLength, known := false, false, false
+	var plain int64
+	for {
+		start := int(decoder.InputOffset())
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return body
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "response" && (t.Name.Space == "DAV:" || t.Name.Space == "") {
+				index++
+				inResponse, sawLength, known = index < len(entries), false, false
+				if inResponse && !entries[index].IsDir {
+					plain, known = h.propfindPlainSize(entries[index].Path, entries[index].Size, rule)
+				}
+			}
+			if !inResponse || entries[index].IsDir || t.Name.Local != "getcontentlength" || (t.Name.Space != "DAV:" && t.Name.Space != "") {
+				continue
+			}
+			openingEnd := int(decoder.InputOffset())
+			var ignored string
+			if err := decoder.DecodeElement(&ignored, &t); err != nil {
+				return body
+			}
+			out.Write(body[cursor:start])
+			if known {
+				opening := body[start:openingEnd]
+				if !bytes.HasSuffix(opening, []byte("/>")) {
+					out.Write(opening)
+					out.WriteString(strconv.FormatInt(plain, 10))
+					end := int(decoder.InputOffset())
+					closing := bytes.LastIndex(body[openingEnd:end], []byte("</"))
+					if closing < 0 {
+						return body
+					}
+					out.Write(body[openingEnd+closing : end])
+				} else {
+					out.WriteString(`<D:getcontentlength xmlns:D="DAV:">`)
+					out.WriteString(strconv.FormatInt(plain, 10))
+					out.WriteString(`</D:getcontentlength>`)
+				}
+			}
+			cursor = int(decoder.InputOffset())
+			sawLength = true
+		case xml.EndElement:
+			if t.Name.Local == "response" && inResponse && (t.Name.Space == "DAV:" || t.Name.Space == "") {
+				if sawLength && !known && !entries[index].IsDir {
+					out.Write(body[cursor:start])
+					out.WriteString(`<D:propstat xmlns:D="DAV:"><D:prop><D:getcontentlength/></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>`)
+					cursor = start
+				}
+				inResponse = false
+			}
+		}
+	}
+	out.Write(body[cursor:])
+	return out.Bytes()
+}
+
+// A DAV listing reports transport size, not container geometry. Only reuse an
+// observed container when its ciphertext length agrees; never infer a version,
+// nonce, chunk size or KDF from a directory entry (and never subtract twice).
+func (h *WebDAVHandler) propfindPlainSize(rawPath string, reported int64, rules ...*config.PasswdInfo) (int64, bool) {
+	if h.fileDAO == nil || rawPath == "" {
+		return 0, false
+	}
+	fi, ok := h.fileDAO.Get(rawPath)
+	if !ok || fi == nil || fi.IsDir || fi.Size < 0 {
+		return 0, false
+	}
+	if fi.ContentVersion < encryption.ContentVersionV1 || fi.ContentVersion > encryption.ContentVersionV3 {
+		return 0, false
+	}
+	if h.cfg != nil && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		if repo, managed := h.fileDAO.(playbackCacheRepository); managed {
+			var rule *config.PasswdInfo
+			if len(rules) > 0 {
+				rule = rules[0]
+			}
+			identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), rawPath, rule, nil)
+			confirmed, hit := repo.GetConfirmedPlayback(identity)
+			if !hit || confirmed == nil || confirmed.EncryptedPath != rawPath || confirmed.CiphertextSize != reported {
+				return 0, false
+			}
+			return confirmed.Size, true
+		}
+	}
+	if fi.CiphertextSize > 0 && reported == fi.CiphertextSize {
+		return fi.Size, true
+	}
+	return 0, false
 }

@@ -306,8 +306,9 @@ func TestFetchRawURLFallsBackToFsLinkWhenFsGetReturnsEmpty(t *testing.T) {
 	if !ok || info == nil {
 		t.Fatal("expected cache entry for display path")
 	}
-	if info.RawURL != "https://cdn.example/from-link" || info.Size != 8192 {
-		t.Fatalf("cached raw_url=%q size=%d", info.RawURL, info.Size)
+	// Locator responses establish transport length, not decrypted geometry.
+	if info.RawURL != "https://cdn.example/from-link" || info.CiphertextSize != 8192 || info.Size != 0 || info.ContentVersion != 0 {
+		t.Fatalf("cached transport=%+v", info)
 	}
 }
 
@@ -369,8 +370,9 @@ func TestFetchRawURLFallsBackToFinalRedirectWhenAPIsReturnEmpty(t *testing.T) {
 	if !ok || info == nil {
 		t.Fatal("expected cache entry for display path")
 	}
-	if info.RawURL != finalRawURL || info.Size != 8192 {
-		t.Fatalf("cached raw_url=%q size=%d", info.RawURL, info.Size)
+	// A redirected HEAD also cannot assert plaintext size or container version.
+	if info.RawURL != finalRawURL || info.CiphertextSize != 8192 || info.Size != 0 || info.ContentVersion != 0 {
+		t.Fatalf("cached transport=%+v", info)
 	}
 }
 

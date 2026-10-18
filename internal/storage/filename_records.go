@@ -146,7 +146,7 @@ func (s *Store) ReserveFilename(rec FilenameRecord) (FilenameRecord, error) {
 		if old := idx.Get(reverse); old != nil {
 			return ErrFilenameReserved
 		}
-		if err = b.Put(k, raw); err != nil {
+		if err = putFilenamePrimary(tx, k, raw); err != nil {
 			return err
 		}
 		return idx.Put(reverse, k)
@@ -162,6 +162,7 @@ func (s *Store) GetFilenameReservation(origin, encryptedPath string) (FilenameRe
 func (s *Store) GetFilenameReservationByOriginal(origin, originalPath, authScope, ruleFingerprint string) (FilenameRecord, bool, error) {
 	return s.getFilenameReservation(origin, originalPath, authScope, ruleFingerprint, true)
 }
+
 func (s *Store) getFilenameReservation(origin, p, auth, rule string, reverse bool) (FilenameRecord, bool, error) {
 	var rec FilenameRecord
 	found := false
@@ -235,7 +236,7 @@ func (s *Store) FinishFilenameReservation(origin, encryptedPath, token, status s
 		if err != nil {
 			return err
 		}
-		return b.Put(k, raw)
+		return putFilenamePrimary(tx, k, raw)
 	})
 }
 func validMediaAlias(rec VerifiedMediaAlias) bool {

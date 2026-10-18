@@ -3,8 +3,10 @@ package handler
 import (
 	"context"
 	"fmt"
+	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,23 +26,25 @@ type decryptPlaybackRequest struct {
 	ResponseWriter http.ResponseWriter
 	Request        *http.Request
 
-	Config           *config.Config
-	Probe            *ProbeScheduler
-	StreamProxy      ports.Streamer
-	FileDAO          ports.FileRepository
-	SizeResolver     *FileSizeResolver
-	StrategySel      *StrategySelector
-	PasswdInfo       *config.PasswdInfo
-	FileItem         FileItem
-	TargetURL        string
-	ProviderKey      string
-	Path             string
-	InitialSize      int64
-	OverridePath     string
-	CompatKey        string
-	ConsumerScenario string
-	FailureLogMsg    string
-	LogCategory      string
+	Config                 *config.Config
+	Probe                  *ProbeScheduler
+	StreamProxy            ports.Streamer
+	FileDAO                ports.FileRepository
+	SizeResolver           *FileSizeResolver
+	StrategySel            *StrategySelector
+	PasswdInfo             *config.PasswdInfo
+	FileItem               FileItem
+	TargetURL              string
+	ExpectedGeometryEpoch  *uint64
+	ExpectedConfigRevision *uint64
+	ProviderKey            string
+	Path                   string
+	InitialSize            int64
+	OverridePath           string
+	CompatKey              string
+	ConsumerScenario       string
+	FailureLogMsg          string
+	LogCategory            string
 
 	FinalPassthroughCount *uint64
 	SizeConflictCount     *uint64
@@ -58,6 +62,15 @@ type StatsRecorder interface {
 	RecordPlayback(ev PlaybackEvent)
 	// RecordDeletion 记录一次文件删除。path 为展示路径（明文）。
 	RecordDeletion(path string)
+}
+
+func writeTrustedPlaybackHead(w http.ResponseWriter, name string, size int64) {
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Accept-Ranges", "bytes")
+	if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func executeDecryptPlayback(req decryptPlaybackRequest) {
@@ -81,6 +94,21 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 		defer release()
 	}
+	if repo, ok := req.FileDAO.(playbackCacheRepository); ok && req.Config != nil && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		if req.ExpectedGeometryEpoch == nil {
+			epoch := repo.PlaybackEpoch(req.FileItem.DisplayPath)
+			req.ExpectedGeometryEpoch = &epoch
+		}
+		if req.ExpectedConfigRevision == nil {
+			revision := req.Config.RuntimeRevision()
+			req.ExpectedConfigRevision = &revision
+		}
+	}
+	if repo, ok := req.FileDAO.(playbackCacheRepository); ok && (req.ExpectedGeometryEpoch != nil && *req.ExpectedGeometryEpoch != repo.PlaybackEpoch(req.FileItem.DisplayPath) || req.ExpectedConfigRevision != nil && req.Config != nil && *req.ExpectedConfigRevision != req.Config.RuntimeRevision()) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+		return
+	}
 	fileSize := req.InitialSize
 	authHeaders := make(http.Header)
 	if auth := r.Header.Get("Authorization"); auth != "" {
@@ -89,7 +117,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		authHeaders.Set("Cookie", cookie)
 	}
-	rawURLScope := rawURLAuthScope(authHeaders)
+	rawURLScope := playbackScope(req.Config, authHeaders)
 	// This orchestration boundary has already selected an authorized playback
 	// route. Preserve the original caller scope even when provider headers differ;
 	// an explicit empty scope represents an authorized anonymous route.
@@ -98,7 +126,8 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	metaLoaded := false
 	emptyContent := false
-	if req.FileDAO != nil && req.FileItem.DisplayPath != "" {
+	managedGeometry := managedPlaybackGeometry(req)
+	if !managedGeometry && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
 			if meta, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); complete {
 				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
@@ -128,17 +157,29 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		}
 	}
 	if !metaLoaded {
-		if inspectedMeta, ok := inspectPlaybackContentMeta(req, authHeaders, fileSize); ok {
+		if inspectedMeta, ok := confirmedPlaybackMeta(req, authHeaders, fileSize); ok {
 			r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
 			req.Request = r
+			metaLoaded = true
 			emptyContent = emptyPlaybackV3Meta(inspectedMeta)
 			if inspectedMeta.PlainSize > 0 || emptyContent {
 				fileSize = inspectedMeta.PlainSize
 			}
-			cachePlaybackContentMeta(req, inspectedMeta)
+			if !managedGeometry {
+				cachePlaybackContentMeta(req, inspectedMeta)
+			}
+			if r.Method == http.MethodHead && alist.PlaybackProfile == config.PlaybackProfileTrustedLocal {
+				writeTrustedPlaybackHead(w, req.FileItem.FileName, inspectedMeta.PlainSize)
+				return
+			}
 		}
 	}
 
+	if managedGeometry && !metaLoaded {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Playback metadata unavailable or invalidated; retry", http.StatusServiceUnavailable)
+		return
+	}
 	// 2.2 hot-path short-circuit: prefer cached sizes (hot cache, meta store,
 	// fileDAO) via ResolveSingle and only fall through to a fresh upstream
 	// HEAD/Range when nothing is known yet. The previously-used
@@ -200,6 +241,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			return false
 		}
 		responseStarted = true
+		// A locally rejected client range is a completed protocol response,
+		// not failed decryption or evidence that valid warm state is stale.
+		if result.StatusCode == http.StatusRequestedRangeNotSatisfiable && result.NoLearning && result.FailureReason == "range_invalid" {
+			return true
+		}
 		reason := result.FailureReason
 		if reason == "" {
 			reason = "stream_error"
@@ -242,6 +288,9 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 		})
 	}
 	trySingle := func(size int64) (bool, errors.FailureReason, error) {
+		if !playbackAdmissionCurrent(req) {
+			return false, errors.FailureReason("playback_admission_changed"), fmt.Errorf("playback object changed; new request required")
+		}
 		log.Info().
 			Str("category", "playback").
 			Str("consumer_scenario", req.ConsumerScenario).
@@ -464,7 +513,7 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	if shouldRetryFreshResolve(lastFailure, firstFrameHint, req.ConsumerScenario) {
 		logDecryptFailure(req, strategy, lastFailure, true)
 		retryWithFreshState := false
-		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP) &&
+		if (req.ConsumerScenario == consumerScenarioRedirect || req.ConsumerScenario == consumerScenarioHTTP || req.ConsumerScenario == consumerScenarioWebDAV) &&
 			req.FileDAO != nil && req.FileItem.DisplayPath != "" && req.Config != nil {
 			authCopy := cloneHeader(authHeaders)
 			probeFreshContent := true
@@ -472,7 +521,19 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				_, complete := cachedPlaybackMeta(cached, req.PasswdInfo.EncType)
 				probeFreshContent = !complete
 			}
+			if repo, ok := req.FileDAO.(playbackCacheRepository); ok && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+				if req.ExpectedGeometryEpoch == nil || req.ExpectedConfigRevision == nil || *req.ExpectedGeometryEpoch != repo.PlaybackEpoch(req.FileItem.DisplayPath) || *req.ExpectedConfigRevision != req.Config.RuntimeRevision() {
+					w.Header().Set("Retry-After", "1")
+					http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+					return
+				}
+			}
 			freshRaw := fetchRawURL(r.Context(), req.Config.GetAlistURL(), req.FileItem.DisplayPath, req.FileItem.EncryptedPath, authCopy, req.FileDAO, 0)
+			if !playbackAdmissionCurrent(req) {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
+				return
+			}
 			if strings.TrimSpace(freshRaw.RawURL) != "" {
 				retryWithFreshState = !strings.EqualFold(req.TargetURL, freshRaw.RawURL)
 				req.TargetURL = freshRaw.RawURL
@@ -484,15 +545,19 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 				// suppress detection, then attach the new nonce before retrying.
 				if probeFreshContent {
 					inspectReq := req
-					inspectReq.FileDAO = nil
-					if inspectedMeta, ok := inspectPlaybackContentMeta(inspectReq, authHeaders, freshRaw.Size); ok {
+					if !managedGeometry {
+						inspectReq.FileDAO = nil
+					}
+					if inspectedMeta, ok := confirmedPlaybackMeta(inspectReq, authHeaders, freshRaw.Size); ok {
 						r = r.WithContext(proxy.WithContentMeta(r.Context(), inspectedMeta))
 						req.Request = r
 						metaLoaded = true
 						if inspectedMeta.PlainSize > 0 {
 							fileSize = inspectedMeta.PlainSize
 						}
-						cachePlaybackContentMeta(req, inspectedMeta)
+						if !managedGeometry {
+							cachePlaybackContentMeta(req, inspectedMeta)
+						}
 						retryWithFreshState = true
 					}
 				}
@@ -703,7 +768,7 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 	default:
 		return encryption.ContentMeta{}, false
 	}
-	if shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
+	if !managedPlaybackGeometry(req) && shouldSkipHTTPContentMetaInspection(req, fallbackSize) {
 		return encryption.ContentMeta{}, false
 	}
 	candidateURLs := make([]string, 0, 3)
@@ -725,6 +790,15 @@ func inspectPlaybackContentMeta(req decryptPlaybackRequest, authHeaders http.Hea
 				appendCandidate(httputil.BuildTargetURLWithQuery(alistURL, "/d"+req.FileItem.EncryptedPath, ""))
 				appendCandidate(httputil.BuildTargetURLWithQuery(alistURL, "/dav"+req.FileItem.EncryptedPath, ""))
 			}
+		}
+	}
+	// The trusted-local warm/cold fast route is already the selected locator.
+	// Inspect it once before launching fallback alternatives; healthy cold loads
+	// must not download the same header through /dav, /d and CDN in parallel.
+	if req.Config != nil && req.Config.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		result := req.StreamProxy.InspectEncryptedContentResult(req.Request.Context(), req.TargetURL, authHeaders, req.PasswdInfo, fallbackSize)
+		if result.Confirmed {
+			return result.Meta, true
 		}
 	}
 	authVariants := buildProbeAuthVariants(req.Config, authHeaders)
@@ -837,12 +911,12 @@ func shouldSkipHTTPContentMetaInspection(req decryptPlaybackRequest, fallbackSiz
 }
 
 func cachePlaybackContentMeta(req decryptPlaybackRequest, meta encryption.ContentMeta) {
-	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || (!meta.IsV2() && !meta.IsV3()) || (meta.PlainSize <= 0 && !emptyPlaybackV3Meta(meta)) {
+	if req.FileDAO == nil || req.FileItem.DisplayPath == "" || (meta.Version != encryption.ContentVersionV1 && !meta.IsV2() && !meta.IsV3()) || (meta.PlainSize <= 0 && !emptyPlaybackV3Meta(meta)) {
 		return
 	}
 	authScope := "anon"
 	if req.Request != nil {
-		authScope = rawURLAuthScope(req.Request.Header)
+		authScope = playbackScope(req.Config, req.Request.Header)
 	}
 	info := &dao.FileInfo{
 		Path:              req.FileItem.DisplayPath,
@@ -988,7 +1062,7 @@ func invalidatePlaybackState(req decryptPlaybackRequest, reason errors.FailureRe
 	case "upstream_4xx":
 		authScope := "anon"
 		if req.Request != nil {
-			authScope = rawURLAuthScope(req.Request.Header)
+			authScope = playbackScope(req.Config, req.Request.Header)
 		}
 		req.FileDAO.InvalidateRawURLForScope(req.FileItem.DisplayPath, authScope)
 	case "range_unsatisfiable", "decrypt_validation_failed", "timeout":

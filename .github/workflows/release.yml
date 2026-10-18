@@ -47,6 +47,9 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Check core release artifact selection
+        run: python3 tools/test_release_artifact_selection.py
+
       - name: Run unit tests
         run: |
           go test ./...
@@ -92,8 +95,9 @@ jobs:
           mkdir -p performance-results
           go version > performance-results/environment.txt
           lscpu >> performance-results/environment.txt
-          (cd shared/encryptcore && go test -mod=readonly -run '^$' -bench 'Benchmark(V3|Playback)' -benchmem -benchtime=200ms -count=3 ./...) | tee performance-results/encryptcore.txt
+          (cd shared/encryptcore && go test -mod=readonly -run '^$' -bench 'Benchmark(V3|Playback|LocalPlayback)' -benchmem -benchtime=200ms -count=3 ./...) | tee performance-results/encryptcore.txt
           go test -mod=readonly -run '^$' -bench 'Benchmark(Decrypted|Probe)' -benchmem -benchtime=200ms -count=3 ./internal/proxy ./internal/handler | tee performance-results/proxy-handler.txt
+          go test -mod=readonly -run '^$' -bench '^BenchmarkFilenameReadIndex$' -benchmem -benchtime=100x -count=1 ./internal/storage | tee performance-results/filename-read-index.txt
       - name: Upload performance results
         if: always()
         uses: actions/upload-artifact@v4
@@ -151,7 +155,7 @@ jobs:
       - name: Verify V3 metadata on real MySQL
         env:
           MYSQL_TEST_DSN: root:integration-only@tcp(127.0.0.1:3306)/metadata_test?parseTime=true
-        run: go test -mod=readonly -timeout 5m -run '^TestMySQLV3MetadataIntegration$' -v ./internal/storage/mysqlstore
+        run: go test -mod=readonly -timeout 5m -run '^TestMySQL(V3Metadata|ListFileMeta)Integration$' -v ./internal/storage/mysqlstore
 
   test-mobile-go:
     runs-on: ubuntu-latest
@@ -760,9 +764,18 @@ jobs:
       contents: write
 
     steps:
-      - name: Download binary artifacts
+      # Download only publishable binary ZIPs. Buildx .dockerbuild records are
+      # not ZIP artifacts and must never reach download-artifact extraction.
+      - name: Download server binary artifacts
         uses: actions/download-artifact@v7
         with:
+          pattern: alist-encrypt-go-*
+          path: release-artifacts
+
+      - name: Download encryption tool artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: encrypt-tool-*
           path: release-artifacts
 
       - name: List release artifacts

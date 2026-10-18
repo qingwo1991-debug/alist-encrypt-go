@@ -135,7 +135,9 @@ func TestExportStrategyAndRangeWithoutMySQL(t *testing.T) {
 		var resp struct {
 			Code int `json:"code"`
 			Data struct {
-				Items []interface{} `json:"items"`
+				Items     []interface{} `json:"items"`
+				Status    string        `json:"status"`
+				Supported bool          `json:"supported"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
@@ -143,6 +145,9 @@ func TestExportStrategyAndRangeWithoutMySQL(t *testing.T) {
 		}
 		if resp.Code != 0 {
 			t.Fatalf("%s code=%d, want 0", path, resp.Code)
+		}
+		if resp.Data.Status != "unsupported" || resp.Data.Supported {
+			t.Fatalf("%s must disclose unsupported Bolt export", path)
 		}
 		if len(resp.Data.Items) != 0 {
 			t.Fatalf("%s items=%d, want empty", path, len(resp.Data.Items))

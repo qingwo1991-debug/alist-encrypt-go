@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -19,6 +20,30 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Reject a known plaintext EOF locally, before a provider can disguise an
+// unsatisfiable encrypted range as a missing object (404).
+func rejectKnownUnsatisfiableRange(w http.ResponseWriter, r *http.Request, header string, size int64, meta encryption.ContentMeta) *StreamOutcome {
+	if r.Method != http.MethodGet || header == "" || (size <= 0 && !isEmptyV3Meta(meta)) {
+		return nil
+	}
+	parsed, err := httputil.ParseRange(header, size)
+	_, unsatisfiable := err.(*httputil.RequestedRangeNotSatisfiable)
+	if !unsatisfiable && !(size == 0 && isEmptyV3Meta(meta) && err == nil && parsed != nil) {
+		return nil
+	}
+	writeRangeNotSatisfiable(w, size)
+	return &StreamOutcome{StatusCode: http.StatusRequestedRangeNotSatisfiable, ResponseStarted: true, FailureReason: "range_invalid", NoLearning: true, Err: errors.NewProxyError("range outside plaintext content")}
+}
+
+type decryptedCacheSourceKey struct{}
+
+func withDecryptedCacheSource(req *http.Request, target string) *http.Request {
+	if _, ok := req.Context().Value(decryptedCacheSourceKey{}).(string); ok {
+		return req
+	}
+	return req.WithContext(context.WithValue(req.Context(), decryptedCacheSourceKey{}, target))
+}
+
 // ProxyDownloadDecrypt downloads and decrypts content
 func (s *StreamProxy) ProxyDownloadDecrypt(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64) error {
 	result := s.ProxyDownloadDecryptWithStrategy(w, r, targetURL, passwdInfo, fileSize, StreamStrategyRange)
@@ -32,6 +57,7 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategy(w http.ResponseWriter, r 
 
 // ProxyDownloadDecryptWithStrategyForStorage downloads and decrypts content with storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.ResponseWriter, r *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	r = withDecryptedCacheSource(r, targetURL)
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := r.Header.Get("Range")
@@ -40,6 +66,9 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 		fileSize = meta.PlainSize
 	}
 	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
+	if outcome := rejectKnownUnsatisfiableRange(w, r, rangeHeader, fileSize, meta); outcome != nil {
+		return outcome
+	}
 
 	r, upstreamClientRange, cachePlan := prepareV3Cache(r, targetURL, passwdInfo, meta, rangeHeader, compatStorageKey, strategy)
 	if cachePlan != nil {
@@ -148,6 +177,7 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategy(w http.ResponseWriter,
 
 // ProxyDownloadDecryptReqWithStrategyForStorage downloads and decrypts using storage-scoped range learning.
 func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey string) *StreamOutcome {
+	req = withDecryptedCacheSource(req, targetURL)
 	cbGate := s.circuitBreakerFor(targetURL)
 
 	rangeHeader := req.Header.Get("Range")
@@ -156,6 +186,9 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 		fileSize = meta.PlainSize
 	}
 	rangeHeader = normalizeV2ClientRangeForPlayback(rangeHeader, meta, targetURL)
+	if outcome := rejectKnownUnsatisfiableRange(w, req, rangeHeader, fileSize, meta); outcome != nil {
+		return outcome
+	}
 	req, upstreamClientRange, cachePlan := prepareV3Cache(req, targetURL, passwdInfo, meta, rangeHeader, compatStorageKey, strategy)
 	if cachePlan != nil {
 		defer cachePlan.release()
@@ -633,7 +666,13 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 		}
 	}
 	if req.Method == http.MethodGet && rangeHeader != "" && s.blockCache != nil {
-		baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
+		cacheTarget := targetURL
+		if source, ok := req.Context().Value(decryptedCacheSourceKey{}).(string); ok {
+			cacheTarget = source
+		}
+		// Redirects change the transport target, not the lookup identity chosen
+		// at entry. Keep target hashing to isolate distinct locators/rules.
+		baseKey := s.decryptedCacheBaseKey(cacheTarget, passwdInfo, fileSize, meta, compatStorageKey)
 		readerToStream = newDecryptedCacheReader(readerToStream, s.blockCache, baseKey, sniffOffset)
 	}
 	// Preparation after the upstream response was obtained; excludes resolve,
