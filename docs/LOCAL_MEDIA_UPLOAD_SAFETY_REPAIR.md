@@ -41,4 +41,4 @@
 
 ## 与原播放性能任务关系
 
-PR100/main273a1fe完整发布已绿，新固定镜像已拉取但播放容器尚未切换；目前运行仍628424f。此次坏片调查不应冒充EOF/缓存补丁现场验收成功，原性能计划继续保留未完成状态和device_unverified边界。
+PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。缓存热读仍未达到目标，正继续定位，原性能计划未完成且保留device_unverified。
