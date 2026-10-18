@@ -57,6 +57,12 @@ SNOS第三元数据GID已complete，仅120386字节，不是视频完成；其pa
 - IPZZ高活跃替代源已取得真实视频载荷，子GID `c475560ef6703093`，已MySQL保护，随后仅选择精确`IPZZ-172_FHD_CH.mp4`，不选广告影片、APK、CHM、ZIP。该文件长度2061432089与旧云坏片相同，但同长不代表新源一定好，仍须piece完成、结构和全解码验收。
 - 最新采样SNOS有效任务1542848512/1563688960字节；IPZZ76103680/2063597568字节，两者均仍active，不能提前当完成。独立审查同时发现观察到文件大小变化后还需失效独立持久几何缓存，正补durable/epoch回归后继续同PR完整重验。
 
+## 完整下载后的额外兼容性核验
+
+SNOS payload现已raw status=complete且总字节相等，但aria2停止任务后逐文件completedLength全部报告0，严格新门禁因此没有搬移，未仅凭总数放行。只读位图复核：选中视频及字幕覆盖的每个piece均存在；缺少的42个piece仅在未选广告中。正增加终态、位图结构、文件累计偏移、逐选中文件piece覆盖均严格成立才补齐完成证明的兼容门禁；不对active或无位图任务降级信任总大小。
+
+SNOS真实下载文件ffprobe为1280×720、H264/AAC、时长8764.367秒（约146分钟）、大小1563588318字节。它是720p替代版本，不冒称原FHD版本。已启动独立全文件音视频严格解码，进程仍运行，未宣称解码通过、未删侧车、未授权删源。PR101最新head `fefe617` 已补独立持久几何缓存失效及epoch/restart回归；其Go全测等多数门禁通过，但移动Go及并发性能仍待完成。
+
 ## 与原播放性能任务关系
 
 PR100/main273a1fe完整发布已绿。续轮已切换固定镜像 `sha256:b7b02a5b7e4d9ae3663aad29eab13ae79c42154f86fe882963be0eafe1d649af`，容器running、RestartCount0。原固定WA-596.part003样本被已有保护作用域门禁返回404（文件仍在目录，错误体Protected filename unavailable for this scope），不能将其3ms错误响应当性能改善；Basic和JWT均复现，正定位审计记录状态。另用可读IPZZ-172进行纯HTTP协议验证：30次PF207、HEAD200、prefix206；HEAD p50/p95=2.865/8.152ms，prefix413.460/472.504ms，EOF已返回416。该文件媒体本身损坏，HTTP协议通过不代表可播放。现场配置原本关闭明文块缓存，已在`/root/docker/alist-encrypt1/conf/config.json`开启（256MiB/256KiB有界），重启后混合PF/HEAD/GET仍419.451ms。再单独连续GET12次，全部206且同一SHA256，p50降至3.718ms；日志确认混合元数据请求导致上游签名fid跨次变化，从而块缓存targetHash失配，正定位如何保持定位符而不削弱对象/鉴权隔离。原性能计划未完成且保留device_unverified。
