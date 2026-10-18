@@ -373,6 +373,30 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	}
 	// Convert display path to real encrypted path
 	realPath, pathMode := h.resolveRealPathForRequest(r, davPath, passwdInfo)
+	if proof, recovered := recoveredFilenameProof(r, davPath); recovered {
+		// The guard just verified this caller and this exact physical object.
+		// Do not consult historical geometry, signed raw URLs, size resolvers or
+		// background warmers for this exceptional recovery route. In particular,
+		// an old same-size confirmation must not supply a different V2 nonce.
+		if realPath != proof.raw || h.cfg.RuntimeRevision() != proof.revision || filenameRuleScope(passwdInfo) != proof.ruleFingerprint {
+			http.Error(w, "Recovered filename binding changed", http.StatusConflict)
+			return
+		}
+		target := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+proof.raw)
+		// Keep decrypted data blocks distinct from any pre-recovery same-size
+		// representation, including same-nonce objects with a different prefix.
+		compatKey := buildRangeCompatStorageKey(passwdInfo, davPath) + "|recovery:" + proof.prefixSHA256
+		executeDecryptPlayback(decryptPlaybackRequest{
+			ResponseWriter: w, Request: r, Config: h.cfg, StreamProxy: h.streamProxy,
+			PasswdInfo: passwdInfo, RequestVerifiedMeta: &proof.meta, ExpectedConfigRevision: &proof.revision,
+			FileItem: FileItem{DisplayPath: davPath, EncryptedPath: proof.raw, TargetURL: target,
+				FileName: path.Base(davPath), PasswdInfo: passwdInfo, CompatStorageKey: compatKey},
+			TargetURL: target, ProviderKey: ProviderKey(target, davPath), Path: davPath,
+			InitialSize: proof.meta.PlainSize, OverridePath: davPath,
+			CompatKey: compatKey, ConsumerScenario: consumerScenarioWebDAV,
+		})
+		return
+	}
 	trace.Logf(r.Context(), "webdav-get", "Path converted: %s -> %s mode=%s", davPath, realPath, pathMode)
 	if r.Method == http.MethodHead && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
 		if repo, managed := h.fileDAO.(playbackCacheRepository); managed {

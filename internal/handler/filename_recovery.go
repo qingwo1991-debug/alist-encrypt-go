@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,6 +16,22 @@ import (
 	"github.com/alist-encrypt-go/internal/storage"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 )
+
+// This proof is private to one authorized request. Recovery must not revive
+// pre-admission global geometry or signed locators for this legacy path.
+type filenameRecoveryProofKey struct{}
+type filenameRecoveryProof struct {
+	display, raw    string
+	prefixSHA256    string
+	ruleFingerprint string
+	revision        uint64
+	meta            encryption.ContentMeta
+}
+
+func recoveredFilenameProof(r *http.Request, display string) (filenameRecoveryProof, bool) {
+	proof, ok := r.Context().Value(filenameRecoveryProofKey{}).(filenameRecoveryProof)
+	return proof, ok && proof.display == display
+}
 
 type filenameRecoveryRepository interface {
 	GetFilenameRecovery(storage.FilenameRecord) (storage.FilenameRecovery, bool, error)
@@ -102,6 +119,9 @@ func (h *WebDAVHandler) bindRecoveredFilename(r *http.Request, rec storage.Filen
 	if _, ok := h.freshFilenameRecoveryRule(rec, revision); !ok {
 		return false
 	}
+	e := recovery.Evidence
+	meta := encryption.ContentMeta{Version: e.ContentVersion, EncType: e.EncType, PlainSize: e.PlainSize, CiphertextSize: e.CiphertextSize, HeaderLen: e.HeaderLen, NonceField: append([]byte(nil), e.NonceField...), ChunkSize: e.ChunkSize, KDFIterations: e.KDFIterations}
+	*r = *r.WithContext(context.WithValue(r.Context(), filenameRecoveryProofKey{}, filenameRecoveryProof{display: rec.OriginalPath, raw: rec.EncryptedPath, prefixSHA256: recovery.PrefixSHA256, ruleFingerprint: rec.RuleFingerprint, revision: revision, meta: meta}))
 	rememberFilenamePath(r, rec.OriginalPath, rec.EncryptedPath, true)
 	return true
 }
