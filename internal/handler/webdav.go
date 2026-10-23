@@ -1135,7 +1135,7 @@ propfindResponseReady:
 		// those are scoped, expiring evidence and must be overlaid on each read.
 		if isDirRequest && h.dirSyncStore != nil {
 			if davEntries := h.parsePropfindEntries(snapshotBody); len(davEntries) > 0 {
-				h.persistWebDAVSnapshot(r, requestPath, davEntries)
+				h.persistWebDAVSnapshot(r, requestPath, davEntries, entries)
 				trace.Logf(r.Context(), "propfind", "Snapshot populated: %s entries=%d", requestPath, len(davEntries))
 			}
 		}
@@ -1493,7 +1493,9 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 			if knownSize {
 				h.upsertMetaFromListing(ctx, displayPath, info.Size)
 			}
-			h.enqueueProbeFromPropfind(ctx, displayPath, info.Size)
+			// Size-only hydration must retain the original transport observation,
+			// not plaintext already recovered for this listing entry.
+			h.enqueueProbeFromPropfind(ctx, displayPath, entry.Size)
 		}
 	}
 	return entries

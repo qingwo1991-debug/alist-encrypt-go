@@ -124,6 +124,7 @@ type probeItem struct {
 	queuedAt    time.Time
 	notBefore   time.Time
 	interest    *playbackInterestTask
+	sizeOnly    *propfindSizeAdmission
 }
 
 const (
@@ -325,8 +326,12 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 		return
 	default:
 	}
-	// Trusted-local directory display must not fan out into per-file network/KDF
-	// probes. Actual playback resolves missing geometry on demand.
+	// Trusted listings may hydrate missing sizes through the same bounded queue,
+	// but must never restore the legacy full playback/range/KDF warmup fan-out.
+	if ps.cfg != nil && ps.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		ps.enqueuePropfindSize(file, authHeaders, reportedSize, source)
+		return
+	}
 	if ps.foreground.Load().Enabled() {
 		return
 	}
@@ -727,6 +732,10 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	startedAt := time.Now()
 	ps.recordRunning(item, startedAt)
 	defer atomic.AddUint64(&ps.runningCount, ^uint64(0))
+	if item.sizeOnly != nil {
+		ps.runPropfindSize(item, startedAt)
+		return
+	}
 
 	// Delay eligibility is checked by dispatch before claiming a provider slot.
 	// The slot remains held until actual work (including CPU work) has returned.
