@@ -12,6 +12,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/httputil"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
 )
 
@@ -68,7 +69,7 @@ func (ps *ProbeScheduler) enqueuePropfindSize(file FileItem, headers http.Header
 	}
 	file.PasswdInfo = &rule
 	file.PropfindSize = observed // Always original transport size, never resolver plaintext.
-	file.TargetURL = origin + "/dav" + file.EncryptedPath
+	file.TargetURL = httputil.BuildTargetURLStripped(origin, "/dav"+file.EncryptedPath)
 	admission := &propfindSizeAdmission{origin: origin, identity: identity, revision: revision, epoch: ps.fileDAO.PlaybackEpoch(file.DisplayPath), ciphertextSize: observed}
 	key := probeCooldownKey(file)
 	reserved, skip := ps.reserveProbe(key, changedCiphertext)
