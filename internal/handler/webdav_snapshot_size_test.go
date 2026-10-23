@@ -22,8 +22,9 @@ func snapshotSizePayload(t *testing.T, info *dao.FileInfo, observed int64) []byt
 func TestSnapshotSizeOverlaysCurrentCanonicalProof(t *testing.T) {
 	h, files, rule := newCanonicalPropfindFixture(t)
 	h.cfg.AlistServer.PasswdList = append(h.cfg.AlistServer.PasswdList, *rule)
-	h.passwdDAO = dao.NewPasswdDAO(nil, h.cfg)
-	t.Cleanup(h.passwdDAO.Stop)
+	keys := dao.NewPasswdDAO(nil, h.cfg)
+	h.passwdDAO = keys
+	t.Cleanup(keys.Stop)
 	info := canonicalPropfindInfo(h, rule, encryption.ContentVersionV2)
 	// Content-only encryption keeps the raw and display paths identical.
 	info.EncryptedPath = info.Path
@@ -54,8 +55,9 @@ func TestSnapshotSizeOverlaysCurrentCanonicalProof(t *testing.T) {
 func TestSnapshotSizeRejectsUnprovenOrMismatchedTransport(t *testing.T) {
 	h, files, rule := newCanonicalPropfindFixture(t)
 	h.cfg.AlistServer.PasswdList = append(h.cfg.AlistServer.PasswdList, *rule)
-	h.passwdDAO = dao.NewPasswdDAO(nil, h.cfg)
-	t.Cleanup(h.passwdDAO.Stop)
+	keys := dao.NewPasswdDAO(nil, h.cfg)
+	h.passwdDAO = keys
+	t.Cleanup(keys.Stop)
 	info := canonicalPropfindInfo(h, rule, encryption.ContentVersionV2)
 	info.EncryptedPath = info.Path
 	info.GeometryIdentity = playbackIdentity(h.cfg, h.cfg.GetAlistURL(), info.EncryptedPath, rule, nil)
@@ -88,8 +90,9 @@ func TestSnapshotSizeRejectsUnprovenOrMismatchedTransport(t *testing.T) {
 func TestSnapshotSizeETagFollowsEffectiveSize(t *testing.T) {
 	h, files, rule := newCanonicalPropfindFixture(t)
 	h.cfg.AlistServer.PasswdList = append(h.cfg.AlistServer.PasswdList, *rule)
-	h.passwdDAO = dao.NewPasswdDAO(nil, h.cfg)
-	t.Cleanup(h.passwdDAO.Stop)
+	keys := dao.NewPasswdDAO(nil, h.cfg)
+	h.passwdDAO = keys
+	t.Cleanup(keys.Stop)
 	info := canonicalPropfindInfo(h, rule, encryption.ContentVersionV2)
 	info.EncryptedPath = info.Path
 	info.GeometryIdentity = playbackIdentity(h.cfg, h.cfg.GetAlistURL(), info.EncryptedPath, rule, nil)

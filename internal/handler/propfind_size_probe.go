@@ -110,12 +110,13 @@ func (ps *ProbeScheduler) runPropfindSize(item probeItem, started time.Time) {
 			atomic.AddUint64(&ps.filesSucceededTotal, 1)
 		} else {
 			atomic.AddUint64(&ps.filesFailedTotal, 1)
-			// Failed metadata reads retry after a minute, not every refresh and
-			// not the legacy full-warmup's potentially day-long cooldown.
-			ps.seenMu.Lock()
-			ps.seen[probeCooldownKey(item.file)] = time.Now().Add(time.Minute - ps.cooldown)
-			ps.seenMu.Unlock()
 		}
+		// Confirmed hits are skipped before reservation. If proof expires or is
+		// invalidated, permit replacement after a short bounded backoff instead
+		// of suppressing missing metadata for the legacy day-long warmup TTL.
+		ps.seenMu.Lock()
+		ps.seen[probeCooldownKey(item.file)] = time.Now().Add(time.Minute - ps.cooldown)
+		ps.seenMu.Unlock()
 		ps.finishRecord(item, started, status, state)
 	}()
 	if !ps.propfindSizeAdmissionCurrent(item) || ps.stream == nil {
