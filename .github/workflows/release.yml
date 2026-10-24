@@ -122,6 +122,8 @@ jobs:
           node-version: '22'
       - name: Verify rendered-frame measurement semantics
         run: node --test tools/playback-probe/*.test.mjs
+      - name: Verify controlled upgrade probe safety with network-free mocks
+        run: python3 tools/controlled_upgrade_probe.py --self-test
 
   test-mysql-metadata:
     runs-on: ubuntu-latest
