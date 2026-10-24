@@ -242,6 +242,7 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 			protected.POST("/wopan/recycle/clear", ginWrap(wopanAdmin.ClearRecycle))
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
 			protected.POST("/recoverFilename", ginWrap(webdavHandler.HandleRecoverFilename))
+			protected.POST("/retryFilename", ginWrap(webdavHandler.HandleRetryFilename))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))
 			protected.Any("/updatePasswd", ginWrap(apiHandler.UpdatePasswd))
 			protected.Any("/updateUsername", ginWrap(apiHandler.UpdateUsername))

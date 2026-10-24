@@ -34,6 +34,16 @@ func (d *FileDAO) FindFilenameReservationForRead(origin, original string) (stora
 	}
 	return d.store.FindFilenameReservationForRead(origin, original)
 }
+
+// ReleaseFailedFilename archives and releases only an unchanged, aged failed
+// reservation. Missing local persistence must never allow another protected write.
+func (d *FileDAO) ReleaseFailedFilename(expected storage.FilenameRecord) error {
+	if d == nil || d.store == nil {
+		return errors.New("filename reservation store unavailable")
+	}
+	return d.store.ReleaseFailedFilename(expected)
+}
+
 func (d *FileDAO) FinishFilenameReservation(origin, raw, token, status string) error {
 	if d == nil || d.store == nil {
 		return errors.New("filename reservation store unavailable")
