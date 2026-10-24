@@ -234,6 +234,12 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		protected := encAPI.Group("")
 		protected.Use(AuthMiddleware(s.cfg.JWTSecret, s.cfg.JWTExpire))
 		{
+			// One instance retains bounded, short-lived single-use confirmations.
+			wopanAdmin := handler.NewWopanAdminHandler(s.cfg, s.userDAO)
+			protected.GET("/wopan/storages", ginWrap(wopanAdmin.Storages))
+			protected.GET("/wopan/quota", ginWrap(wopanAdmin.Quota))
+			protected.POST("/wopan/recycle/prepare", ginWrap(wopanAdmin.PrepareRecycle))
+			protected.POST("/wopan/recycle/clear", ginWrap(wopanAdmin.ClearRecycle))
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
 			protected.POST("/recoverFilename", ginWrap(webdavHandler.HandleRecoverFilename))
 			protected.Any("/getUserInfo", ginWrap(apiHandler.GetUserInfo))

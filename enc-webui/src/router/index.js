@@ -105,6 +105,12 @@ export const constantRoutes = [
         name: 'file transfer',
         component: () => import('@/views/folder-convert/index.vue'),
         meta: { title: 'file transfer', icon: 'table' }
+      },
+      {
+        path: 'cloud-storage',
+        name: 'cloud-storage',
+        component: () => import('@/views/cloud-storage/index.vue'),
+        meta: { title: 'cloud storage', elSvgIcon: 'Coin' }
       }
     ]
   },

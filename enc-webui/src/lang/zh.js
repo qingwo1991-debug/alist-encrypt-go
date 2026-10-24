@@ -9,6 +9,7 @@ export default {
     'encrypt local': '本地加解密',
     'encrypt online': '在线加解密',
     'file transfer': '文件转存',
+    'cloud storage': '沃盘容量与回收站',
     'description': '介绍',
     Overview: '总览',
     Config: '配置',
