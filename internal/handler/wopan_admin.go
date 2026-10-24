@@ -53,15 +53,16 @@ func wopanError(status int, code string) error { return &wopanAdminError{status,
 // Construct it once when registering routes: rebuilding it per request would
 // invalidate confirmations, while persisting them would defeat restart expiry.
 type WopanAdminHandler struct {
-	cfg      *config.Config
-	userDAO  *dao.UserDAO
-	jwtAuth  *auth.JWTAuth
-	upstream *http.Client
-	provider wopanAdminProvider
-	now      func() time.Time
-	mu       sync.Mutex
-	pending  map[[32]byte]wopanChallenge
-	inflight map[[32]byte]bool
+	cfg        *config.Config
+	userDAO    *dao.UserDAO
+	jwtAuth    *auth.JWTAuth
+	upstream   *http.Client
+	provider   wopanAdminProvider
+	now        func() time.Time
+	mu         sync.Mutex
+	pending    map[[32]byte]wopanChallenge
+	inflight   map[[32]byte]bool
+	automation wopanAutomationState
 }
 
 func NewWopanAdminHandler(cfg *config.Config, userDAO *dao.UserDAO) *WopanAdminHandler {
@@ -758,9 +759,22 @@ func (h *WopanAdminHandler) ClearRecycle(w http.ResponseWriter, r *http.Request)
 		h.fail(w, wopanError(http.StatusConflict, "configuration_changed"))
 		return
 	}
+	// If this account also has an automation policy, write ahead even for a
+	// manual submission: a process crash must not turn a manual unknown outcome
+	// into an automatic retry after restart.
+	completeCheckpoint, checkpointErr := h.manualAutomationCheckpoint(accountKey)
+	if checkpointErr != nil {
+		h.fail(w, checkpointErr)
+		return
+	}
 	// Exactly one attempt. Any provider error after submitting is deliberately
 	// outcome-unknown: neither server nor browser should retry automatically.
 	if err = h.provider.EmptyRecycle(ctx, addition.AccessToken); err != nil {
+		outcome = "clear_outcome_unknown"
+		h.fail(w, wopanError(http.StatusBadGateway, outcome))
+		return
+	}
+	if err = completeCheckpoint(); err != nil {
 		outcome = "clear_outcome_unknown"
 		h.fail(w, wopanError(http.StatusBadGateway, outcome))
 		return

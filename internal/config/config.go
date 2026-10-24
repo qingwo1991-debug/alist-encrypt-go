@@ -206,14 +206,15 @@ type Config struct {
 	Port         int            `json:"port"`
 
 	// Extended settings
-	Scheme    *SchemeConfig `json:"scheme,omitempty"`
-	Proxy     *ProxyConfig  `json:"proxy,omitempty"`
-	Log       *LogConfig    `json:"log,omitempty"`
-	Database  *DBConfig     `json:"database,omitempty"`
-	Debug     *DebugConfig  `json:"debug,omitempty"`
-	DataDir   string        `json:"data_dir,omitempty"`
-	JWTSecret string        `json:"jwt_secret,omitempty"`
-	JWTExpire int           `json:"jwt_expire,omitempty"`
+	Scheme       *SchemeConfig      `json:"scheme,omitempty"`
+	Proxy        *ProxyConfig       `json:"proxy,omitempty"`
+	Log          *LogConfig         `json:"log,omitempty"`
+	Database     *DBConfig          `json:"database,omitempty"`
+	Debug        *DebugConfig       `json:"debug,omitempty"`
+	CloudStorage CloudStorageConfig `json:"cloudStorage"`
+	DataDir      string             `json:"data_dir,omitempty"`
+	JWTSecret    string             `json:"jwt_secret,omitempty"`
+	JWTExpire    int                `json:"jwt_expire,omitempty"`
 	// StatsPassword: 播放统计导出接口的独立访问密码。为空表示统计接口不可用（默认关闭）。
 	// 独立于管理/加密密码，避免统计接口复用登录鉴权。
 	StatsPassword string `json:"stats_password,omitempty"`
@@ -497,6 +498,7 @@ func DefaultConfig() *Config {
 			DisableCleanup:         false,
 			DirSnapshotCleanupDays: 30,
 		},
+		CloudStorage:  CloudStorageConfig{WopanAutomation: WopanAutomationConfig{IntervalHours: 24}},
 		DataDir:       "./data",
 		JWTSecret:     "",
 		JWTExpire:     48,
@@ -747,6 +749,7 @@ func (c *Config) snapshotLocked() *Config {
 		JWTSecret:     c.JWTSecret,
 		JWTExpire:     c.JWTExpire,
 		StatsPassword: c.StatsPassword,
+		CloudStorage:  cloneCloudStorageConfig(c.CloudStorage),
 		configPath:    c.configPath,
 	}
 	if c.Scheme != nil {
@@ -776,7 +779,9 @@ func (c *Config) snapshotLocked() *Config {
 	return snapshot
 }
 
-// MarshalJSONSnapshot serializes a deep, race-free copy of the live config.
+// MarshalJSONSnapshot serializes a deep, race-free public copy of the live
+// config. Independent cloud policies are omitted from generic management/mobile
+// JSON; saveLocked still persists them in the private on-disk configuration.
 func (c *Config) MarshalJSONSnapshot() ([]byte, error) {
 	if c == nil {
 		return []byte("null"), nil
@@ -785,7 +790,12 @@ func (c *Config) MarshalJSONSnapshot() ([]byte, error) {
 	snapshot := c.snapshotLocked()
 	c.mu.RUnlock()
 	snapshot.normalizeEncPaths()
-	return json.Marshal(snapshot)
+	// An explicitly omitted embedding field shadows Config.CloudStorage without
+	// changing its persistence tag or exposing internal policy bindings.
+	return json.Marshal(struct {
+		*Config
+		CloudStorage *CloudStorageConfig `json:"cloudStorage,omitempty"`
+	}{Config: snapshot})
 }
 
 // ReplaceFromJSON validates and atomically persists a complete config update.
@@ -794,6 +804,17 @@ func (c *Config) MarshalJSONSnapshot() ([]byte, error) {
 func (c *Config) ReplaceFromJSON(data []byte) error {
 	if c == nil {
 		return fmt.Errorf("config is nil")
+	}
+	// Automation is exclusively managed through its versioned policy API.
+	// Reject even null or case-insensitive JSON aliases accepted by encoding/json.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key := range fields {
+		if strings.EqualFold(key, "cloudStorage") {
+			return fmt.Errorf("cloudStorage cannot be changed through generic config updates")
+		}
 	}
 	c.mu.RLock()
 	candidate := c.snapshotLocked()
@@ -840,6 +861,9 @@ func (c *Config) ReplaceFromJSON(data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := c.snapshotLocked()
+	// Policy/checkpoint updates may have committed while candidate was validated.
+	// A generic save must preserve the latest independent cloud-storage state.
+	candidate.CloudStorage = cloneCloudStorageConfig(c.CloudStorage)
 	c.assignSnapshotLocked(candidate)
 	if err := c.saveLocked(); err != nil {
 		c.assignSnapshotLocked(old)
@@ -866,35 +890,80 @@ func (c *Config) assignSnapshotLocked(src *Config) {
 	c.JWTSecret = src.JWTSecret
 	c.JWTExpire = src.JWTExpire
 	c.StatsPassword = src.StatsPassword
+	c.CloudStorage = cloneCloudStorageConfig(src.CloudStorage)
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// Keep the previous bytes so a directory-sync failure after rename can
+	// restore the prior checkpoint, rather than rolling back only memory.
+	previous, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return readErr
+	}
+	renamed, err := writeFileAtomicSynced(path, data, perm)
+	if err == nil || !renamed {
 		return err
 	}
+	var rollbackErr error
+	if readErr == nil {
+		_, rollbackErr = writeFileAtomicSynced(path, previous, perm)
+	} else {
+		rollbackErr = os.Remove(path)
+		if rollbackErr == nil {
+			var parent *os.File
+			parent, rollbackErr = os.Open(filepath.Dir(path))
+			if rollbackErr == nil {
+				rollbackErr = parent.Sync()
+				if closeErr := parent.Close(); rollbackErr == nil {
+					rollbackErr = closeErr
+				}
+			}
+		}
+	}
+	if rollbackErr != nil {
+		return fmt.Errorf("atomic config save failed: %w; disk rollback also failed: %v", err, rollbackErr)
+	}
+	return err
+}
+
+// writeFileAtomicSynced reports whether rename happened even if the final
+// durability fence fails, so callers can attempt to restore the previous file.
+func writeFileAtomicSynced(path string, data []byte, perm os.FileMode) (bool, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false, err
+	}
+	parent, err := os.Open(dir)
+	if err != nil {
+		return false, err
+	}
+	defer parent.Close()
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return err
+		return false, err
 	}
 	if err := tmp.Chmod(perm); err != nil {
 		tmp.Close()
-		return err
+		return false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return false, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, parent.Sync()
 }
 
 func (c *Config) applyEnvOverrides() {

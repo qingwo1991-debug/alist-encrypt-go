@@ -5,9 +5,11 @@ vi.mock('@/api/cloud-storage', () => ({
   getWopanStoragesReq: vi.fn(),
   getWopanQuotaReq: vi.fn(),
   prepareWopanRecycleReq: vi.fn(),
-  clearWopanRecycleReq: vi.fn()
+  clearWopanRecycleReq: vi.fn(),
+  getWopanAutomationReq: vi.fn(),
+  saveWopanAutomationReq: vi.fn()
 }))
-import { clearWopanRecycleReq, getWopanQuotaReq, getWopanStoragesReq, prepareWopanRecycleReq } from '@/api/cloud-storage'
+import { clearWopanRecycleReq, getWopanAutomationReq, getWopanQuotaReq, getWopanStoragesReq, prepareWopanRecycleReq, saveWopanAutomationReq } from '@/api/cloud-storage'
 import CloudStorage from './index.vue'
 
 const phrase = '清空个人账号全部回收站'
@@ -95,6 +97,8 @@ beforeEach(() => {
   getWopanQuotaReq.mockImplementation(id => Promise.resolve(ok(quotaData(id === 2 ? otherPersonal : personal))))
   prepareWopanRecycleReq.mockImplementation(() => Promise.resolve(ok(preparation())))
   clearWopanRecycleReq.mockResolvedValue(ok({ storage_id: 1, status: 'accepted' }))
+  getWopanAutomationReq.mockResolvedValue(ok({ enabled: false, storage_ids: [], interval_hours: 24 }))
+  saveWopanAutomationReq.mockImplementation(body => Promise.resolve(ok({ enabled: body.enabled, storage_ids: body.storage_ids, interval_hours: body.interval_hours })))
 })
 afterEach(() => {
   wrapper?.unmount()
@@ -278,6 +282,219 @@ describe('WoPan discovery and account-scoped quota', () => {
   })
 })
 
+describe('WoPan multi-selection and safe scheduled cleanup', () => {
+  const autoPhrase = '自动清空所选账号全部回收站'
+  const choose = async (id, checked = true) => {
+    await wrapper.get(`[data-testid="multi-storage-${id}"]`).setValue(checked)
+    await flushPromises()
+  }
+  const typeAuto = async value => {
+    await wrapper.get('[data-testid="automation-phrase"]').setValue(value)
+    await flushPromises()
+  }
+
+  it('supports single and multiple checked mounts with independent total/used/remaining and no account sum', async () => {
+    const setup = await mountPage()
+    expect(wrapper.get('[data-testid="automation-status"]').text()).toContain('已关闭')
+    expect(setup.intervalHours).toBe(24)
+    expect(wrapper.get('[data-testid="multi-storage-3"]').element.disabled).toBe(true)
+    await choose(1)
+    expect(wrapper.get('[data-testid="multi-1-total-bytes"]').text()).toContain('1.00 TiB')
+    expect(wrapper.get('[data-testid="multi-1-used-bytes"]').text()).toContain('512.00 GiB')
+    expect(wrapper.get('[data-testid="multi-1-available-bytes"]').text()).toContain('549755813888 字节')
+    await choose(2)
+    expect(wrapper.find('[data-testid="quota-storage-1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="quota-storage-2"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('账号级，不合计')
+    expect(setup.selectedId).toBe(1)
+    await choose(1, false)
+    expect(wrapper.find('[data-testid="quota-storage-1"]').exists()).toBe(false)
+    expect(setup.selectedId).toBe(1)
+    expect(saveWopanAutomationReq).not.toHaveBeenCalled()
+  })
+
+  it('isolates one quota error and rejects late quota after deselect/reselect or reload', async () => {
+    const setup = await mountPage()
+    const pending = deferred()
+    getWopanQuotaReq.mockImplementation(id => id === 1 ? pending.promise : Promise.resolve(ok(quotaData(otherPersonal))))
+    await choose(1)
+    const signal = getWopanQuotaReq.mock.calls.at(-1)[1].signal
+    await choose(1, false)
+    expect(signal.aborted).toBe(true)
+    getWopanQuotaReq.mockImplementation(id => id === 1 ? Promise.reject(new Error('单盘查询失败')) : Promise.resolve(ok(quotaData(otherPersonal))))
+    await choose(1)
+    await choose(2)
+    pending.resolve(ok(quotaData(personal, { total_bytes: '1' })))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="quota-storage-1"]').text()).toContain('单盘查询失败')
+    expect(wrapper.get('[data-testid="multi-2-total-bytes"]').text()).toContain('1.00 TiB')
+    expect(setup.multiQuotas[1].data).toBeNull()
+    getWopanStoragesReq.mockResolvedValueOnce(ok({ storages: [{ ...personal, mount_path: '/changed' }, otherPersonal] }))
+    await click('reload-storages')
+    expect(setup.multiQuotas[1].data).toBeNull()
+    expect(wrapper.text()).not.toContain('1 字节')
+  })
+
+  it('cancels enabling with zero writes, prepare or clear calls and validates exact phrase', async () => {
+    await mountPage()
+    await choose(1)
+    await choose(2)
+    await click('enable-automation')
+    const list = wrapper.get('[data-testid="automation-selected-list"]').text()
+    expect(list).toContain(personal.mount_path)
+    expect(list).toContain(otherPersonal.mount_path)
+    expect(wrapper.get('[role="dialog"]').text()).toContain('以后新进入回收站')
+    for (const wrong of ['', autoPhrase + ' ', ' ' + autoPhrase, '清空个人账号全部回收站']) {
+      await typeAuto(wrong)
+      expect(wrapper.get('[data-testid="confirm-automation"]').element.disabled).toBe(true)
+      await state().confirmAutomation()
+    }
+    await typeAuto(autoPhrase)
+    await click('cancel-automation')
+    expect(saveWopanAutomationReq).not.toHaveBeenCalled()
+    expect(prepareWopanRecycleReq).not.toHaveBeenCalled()
+    expect(clearWopanRecycleReq).not.toHaveBeenCalled()
+    await click('enable-automation')
+    expect(state().automationPhrase).toBe('')
+  })
+
+  it.each([[[1]], [[1, 2]]])('saves exactly selected IDs %j only after phrase and does not execute clear', async ids => {
+    await mountPage()
+    for (const id of ids) await choose(id)
+    await wrapper.get('[data-testid="automation-interval"]').setValue(48)
+    await click('enable-automation')
+    await typeAuto(autoPhrase)
+    await click('confirm-automation')
+    expect(saveWopanAutomationReq).toHaveBeenCalledExactlyOnceWith({ enabled: true, storage_ids: ids, interval_hours: 48, confirmation_phrase: autoPhrase }, { signal: expect.any(AbortSignal) })
+    expect(wrapper.get('[data-testid="automation-status"]').text()).toContain('已开启')
+    expect(wrapper.text()).toContain('本次不会立即清空')
+    expect(prepareWopanRecycleReq).not.toHaveBeenCalled()
+    expect(clearWopanRecycleReq).not.toHaveBeenCalled()
+  })
+
+  it('saves disabled directly with empty phrase and blocks double-click writes', async () => {
+    await mountPage()
+    await choose(2)
+    const pending = deferred()
+    saveWopanAutomationReq.mockReturnValueOnce(pending.promise)
+    await click('disable-automation')
+    await state().disableAutomation()
+    expect(saveWopanAutomationReq).toHaveBeenCalledExactlyOnceWith({ enabled: false, storage_ids: [2], interval_hours: 24, confirmation_phrase: '' }, { signal: expect.any(AbortSignal) })
+    expect(wrapper.get('[data-testid="enable-automation"]').element.disabled).toBe(true)
+    pending.resolve(ok({ enabled: false, storage_ids: [2], interval_hours: 24 }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="automation-status"]').text()).toContain('已关闭')
+    expect(wrapper.text()).toContain('已提交的清理不可撤销')
+  })
+
+  it.each([0, 721, 1.5, ''])('rejects invalid interval %j before dialog or POST', async interval => {
+    await mountPage()
+    await choose(1)
+    await wrapper.get('[data-testid="automation-interval"]').setValue(interval)
+    await state().openAutomationDialog()
+    await state().disableAutomation()
+    expect(state().automationDialogVisible).toBe(false)
+    expect(saveWopanAutomationReq).not.toHaveBeenCalled()
+  })
+
+  it('invalidates confirmation when selection, interval or mount configuration changes', async () => {
+    await mountPage()
+    await choose(1)
+    await click('enable-automation')
+    await typeAuto(autoPhrase)
+    await choose(2)
+    expect(state().automationDialogVisible).toBe(false)
+    await click('enable-automation')
+    await typeAuto(autoPhrase)
+    state().intervalHours = 25
+    await flushPromises()
+    expect(state().automationDialogVisible).toBe(false)
+    await click('enable-automation')
+    await click('reload-storages')
+    expect(state().automationDialogVisible).toBe(false)
+    expect(saveWopanAutomationReq).not.toHaveBeenCalled()
+  })
+
+  it('does not show enabled on failed load/write or mismatched success response, hides secrets', async () => {
+    getWopanAutomationReq.mockRejectedValueOnce(new Error('secret-token-do-not-render'))
+    await mountPage()
+    expect(wrapper.get('[data-testid="automation-status"]').text()).toContain('未知')
+    expect(wrapper.text()).not.toContain('secret-token-do-not-render')
+    expect(wrapper.get('[data-testid="enable-automation"]').element.disabled).toBe(true)
+    await click('reload-automation')
+    await choose(1)
+    saveWopanAutomationReq.mockRejectedValueOnce(new Error('private-provider-response'))
+    await click('enable-automation')
+    await typeAuto(autoPhrase)
+    await click('confirm-automation')
+    expect(wrapper.get('[data-testid="automation-status"]').text()).not.toContain('已开启')
+    expect(wrapper.text()).not.toContain('private-provider-response')
+    expect(wrapper.get('[data-testid="automation-error"]').text()).toContain('保存结果未确认')
+    await click('reload-automation')
+    await choose(1)
+    saveWopanAutomationReq.mockResolvedValueOnce(ok({ enabled: true, storage_ids: [2], interval_hours: 24 }))
+    await click('enable-automation')
+    await typeAuto(autoPhrase)
+    await click('confirm-automation')
+    expect(state().automationState).toBeNull()
+  })
+
+  it('shows fixed safe last-result messages and quarantine even with enabled total switch', async () => {
+    getWopanAutomationReq.mockResolvedValueOnce(ok({ enabled: true, storage_ids: [1, 2], interval_hours: 24, last_results: [{ storage_id: 1, status: 'success' }, { storage_id: 2, status: 'unknown', code: 'secret-provider-error' }] }))
+    await mountPage()
+    expect(wrapper.get('[data-testid="automation-status"]').text()).toContain('已开启')
+    expect(wrapper.get('[data-testid="automation-results"]').text()).toContain('请求已提交')
+    expect(wrapper.get('[data-testid="automation-quarantine"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('secret-provider-error')
+    expect(state().automationResultText({ status: 'constructor' })).toContain('结果无法确认')
+    expect(saveWopanAutomationReq).not.toHaveBeenCalled()
+  })
+
+  it('treats skipped account_deduplicated as benign without a false quarantine warning', async () => {
+    getWopanAutomationReq.mockResolvedValueOnce(ok({ enabled: true, storage_ids: [1, 2], interval_hours: 24, last_results: [{ storage_id: 1, status: 'success' }, { storage_id: 2, status: 'skipped', code: 'account_deduplicated' }] }))
+    await mountPage()
+    expect(wrapper.get('[data-testid="automation-results"]').text()).toContain('同账号已处理，本挂载跳过')
+    expect(wrapper.find('[data-testid="automation-quarantine"]').exists()).toBe(false)
+    expect(saveWopanAutomationReq).not.toHaveBeenCalled()
+  })
+
+  it.each(['clear_in_progress', 'upstream_unavailable', 'provider_unavailable'])('does not falsely promise quarantine or no retry for transient code %s', async code => {
+    getWopanAutomationReq.mockResolvedValueOnce(ok({ enabled: true, storage_ids: [1], interval_hours: 24, last_results: [{ storage_id: 1, status: 'failed', code }] }))
+    await mountPage()
+    const result = wrapper.get('[data-testid="automation-results"]').text()
+    expect(result).not.toContain('不会自动重试')
+    expect(result).not.toContain('需要重新确认')
+    expect(wrapper.get('[data-testid="automation-quarantine"]').text()).toContain('其他暂时失败可能在后续周期重试')
+    expect(wrapper.text()).not.toContain('即使总开关开启，也必须重新确认相关账号后才能继续')
+    expect(state().automationResultText({ status: 'secret-status', code: 'secret-code' })).toBe('结果无法确认，请重新读取并核实。')
+  })
+
+  it.each(['load', 'save', 'quota'])('aborts %s and ignores late responses on disposal', async kind => {
+    const pending = deferred()
+    if (kind === 'load') getWopanAutomationReq.mockReturnValueOnce(pending.promise)
+    const setup = await mountPage()
+    let signal
+    if (kind === 'load') signal = getWopanAutomationReq.mock.calls[0][0].signal
+    if (kind === 'save') {
+      saveWopanAutomationReq.mockReturnValueOnce(pending.promise)
+      await click('disable-automation')
+      signal = saveWopanAutomationReq.mock.calls[0][1].signal
+    }
+    if (kind === 'quota') {
+      getWopanQuotaReq.mockReturnValueOnce(pending.promise)
+      await choose(1)
+      signal = getWopanQuotaReq.mock.calls.at(-1)[1].signal
+    }
+    wrapper.unmount()
+    wrapper = undefined
+    pending.resolve(ok(kind === 'quota' ? quotaData() : { enabled: true, storage_ids: [1], interval_hours: 24 }))
+    await flushPromises()
+    expect(signal.aborted).toBe(true)
+    expect(setup.automationState?.enabled).not.toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
 describe('WoPan explicit one-use destructive confirmation', () => {
   it('opens warnings without preparing; requires exact typed phrase and never auto-clears', async () => {
     const setup = await mountPage()
@@ -302,7 +519,7 @@ describe('WoPan explicit one-use destructive confirmation', () => {
     await vi.advanceTimersByTimeAsync(10000)
     expect(clearWopanRecycleReq).not.toHaveBeenCalled()
     await click('confirm-clear')
-    expect(clearWopanRecycleReq).toHaveBeenCalledExactlyOnceWith({ storage_id: 1, confirmation_token: 'opaque-one-time-token', confirmation_phrase: phrase })
+    expect(clearWopanRecycleReq).toHaveBeenCalledExactlyOnceWith({ storage_id: 1, confirmation_token: 'opaque-one-time-token', confirmation_phrase: phrase }, { signal: expect.any(AbortSignal) })
     expect(setup.prepared).toBeNull()
     expect(setup.confirmationInput).toBe('')
     expect(setup.clearing).toBe(false)

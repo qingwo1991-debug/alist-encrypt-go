@@ -296,6 +296,12 @@ func (f *wopanFixture) request(method, path, token, body string, headers map[str
 		f.h.Storages(rr, req)
 	case "/enc-api/wopan/quota":
 		f.h.Quota(rr, req)
+	case "/enc-api/wopan/automation":
+		if method == http.MethodGet {
+			f.h.GetAutomation(rr, req)
+		} else {
+			f.h.SaveAutomation(rr, req)
+		}
 	case "/enc-api/wopan/recycle/prepare":
 		f.h.PrepareRecycle(rr, req)
 	case "/enc-api/wopan/recycle/clear":

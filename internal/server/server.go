@@ -50,6 +50,9 @@ type Server struct {
 	statsExportHandler *handler.StatsExportHandler
 	statsShutdown      func() // 停服前冲刷统计（recorder.FlushSessions + store.Stop）
 	rangeCompatStore   proxy.RangeCompatStore
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wopanAdmin         *handler.WopanAdminHandler
 }
 
 // New creates a new server instance
@@ -236,6 +239,9 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		{
 			// One instance retains bounded, short-lived single-use confirmations.
 			wopanAdmin := handler.NewWopanAdminHandler(s.cfg, s.userDAO)
+			s.wopanAdmin = wopanAdmin
+			protected.GET("/wopan/automation", ginWrap(wopanAdmin.GetAutomation))
+			protected.POST("/wopan/automation", ginWrap(wopanAdmin.SaveAutomation))
 			protected.GET("/wopan/storages", ginWrap(wopanAdmin.Storages))
 			protected.GET("/wopan/quota", ginWrap(wopanAdmin.Quota))
 			protected.POST("/wopan/recycle/prepare", ginWrap(wopanAdmin.PrepareRecycle))
@@ -457,6 +463,11 @@ func debugTokenMiddleware(token string) gin.HandlerFunc {
 
 // Start starts the server(s)
 func (s *Server) Start() error {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	defer s.cancel()
+	if s.wopanAdmin != nil {
+		s.wopanAdmin.StartAutomation(s.ctx)
+	}
 	errChan := make(chan error, 3)
 
 	// Start HTTP server
@@ -598,6 +609,9 @@ func (s *Server) startUnix() error {
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Info().Msg("Shutting down server...")
+	if s.cancel != nil {
+		s.cancel()
+	}
 
 	// Cancel startup probe goroutine
 	if s.probeCancel != nil {
@@ -626,6 +640,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 	s.probeWG.Wait()
+	if s.wopanAdmin != nil {
+		if err := s.wopanAdmin.WaitAutomation(ctx); err != nil {
+			return err
+		}
+	}
 
 	if s.proxyHandler != nil {
 		s.proxyHandler.Stop()
