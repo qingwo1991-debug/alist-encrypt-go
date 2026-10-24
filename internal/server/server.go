@@ -116,7 +116,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Health check endpoints (no auth required)
-	r.GET("/health", HealthHandler)
+	r.GET("/health", newHealthHandler(s.streamProxy))
 	r.GET("/ready", ReadyHandler)
 
 	s.setupWebUIRoutes(r)
