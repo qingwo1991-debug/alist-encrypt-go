@@ -272,6 +272,54 @@ func (h *AlistHandler) snapshotScopeMatches(snap *DirListSnapshot, authHash stri
 	return true
 }
 
+// snapshotListContent distinguishes an explicit empty array from an unavailable
+// or malformed listing. Never turn unknown content (or skipped malformed rows)
+// into a successful empty directory. total can describe an upstream filtered or
+// paged collection, so it must not be compared with the returned content length.
+func snapshotListContent(payload []byte) ([]map[string]interface{}, string) {
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, "snapshot payload invalid json"
+	}
+	if code, ok := body["code"].(float64); !ok || code != 200 {
+		return nil, "snapshot payload not successful"
+	}
+	data, ok := body["data"].(map[string]interface{})
+	if !ok || data == nil {
+		return nil, "snapshot data missing or invalid"
+	}
+	content, ok := data["content"].([]interface{})
+	if !ok {
+		return nil, "snapshot content missing or invalid"
+	}
+	items := make([]map[string]interface{}, 0, len(content))
+	for _, item := range content {
+		row, ok := item.(map[string]interface{})
+		if !ok || row == nil {
+			return nil, "snapshot item invalid"
+		}
+		if name, ok := row["name"].(string); !ok || name == "" {
+			return nil, "snapshot item name missing or invalid"
+		}
+		if _, ok := row["is_dir"].(bool); !ok {
+			return nil, "snapshot item kind missing or invalid"
+		}
+		items = append(items, row)
+	}
+	return items, ""
+}
+
+func snapshotListShape(payload []byte, itemCount int) (bool, string) {
+	content, reason := snapshotListContent(payload)
+	if reason != "" {
+		return false, reason
+	}
+	if len(content) == 0 && itemCount > 0 {
+		return false, "snapshot empty content contradicts cached item count"
+	}
+	return true, ""
+}
+
 func validateSnapshotForDir(dirPath string, snap *DirListSnapshot) (bool, string) {
 	if snap == nil {
 		return false, "snapshot missing"
@@ -284,17 +332,14 @@ func validateSnapshotForDir(dirPath string, snap *DirListSnapshot) (bool, string
 		return false, "snapshot payload empty"
 	}
 
-	var body map[string]interface{}
-	if err := json.Unmarshal(snap.PayloadJSON, &body); err != nil {
-		return false, "snapshot payload invalid json"
+	content, reason := snapshotListContent(snap.PayloadJSON)
+	if reason != "" {
+		return false, reason
 	}
-	data, _ := body["data"].(map[string]interface{})
-	content, _ := data["content"].([]interface{})
-	for _, item := range content {
-		fileData, _ := item.(map[string]interface{})
-		if fileData == nil {
-			continue
-		}
+	if len(content) == 0 && snap.ItemCount > 0 {
+		return false, "snapshot empty content contradicts cached item count"
+	}
+	for _, fileData := range content {
 		name, _ := fileData["name"].(string)
 		childPath, hasPath := fileData["path"].(string)
 		if hasPath && strings.TrimSpace(childPath) != "" {
@@ -526,6 +571,11 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 		return
 	}
 	if sourceMode != dirSyncModeScan && !h.snapshotScopeEnabled(dirPath) {
+		return
+	}
+	// Validate payload shape only here: callers may still be filling paths or
+	// holding a filtered page. Scope/path ownership is checked before serving.
+	if valid, _ := snapshotListShape(payload, itemCount); !valid {
 		return
 	}
 	if h.snapshotPayloadRootPoisoned(dirPath, payload) {
