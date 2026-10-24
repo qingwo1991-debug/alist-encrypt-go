@@ -218,12 +218,8 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 // first <response> so the body is a drop-in for what the live upstream PROPFIND
 // would have produced after the passwd-name rewrites.
 func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte, requests ...*http.Request) []byte {
-	var resp struct {
-		Data struct {
-			Content []map[string]interface{} `json:"content"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(payload, &resp); err != nil {
+	content, reason := snapshotListContent(payload)
+	if reason != "" {
 		return nil
 	}
 
@@ -239,7 +235,7 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte,
 	writeSnapshotResponse(&b, davHref(dirPath)+"/", rootName, true, 0, "", "", "", "")
 
 	// Children.
-	for _, item := range resp.Data.Content {
+	for _, item := range content {
 		name, _ := item["name"].(string)
 		if name == "" {
 			continue
@@ -462,6 +458,9 @@ func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, e
 // constants and TTL) so HTTP and WebDAV serve identical cached listings.
 func (h *WebDAVHandler) upsertWebDAVSnapshot(ctx context.Context, dirPath, scopeKey string, payload []byte, itemCount int) {
 	if h == nil || h.dirSyncStore == nil || h.cfg == nil {
+		return
+	}
+	if valid, _ := snapshotListShape(payload, itemCount); !valid {
 		return
 	}
 	now := time.Now()
