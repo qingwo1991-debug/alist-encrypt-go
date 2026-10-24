@@ -1415,7 +1415,7 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 
 	protected, safePath, err := prepareFilenameWrite(h.cfg, h.fileDAO, r, passwdInfo, uploadPath, encryptedPath, fileSize, hasRange, h.httpClient)
 	if err != nil {
-		RespondHTTPErrorWithStatus(w, err.Error(), http.StatusConflict)
+		respondFilenameWriteError(w, err)
 		return
 	}
 	var buffered *filenameWriteResponse

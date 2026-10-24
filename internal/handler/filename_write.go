@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/storage"
@@ -24,6 +26,35 @@ import (
 type filenameReservationRepository interface {
 	ReserveFilename(storage.FilenameRecord) (storage.FilenameRecord, error)
 	FinishFilenameReservation(string, string, string, string) error
+}
+
+// Stable error codes let upload clients distinguish a durable failed claim from
+// an existing destination or an unavailable verifier. None authorizes automatic
+// retry: failed claims require the explicit management maintenance operation.
+type filenameWriteError struct {
+	code   string
+	status int
+	cause  error
+}
+
+func (e *filenameWriteError) Error() string { return e.code }
+func (e *filenameWriteError) Unwrap() error { return e.cause }
+func newFilenameWriteError(code string, status int, cause error) error {
+	return &filenameWriteError{code: code, status: status, cause: cause}
+}
+func respondFilenameWriteError(w http.ResponseWriter, err error) {
+	var typed *filenameWriteError
+	if errors.As(err, &typed) {
+		filenameOperationError(w, typed.status, typed.code)
+		return
+	}
+	filenameOperationError(w, http.StatusBadRequest, "invalid_filename_write")
+}
+func filenamePreflightError(status int, err error) error {
+	if err == nil && status >= 200 && status < 300 {
+		return newFilenameWriteError("destination_present", http.StatusConflict, nil)
+	}
+	return newFilenameWriteError("upstream_unavailable", http.StatusServiceUnavailable, err)
 }
 
 func protectedFilenameLimit(cfg *config.Config, displayPath string) int {
@@ -73,7 +104,7 @@ func prepareFilenameWrite(cfg *config.Config, repository interface{}, r *http.Re
 		return nil, legacyRawPath, nil
 	}
 	if hasRange {
-		return nil, "", fmt.Errorf("protected filename upload requires a complete non-resumed file")
+		return nil, "", newFilenameWriteError("complete_upload_required", http.StatusBadRequest, nil)
 	}
 	suffix := info.EncSuffix
 	if suffix == "" {
@@ -86,7 +117,25 @@ func prepareFilenameWrite(cfg *config.Config, repository interface{}, r *http.Re
 	raw := path.Join(path.Dir(displayPath), encoded)
 	repo, ok := repository.(filenameReservationRepository)
 	if !ok {
-		return nil, "", fmt.Errorf("filename reservation store unavailable")
+		return nil, "", newFilenameWriteError("filename_store_unavailable", http.StatusServiceUnavailable, nil)
+	}
+	// Existing local claims win regardless of physical absence: never retry a
+	// failed/complete upload just because the remote object cannot be found.
+	if getter, ok := repository.(interface {
+		GetFilenameReservation(string, string) (storage.FilenameRecord, bool, error)
+	}); ok {
+		rec, found, err := getter.GetFilenameReservation(cfg.GetAlistURL(), raw)
+		if err != nil {
+			return nil, "", newFilenameWriteError("filename_store_unavailable", http.StatusServiceUnavailable, err)
+		}
+		if found {
+			code := "destination_reserved"
+			switch rec.Status {
+			case storage.FilenameFailed, storage.FilenamePending, storage.FilenameComplete:
+				code = "reserved_" + rec.Status
+			}
+			return nil, "", newFilenameWriteError(code, http.StatusConflict, nil)
+		}
 	}
 	// Reject existing or uninspectable destinations before creating a durable
 	// reservation: a rejected write must not fence a pre-existing legacy read.
@@ -94,18 +143,21 @@ func prepareFilenameWrite(cfg *config.Config, repository interface{}, r *http.Re
 	// concurrent local writers and destinations changed by an external writer.
 	status, _, err := filenameRemoteHead(r, cfg.GetAlistURL(), raw, client)
 	if err != nil || status != http.StatusNotFound {
-		return nil, "", fmt.Errorf("filename destination must be verified absent before reservation (status %d): %v", status, err)
+		return nil, "", filenamePreflightError(status, err)
 	}
 	rec, err := repo.ReserveFilename(storage.FilenameRecord{Origin: cfg.GetAlistURL(), EncryptedPath: raw, OriginalPath: displayPath, DisplayName: short, RuleFingerprint: filenameRuleScope(info), AuthScope: filenameRequestScope(r), CiphertextSize: plainSize + 32})
 	if err != nil {
-		return nil, "", fmt.Errorf("filename destination cannot be reserved: %w", err)
+		if errors.Is(err, storage.ErrFilenameReserved) {
+			return nil, "", newFilenameWriteError("destination_reserved", http.StatusConflict, err)
+		}
+		return nil, "", newFilenameWriteError("filename_store_unavailable", http.StatusServiceUnavailable, err)
 	}
 	write := &protectedFilenameWrite{repo: repo, record: rec, expectedSize: plainSize + 32}
 	status, size, err := filenameRemoteHead(r, cfg.GetAlistURL(), raw, client)
 	_ = size
 	if err != nil || status != http.StatusNotFound {
 		_ = write.finish(storage.FilenameFailed)
-		return nil, "", fmt.Errorf("filename destination must be verified absent (status %d): %v", status, err)
+		return nil, "", filenamePreflightError(status, err)
 	}
 	return write, raw, nil
 }
@@ -165,8 +217,10 @@ func filenameRemoteHead(r *http.Request, origin, raw string, client *http.Client
 	return resp.StatusCode, resp.ContentLength, nil
 }
 
-// A successful complete fresh listing is authoritative for existence. Neither
-// transport HTTP 200 alone nor a partial page may establish absence.
+// A successful complete fresh listing checks the normal upload destination in
+// the caller's visible API scope. Neither HTTP 200 alone nor a partial page may
+// establish absence, and even a complete caller-scoped listing is not proof of
+// physical absence sufficient to release a durable filename reservation.
 func filenameRemoteAPIList(r *http.Request, origin, raw string, client *http.Client) (int, int64, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -222,17 +276,19 @@ func filenameRemoteAPIList(r *http.Request, origin, raw string, client *http.Cli
 		return 0, 0, fmt.Errorf("filename API verification lacks a complete successful listing")
 	}
 	// OpenList serializes a successful empty directory as content:null. Keep
-	// missing content distinct, and accept null only with authoritative total 0.
+	// missing content distinct, and accept null only with an explicit total 0.
 	if bytes.Equal(bytes.TrimSpace(listing.Data.Content), []byte("null")) {
 		if *listing.Data.Total == 0 {
 			return http.StatusNotFound, 0, nil
 		}
 		return 0, 0, fmt.Errorf("filename API verification has null non-empty content")
 	}
-	var content []struct {
-		Name  string `json:"name"`
-		Size  *int64 `json:"size"`
-		IsDir bool   `json:"is_dir"`
+	var content []*struct {
+		Name string `json:"name"`
+		Size *int64 `json:"size"`
+		// Retain compatibility with listings that omit is_dir; non-boolean
+		// values (other than JSON null) are rejected by json.Unmarshal.
+		IsDir bool `json:"is_dir"`
 	}
 	if err := json.Unmarshal(listing.Data.Content, &content); err != nil {
 		return 0, 0, err
@@ -242,11 +298,19 @@ func filenameRemoteAPIList(r *http.Request, origin, raw string, client *http.Cli
 	}
 	var found bool
 	var size int64
+	seen := make(map[string]struct{}, len(content))
 	for _, entry := range content {
+		if entry == nil || entry.Name == "" || entry.Name == "." || entry.Name == ".." || strings.ContainsAny(entry.Name, `/\`) || strings.IndexFunc(entry.Name, unicode.IsControl) >= 0 {
+			return 0, 0, fmt.Errorf("filename API verification invalid entry name")
+		}
+		if _, duplicate := seen[entry.Name]; duplicate {
+			return 0, 0, fmt.Errorf("filename API verification duplicate entry name")
+		}
+		seen[entry.Name] = struct{}{}
 		if entry.Name != path.Base(raw) {
 			continue
 		}
-		if found || entry.IsDir || entry.Size == nil || *entry.Size < 0 {
+		if entry.IsDir || entry.Size == nil || *entry.Size < 0 {
 			return 0, 0, fmt.Errorf("filename API verification ambiguous destination")
 		}
 		found = true

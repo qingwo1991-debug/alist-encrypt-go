@@ -714,7 +714,7 @@ func (h *WebDAVHandler) handlePut(w http.ResponseWriter, r *http.Request, davPat
 
 	protected, safePath, err := prepareFilenameWrite(h.cfg, h.fileDAO, r, passwdInfo, davPath, realPath, fileSize, hasRange, h.stdClient)
 	if err != nil {
-		RespondHTTPErrorWithStatus(w, err.Error(), http.StatusConflict)
+		respondFilenameWriteError(w, err)
 		return
 	}
 	var buffered *filenameWriteResponse

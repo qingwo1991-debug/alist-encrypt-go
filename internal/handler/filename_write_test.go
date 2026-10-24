@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
@@ -156,7 +158,7 @@ func TestProtectedFilenamePropfindVerifiesExactResource(t *testing.T) {
 }
 
 func TestProtectedFilenameAPIListingRequiresFreshCompleteEnvelope(t *testing.T) {
-	for _, tc := range []struct {
+	tests := []struct {
 		name, body string
 		status     int
 		wantStatus int
@@ -166,12 +168,54 @@ func TestProtectedFilenameAPIListingRequiresFreshCompleteEnvelope(t *testing.T) 
 		{"nonempty-null", `{"code":200,"data":{"total":1,"content":null}}`, 200, 0},
 		{"invalid-content-type", `{"code":200,"data":{"total":0,"content":{}}}`, 200, 0},
 		{"present", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":37}]}}`, 200, 200},
+		{"present-explicit-file", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":37,"is_dir":false}]}}`, 200, 200},
+		{"absent-valid-entries", `{"code":200,"data":{"total":2,"content":[{"name":"other.bin","size":37},{"name":"目录","is_dir":true}]}}`, 200, 404},
+		{"null-entry", `{"code":200,"data":{"total":1,"content":[null]}}`, 200, 0},
+		{"null-entry-after-target", `{"code":200,"data":{"total":2,"content":[{"name":"cipher.bin","size":37},null]}}`, 200, 0},
+		{"missing-entry-name", `{"code":200,"data":{"total":1,"content":[{"size":37}]}}`, 200, 0},
+		{"null-entry-name", `{"code":200,"data":{"total":1,"content":[{"name":null,"size":37}]}}`, 200, 0},
+		{"invalid-entry-name-type", `{"code":200,"data":{"total":1,"content":[{"name":42,"size":37}]}}`, 200, 0},
+		{"duplicate-target", `{"code":200,"data":{"total":2,"content":[{"name":"cipher.bin","size":37},{"name":"cipher.bin","size":37}]}}`, 200, 0},
+		{"duplicate-nontarget", `{"code":200,"data":{"total":2,"content":[{"name":"other.bin","size":37},{"name":"other.bin","size":37}]}}`, 200, 0},
+		{"duplicate-nontarget-after-target", `{"code":200,"data":{"total":3,"content":[{"name":"cipher.bin","size":37},{"name":"other.bin","size":37},{"name":"other.bin","size":37}]}}`, 200, 0},
+		{"directory-target", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":37,"is_dir":true}]}}`, 200, 0},
+		{"invalid-is-dir-string", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":37,"is_dir":"false"}]}}`, 200, 0},
+		{"invalid-is-dir-number", `{"code":200,"data":{"total":1,"content":[{"name":"other.bin","size":37,"is_dir":0}]}}`, 200, 0},
+		{"invalid-is-dir-object", `{"code":200,"data":{"total":1,"content":[{"name":"other.bin","size":37,"is_dir":{}}]}}`, 200, 0},
+		{"missing-target-size", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin"}]}}`, 200, 0},
+		{"null-target-size", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":null}]}}`, 200, 0},
+		{"negative-target-size", `{"code":200,"data":{"total":1,"content":[{"name":"cipher.bin","size":-1}]}}`, 200, 0},
 		{"app-error", `{"code":500,"data":null}`, 200, 0},
 		{"partial", `{"code":200,"data":{"total":2,"content":[{"name":"other.bin","size":37}]}}`, 200, 0},
 		{"missing-content", `{"code":200,"data":{"total":0}}`, 200, 0},
 		{"missing-total", `{"code":200,"data":{"content":[]}}`, 200, 0},
 		{"revoked", `{"code":401}`, 401, 0},
-	} {
+	}
+	invalidNames := []string{"", ".", "..", "/", `\`, "nested/name.bin", `nested\name.bin`, "../name.bin"}
+	for c := rune(0); c <= 0x9f; c++ {
+		if unicode.IsControl(c) {
+			invalidNames = append(invalidNames, "other"+string(c)+".bin")
+		}
+	}
+	for _, name := range invalidNames {
+		encoded, err := json.Marshal(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Keep a valid target before the malformed non-target to ensure a
+		// matching destination never short-circuits inventory validation.
+		tests = append(tests, struct {
+			name, body string
+			status     int
+			wantStatus int
+		}{
+			name:       fmt.Sprintf("invalid-basename-%q", name),
+			body:       fmt.Sprintf(`{"code":200,"data":{"total":2,"content":[{"name":"cipher.bin","size":37},{"name":%s,"size":1}]}}`, encoded),
+			status:     200,
+			wantStatus: 0,
+		})
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/api/fs/list" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer user" {
