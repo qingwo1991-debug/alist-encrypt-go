@@ -762,7 +762,7 @@ func (h *WopanAdminHandler) ClearRecycle(w http.ResponseWriter, r *http.Request)
 	// If this account also has an automation policy, write ahead even for a
 	// manual submission: a process crash must not turn a manual unknown outcome
 	// into an automatic retry after restart.
-	completeCheckpoint, checkpointErr := h.manualAutomationCheckpoint(accountKey)
+	completeCheckpoint, checkpointErr := h.manualAutomationCheckpoint(accountKey, s)
 	if checkpointErr != nil {
 		h.fail(w, checkpointErr)
 		return

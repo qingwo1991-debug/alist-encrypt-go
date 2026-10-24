@@ -310,6 +310,143 @@ func TestPublicJSONSnapshotOmitsCloudPolicyAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestWopanAutomationAlistManagementChangesDurablyHoldConsent(t *testing.T) {
+	for _, generic := range []bool{false, true} {
+		name := "UpdateAlistServer"
+		if generic {
+			name = "ReplaceFromJSON"
+		}
+		t.Run(name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			cfg := LoadFromBaseDir(baseDir)
+			// Start with normalized snapshots to test actual value changes only.
+			original := cfg.AlistServerSnapshot()
+			if err := cfg.UpdateAlistServer(original); err != nil {
+				t.Fatal(err)
+			}
+			original = cfg.AlistServerSnapshot()
+			policy := testWopanAutomationPolicy()
+			if err := cfg.UpdateWopanAutomation(0, policy); err != nil {
+				t.Fatal(err)
+			}
+			update := func(server AlistServer) error {
+				if !generic {
+					return cfg.UpdateAlistServer(server)
+				}
+				payload, err := json.Marshal(struct {
+					AlistServer AlistServer `json:"alistServer"`
+				}{AlistServer: server})
+				if err != nil {
+					return err
+				}
+				return cfg.ReplaceFromJSON(payload)
+			}
+			if err := update(original); err != nil {
+				t.Fatal(err)
+			}
+			for _, binding := range cfg.CloudStorageSnapshot().WopanAutomation.Bindings {
+				if binding.Quarantined {
+					t.Fatal("same-value update unnecessarily held consent")
+				}
+			}
+			changed := original
+			changed.ServerHost = "changed.example"
+			before := cfg.CloudStorageSnapshot()
+			beforeRevision := cfg.RuntimeRevision()
+			path := cfg.configPath
+			cfg.configPath = t.TempDir()
+			if err := update(changed); err == nil {
+				t.Fatal("management save unexpectedly succeeded")
+			}
+			if !reflect.DeepEqual(cfg.AlistServerSnapshot(), original) || !reflect.DeepEqual(cfg.CloudStorageSnapshot(), before) || cfg.RuntimeRevision() != beforeRevision {
+				t.Fatal("failed management save did not roll back context and consent")
+			}
+			cfg.configPath = path
+			if err := update(changed); err != nil {
+				t.Fatal(err)
+			}
+			if err := update(original); err != nil {
+				t.Fatal(err)
+			}
+			got := LoadFromBaseDir(baseDir).CloudStorageSnapshot().WopanAutomation
+			if got.Version != policy.Version {
+				t.Fatal("context hold advanced independent policy version")
+			}
+			for _, binding := range got.Bindings {
+				if !binding.Quarantined {
+					t.Fatal("A -> B -> A resurrected prior consent")
+				}
+			}
+		})
+	}
+}
+
+func TestWopanAutomationCheckpointClearRequiresRuntimeRevision(t *testing.T) {
+	baseDir := t.TempDir()
+	cfg := LoadFromBaseDir(baseDir)
+	policy := testWopanAutomationPolicy()
+	if err := cfg.UpdateWopanAutomation(0, policy); err != nil {
+		t.Fatal(err)
+	}
+	revision := cfg.RuntimeRevision()
+	if err := cfg.QuarantineWopanAutomation(1, policy.Bindings[0].AccountHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ReplaceFromJSON([]byte(`{"port":5345}`)); err != nil {
+		t.Fatal(err)
+	}
+	before := cfg.CloudStorageSnapshot()
+	if err := cfg.ClearWopanAutomationCheckpoint(1, policy.Bindings[0].AccountHash, revision); !errors.Is(err, ErrWopanAutomationVersionConflict) {
+		t.Fatalf("stale runtime clear error=%v", err)
+	}
+	if !reflect.DeepEqual(cfg.CloudStorageSnapshot(), before) || !reflect.DeepEqual(LoadFromBaseDir(baseDir).CloudStorageSnapshot(), before) {
+		t.Fatal("stale runtime clear lost durable quarantine")
+	}
+	if err := cfg.ClearWopanAutomationCheckpoint(1, policy.Bindings[0].AccountHash, cfg.RuntimeRevision()); err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range cfg.CloudStorageSnapshot().WopanAutomation.Bindings {
+		if binding.AccountHash == policy.Bindings[0].AccountHash && binding.Quarantined {
+			t.Fatal("current runtime clear did not clear checkpoint")
+		}
+	}
+}
+
+func TestWopanAutomationDurabilityPlatformGuard(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy WopanAutomationConfig
+		strict bool
+	}{
+		{name: "ordinary defaults", policy: WopanAutomationConfig{IntervalHours: 24}},
+		{name: "enabled", policy: WopanAutomationConfig{Enabled: true}, strict: true},
+		{name: "disabled quarantined", policy: WopanAutomationConfig{Bindings: []WopanAutomationBinding{{Quarantined: true}}}, strict: true},
+		{name: "disabled clean binding", policy: WopanAutomationConfig{Bindings: []WopanAutomationBinding{{}}}},
+		{name: "disabled later quarantined binding", policy: WopanAutomationConfig{Bindings: []WopanAutomationBinding{{}, {Quarantined: true}}}, strict: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			strict := wopanAutomationDurabilityRequired(CloudStorageConfig{WopanAutomation: tc.policy})
+			if strict != tc.strict {
+				t.Fatalf("strict=%v, want %v", strict, tc.strict)
+			}
+			if err := validateWopanAutomationDurability("windows", strict); (err != nil) != strict {
+				t.Fatalf("Windows guard error=%v strict=%v", err, strict)
+			}
+			for _, goos := range []string{"linux", "darwin", "android"} {
+				if err := validateWopanAutomationDurability(goos, strict); err != nil {
+					t.Fatalf("%s unexpectedly rejected: %v", goos, err)
+				}
+			}
+		})
+	}
+	// Explicit checkpoint writes must always request strict durability, even
+	// when a disabled policy's final clean binding would not request it itself.
+	if err := validateWopanAutomationDurability("windows", true); err == nil {
+		t.Fatal("strict checkpoint durability accepted on Windows")
+	}
+}
+
 func TestReplaceFromJSONRejectsCloudStorage(t *testing.T) {
 	cfg := LoadFromBaseDir(t.TempDir())
 	if err := cfg.UpdateWopanAutomation(0, testWopanAutomationPolicy()); err != nil {

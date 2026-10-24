@@ -105,6 +105,37 @@ func validateWopanAutomation(policy WopanAutomationConfig) error {
 	return nil
 }
 
+// Management changes to the Alist context invalidate existing consent, even
+// when a later update returns to the same values (A -> B -> A).
+// The caller owns this cloud snapshot and persists it with the context change.
+func quarantineWopanAutomationBindings(cloud *CloudStorageConfig) {
+	if !cloud.WopanAutomation.Enabled {
+		return
+	}
+	for i := range cloud.WopanAutomation.Bindings {
+		cloud.WopanAutomation.Bindings[i].Quarantined = true
+	}
+}
+
+func wopanAutomationDurabilityRequired(cloud CloudStorageConfig) bool {
+	if cloud.WopanAutomation.Enabled {
+		return true
+	}
+	for _, binding := range cloud.WopanAutomation.Bindings {
+		if binding.Quarantined {
+			return true
+		}
+	}
+	return false
+}
+
+func validateWopanAutomationDurability(goos string, strict bool) error {
+	if strict && goos == "windows" {
+		return errors.New("durable wopan automation is unsupported on Windows")
+	}
+	return nil
+}
+
 // UpdateWopanAutomation atomically persists a policy using compare-and-swap.
 // Every save, including disabling/re-enabling, must supply the next version.
 // Policy changes never advance the unrelated runtimeRevision publication fence.
@@ -138,6 +169,17 @@ func (c *Config) UpdateWopanAutomation(expectedVersion uint64, policy WopanAutom
 // true BEFORE invoking a destructive provider operation. Clear with false only
 // after confirmed success; a failed save rolls back so the quarantine remains.
 func (c *Config) SetWopanAutomationCheckpoint(expectedVersion uint64, accountHash string, quarantined bool) error {
+	return c.setWopanAutomationCheckpoint(expectedVersion, accountHash, quarantined, nil)
+}
+
+// ClearWopanAutomationCheckpoint clears a successful operation's checkpoint only
+// if its captured runtime context is still current. Both generation checks and
+// the durable clear happen under the same lock, closing the management TOCTOU.
+func (c *Config) ClearWopanAutomationCheckpoint(expectedVersion uint64, accountHash string, expectedRuntimeRevision uint64) error {
+	return c.setWopanAutomationCheckpoint(expectedVersion, accountHash, false, &expectedRuntimeRevision)
+}
+
+func (c *Config) setWopanAutomationCheckpoint(expectedVersion uint64, accountHash string, quarantined bool, expectedRuntimeRevision *uint64) error {
 	if c == nil {
 		return fmt.Errorf("config is nil")
 	}
@@ -147,6 +189,9 @@ func (c *Config) SetWopanAutomationCheckpoint(expectedVersion uint64, accountHas
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.CloudStorage.WopanAutomation.Version != expectedVersion {
+		return ErrWopanAutomationVersionConflict
+	}
+	if expectedRuntimeRevision != nil && c.runtimeRevision != *expectedRuntimeRevision {
 		return ErrWopanAutomationVersionConflict
 	}
 	candidate := cloneCloudStorageConfig(c.CloudStorage)
@@ -163,7 +208,9 @@ func (c *Config) SetWopanAutomationCheckpoint(expectedVersion uint64, accountHas
 	}
 	old := c.CloudStorage
 	c.CloudStorage = candidate
-	if err := c.saveLocked(); err != nil {
+	// Checkpoint clearing is still a journal operation even if the policy was
+	// disabled or the candidate no longer contains a quarantine marker.
+	if err := c.saveLockedDurable(true); err != nil {
 		c.CloudStorage = old
 		return err
 	}

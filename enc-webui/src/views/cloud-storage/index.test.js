@@ -344,7 +344,7 @@ describe('WoPan multi-selection and safe scheduled cleanup', () => {
     expect(list).toContain(personal.mount_path)
     expect(list).toContain(otherPersonal.mount_path)
     expect(wrapper.get('[role="dialog"]').text()).toContain('以后新进入回收站')
-    for (const wrong of ['', autoPhrase + ' ', ' ' + autoPhrase, '清空个人账号全部回收站']) {
+    for (const wrong of ['', `${autoPhrase} `, ` ${autoPhrase}`, '清空个人账号全部回收站']) {
       await typeAuto(wrong)
       expect(wrapper.get('[data-testid="confirm-automation"]').element.disabled).toBe(true)
       await state().confirmAutomation()

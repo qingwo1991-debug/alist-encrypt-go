@@ -27,9 +27,12 @@ type wopanAutomationState struct {
 	done             chan struct{}
 	running          bool
 	persistenceFault bool
-	cancel           context.CancelFunc
-	lastRun          string
-	results          []wopanAutomationResult
+	// holds fences new reasons against callbacks that own an older pending
+	// checkpoint. Durable quarantine survives restart; old callbacks do not.
+	holds   map[string]bool
+	cancel  context.CancelFunc
+	lastRun string
+	results []wopanAutomationResult
 	// wait is injectable for deterministic scheduler tests. A timer is stopped
 	// on both policy changes and shutdown; no OS service or browser session exists.
 	wait func(time.Duration) (<-chan time.Time, func())
@@ -185,6 +188,7 @@ func (h *WopanAdminHandler) SaveAutomation(w http.ResponseWriter, r *http.Reques
 	}
 	if input.Enabled {
 		h.automation.persistenceFault = false
+		h.automation.holds = nil
 	}
 	h.automation.results = nil
 	h.automation.lastRun = ""
@@ -382,6 +386,10 @@ func (h *WopanAdminHandler) runAutomationOnce(parent context.Context, version ui
 				// confirmed account, never any newly observed unconfirmed account.
 				if expected.AccountHash != "" {
 					h.mu.Lock()
+					if h.automation.holds == nil {
+						h.automation.holds = make(map[string]bool)
+					}
+					h.automation.holds[expected.AccountHash] = true
 					if checkpointErr := h.cfg.SetWopanAutomationCheckpoint(version, expected.AccountHash, true); checkpointErr != nil {
 						h.automation.persistenceFault = true
 					}
@@ -419,7 +427,7 @@ func (h *WopanAdminHandler) runAutomationOnce(parent context.Context, version ui
 
 // manualAutomationCheckpoint shares the automatic account journal without
 // changing the existing two-stage manual confirmation authorization.
-func (h *WopanAdminHandler) manualAutomationCheckpoint(key [32]byte) (func() error, error) {
+func (h *WopanAdminHandler) manualAutomationCheckpoint(key [32]byte, s wopanUpstreamSession) (func() error, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.cfg.CloudStorageSnapshot().WopanAutomation
@@ -438,16 +446,19 @@ func (h *WopanAdminHandler) manualAutomationCheckpoint(key [32]byte) (func() err
 		return nil, wopanError(http.StatusInternalServerError, "automation_checkpoint_failed")
 	}
 	return func() error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.automation.holds[accountHash] || !h.unchanged(s) {
+			return nil
+		}
 		// A manual success must never clear an already unknown automatic checkpoint.
 		for _, b := range p.Bindings {
 			if b.AccountHash == accountHash && b.Quarantined {
 				return nil
 			}
 		}
-		if err := h.cfg.SetWopanAutomationCheckpoint(p.Version, accountHash, false); err != nil {
-			h.mu.Lock()
+		if err := h.cfg.ClearWopanAutomationCheckpoint(p.Version, accountHash, s.revision); err != nil {
 			h.automation.persistenceFault = true
-			h.mu.Unlock()
 			return err
 		}
 		return nil
@@ -499,10 +510,13 @@ func (h *WopanAdminHandler) automationClear(ctx context.Context, s wopanUpstream
 	if err = h.provider.EmptyRecycle(ctx, a.AccessToken); err != nil {
 		return wopanError(http.StatusBadGateway, "clear_outcome_unknown")
 	}
-	if err = h.cfg.SetWopanAutomationCheckpoint(p.Version, b.AccountHash, false); err != nil {
-		h.mu.Lock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.automation.holds[b.AccountHash] || !h.unchanged(s) {
+		return nil
+	}
+	if err = h.cfg.ClearWopanAutomationCheckpoint(p.Version, b.AccountHash, s.revision); err != nil {
 		h.automation.persistenceFault = true
-		h.mu.Unlock()
 		return wopanError(http.StatusInternalServerError, "clear_outcome_unknown")
 	}
 	return nil

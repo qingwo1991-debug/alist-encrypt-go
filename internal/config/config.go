@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -711,6 +713,16 @@ func (c *Config) Save() error {
 // lock through the atomic rename makes runtime updates and their disk state a
 // single transaction from other goroutines' perspective.
 func (c *Config) saveLocked() error {
+	return c.saveLockedDurable(wopanAutomationDurabilityRequired(c.CloudStorage))
+}
+
+// saveLockedDurable rejects automation journals where the required directory
+// durability fence is unsupported. Ordinary Windows config saves retain their
+// legacy behavior, but must never be mistaken for durable automation consent.
+func (c *Config) saveLockedDurable(strict bool) error {
+	if err := validateWopanAutomationDurability(runtime.GOOS, strict); err != nil {
+		return err
+	}
 	if err := validatePlaybackProfile(c.AlistServer.PlaybackProfile); err != nil {
 		return err
 	}
@@ -864,6 +876,9 @@ func (c *Config) ReplaceFromJSON(data []byte) error {
 	// Policy/checkpoint updates may have committed while candidate was validated.
 	// A generic save must preserve the latest independent cloud-storage state.
 	candidate.CloudStorage = cloneCloudStorageConfig(c.CloudStorage)
+	if !alistServerManagementEqual(c.AlistServer, candidate.AlistServer) {
+		quarantineWopanAutomationBindings(&candidate.CloudStorage)
+	}
 	c.assignSnapshotLocked(candidate)
 	if err := c.saveLocked(); err != nil {
 		c.assignSnapshotLocked(old)
@@ -894,6 +909,9 @@ func (c *Config) assignSnapshotLocked(src *Config) {
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if runtime.GOOS == "windows" {
+		return writeFileAtomicLegacy(path, data, perm)
+	}
 	// Keep the previous bytes so a directory-sync failure after rename can
 	// restore the prior checkpoint, rather than rolling back only memory.
 	previous, readErr := os.ReadFile(path)
@@ -924,6 +942,32 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("atomic config save failed: %w; disk rollback also failed: %v", err, rollbackErr)
 	}
 	return err
+}
+
+// writeFileAtomicLegacy preserves ordinary Windows configuration saves. It
+// offers atomic replacement only, not the automation journal durability fence.
+func writeFileAtomicLegacy(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // writeFileAtomicSynced reports whether rename happened even if the final
@@ -1453,6 +1497,26 @@ func (c *Config) IsUnixSocketEnabled() bool {
 	return c.Scheme != nil && c.Scheme.UnixFile != ""
 }
 
+// alistServerManagementEqual compares effective normalized values, not the
+// nil/empty collection representations introduced by JSON/snapshot roundtrips.
+// Copies keep canonicalization from mutating either live or caller-owned data.
+func alistServerManagementEqual(left, right AlistServer) bool {
+	canonical := func(server AlistServer) AlistServer {
+		server.PasswdList = clonePasswdList(server.PasswdList)
+		server.StreamStrategyOverrides = append([]StreamStrategyOverride(nil), server.StreamStrategyOverrides...)
+		if len(server.FilenameWriteLimits) == 0 {
+			server.FilenameWriteLimits = nil
+		} else {
+			server.FilenameWriteLimits = cloneFilenameWriteLimits(server.FilenameWriteLimits)
+		}
+		view := &Config{AlistServer: server}
+		view.normalizeAlistServerTuning()
+		view.normalizeEncPaths()
+		return view.AlistServer
+	}
+	return reflect.DeepEqual(canonical(left), canonical(right))
+}
+
 // UpdateAlistServer updates Alist server config and saves
 func (c *Config) UpdateAlistServer(server AlistServer) error {
 	if err := validatePlaybackProfile(server.PlaybackProfile); err != nil {
@@ -1474,10 +1538,16 @@ func (c *Config) UpdateAlistServer(server AlistServer) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old := c.AlistServer
+	oldCloud := cloneCloudStorageConfig(c.CloudStorage)
 	c.AlistServer = server
 	c.normalizeAlistServerTuning()
+	if !alistServerManagementEqual(old, c.AlistServer) {
+		c.CloudStorage = cloneCloudStorageConfig(c.CloudStorage)
+		quarantineWopanAutomationBindings(&c.CloudStorage)
+	}
 	if err := c.saveLocked(); err != nil {
 		c.AlistServer = old
+		c.CloudStorage = oldCloud
 		return err
 	}
 	c.runtimeRevision++
