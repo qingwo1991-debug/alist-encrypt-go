@@ -326,10 +326,10 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 		return
 	default:
 	}
-	// Trusted listings may hydrate missing sizes through the same bounded queue,
-	// but must never restore the legacy full playback/range/KDF warmup fan-out.
+	// Generic warmup producers may supply plaintext sizes (playback, fs/get and
+	// shared snapshots). They have no authority to invalidate ciphertext proof.
+	// Trusted DAV transport observations use EnqueueObservedPropfindSize instead.
 	if ps.cfg != nil && ps.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
-		ps.enqueuePropfindSize(file, authHeaders, reportedSize, source)
 		return
 	}
 	if ps.foreground.Load().Enabled() {

@@ -33,7 +33,7 @@ func TestPropfindSizeOnlyForeignLocatorNeverReceivesCallerCredentials(t *testing
 	}))
 	defer upstream.Close()
 	ps, file := newPropfindSizeScheduler(t, upstream.URL, 2)
-	ps.EnqueueWithSource(file, http.Header{"Authorization": []string{"Basic caller"}, "Cookie": []string{"private-cookie"}, "X-Provider-Secret": []string{"private-provider"}}, int64(len(body)), probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, http.Header{"Authorization": []string{"Basic caller"}, "Cookie": []string{"private-cookie"}, "X-Provider-Secret": []string{"private-provider"}}, int64(len(body)), probeSourcePropfind)
 	item := <-ps.queue
 	ps.runItem(item)
 	if _, hit := ps.fileDAO.GetConfirmedPlayback(item.sizeOnly.identity); !hit {
@@ -61,7 +61,7 @@ func TestPropfindSizeOnlyConfigChangeDuringInspectionCannotPublish(t *testing.T)
 	defer upstream.Close()
 	origin = upstream.URL
 	ps, file := newPropfindSizeScheduler(t, origin, 2)
-	ps.EnqueueWithSource(file, http.Header{"Authorization": []string{"Basic caller"}}, int64(len(body)), probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, http.Header{"Authorization": []string{"Basic caller"}}, int64(len(body)), probeSourcePropfind)
 	item := <-ps.queue
 	done := make(chan struct{})
 	go func() { ps.runItem(item); close(done) }()

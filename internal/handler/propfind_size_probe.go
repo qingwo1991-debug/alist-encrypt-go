@@ -26,7 +26,19 @@ type propfindSizeAdmission struct {
 	ciphertextSize   int64
 }
 
-func (ps *ProbeScheduler) enqueuePropfindSize(file FileItem, headers http.Header, observed int64, source string) {
+// EnqueueObservedPropfindSize admits only an original upstream DAV transport
+// length paired with this exact raw path, or that observation retained privately
+// in a DAV snapshot. Generic display/plaintext sizes must never enter this API:
+// a different observed ciphertext length revokes existing canonical proof.
+func (ps *ProbeScheduler) EnqueueObservedPropfindSize(file FileItem, headers http.Header, observed int64, source string) {
+	if ps == nil || !ps.enabled || ps.queue == nil {
+		return
+	}
+	select {
+	case <-ps.done():
+		return
+	default:
+	}
 	if ps.cfg == nil || ps.fileDAO == nil || ps.stream == nil || file.PasswdInfo == nil || !file.PasswdInfo.Enable || file.DisplayPath == "" || file.EncryptedPath == "" || observed <= 0 {
 		return
 	}

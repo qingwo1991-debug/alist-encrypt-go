@@ -1495,7 +1495,7 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 			}
 			// Size-only hydration must retain the original transport observation,
 			// not plaintext already recovered for this listing entry.
-			h.enqueueProbeFromPropfind(ctx, displayPath, entry.Size)
+			h.enqueueProbeFromPropfind(ctx, displayPath, encryptedPath, entry.Size)
 		}
 	}
 	return entries
@@ -1514,7 +1514,7 @@ func (h *WebDAVHandler) upsertMetaFromListing(ctx context.Context, displayPath s
 	})
 }
 
-func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPath string, reportedSize int64) {
+func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPath, observedRawPath string, reportedSize int64) {
 	if h.probe == nil {
 		return
 	}
@@ -1541,7 +1541,15 @@ func (h *WebDAVHandler) enqueueProbeFromPropfind(ctx context.Context, displayPat
 			authHeaders.Set("Authorization", value)
 		}
 	}
-	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, probeSourceFromContext(ctx, probeSourcePropfind))
+	source := probeSourceFromContext(ctx, probeSourcePropfind)
+	if h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		// Preserve the exact raw-path/length pair from the original response,
+		// including startup/deep scans; a stale global alias is not evidence.
+		file.EncryptedPath = observedRawPath
+		h.probe.EnqueueObservedPropfindSize(file, authHeaders, reportedSize, source)
+		return
+	}
+	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, source)
 }
 
 func (h *WebDAVHandler) withProbeAuthContext(ctx context.Context) context.Context {

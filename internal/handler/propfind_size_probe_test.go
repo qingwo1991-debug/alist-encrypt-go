@@ -87,7 +87,7 @@ func TestPropfindSizeOnlyBoundedHeaderAndNoPlaybackWarmup(t *testing.T) {
 			origin = upstream.URL
 			ps, file := newPropfindSizeScheduler(t, origin, 4)
 			headers := http.Header{"Authorization": []string{"Basic caller"}}
-			ps.EnqueueWithSource(file, headers, int64(len(body)), probeSourcePropfind)
+			ps.EnqueueObservedPropfindSize(file, headers, int64(len(body)), probeSourcePropfind)
 			if len(ps.queue) != 1 {
 				t.Fatal("small subtitle excluded by legacy video/size/foreground filters")
 			}
@@ -110,7 +110,7 @@ func TestPropfindSizeOnlyBoundedHeaderAndNoPlaybackWarmup(t *testing.T) {
 				t.Fatalf("api=%d header=%d rangeWarmup=%d", api.Load(), media.Load(), ps.filesRangeProbed)
 			}
 			file.PasswdInfo = item.file.PasswdInfo
-			ps.EnqueueWithSource(file, item.authHeaders, int64(len(body)), probeSourcePropfind)
+			ps.EnqueueObservedPropfindSize(file, item.authHeaders, int64(len(body)), probeSourcePropfind)
 			if len(ps.queue) != 0 {
 				t.Fatal("already-confirmed metadata queued again")
 			}
@@ -120,20 +120,20 @@ func TestPropfindSizeOnlyBoundedHeaderAndNoPlaybackWarmup(t *testing.T) {
 
 func TestPropfindSizeOnlyAdmissionBoundedAndCredentialScoped(t *testing.T) {
 	ps, file := newPropfindSizeScheduler(t, "http://127.0.0.1:5244", 2)
-	ps.EnqueueWithSource(file, nil, 4096, probeSourcePropfind)
-	ps.EnqueueWithSource(file, http.Header{"Authorization": []string{"Basic caller"}}, -1, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, nil, 4096, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, http.Header{"Authorization": []string{"Basic caller"}}, -1, probeSourcePropfind)
 	if len(ps.queue) != 0 {
 		t.Fatal("missing auth/ciphertext observation admitted")
 	}
 	auth := http.Header{"Authorization": []string{"Basic caller"}}
-	ps.EnqueueWithSource(file, auth, 4096, probeSourcePropfind)
-	ps.EnqueueWithSource(file, auth, 4096, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, auth, 4096, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, auth, 4096, probeSourcePropfind)
 	other := file
 	other.DisplayPath, other.EncryptedPath = "/encrypt/other.srt", "/encrypt/other.bin"
-	ps.EnqueueWithSource(other, auth, 4096, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(other, auth, 4096, probeSourcePropfind)
 	third := file
 	third.DisplayPath, third.EncryptedPath = "/encrypt/third.srt", "/encrypt/third.bin"
-	ps.EnqueueWithSource(third, auth, 4096, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(third, auth, 4096, probeSourcePropfind)
 	if len(ps.queue) != 2 || atomic.LoadUint64(&ps.droppedTotal) != 1 {
 		t.Fatalf("queue=%d dropped=%d", len(ps.queue), ps.droppedTotal)
 	}
@@ -150,7 +150,7 @@ func TestPropfindSizeOnlyConfigAndEpochFenceBeforeNetwork(t *testing.T) {
 			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.WriteHeader(500) }))
 			defer upstream.Close()
 			ps, file := newPropfindSizeScheduler(t, upstream.URL, 2)
-			ps.EnqueueWithSource(file, http.Header{"Authorization": []string{"Basic caller"}}, 4096, probeSourcePropfind)
+			ps.EnqueueObservedPropfindSize(file, http.Header{"Authorization": []string{"Basic caller"}}, 4096, probeSourcePropfind)
 			item := <-ps.queue
 			if fence == "config" {
 				alist := ps.cfg.AlistServerSnapshot()
@@ -187,7 +187,7 @@ func TestPropfindSizeOnlyStopCancelsActualHeaderRead(t *testing.T) {
 	defer upstream.Close()
 	origin = upstream.URL
 	ps, file := newPropfindSizeScheduler(t, origin, 2)
-	ps.EnqueueWithSource(file, http.Header{"Authorization": []string{"Basic caller"}}, 4096, probeSourcePropfind)
+	ps.EnqueueObservedPropfindSize(file, http.Header{"Authorization": []string{"Basic caller"}}, 4096, probeSourcePropfind)
 	ps.workerWG.Add(1)
 	go func() { defer ps.workerWG.Done(); ps.worker() }()
 	select {

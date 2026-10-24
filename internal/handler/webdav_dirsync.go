@@ -274,7 +274,7 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte,
 				} else if h.probe != nil && len(requests) > 0 && requests[0] != nil {
 					// Admission only: existing bounded workers inspect tiny container
 					// headers after foreground work. No network is done by this loop.
-					h.probe.EnqueueWithSource(FileItem{DisplayPath: childPath, EncryptedPath: raw, FileName: name, TargetURL: httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+raw), PasswdInfo: rule}, h.webdavAuthHeaders(requests[0]), int64(cipherSize), probeSourcePropfind)
+					h.probe.EnqueueObservedPropfindSize(FileItem{DisplayPath: childPath, EncryptedPath: raw, FileName: name, TargetURL: httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+raw), PasswdInfo: rule}, h.webdavAuthHeaders(requests[0]), int64(cipherSize), probeSourcePropfind)
 				}
 			}
 		}
