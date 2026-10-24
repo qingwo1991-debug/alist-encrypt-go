@@ -730,10 +730,13 @@ func (h *AlistHandler) HandleFsSearch(w http.ResponseWriter, r *http.Request) {
 func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, body []byte, srcReq *http.Request) (*http.Response, error) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), endpoint, nil)
 
+	// Authorization belongs to the upstream file-browser session. Strip only
+	// local management credentials; dropping it silently turns searches into
+	// guest requests, even when the same caller can list files successfully.
 	req, err := httputil.NewRequest(method, targetURL).
 		WithContext(srcReq.Context()).
 		WithBody(body).
-		CopyHeadersExcept(srcReq, "Content-Length", "Authorization", "Authorizetoken", "X-User-Token").
+		CopyHeadersExcept(srcReq, "Content-Length", "Authorizetoken", "X-User-Token").
 		WithForwardedHeaders(srcReq).
 		WithHeader("Content-Type", "application/json").
 		Build()
