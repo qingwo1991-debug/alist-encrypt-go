@@ -19,6 +19,9 @@ const cleanupRequest = (config) => {
 }
 
 const codeMatches = (code, candidates) => candidates.has(String(code))
+// Some local admin APIs use 403 for upstream capability/CSRF failures. Their
+// explicit opt-in must never suppress a genuine local-session 401.
+const shouldResetAuth = (code, config) => String(code) === '401' || (String(code) === '403' && !config?.skipForbiddenAuthReset)
 
 const errorMessage = (err) => {
   const status = err?.response?.status
@@ -92,11 +95,10 @@ service.interceptors.response.use(
     }
     const { code, msg } = res.data
     const successCodes = new Set(['0', '200', '20000'])
-    const noAuthCodes = new Set(['401', '403'])
     if (codeMatches(code, successCodes)) {
       return res.data
     } else {
-      if (codeMatches(code, noAuthCodes)) {
+      if (shouldResetAuth(code, res.config)) {
         resetExpiredSession()
       }
       // @ts-ignore
@@ -112,7 +114,7 @@ service.interceptors.response.use(
   //响应报错
   (err) => {
     cleanupRequest(err?.config)
-    const unauthorized = [401, 403].includes(err?.response?.status)
+    const unauthorized = shouldResetAuth(err?.response?.status, err?.config)
     if (unauthorized) {
       resetExpiredSession()
     }
