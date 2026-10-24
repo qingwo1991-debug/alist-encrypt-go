@@ -3,7 +3,18 @@
 > 对应已批准计划：`LOCAL_PLAYBACK_PERFORMANCE_PLAN.md`。状态：执行中，不代表整体完成。
 > 原 `REMAINING_ENGINEERING_PLAN.md` 的未完成项目保留历史，不冒充本轮已交付。
 
-## 当前进度更新（2026-10-18）
+## 当前进度更新（2026-10-24）
+
+生产现为固定摘要 v2026.10.24.521（image ID `6e4d35e9`），不是下面历史的 4f1668e。当前完整交付后安全冷备份、82 条预留保留、五表 SQL 归档及单服务切换记录见 `CURRENT_COLD_UPGRADE_WINDOW_20261024.md`；媒体盘 Unix 权限不生效的问题已按该记录实际加密认证加固，不把创建请求 0600 当有效权限。
+
+- 实际生产 Ctrl+K 浏览器业务 200，旧 guest 错误消失，见 `CTRLK_PRODUCTION_ACCEPTANCE_20261024.md`。
+- 新完整收据对象明文 1,602,702,460 字节，30 组 PF0 / HEAD / prefix、32 个最多 16 并发请求及 EOF 416 通过；暖 prefix p50 / p95 为 3.343 / 7.063 ms，见 `PRODUCTION_PLAYBACK_30_SAMPLE_20261024.md`。这是新对象暖态样本，不与旧 WA / IPZZ 不同对象的数字作严格回归比值。
+- 该对象前 30 秒实际音视频解码通过：900 帧、输出 30.000 秒、无错误，转发器实际读取约 94.3 MB；不是全片或长时播放，见 `PRODUCTION_30_SECOND_DECODE_20261024.md`。短测后 Go heap 从 30 至 70 / 76 MiB，未声称内存不增长；长时稳态仍待测。
+- 已知 WA 逻辑 404 定位到 failed + 无 additive recovery；精确物理路径元数据 207 且密文长度一致，但没有内容头 / 解密证据，合法管理员恢复未执行，见 `WA596_COLD_CLAIM_DIAGNOSIS_20261024.md`。
+- 目录首次带斜杠只返回自身的证据仍保留，暖后两入口 1823 项；另有缺失 / null content 被当空目录的独立可复现缺陷，修复在 PR111，未部署、不冒认原事故根因。
+- **60 分钟连续播放、后台扫描对照、实际设备首帧 / seek 仍 `device_unverified`**。SNOS229、IPZZ172 的保护、完整来源 / 读回 / 删源门槛和旧源保留不变。
+
+## 历史进度更新（2026-10-18）
 
 当前已部署main `4f1668e`，完整PR及main发布均success，固定镜像digest和现场证据见`LOCAL_PLAYBACK_DEPLOYMENT_ACCEPTANCE.md`。以下b6f2f1b是历史基线，不是当前运行镜像。
 
