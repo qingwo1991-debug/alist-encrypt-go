@@ -46,6 +46,8 @@ func TestWopanManagementRoutesRequireLocalAdministratorSession(t *testing.T) {
 	}
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/enc-api/wopan/storages"},
+		{http.MethodGet, "/enc-api/wopan/automation"},
+		{http.MethodPost, "/enc-api/wopan/automation"},
 		{http.MethodGet, "/enc-api/wopan/quota?storage_id=5"},
 		{http.MethodPost, "/enc-api/wopan/recycle/prepare"},
 		{http.MethodPost, "/enc-api/wopan/recycle/clear"},

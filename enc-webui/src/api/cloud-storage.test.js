@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/utils/axios-req', () => ({ default: vi.fn() }))
 import axiosReq from '@/utils/axios-req'
-import { clearWopanRecycleReq, getWopanQuotaReq, getWopanStoragesReq, prepareWopanRecycleReq } from './cloud-storage'
+import { clearWopanRecycleReq, getWopanAutomationReq, getWopanQuotaReq, getWopanStoragesReq, prepareWopanRecycleReq, saveWopanAutomationReq } from './cloud-storage'
 
 beforeEach(() => axiosReq.mockReset())
 
@@ -32,6 +32,25 @@ describe('WoPan local admin transport', () => {
     expect(axiosReq).toHaveBeenCalledExactlyOnceWith({
       url: '/enc-api/wopan/recycle/prepare', method: 'post', data: { storage_id: 9 },
       signal: undefined, timeout: 20000, reqLoading: false, isNotTipErrorMsg: true, skipForbiddenAuthReset: true
+    })
+  })
+
+  it('reads automation using the same local auth transport with AbortSignal', async () => {
+    const controller = new AbortController()
+    await getWopanAutomationReq({ signal: controller.signal })
+    expect(axiosReq).toHaveBeenCalledExactlyOnceWith({
+      url: '/enc-api/wopan/automation', method: 'get', data: undefined,
+      signal: controller.signal, timeout: 20000, reqLoading: false, isNotTipErrorMsg: true, skipForbiddenAuthReset: true
+    })
+  })
+
+  it.each([true, false])('saves only the strict automation JSON fields (enabled=%s), without run-now or clear', async enabled => {
+    const controller = new AbortController()
+    const body = { enabled, storage_ids: [1, 42], interval_hours: 24, confirmation_phrase: enabled ? '自动清空所选账号全部回收站' : '' }
+    await saveWopanAutomationReq({ ...body, token: 'must-not-send', run_now: true }, { signal: controller.signal })
+    expect(axiosReq).toHaveBeenCalledExactlyOnceWith({
+      url: '/enc-api/wopan/automation', method: 'post', data: body,
+      signal: controller.signal, timeout: 20000, reqLoading: false, isNotTipErrorMsg: true, skipForbiddenAuthReset: true
     })
   })
 
