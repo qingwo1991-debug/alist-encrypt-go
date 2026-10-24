@@ -31,6 +31,39 @@ func TestWopanAutomationReviewRuntimeCredentialABARequiresReconfirmation(t *test
 	}
 }
 
+func TestWopanAutomationReviewNoopGenericSavePreservesUsableBinding(t *testing.T) {
+	for _, kind := range []string{"public-roundtrip", "port-only"} {
+		t.Run(kind, func(t *testing.T) {
+			f := automationFixture(t)
+			version := enableAutomation(t, f, 27)
+			before, err := f.h.snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := []byte(`{"port":5345}`)
+			if kind == "public-roundtrip" {
+				payload, err = f.cfg.MarshalJSONSnapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.cfg.ReplaceFromJSON(payload); err != nil {
+				t.Fatal(err)
+			}
+			after, err := f.h.snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("effective no-op changed settings hash: %t", before.configHash != after.configHash)
+			f.h.runAutomationOnce(context.Background(), version)
+			_, _, clears := f.provider.counts()
+			if clears != 1 {
+				t.Fatalf("effective no-op generic save invalidated usable automation: mock clear calls=%d, results=%+v", clears, automationResults(f))
+			}
+		})
+	}
+}
+
 func TestWopanAutomationReviewManualCompletionMustNotEraseObservedBindingHold(t *testing.T) {
 	f := automationFixture(t)
 	f.upstream.change(func() { f.upstream.storages[28] = wopanMockStorage(28) })
