@@ -4,6 +4,7 @@ export default {
     Config: 'Config',
     Tools: 'Tools',
     'warm overview': 'Preheat Overview',
+    'cloud storage': 'WoPan Capacity & Recycle Bin',
     Dashboard: '',
     'Setting Switch': '',
     'Error Log': '',

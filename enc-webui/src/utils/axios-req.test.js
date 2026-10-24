@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('element-plus', () => ({
   ElLoading: { service: vi.fn() },
@@ -38,12 +38,63 @@ describe('axiosReq request cleanup', () => {
   }
 
   beforeEach(() => {
+    vi.useFakeTimers()
     store.axiosPromiseArr.splice(0)
     store.resetStateAndToLogin.mockReset()
     useBasicStore.mockReset()
     useBasicStore.mockReturnValue(store)
     ElLoading.service.mockReset()
     ElMessage.error.mockReset()
+  })
+  afterEach(() => {
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
+  })
+
+  it.each([
+    [403, true, false],
+    [403, undefined, true],
+    [401, true, true],
+    [401, undefined, true]
+  ])('handles HTTP %s with skipForbiddenAuthReset=%s (reset=%s)', async (status, skipForbiddenAuthReset, resetExpected) => {
+    const failure = new Error('permission denied')
+    const request = axiosReq({
+      url: '/enc-api/wopan/storages',
+      method: 'get',
+      reqLoading: false,
+      isNotTipErrorMsg: true,
+      skipForbiddenAuthReset,
+      adapter: async config => {
+        failure.config = config
+        failure.response = { status, data: { msg: 'upstream_admin_required' } }
+        throw failure
+      }
+    })
+    await expect(request).rejects.toBe(failure)
+    expect(store.resetStateAndToLogin).toHaveBeenCalledTimes(resetExpected ? 1 : 0)
+    expect(store.axiosPromiseArr).toEqual([])
+  })
+
+  it.each([
+    [403, true, false],
+    [403, undefined, true],
+    [401, true, true],
+    [401, undefined, true]
+  ])('handles envelope code %s with skipForbiddenAuthReset=%s (reset=%s)', async (code, skipForbiddenAuthReset, resetExpected) => {
+    const request = axiosReq({
+      url: '/enc-api/wopan/storages',
+      method: 'get',
+      reqLoading: false,
+      isNotTipErrorMsg: true,
+      skipForbiddenAuthReset,
+      adapter: async config => ({
+        ...adapterResponse(config, null),
+        data: { code, msg: 'upstream_admin_required' }
+      })
+    })
+    await expect(request).rejects.toBe('upstream_admin_required')
+    expect(store.resetStateAndToLogin).toHaveBeenCalledTimes(resetExpected ? 1 : 0)
+    expect(store.axiosPromiseArr).toEqual([])
   })
 
   it('cleans up the matching request when concurrent responses finish out of order', async () => {
