@@ -26,15 +26,18 @@ type decryptPlaybackRequest struct {
 	ResponseWriter http.ResponseWriter
 	Request        *http.Request
 
-	Config                 *config.Config
-	Probe                  *ProbeScheduler
-	StreamProxy            ports.Streamer
-	FileDAO                ports.FileRepository
-	SizeResolver           *FileSizeResolver
-	StrategySel            *StrategySelector
-	PasswdInfo             *config.PasswdInfo
-	FileItem               FileItem
-	TargetURL              string
+	Config       *config.Config
+	Probe        *ProbeScheduler
+	StreamProxy  ports.Streamer
+	FileDAO      ports.FileRepository
+	SizeResolver *FileSizeResolver
+	StrategySel  *StrategySelector
+	PasswdInfo   *config.PasswdInfo
+	FileItem     FileItem
+	TargetURL    string
+	// RequestVerifiedMeta is used only by an independently re-proven recovered
+	// filename request; it must never be published as shared cache admission.
+	RequestVerifiedMeta    *encryption.ContentMeta
 	ExpectedGeometryEpoch  *uint64
 	ExpectedConfigRevision *uint64
 	ProviderKey            string
@@ -104,6 +107,11 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 			req.ExpectedConfigRevision = &revision
 		}
 	}
+	if req.ExpectedConfigRevision != nil && req.Config != nil && *req.ExpectedConfigRevision != req.Config.RuntimeRevision() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Playback configuration changed; retry", http.StatusServiceUnavailable)
+		return
+	}
 	if repo, ok := req.FileDAO.(playbackCacheRepository); ok && (req.ExpectedGeometryEpoch != nil && *req.ExpectedGeometryEpoch != repo.PlaybackEpoch(req.FileItem.DisplayPath) || req.ExpectedConfigRevision != nil && req.Config != nil && *req.ExpectedConfigRevision != req.Config.RuntimeRevision()) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "Playback object changed; retry", http.StatusServiceUnavailable)
@@ -126,8 +134,18 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 
 	metaLoaded := false
 	emptyContent := false
+	if req.RequestVerifiedMeta != nil {
+		meta := *req.RequestVerifiedMeta
+		r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
+		req.Request = r
+		fileSize, metaLoaded = meta.PlainSize, true
+		if r.Method == http.MethodHead {
+			writeTrustedPlaybackHead(w, req.FileItem.FileName, meta.PlainSize)
+			return
+		}
+	}
 	managedGeometry := managedPlaybackGeometry(req)
-	if !managedGeometry && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
+	if !metaLoaded && !managedGeometry && req.FileDAO != nil && req.FileItem.DisplayPath != "" {
 		if info, ok := req.FileDAO.Get(req.FileItem.DisplayPath); ok && info != nil && info.ContentVersion > 0 {
 			if meta, complete := cachedPlaybackMeta(info, req.PasswdInfo.EncType); complete {
 				r = r.WithContext(proxy.WithContentMeta(r.Context(), meta))
