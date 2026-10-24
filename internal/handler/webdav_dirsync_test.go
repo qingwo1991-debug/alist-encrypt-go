@@ -61,6 +61,9 @@ func newWebDAVSnapshotTestHandler(t *testing.T) (*WebDAVHandler, DirSyncStore, *
 	t.Cleanup(func() { _ = store.Close() })
 
 	cfg := config.DefaultConfig()
+	// Match the test snapshots' explicit provider; CI may set ALIST_HOST to
+	// another hostname. Provider isolation must not depend on runner defaults.
+	cfg.AlistServer.ServerHost, cfg.AlistServer.ServerPort, cfg.AlistServer.HTTPS = "127.0.0.1", 5244, false
 	cfg.AlistServer.PasswdList = []config.PasswdInfo{{
 		Password: "test-secret",
 		EncType:  "aesctr",

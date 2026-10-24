@@ -288,13 +288,10 @@ func (h *WebDAVHandler) propfindPlainSize(rawPath string, reported int64, rules 
 	if h.fileDAO == nil || rawPath == "" {
 		return 0, false
 	}
-	fi, ok := h.fileDAO.Get(rawPath)
-	if !ok || fi == nil || fi.IsDir || fi.Size < 0 {
-		return 0, false
-	}
-	if fi.ContentVersion < encryption.ContentVersionV1 || fi.ContentVersion > encryption.ContentVersionV3 {
-		return 0, false
-	}
+	// Confirmations are persisted by logical identity, independently of the
+	// ordinary path cache. After restart (or eviction), the display-keyed file
+	// record need not have a raw-path mirror. A listing's incomplete alias must
+	// not hide otherwise valid canonical proof, or become a substitute for it.
 	if h.cfg != nil && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
 		if repo, managed := h.fileDAO.(playbackCacheRepository); managed {
 			var rule *config.PasswdInfo
@@ -303,11 +300,26 @@ func (h *WebDAVHandler) propfindPlainSize(rawPath string, reported int64, rules 
 			}
 			identity := playbackIdentity(h.cfg, h.cfg.GetAlistURL(), rawPath, rule, nil)
 			confirmed, hit := repo.GetConfirmedPlayback(identity)
-			if !hit || confirmed == nil || confirmed.EncryptedPath != rawPath || confirmed.CiphertextSize != reported {
+			if !hit || confirmed == nil || confirmed.EncryptedPath != rawPath || confirmed.CiphertextSize < 0 || confirmed.CiphertextSize != reported {
 				return 0, false
 			}
-			return confirmed.Size, true
+			encType := ""
+			if rule != nil {
+				encType = rule.EncType
+			}
+			meta, complete := propfindSizeMeta(confirmed, encType)
+			if !complete {
+				return 0, false
+			}
+			return meta.PlainSize, true
 		}
+	}
+	fi, ok := h.fileDAO.Get(rawPath)
+	if !ok || fi == nil || fi.IsDir || fi.Size < 0 {
+		return 0, false
+	}
+	if fi.ContentVersion < encryption.ContentVersionV1 || fi.ContentVersion > encryption.ContentVersionV3 {
+		return 0, false
 	}
 	if fi.CiphertextSize > 0 && reported == fi.CiphertextSize {
 		return fi.Size, true

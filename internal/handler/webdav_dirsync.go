@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/httputil"
 	"github.com/alist-encrypt-go/internal/trace"
 )
 
@@ -177,6 +179,9 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 	if !ok || snap == nil || len(snap.PayloadJSON) == 0 {
 		return nil, false
 	}
+	if snap.ProviderHost != "" && snap.ProviderHost != webdavProvider {
+		return nil, false
+	}
 	// Freshness guard: a snapshot may only be served while its scheduled
 	// refresh window is still open. An expired or marked-stale snapshot must
 	// never be re-emitted — doing so lets a long-lived skeleton row (e.g. an
@@ -200,7 +205,7 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 		trace.Logf(r.Context(), "propfind", "Snapshot cache rejected %s: %s", davPath, reason)
 		return nil, false
 	}
-	body := h.buildSnapshotMultistatus(dirPath, snap.PayloadJSON)
+	body := h.buildSnapshotMultistatus(dirPath, snap.PayloadJSON, r)
 	if len(body) == 0 {
 		return nil, false
 	}
@@ -212,7 +217,7 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 // a WebDAV multistatus body. The requested directory itself is included as the
 // first <response> so the body is a drop-in for what the live upstream PROPFIND
 // would have produced after the passwd-name rewrites.
-func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte) []byte {
+func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte, requests ...*http.Request) []byte {
 	var resp struct {
 		Data struct {
 			Content []map[string]interface{} `json:"content"`
@@ -245,8 +250,43 @@ func (h *WebDAVHandler) buildSnapshotMultistatus(dirPath string, payload []byte)
 			size = int64(s)
 		}
 		childPath, _ := item["path"].(string)
+		if childPath == "" {
+			childPath = path.Join(dirPath, name)
+		}
+		if !isDir && h.cfg != nil && h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal && h.passwdDAO != nil {
+			if rule, found := h.passwdDAO.FindByPath(childPath); found && rule != nil && rule.Enable {
+				// Old snapshots (including HTTP snapshots whose size may be a
+				// transport length) do not identify the observed container. Fetch
+				// the directory once to establish provenance; never guess a version
+				// or trust its negative/stale/plain/ciphertext size interchangeably.
+				cipherSize, hasCipher := item[snapshotCipherSizeKey].(float64)
+				observedRaw, _ := item[snapshotRawPathKey].(string)
+				raw := childPath
+				if rule.EncName {
+					raw = h.convertToRealPath(childPath, rule)
+				}
+				if !hasCipher || cipherSize < 0 || observedRaw != raw {
+					return nil
+				}
+				size = -1
+				if plain, known := h.propfindPlainSize(raw, int64(cipherSize), rule); known {
+					size = plain
+				} else if h.probe != nil && len(requests) > 0 && requests[0] != nil {
+					// Admission only: existing bounded workers inspect tiny container
+					// headers after foreground work. No network is done by this loop.
+					h.probe.EnqueueObservedPropfindSize(FileItem{DisplayPath: childPath, EncryptedPath: raw, FileName: name, TargetURL: httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+raw), PasswdInfo: rule}, h.webdavAuthHeaders(requests[0]), int64(cipherSize), probeSourcePropfind)
+				}
+			}
+		}
 		href := itemDAVHref(dirPath, childPath, name, isDir)
-		writeSnapshotResponse(&b, href, name, isDir, size, itemLastModified(item), itemContentType(item), itemETag(item), itemCreationDate(item))
+		etag := ""
+		if size >= 0 {
+			// The item belongs to this decoded response; do not derive a DAV
+			// validator from an old unavailable or ciphertext-sized value.
+			item["size"] = float64(size)
+			etag = itemETag(item)
+		}
+		writeSnapshotResponse(&b, href, name, isDir, size, itemLastModified(item), itemContentType(item), etag, itemCreationDate(item))
 	}
 	b.WriteString(`</D:multistatus>`)
 	return b.Bytes()
@@ -355,7 +395,12 @@ func itemContentType(item map[string]interface{}) string {
 // dir-sync snapshot store so subsequent HTTP fs/list and WebDAV reads in this
 // whitelist hit the fast path. Only directory listings are persisted; a
 // single-file PROPFIND carries no directory snapshot.
-func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, entries []propfindEntry) {
+const (
+	snapshotCipherSizeKey = "_enc_ciphertext_size"
+	snapshotRawPathKey    = "_enc_observed_path"
+)
+
+func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, entries []propfindEntry, observed ...[]propfindEntry) {
 	if h == nil || h.dirSyncStore == nil {
 		return
 	}
@@ -369,19 +414,31 @@ func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, e
 	// Entries include the directory's own response (self) plus each child; the
 	// snapshot content holds children only, matching the HTTP fs/list payload.
 	// Names here are already the decrypted display names from parsePropfindResponse.
+	// Rewriting preserves response order. Pair exact original responses by
+	// ordinal, not a global display/raw cache that may contain a stale alias.
+	// Plaintext size is never reused as ciphertext evidence.
+	paired := len(observed) > 0 && len(observed[0]) == len(entries)
 	content := make([]map[string]interface{}, 0, len(entries))
-	for _, e := range entries {
+	for index, e := range entries {
 		childPath := normalizeDirPath(e.Path)
 		if childPath == dirPath || childPath == "" {
 			continue // self response
 		}
-		content = append(content, map[string]interface{}{
+		item := map[string]interface{}{
 			"name":     e.Name,
 			"path":     childPath,
 			"size":     float64(e.Size),
 			"is_dir":   e.IsDir,
 			"modified": e.Modified,
-		})
+		}
+		if !e.IsDir && paired && h.passwdDAO != nil {
+			original := observed[0][index]
+			if rule, found := h.passwdDAO.FindByPath(childPath); found && rule != nil && rule.Enable && !original.IsDir && original.Size >= 0 {
+				item[snapshotCipherSizeKey] = original.Size
+				item[snapshotRawPathKey] = original.Path
+			}
+		}
+		content = append(content, item)
 	}
 	if len(content) == 0 {
 		return

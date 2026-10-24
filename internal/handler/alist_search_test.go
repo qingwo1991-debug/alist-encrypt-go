@@ -15,9 +15,9 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 func TestCollectEncryptedSearchRootsConcurrentConfigUpdate(t *testing.T) {
@@ -848,7 +848,7 @@ func TestResolveRemoveNameStripsOriginalPrefix(t *testing.T) {
 	}
 }
 
-func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
+func TestHandleFsSearchForwardsUpstreamAuthorizationOnly(t *testing.T) {
 	passwd := &config.PasswdInfo{
 		Password:  "testpass",
 		EncType:   "aesctr",
@@ -863,8 +863,8 @@ func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			t.Fatalf("upstream received Authorization header: %s", auth)
+		if auth := r.Header.Get("Authorization"); auth != "upstream-jwt" {
+			t.Errorf("upstream Authorization = %q, want explicit caller token", auth)
 		}
 		if auth := r.Header.Get("Authorizetoken"); auth != "" {
 			t.Fatalf("upstream received Authorizetoken header: %s", auth)
@@ -895,8 +895,9 @@ func TestHandleFsSearchDoesNotForwardAuthHeaderUpstream(t *testing.T) {
 
 	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
 	req := httptest.NewRequest(http.MethodPost, "/api/fs/search", strings.NewReader(`{"parent":"/","keywords":"vid","scope":0,"page":1,"per_page":100,"password":""}`))
-	req.Header.Set("Authorization", "Bearer frontend-token")
-	req.Header.Set("Authorizetoken", "frontend-token")
+	req.Header.Set("Authorization", "upstream-jwt")
+	req.Header.Set("Authorizetoken", "local-management-jwt")
+	req.Header.Set("X-User-Token", "local-user-token")
 	rec := httptest.NewRecorder()
 	handler.HandleFsSearch(rec, req)
 

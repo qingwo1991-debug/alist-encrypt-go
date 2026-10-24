@@ -124,6 +124,7 @@ type probeItem struct {
 	queuedAt    time.Time
 	notBefore   time.Time
 	interest    *playbackInterestTask
+	sizeOnly    *propfindSizeAdmission
 }
 
 const (
@@ -325,8 +326,12 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 		return
 	default:
 	}
-	// Trusted-local directory display must not fan out into per-file network/KDF
-	// probes. Actual playback resolves missing geometry on demand.
+	// Generic warmup producers may supply plaintext sizes (playback, fs/get and
+	// shared snapshots). They have no authority to invalidate ciphertext proof.
+	// Trusted DAV transport observations use EnqueueObservedPropfindSize instead.
+	if ps.cfg != nil && ps.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal {
+		return
+	}
 	if ps.foreground.Load().Enabled() {
 		return
 	}
@@ -727,6 +732,10 @@ func (ps *ProbeScheduler) runClaimedItem(item probeItem, sem chan struct{}) {
 	startedAt := time.Now()
 	ps.recordRunning(item, startedAt)
 	defer atomic.AddUint64(&ps.runningCount, ^uint64(0))
+	if item.sizeOnly != nil {
+		ps.runPropfindSize(item, startedAt)
+		return
+	}
 
 	// Delay eligibility is checked by dispatch before claiming a provider slot.
 	// The slot remains held until actual work (including CPU work) has returned.
@@ -1324,7 +1333,7 @@ func (ps *ProbeScheduler) recordRunning(item probeItem, startedAt time.Time) {
 
 func (ps *ProbeScheduler) finishRecord(item probeItem, startedAt time.Time, status string, result probeExecutionResult) {
 	ps.ensureRecordState()
-	if status == probeStatusFailed {
+	if status == probeStatusFailed && item.sizeOnly == nil {
 		// A failed attempt must not suppress this file for the full configured
 		// cooldown. The next scan or real playback can retry after credentials or
 		// a signed URL have recovered.
@@ -1368,7 +1377,8 @@ func (ps *ProbeScheduler) finishRecord(item probeItem, startedAt time.Time, stat
 		ps.recordCount++
 	}
 	atomic.StoreInt64(&ps.lastRecordFinishedNano, now.UnixNano())
-	if status == probeStatusSuccess {
+	// Header-only metadata is not a completed playback/range warmup.
+	if status == probeStatusSuccess && item.sizeOnly == nil {
 		ps.pruneWarmLocked(now)
 		warm := ps.successfulWarm[item.file.DisplayPath]
 		warm.Source = item.source
