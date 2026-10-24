@@ -163,6 +163,9 @@ func digestBucket(ctx context.Context, b *bolt.Bucket, h hash.Hash, depth int, n
 }
 func inspect(ctx context.Context, root, dbPath string) (report, error) {
 	var out report
+	if ctx.Err() != nil {
+		return out, errors.New("inspection_cancelled")
+	}
 	resolved, info, err := scopedDB(root, dbPath)
 	if err != nil {
 		return out, err
@@ -180,6 +183,9 @@ func inspect(ctx context.Context, root, dbPath string) (report, error) {
 	}
 	out = report{Schema: 1, ReadOnly: true, InventoryOnly: true, DatabaseBytes: info.Size(), Buckets: make(map[string]bucketReport)}
 	err = db.View(func(tx *bolt.Tx) error {
+		if ctx.Err() != nil {
+			return errors.New("inspection_cancelled")
+		}
 		out.TransactionID = tx.ID()
 		known := make(map[string]bool)
 		n := 0
@@ -229,6 +235,13 @@ func inspect(ctx context.Context, root, dbPath string) (report, error) {
 			out.Buckets[name] = r
 		}
 		return tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
+			if ctx.Err() != nil {
+				return errors.New("inspection_cancelled")
+			}
+			n++
+			if n > maxEntries {
+				return errors.New("audit_limits_exceeded")
+			}
 			if !known[string(name)] {
 				out.OtherRootBucketCount++
 			}
