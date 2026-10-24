@@ -11,7 +11,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/alist-encrypt-go/internal/config"
@@ -91,6 +93,152 @@ func TestProtectedFilenamePutBoundedReservedAndVerified(t *testing.T) {
 		t.Fatalf("repeat status=%d puts=%d", rr.Code, puts)
 	}
 }
+
+// protectedPutSourceChanged is a controlled source-side failure, not EOF. It
+// models a verified reader detecting mutation only after valid bytes were sent.
+type protectedPutSourceChanged struct{}
+
+func (protectedPutSourceChanged) Error() string { return "source changed after verified prefix" }
+
+type protectedPutPartialReader struct {
+	remaining int
+	consumed  <-chan struct{}
+	fail      func() error
+}
+
+func (r *protectedPutPartialReader) Read(p []byte) (int, error) {
+	if r.remaining > 0 {
+		n := len(p)
+		if n > r.remaining {
+			n = r.remaining
+		}
+		for i := 0; i < n; i++ {
+			p[i] = 'v'
+		}
+		r.remaining -= n
+		return n, nil
+	}
+	select {
+	case <-r.consumed:
+		return 0, r.fail()
+	case <-time.After(5 * time.Second):
+		return 0, fmt.Errorf("fixture upstream did not consume verified prefix")
+	}
+}
+
+func TestProtectedFilenameMidstreamAbortRemainsFailedAndExclusive(t *testing.T) {
+	for _, mode := range []string{"source-reader-error", "client-cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			const plainSize = 1024 * 1024
+			consumed := make(chan struct{})
+			type putObservation struct {
+				bytes int
+				err   error
+			}
+			observed := make(chan putObservation, 1)
+			var puts, lists atomic.Int32
+			upstream := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/fs/list":
+					lists.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"code":200,"data":{"total":0,"content":[]}}`)
+				case "/api/fs/put":
+					puts.Add(1)
+					if r.Header.Get("As-Task") != "false" {
+						t.Errorf("protected upload was asynchronous: %q", r.Header.Get("As-Task"))
+					}
+					// Read more than the V2 header before allowing the source
+					// failure: this must exercise an actual partially sent PUT.
+					prefix := make([]byte, 4096)
+					n, firstErr := io.ReadFull(r.Body, prefix)
+					close(consumed)
+					rest, readErr := io.ReadAll(r.Body)
+					if firstErr != nil {
+						readErr = firstErr
+					}
+					observed <- putObservation{bytes: n + len(rest), err: readErr}
+					w.WriteHeader(http.StatusBadRequest)
+				default:
+					t.Errorf("unexpected upstream path: %s", r.URL.Path)
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+			}))
+			defer upstream.Close()
+			ep := &config.PasswdInfo{Password: "test", EncType: "aesctr", EncName: true, EncSuffix: ".bin", Enable: true, EncPath: []string{"/limited/*"}}
+			h, d := newTestAlistHandler(t, upstream.URL, ep)
+			t.Cleanup(h.Stop)
+			h.cfg.AlistServer.FilenameWriteLimits = map[string]int{"/limited": 100}
+			display := "/limited/interrupted.mp4"
+			encoded, _, err := encryption.BoundEncryptedFilename(ep.Password, ep.EncType, "interrupted.mp4", ep.EncSuffix, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := "/limited/" + encoded
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fail := func() error { return protectedPutSourceChanged{} }
+			if mode == "client-cancel" {
+				fail = func() error {
+					cancel()
+					return context.Canceled
+				}
+			}
+			body := &protectedPutPartialReader{remaining: 64 * 1024, consumed: consumed, fail: fail}
+			upload := func(reader io.Reader, requestContext context.Context) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(http.MethodPut, "/api/fs/put", reader).WithContext(requestContext)
+				r.ContentLength = plainSize
+				r.Header.Set("Content-Length", strconv.Itoa(plainSize))
+				r.Header.Set("File-Path", url.QueryEscape(display))
+				r.Header.Set("Authorization", "Bearer unit")
+				w := httptest.NewRecorder()
+				h.HandleFsPut(w, r)
+				return w
+			}
+			w := upload(body, ctx)
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("aborted PUT published success: status=%d body=%s", w.Code, w.Body.String())
+			}
+			if w.Body.String() != "Encryption error\n" {
+				t.Fatalf("abort did not return the existing sanitized failure: body=%q", w.Body.String())
+			}
+			select {
+			case got := <-observed:
+				if got.bytes <= 32 || got.bytes >= plainSize+32 || got.err == nil {
+					t.Fatalf("fixture did not observe a truncated ciphertext PUT: bytes=%d err=%v", got.bytes, got.err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("upstream did not observe aborted PUT")
+			}
+			rec, found, err := d.GetFilenameReservation(h.cfg.GetAlistURL(), raw)
+			if err != nil || !found || rec.Status != storage.FilenameFailed {
+				t.Fatalf("abort did not retain FAILED audit: found=%v status=%q err=%v", found, rec.Status, err)
+			}
+			if _, err := d.ReserveFilename(rec); err == nil {
+				t.Fatal("partial PUT released exclusive reservation")
+			}
+			if _, found := d.GetEncPath(display); found {
+				t.Fatal("partial PUT published a successful encrypted mapping")
+			}
+			guard := &WebDAVHandler{cfg: h.cfg, fileDAO: d, passwdDAO: h.passwdDAO}
+			read := httptest.NewRequest(http.MethodGet, "/dav"+display, nil)
+			if invalid, err := guard.hasInvalidProtectedFilenameScope(read, display); err != nil || !invalid {
+				t.Fatalf("failed partial PUT became logically readable: invalid=%v err=%v", invalid, err)
+			}
+			// Even an absent-looking remote response must never automatically
+			// admit an overwrite after a partial write or source cancellation.
+			w = upload(strings.NewReader("retry"), context.Background())
+			if w.Code != http.StatusConflict || puts.Load() != 1 || lists.Load() != 2 {
+				t.Fatalf("partial upload retried upstream: status=%d puts=%d lists=%d", w.Code, puts.Load(), lists.Load())
+			}
+			after, found, err := d.GetFilenameReservation(h.cfg.GetAlistURL(), raw)
+			if err != nil || !found || after.Status != storage.FilenameFailed || after.Token != rec.Token {
+				t.Fatal("retry changed or completed failed reservation")
+			}
+		})
+	}
+}
+
 func pathBase(s string) string { i := strings.LastIndex(s, "/"); return s[i+1:] }
 
 func TestProtectedFilenameMissingStoreAndAmbiguousHeadFailClosed(t *testing.T) {
