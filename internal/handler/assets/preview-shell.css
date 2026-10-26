@@ -1,0 +1,28 @@
+.aeg-preview-shell {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 980px;
+  min-height: 180px;
+  aspect-ratio: 16 / 9;
+  max-height: 65vh;
+  margin: 0 auto 12px;
+  border-radius: 12px;
+  background: #15171b;
+  color: #f4f4f5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+.aeg-preview-shell button {
+  color: #dedee3;
+  background: transparent;
+  border: 1px solid #686971;
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}

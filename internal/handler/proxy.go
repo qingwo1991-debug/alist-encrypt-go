@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -882,6 +883,9 @@ func (h *ProxyHandler) upstreamStalenessThreshold() time.Duration {
 
 // HandleProxy handles catch-all proxy to Alist
 func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
+	if servePreviewShellAsset(w, r) {
+		return
+	}
 	if err := guardProtectedProxyMutation(h.cfg, r); err != nil {
 		respondProtectedMutationError(w, err)
 		return
@@ -902,6 +906,14 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A browser document refresh must receive a transformable body, rather
+	// than a 304 referring to a pre-enhancement cached HTML representation.
+	// Do not change caching or compression for API/media/asset requests.
+	if isPreviewShellDocumentRequest(r) && (r.Header.Get("Sec-Fetch-Dest") == "document" || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")) {
+		proxyReq.Header.Del("If-None-Match")
+		proxyReq.Header.Del("If-Modified-Since")
+		proxyReq.Header.Set("Accept-Encoding", "identity")
+	}
 	resp, err := h.client.Do(proxyReq)
 	if err != nil {
 		log.Error().Err(err).Str("target", targetURL).Msg("Failed to proxy request")
@@ -985,15 +997,28 @@ func (h *ProxyHandler) HandleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if shouldRewriteTextResponse(contentType) {
+	// Never inspect or edit compressed representations, partial responses, or
+	// explicitly non-transformable content. Accept-Encoding may be forwarded
+	// verbatim by the proxy, so Go's automatic decompression is not guaranteed.
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	transformAllowed := (encoding == "" || encoding == "identity") && r.Method != http.MethodHead &&
+		r.Header.Get("Range") == "" && resp.Header.Get("Content-Range") == "" &&
+		!hasPreviewShellNoTransform(resp.Header) && !hasPreviewShellNoTransform(r.Header)
+	if shouldRewriteTextResponse(contentType) && transformAllowed {
 		body, err := readLimitedBody(resp, maxProxyResponseBody)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to read textual proxy response body")
 			RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 			return
 		}
+		originalBody := body
 		body = rewriteUpstreamTextBody(r, h.cfg.GetAlistURL(), body)
-		httputil.CopyResponseHeaders(w, resp, "Content-Length")
+		body, injected := injectPreviewShell(r, resp, body)
+		if injected || !bytes.Equal(originalBody, body) {
+			httputil.CopyResponseHeaders(w, resp, "Content-Length", "Etag", "Last-Modified", "Content-Md5", "Digest", "Repr-Digest", "Content-Digest")
+		} else {
+			httputil.CopyResponseHeaders(w, resp)
+		}
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(body)
 		return
