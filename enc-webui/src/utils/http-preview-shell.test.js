@@ -1,8 +1,10 @@
+// @vitest-environment node
 import { readFileSync } from 'node:fs'
+import { URL as FileURL } from 'node:url'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const source = readFileSync(new URL('../../../internal/handler/assets/preview-shell.js', import.meta.url), 'utf8')
+const source = readFileSync(new FileURL('../../../internal/handler/assets/preview-shell.js', import.meta.url), 'utf8')
 let dom
 let win
 let document
