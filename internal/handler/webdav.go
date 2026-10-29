@@ -55,6 +55,7 @@ type WebDAVHandler struct {
 	dirSyncStore          DirSyncStore
 	mediaRecovery         mediaRecoveryState
 	stopOnce              sync.Once
+	rawWarmups            webdavRawWarmups
 }
 
 // SetDirSyncStore injects the shared dir-sync snapshot store so directory
@@ -216,6 +217,7 @@ func (h *WebDAVHandler) Stop() {
 	h.stopOnce.Do(func() {
 		// Join our I/O before stopping shared proxy dependencies or letting
 		// the caller close the store. Concurrent/repeated Stop calls join too.
+		h.rawWarmups.stop()
 		h.mediaRecovery.stop()
 		if h.proxyHandler != nil {
 			h.proxyHandler.Stop()
@@ -417,14 +419,9 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 		}
 	}
 
-	// WebDAV clients often start playback without a Range header. Some signed
-	// CDN URLs reject that full-file GET, and some providers reject deep seek
-	// ranges on signed URLs. Startup and arbitrary seeks historically went
-	// through the stable internal /dav path (one extra hop before redirect to
-	// the CDN). To cut that hop for the dominant startup case, a full-file GET
-	// without Range (first startup probe) now prefers a fresh raw_url as well:
-	// if the cached raw_url is fresh we use it directly, otherwise we resolve
-	// it synchronously once and fall back to internal /dav when unavailable.
+	// Reuse fresh signed URLs, but never put optional metadata/redirect discovery
+	// ahead of actual DAV playback. Proxy-only drivers and DAV Basic auth can
+	// make that discovery fail on every startup/seek despite a usable /dav path.
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 	trace.Logf(r.Context(), "webdav-get", "Using internal /dav target for playback, display=%s source=dav_internal", davPath)
 	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
@@ -448,30 +445,8 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for %s playback, display=%s source=cache", sourceHint, davPath)
 		}
 	}
-	if preferRawURL {
-		if needsRawURLWarmup {
-			if resolve := h.resolveRawURLFromAlist(r, davPath, realPath); resolve.RawURL != "" {
-				if !strings.EqualFold(targetURL, resolve.RawURL) {
-					targetURL = resolve.RawURL
-					sourceHint := "first-frame"
-					if !firstFrameRange {
-						sourceHint = "startup-full"
-					}
-					trace.Logf(r.Context(), "webdav-get", "Using fresh raw_url for %s playback, display=%s source=%s", sourceHint, davPath, resolve.Source)
-				} else {
-					trace.Logf(r.Context(), "webdav-get", "Warmed raw_url from alist, display=%s source=%s", davPath, resolve.Source)
-				}
-			} else {
-				trace.Logf(r.Context(), "webdav-get", "raw_url warmup failed, display=%s real=%s status=%d reason=%s source=%s",
-					davPath, realPath, resolve.StatusCode, resolve.FailureReason, resolve.Source)
-			}
-		}
-	} else {
-		if needsRawURLWarmup {
-			h.warmRawURLFromAlistAsync(r, davPath, realPath)
-		} else {
-			trace.Logf(r.Context(), "webdav-get", "Skipped raw_url warmup, fresh cache exists display=%s", davPath)
-		}
+	if needsRawURLWarmup {
+		h.warmRawURLFromAlistAsync(r, davPath, realPath)
 	}
 
 	// Look up file info using DISPLAY path (davPath), not realPath
@@ -620,44 +595,7 @@ func (h *WebDAVHandler) preferCachedV2PlainSize(displayPath string, resolvedSize
 }
 
 func (h *WebDAVHandler) warmRawURLFromAlistAsync(r *http.Request, displayPath, realPath string) {
-	if h == nil || h.cfg == nil || strings.TrimSpace(displayPath) == "" || strings.TrimSpace(realPath) == "" {
-		return
-	}
-	stalenessThreshold := h.upstreamStalenessThreshold()
-	if h.fileDAO != nil {
-		if cachedInfo, ok := h.fileDAO.Get(displayPath); ok && cachedRawURLFresh(cachedInfo, stalenessThreshold, playbackScope(h.cfg, r.Header)) && strings.TrimSpace(cachedInfo.RawURL) != "" {
-			trace.Logf(r.Context(), "webdav-get", "Skipped raw_url async warmup, fresh cache exists display=%s", displayPath)
-			return
-		}
-	}
-	authHeaders := make(http.Header)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		authHeaders.Set("Authorization", auth)
-	}
-	if cookie := r.Header.Get("Cookie"); cookie != "" {
-		authHeaders.Set("Cookie", cookie)
-	}
-	trace.Logf(r.Context(), "webdav-get", "Queued raw_url async warmup, display=%s", displayPath)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), finalRawURLResolveTimeout)
-		defer cancel()
-		result := fetchRawURL(ctx, h.cfg.GetAlistURL(), displayPath, realPath, authHeaders, h.fileDAO, stalenessThreshold)
-		if result.RawURL != "" {
-			log.Info().
-				Str("category", "webdav_get").
-				Str("display_path", displayPath).
-				Str("source", result.Source).
-				Msg("Warmed raw_url asynchronously")
-			return
-		}
-		log.Debug().
-			Str("category", "webdav_get").
-			Str("display_path", displayPath).
-			Int("status", result.StatusCode).
-			Str("reason", result.FailureReason.String()).
-			Str("source", result.Source).
-			Msg("raw_url async warmup failed")
-	}()
+	h.enqueueRawURLWarmup(r, displayPath, realPath)
 }
 
 // handlePut handles PUT requests with encryption and filename encryption

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	stderrors "errors"
+	"io"
 	"net"
 	"strings"
 
@@ -27,6 +28,52 @@ func streamFetchErrorOutcome(err error) *StreamOutcome {
 		}
 	}
 	return result
+}
+
+// streamReadError marks errors returned by the copy's reader, not its writer.
+// Keep the original error available to errors.Is/As without guessing its source
+// from the message (a downstream writer can also return ErrUnexpectedEOF).
+type streamReadError struct{ err error }
+
+func (e *streamReadError) Error() string { return "stream read: " + e.err.Error() }
+func (e *streamReadError) Unwrap() error { return e.err }
+
+type streamCopyReader struct{ io.Reader }
+
+func (r streamCopyReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && err != io.EOF {
+		err = &streamReadError{err: err}
+	}
+	return n, err
+}
+
+// copyStreamBody preserves the read/write error boundary even when src or dst
+// implements WriterTo/ReaderFrom. A writer failure wins over a simultaneous read
+// failure, just as in io.CopyBuffer. Only a successful copy may synthesize a
+// short-body error; receiving every expected byte never erases a real error.
+func copyStreamBody(dst io.Writer, src io.Reader, buf []byte, expected int64) (int64, error) {
+	written, err := io.CopyBuffer(struct{ io.Writer }{dst}, streamCopyReader{src}, buf)
+	if err == nil && expected > 0 && written < expected {
+		err = &streamReadError{err: io.ErrUnexpectedEOF}
+	}
+	return written, err
+}
+
+// classifyStreamCopyError is only for a failed body copy. The request's context
+// wins cancellation races with transport EOF, but a transport error alone is not
+// evidence that the request was canceled. Deadlines remain timeout failures.
+func classifyStreamCopyError(ctx context.Context, err error) errors.FailureReason {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		reason, _ := classifyStreamError(ctxErr)
+		return reason
+	}
+	var readErr *streamReadError
+	if stderrors.As(err, &readErr) && stderrors.Is(readErr, io.ErrUnexpectedEOF) {
+		return "upstream_truncated"
+	}
+	reason, _ := classifyStreamError(err)
+	return reason
 }
 
 func classifyStreamError(err error) (errors.FailureReason, bool) {

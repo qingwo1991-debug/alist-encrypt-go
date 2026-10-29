@@ -33,10 +33,13 @@ func resolveFinalRawURL(ctx context.Context, cfg *config.Config, alistURL, displ
 			continue
 		}
 		result := followToFinalRawURL(ctx, cfg, candidate.url, authHeaders)
+		result.Source = candidate.source
 		if strings.TrimSpace(result.RawURL) == "" {
+			if result.FailureReason != errors.ReasonRawURLEmpty {
+				return result
+			}
 			continue
 		}
-		result.Source = candidate.source
 		if !cachePlaybackRawURL(ctx, fileDAO, displayPath, realPath, result.RawURL, result.Size, authHeaders) {
 			return rawURLFetchResult{FailureReason: "raw_url_invalidated"}
 		}
@@ -92,6 +95,10 @@ func followToFinalRawURL(ctx context.Context, cfg *config.Config, initialURL str
 				continue
 			}
 
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				resp.Body.Close()
+				return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.FailureReason("raw_url_redirect_http_" + strconv.Itoa(resp.StatusCode))}
+			}
 			size := responseSize(resp)
 			if method == http.MethodGet {
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
