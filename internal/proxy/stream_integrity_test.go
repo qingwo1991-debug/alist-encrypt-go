@@ -117,8 +117,9 @@ func TestDecryptStreamTreatsShortUpstreamBodyAsTruncatedWithoutRangeSuccess(t *t
 	if !result.NoLearning {
 		t.Fatal("truncated response must not be learned as a successful playback")
 	}
-	if !result.Retryable {
-		t.Fatal("truncated upstream response should allow a fresh retry")
+	// A fresh fetch cannot safely append to this already committed response.
+	if !result.ResponseStarted || result.Retryable {
+		t.Fatal("truncated upstream response must be terminal after response start")
 	}
 	if result.BytesWritten != 5 || result.ExpectedBytes != 10 {
 		t.Fatalf("bytes written/expected=%d/%d, want 5/10", result.BytesWritten, result.ExpectedBytes)

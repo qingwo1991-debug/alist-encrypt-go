@@ -357,29 +357,19 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 
 	buf := getBuffer()
 	defer putBuffer(buf)
-	written, err := io.CopyBuffer(w, bodyReader, *buf)
+	written, err := copyStreamBody(w, bodyReader, *buf, result.ExpectedBytes)
 	result.BytesWritten = written
 	result.WallDuration = time.Since(streamStart)
 	if result.WallDuration > 0 && written > 0 {
 		result.BytesPerSecond = float64(written) / result.WallDuration.Seconds()
 	}
-	if err == nil && result.ExpectedBytes > 0 && written < result.ExpectedBytes {
-		err = io.ErrUnexpectedEOF
-		result.FailureReason = "upstream_truncated"
-		result.Retryable = true
-		result.NoLearning = true
-	}
 	if err != nil {
 		result.Err = err
-		reason, retryable := classifyStreamError(err)
-		if reason == "client_disconnect" {
+		result.FailureReason = classifyStreamCopyError(req.Context(), err)
+		if result.FailureReason == "client_disconnect" {
 			log.Debug().Err(err).Int64("bytes_written", written).Msg("Client ended V3 decrypt stream")
 		} else {
 			log.Error().Err(err).Int64("bytes_written", written).Msg("Error streaming V3 decrypted content")
-		}
-		if result.FailureReason == "" {
-			result.FailureReason = reason
-			result.Retryable = retryable
 		}
 	}
 	// Once any successful response has started, body failures are terminal.

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -232,7 +233,8 @@ type rawURLFetchResult struct {
 	RawURL        string
 	Size          int64
 	Source        string
-	StatusCode    int
+	StatusCode    int // HTTP transport status; never replaced by the JSON business code.
+	BusinessCode  int
 	FailureReason errors.FailureReason
 }
 
@@ -1792,7 +1794,7 @@ func fetchRawURLUnshared(ctx context.Context, alistURL, displayPath, realPath st
 	}
 
 	linkResult := fetchRawURLViaAPI(ctx, alistURL, displayPath, realPath, authHeaders, fileDAO, "/api/fs/link")
-	if strings.TrimSpace(linkResult.RawURL) != "" {
+	if strings.TrimSpace(linkResult.RawURL) != "" || linkResult.FailureReason != errors.ReasonRawURLEmpty {
 		return linkResult
 	}
 	resolverCfg := fileDAO.Config()
@@ -1800,7 +1802,7 @@ func fetchRawURLUnshared(ctx context.Context, alistURL, displayPath, realPath st
 		resolverCfg = config.Get()
 	}
 	redirectResult := resolveFinalRawURL(ctx, resolverCfg, alistURL, displayPath, realPath, authHeaders, fileDAO)
-	if strings.TrimSpace(redirectResult.RawURL) != "" {
+	if strings.TrimSpace(redirectResult.RawURL) != "" || redirectResult.FailureReason != errors.ReasonRawURLEmpty {
 		return redirectResult
 	}
 	if linkResult.StatusCode != 0 || linkResult.FailureReason != "" {
@@ -1829,16 +1831,13 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	if ctx.Err() != nil {
 		return rawURLFetchResult{FailureReason: "interest_canceled"}
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		// The failed resolver owns a flight; do not cancel its own fallback
-		// admission here. The playback failure boundary invalidates rejected URLs.
-		if _, managed := ctx.Value(playbackTransportKey{}).(playbackTransportAdmission); !managed {
-			fileDAO.InvalidateRawURLForScope(displayPath, playbackScope(fileDAO.Config(), authHeaders))
-		}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Metadata failures do not establish driver capability. Do not fall back
+		// through other endpoints or invalidate another caller's transport.
 		return rawURLFetchResult{
 			StatusCode:    resp.StatusCode,
 			Source:        rawURLSourceFromAPIPath(apiPath),
-			FailureReason: errors.FailureReason("raw_url_http_" + http.StatusText(resp.StatusCode)),
+			FailureReason: errors.FailureReason("raw_url_http_" + strconv.Itoa(resp.StatusCode)),
 		}
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
@@ -1852,8 +1851,11 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 	if json.Unmarshal(respBody, &result) != nil {
 		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLInvalidJSON, Source: rawURLSourceFromAPIPath(apiPath)}
 	}
-	if result.Code != 200 || result.Data.RawURL == "" {
-		return rawURLFetchResult{StatusCode: resp.StatusCode, FailureReason: errors.ReasonRawURLEmpty, Source: rawURLSourceFromAPIPath(apiPath)}
+	if result.Code != 200 {
+		return rawURLFetchResult{StatusCode: resp.StatusCode, BusinessCode: result.Code, FailureReason: errors.FailureReason("raw_url_business_" + strconv.Itoa(result.Code)), Source: rawURLSourceFromAPIPath(apiPath)}
+	}
+	if strings.TrimSpace(result.Data.RawURL) == "" {
+		return rawURLFetchResult{StatusCode: resp.StatusCode, BusinessCode: result.Code, FailureReason: errors.ReasonRawURLEmpty, Source: rawURLSourceFromAPIPath(apiPath)}
 	}
 	if ctx.Err() != nil {
 		return rawURLFetchResult{FailureReason: "interest_canceled"}
@@ -1862,10 +1864,11 @@ func fetchRawURLViaAPI(ctx context.Context, alistURL, displayPath, realPath stri
 		return rawURLFetchResult{FailureReason: "raw_url_invalidated"}
 	}
 	return rawURLFetchResult{
-		RawURL:     result.Data.RawURL,
-		Size:       result.Data.Size,
-		Source:     rawURLSourceFromAPIPath(apiPath),
-		StatusCode: resp.StatusCode,
+		RawURL:       result.Data.RawURL,
+		Size:         result.Data.Size,
+		Source:       rawURLSourceFromAPIPath(apiPath),
+		StatusCode:   resp.StatusCode,
+		BusinessCode: result.Code,
 	}
 }
 

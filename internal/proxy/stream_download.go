@@ -684,29 +684,23 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 
 	buf := getBuffer()
 	defer putBuffer(buf)
-	written, err := io.CopyBuffer(w, readerToStream, *buf)
+	written, err := copyStreamBody(w, readerToStream, *buf, result.ExpectedBytes)
 	result.BytesWritten = written
 	result.WallDuration = time.Since(streamStart)
 	if result.WallDuration > 0 && written > 0 {
 		result.BytesPerSecond = float64(written) / result.WallDuration.Seconds()
 	}
-	if err == nil && result.ExpectedBytes > 0 && written < result.ExpectedBytes {
-		err = io.ErrUnexpectedEOF
-		result.FailureReason = "upstream_truncated"
-		result.Retryable = true
-		result.NoLearning = true
-	}
 	if err != nil {
 		result.Err = err
-		reason, retryable := classifyStreamError(err)
-		if reason == "client_disconnect" {
+		result.FailureReason = classifyStreamCopyError(req.Context(), err)
+		// Headers are already committed. A fresh fetch/strategy must not append
+		// bytes to this response, even when an upstream truncation is confirmed.
+		result.Retryable = false
+		result.NoLearning = true
+		if result.FailureReason == "client_disconnect" {
 			log.Debug().Err(err).Int64("bytes_written", written).Msg("Client ended decrypt stream")
 		} else {
 			log.Error().Err(err).Int64("bytes_written", written).Msg("Error streaming decrypted content")
-		}
-		if result.FailureReason == "" {
-			result.FailureReason = reason
-			result.Retryable = retryable
 		}
 	}
 	if strategy == StreamStrategyRange && activeRange != nil && result.Err == nil {
