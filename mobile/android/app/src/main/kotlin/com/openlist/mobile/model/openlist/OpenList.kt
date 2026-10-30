@@ -121,14 +121,17 @@ object OpenList : Event, LogCallback {
     }
 
     /**
-     * Force database synchronization (WAL checkpoint)
-     * This ensures SQLite WAL files are merged into the main database file
+     * Request an OpenList DB WAL checkpoint (flush/checkpoint only, not a backup).
+     * Completion describes this invocation's SQLite counters, not a stable snapshot,
+     * application write barrier, or a guarantee that the WAL file was removed.
+     * Busy/partial/no-WAL/unsupported-engine failures are logged below; the existing
+     * Unit bridge does not expose a detailed result or backup-completion signal.
      */
     fun forceDatabaseSync() {
         Log.d(TAG, "forceDatabaseSync")
         runCatching {
             Openlistlib.forceDBSync()
-            Log.d(TAG, "Database sync completed successfully")
+            Log.d(TAG, "Database checkpoint invocation completed (flush only, not backup)")
         }.onFailure { e ->
             Log.e(TAG, "Failed to sync database", e)
         }
