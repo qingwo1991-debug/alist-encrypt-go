@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -58,6 +59,9 @@ type AlistHandler struct {
 	dirSyncStopped        bool
 	dirSyncWG             sync.WaitGroup
 	dirSyncStop           sync.Once
+	filenameTaskMu        sync.Mutex
+	filenameTaskSem       chan struct{}
+	filenameTaskPending   map[string]bool
 	fsMetaGroup           singleflight.Group
 	fsMetaMu              sync.Mutex
 	statsRecorder         StatsRecorder
@@ -1413,6 +1417,14 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 		log.Debug().Str("original", uploadPath).Str("encrypted", encryptedPath).Msg("Encrypted filename for upload")
 	}
 
+	// Match OpenList's existing exact header-value contract, without rewriting it.
+	asyncUpload := r.Header.Get("As-Task") == "true"
+	if asyncUpload && passwdInfo.EncName && protectedFilenameLimit(h.cfg, uploadPath) > 0 {
+		if _, ok := h.fileDAO.(filenameUploadTaskRepository); !ok {
+			respondFilenameWriteError(w, newFilenameWriteError("filename_store_unavailable", http.StatusServiceUnavailable, nil))
+			return
+		}
+	}
 	protected, safePath, err := prepareFilenameWrite(h.cfg, h.fileDAO, r, passwdInfo, uploadPath, encryptedPath, fileSize, hasRange, h.httpClient)
 	if err != nil {
 		respondFilenameWriteError(w, err)
@@ -1431,8 +1443,22 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 	targetURL := httputil.BuildTargetURL(h.cfg.GetAlistURL(), "/api/fs/put", r)
 
 	if err := h.streamProxy.ProxyUploadEncrypt(uploadResponse, r, targetURL, passwdInfo, fileSize, startOffset); err != nil {
-		if protected != nil {
+		if protected != nil && !asyncUpload {
+			// Synchronous (non-task) protected uploads: any proxy failure means the
+			// remote write did not complete, so retain the FAILED audit exactly as
+			// before. Async uploads are handled below because acceptance may be
+			// unknown there.
 			_ = protected.finish(storage.FilenameFailed)
+		} else if protected != nil {
+			// Only a definite upstream rejection (non-2xx before any body committed)
+			// proves no task was accepted. Transport or mid-stream failures leave
+			// acceptance unknown: a task may already be running, so keep the claim
+			// pending to preserve the exclusive reservation rather than allow a
+			// risky maintenance release.
+			var rejected *proxy.UpstreamRejectedUploadError
+			if errors.As(err, &rejected) {
+				_ = protected.finish(storage.FilenameFailed)
+			}
 		}
 		log.Error().Err(err).Str("path", uploadPath).Msg("Failed to encrypt upload")
 		RespondHTTPErrorWithStatus(w, "Encryption error", http.StatusBadGateway)
@@ -1441,9 +1467,38 @@ func (h *AlistHandler) HandleFsPut(w http.ResponseWriter, r *http.Request) {
 
 	if protected != nil {
 		if buffered.overflow || buffered.status >= 300 {
-			_ = protected.finish(storage.FilenameFailed)
+			// A committed non-2xx upstream status is a definite rejection. An
+			// oversized/malformed response is acceptance-unknown, so for async keep
+			// the claim pending rather than allow a risky maintenance release.
+			if !asyncUpload || buffered.status >= 300 {
+				_ = protected.finish(storage.FilenameFailed)
+			}
 			RespondHTTPErrorWithStatus(w, "Protected upload failed", http.StatusBadGateway)
 			return
+		}
+		if asyncUpload {
+			taskID, err := filenameAcceptedTaskID(buffered.body.Bytes())
+			if err != nil {
+				// Malformed/unknown result: an upstream task may already be running,
+				// so keep the claim pending rather than guessing success or failure.
+				RespondHTTPErrorWithStatus(w, "Invalid protected upload response", http.StatusBadGateway)
+				return
+			}
+			if taskID != "" {
+				taskRepo, ok := h.fileDAO.(filenameUploadTaskRepository)
+				if !ok {
+					RespondHTTPErrorWithStatus(w, "Protected upload task store unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				receipt := storage.FilenameUploadTask{Origin: protected.record.Origin, TaskID: taskID, EncryptedPath: protected.record.EncryptedPath, Token: protected.record.Token, AuthScope: protected.record.AuthScope, RuleFingerprint: protected.record.RuleFingerprint}
+				if err := taskRepo.BindFilenameUploadTask(receipt); err != nil {
+					RespondHTTPErrorWithStatus(w, "Cannot persist protected upload task", http.StatusServiceUnavailable)
+					return
+				}
+				buffered.publish(w)
+				h.pollFilenameUploadTask(receipt, filenameTaskCredentials(r.Header))
+				return // Accepted is not completed: no mapping or immediate verification.
+			}
 		}
 		if err := protected.verify(r, h.httpClient); err != nil {
 			RespondHTTPErrorWithStatus(w, err.Error(), http.StatusBadGateway)
