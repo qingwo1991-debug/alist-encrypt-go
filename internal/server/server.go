@@ -338,6 +338,10 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 	r.POST("/api/fs/list", ginWrap(alistHandler.HandleFsList))
 	r.POST("/api/fs/search", ginWrap(alistHandler.HandleFsSearch))
 	r.PUT("/api/fs/put", ginWrap(alistHandler.HandleFsPut))
+	// Queries recover durable filename receipts; task mutations retain catch-all semantics.
+	r.GET("/api/task/upload/undone", ginWrap(alistHandler.HandleUploadTasks))
+	r.GET("/api/task/upload/done", ginWrap(alistHandler.HandleUploadTasks))
+	r.POST("/api/task/upload/info", ginWrap(alistHandler.HandleUploadTasks))
 	r.POST("/api/fs/remove", ginWrap(alistHandler.HandleFsRemove))
 	r.POST("/api/fs/rename", ginWrap(alistHandler.HandleFsRename))
 	r.POST("/api/fs/move", ginWrap(alistHandler.HandleFsMove))

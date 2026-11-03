@@ -28,11 +28,8 @@ func TestSynchronousUploadVerificationBeforePublication(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sp := NewStreamProxy(config.DefaultConfig())
 			sp.client = newTestClient(func(r *http.Request) (*http.Response, error) {
-				if tc.protected && !tc.dav && r.Header.Get("As-Task") != "false" {
-					t.Errorf("As-Task=%q, want false", r.Header.Get("As-Task"))
-				}
-				if (!tc.protected || tc.dav) && r.Header.Get("As-Task") != "true" {
-					t.Errorf("legacy/DAV As-Task changed: %q", r.Header.Get("As-Task"))
+				if r.Header.Get("As-Task") != "true" {
+					t.Errorf("explicit async upload mode changed: As-Task=%q", r.Header.Get("As-Task"))
 				}
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}, "Content-Length": {"999999"}, "X-Test": {"preserved"}}, Body: io.NopCloser(strings.NewReader(tc.body)), Request: r}, nil
 			})

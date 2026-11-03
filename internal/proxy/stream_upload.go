@@ -19,6 +19,16 @@ import (
 
 type synchronousUploadVerificationKey struct{}
 
+// UpstreamRejectedUploadError reports a definitive upstream rejection: the
+// server returned a non-2xx status before any response body was committed, so
+// no upload task was accepted. It is distinct from transport or mid-stream
+// failures, where acceptance is unknown and a task may already be running.
+type UpstreamRejectedUploadError struct{ Status int }
+
+func (e *UpstreamRejectedUploadError) Error() string {
+	return fmt.Sprintf("upstream upload status %d", e.Status)
+}
+
 // WithSynchronousUploadVerification requests a bounded synchronous fs/put result
 // check before any successful response or upload metadata is published.
 func WithSynchronousUploadVerification(ctx context.Context) context.Context {
@@ -109,7 +119,11 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 	rewriteUploadHeadersForV2(req, contentMeta, startOffset, originalContentRange, plainContentLength)
 	verifySynchronous, _ := r.Context().Value(synchronousUploadVerificationKey{}).(bool)
 	verifySynchronous = verifySynchronous && !isWebDAVUploadTarget(targetURL)
-	if verifySynchronous {
+	if verifySynchronous && r.Header.Get("As-Task") != "true" {
+		// A protected upload must validate the API result, but accepting an
+		// asynchronous task is not the same as completing the remote write.
+		// Preserve the caller's explicit task mode; the handler binds its real
+		// task ID and verifies the remote file only after task success.
 		req.Header.Set("As-Task", "false")
 	}
 
@@ -123,7 +137,7 @@ func (s *StreamProxy) ProxyUploadEncrypt(w http.ResponseWriter, r *http.Request,
 		// Do not commit the upstream response here, otherwise the caller cannot
 		// report the failure cleanly and may mistake it for a successful upload.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-		return errors.NewProxyError(fmt.Sprintf("upstream upload status %d", resp.StatusCode))
+		return &UpstreamRejectedUploadError{Status: resp.StatusCode}
 	}
 	var verifiedResponse []byte
 	if verifySynchronous {
