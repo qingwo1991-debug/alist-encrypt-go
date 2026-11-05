@@ -464,7 +464,7 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 func (d *FileDAO) Delete(path string) error {
 	d.playback.mu.Lock()
 	defer d.playback.mu.Unlock()
-	d.invalidatePlaybackLocked()
+	d.invalidateDisplayPathLocked(path)
 	d.pathCache.Delete(path)
 	return d.store.Delete(storage.BucketFileInfo, path)
 }
@@ -668,7 +668,7 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	}
 	d.playback.mu.Lock()
 	defer d.playback.mu.Unlock()
-	d.invalidatePlaybackLocked()
+	d.invalidateDisplayPathLocked(displayPath)
 	d.DeleteFileSize(displayPath)
 	_ = d.store.Delete(storage.BucketFileInfo, displayPath)
 	// Get() already checks both byEncPath and byDispPath maps, so a single
