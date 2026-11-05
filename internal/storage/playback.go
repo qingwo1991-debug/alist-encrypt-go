@@ -44,6 +44,15 @@ func (s *Store) SetPlayback(key string, value interface{}) error {
 		return b.Put([]byte(key), data)
 	})
 }
+func (s *Store) DeletePlayback(key string) error {
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(playbackBucket)
+		if b == nil {
+			return nil
+		}
+		return b.Delete([]byte(key))
+	})
+}
 func (s *Store) ClearPlayback() error {
 	return s.update(func(tx *bolt.Tx) error {
 		if tx.Bucket(playbackBucket) == nil {

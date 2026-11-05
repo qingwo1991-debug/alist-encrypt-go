@@ -151,3 +151,44 @@ func TestCanceledPlaybackFlightRetainsAdmissionUntilWorkerExits(t *testing.T) {
 		t.Fatal("stop failed to join")
 	}
 }
+
+// One listing entry whose size moved must not revoke every other confirmation
+// and must not move the fence that queued background probes were admitted
+// under. The previous global invalidation made a probe wait out its queue slot
+// and then fail as size_probe_invalidated without reading a single byte, so
+// listings never accumulated confirmed geometry.
+func TestInvalidateDisplayPathIsScopedToThatPath(t *testing.T) {
+	d := newTestFileDAO(t)
+	defer d.Stop()
+	confirmedAt := time.Now().Add(-time.Minute)
+	publish := func(path string) string {
+		identity := "id:" + path
+		info := &FileInfo{Path: path, EncryptedPath: "/raw" + path, Size: 100, CiphertextSize: 132, ContentVersion: 2, HeaderLen: 32, GeometryIdentity: identity, GeometryConfirmedAt: confirmedAt}
+		if !d.PublishConfirmedPlayback(info, d.PlaybackEpoch(path)) {
+			t.Fatalf("publish %s", path)
+		}
+		return identity
+	}
+	aID, bID := publish("/a"), publish("/b")
+	admittedForB := d.PlaybackEpoch("/b")
+
+	d.InvalidateDisplayPath("/a")
+
+	if _, ok := d.GetConfirmedPlayback(aID); ok {
+		t.Fatal("revoked path kept its confirmation")
+	}
+	if _, ok := d.GetConfirmedPlayback(bID); !ok {
+		t.Fatal("unrelated path lost its confirmation")
+	}
+	if got := d.PlaybackEpoch("/b"); got != admittedForB {
+		t.Fatalf("unrelated path fence moved: %d -> %d", admittedForB, got)
+	}
+	if got := d.PlaybackEpoch("/a"); got == admittedForB {
+		t.Fatal("revoked path fence did not move")
+	}
+	// A probe admitted for /b before /a was revoked must still publish.
+	late := &FileInfo{Path: "/b", EncryptedPath: "/raw/b", Size: 100, CiphertextSize: 132, ContentVersion: 2, HeaderLen: 32, GeometryIdentity: "id:/b:late", GeometryConfirmedAt: time.Now()}
+	if !d.PublishConfirmedPlayback(late, admittedForB) {
+		t.Fatal("unrelated path publication rejected after another path was revoked")
+	}
+}
