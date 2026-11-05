@@ -8,6 +8,11 @@ import (
 // Playback cache is rebuildable and deliberately separate from filename audit.
 var playbackBucket = []byte("playback_confirmed_v1")
 
+// playbackStoreLimit bounds the durable confirmation cache. It must cover the
+// browsable working set, otherwise live proofs are evicted and listings stop
+// reporting sizes until the same file is probed again.
+const playbackStoreLimit = 65536
+
 func (s *Store) GetPlayback(key string, value interface{}) error {
 	return s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(playbackBucket)
@@ -33,7 +38,7 @@ func (s *Store) SetPlayback(key string, value interface{}) error {
 		}
 		// This is a bounded, rebuildable cache, not an audit history. Eviction
 		// needs no O(N) expiry scan and never touches filename reservations.
-		if b.Get([]byte(key)) == nil && b.Stats().KeyN >= 2048 {
+		if b.Get([]byte(key)) == nil && b.Stats().KeyN >= playbackStoreLimit {
 			c := b.Cursor()
 			if k, _ := c.First(); k != nil {
 				if err := c.Delete(); err != nil {
