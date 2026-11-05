@@ -298,6 +298,21 @@ func (h *WopanAdminHandler) storage(ctx context.Context, s wopanUpstreamSession,
 	return value, nil
 }
 
+// storageRecord reads one raw storage record without assuming a driver. A
+// quota provider needs the addition, which list responses hide on purpose, and
+// each provider parses only its own fields; the driver check therefore belongs
+// to the caller that owns that driver, not here.
+func (h *WopanAdminHandler) storageRecord(ctx context.Context, s wopanUpstreamSession, id int) (wopanStorage, error) {
+	var value wopanStorage
+	if err := h.upstreamJSON(ctx, s, http.MethodGet, "/api/admin/storage/get?id="+strconv.Itoa(id), nil, &value); err != nil {
+		return value, err
+	}
+	if value.ID != id {
+		return value, wopanError(http.StatusBadGateway, "upstream_invalid_response")
+	}
+	return value, nil
+}
+
 // Reject duplicate keys (including in raw additions) rather than letting two
 // parsers choose different account, scope or authorization values. Upstream
 // schema extension fields remain allowed; recursion is deliberately bounded.

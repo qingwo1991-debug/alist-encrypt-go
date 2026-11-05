@@ -2,27 +2,38 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/alist-encrypt-go/internal/quota"
 )
 
 // QuotaHandler exposes read-only storage quota through one endpoint so a caller
-// does not need to know which provider backs a mount. It reuses the OpenList
-// admin session and the WoPan provider owned by WopanAdminHandler; the provider
-// is never rebuilt per request, so its exact-byte quota reads stay the only
-// source of truth.
+// does not need to know which provider backs a mount. Providers are registered
+// once in a registry keyed by driver name, so adding a provider never touches
+// the request path: it never learns which drivers exist and every provider stays
+// unaware of the others.
 //
 // Only drivers with an implemented quota client report numbers. Every other
 // driver is reported as supported=false with an explicit reason: "unknown" must
 // never be rendered as a zero, because a zero total is indistinguishable from a
 // genuinely empty account.
 type QuotaHandler struct {
-	admin *WopanAdminHandler
+	admin    *WopanAdminHandler
+	registry *quota.Registry
 }
 
 func NewQuotaHandler(admin *WopanAdminHandler) *QuotaHandler {
-	return &QuotaHandler{admin: admin}
+	h := &QuotaHandler{admin: admin}
+	if admin != nil {
+		h.registry = quota.NewRegistry(
+			newWopanQuotaProvider(admin),
+			quota.NewYun139Provider(quota.DefaultYun139Endpoint),
+		)
+	}
+	return h
 }
 
 // quotaStorageView is one storage's quota state. Byte counts are decimal
@@ -148,43 +159,57 @@ func quotaStorageFilter(r *http.Request) (int, error) {
 	return id, nil
 }
 
-// storageQuota resolves one storage. Drivers without a quota client are marked
-// unsupported instead of being probed with a guess; WoPan is the only provider
-// with an implemented exact byte quota, and its personal-account scope is
-// reported explicitly so a caller never confuses it with the mount folder size.
+// storageQuota resolves one storage through the registry. A driver without a
+// registered provider is marked unsupported instead of being probed with a
+// guess. The addition loader is handed to the provider rather than resolved
+// here, so a driver nobody owns never costs an upstream round trip.
 func (h *QuotaHandler) storageQuota(ctx context.Context, s wopanUpstreamSession, entry wopanStorage) (quotaStorageView, error) {
 	view := quotaStorageView{StorageID: entry.ID, MountPath: entry.MountPath, Driver: entry.Driver}
-	if entry.Driver != "WoPan" {
+	provider, ok := h.registry.Provider(entry.Driver)
+	if !ok {
 		view.UnsupportedReason = "unsupported_driver"
 		return view, nil
 	}
-	// List responses hide additions on purpose, so the raw record is required.
-	value, err := h.admin.storage(ctx, s, entry.ID)
+	result, err := provider.Quota(ctx, quota.Storage{
+		ID:        entry.ID,
+		MountPath: entry.MountPath,
+		Driver:    entry.Driver,
+		Disabled:  entry.Disabled,
+		Status:    entry.Status,
+		Addition: func(ctx context.Context) (string, error) {
+			// List responses hide additions on purpose, so the raw record is
+			// required before any provider can read its own credential.
+			value, err := h.admin.storageRecord(ctx, s, entry.ID)
+			if err != nil {
+				return "", err
+			}
+			return value.Addition, nil
+		},
+	})
 	if err != nil {
-		return view, err
+		return view, quotaFailure(err)
 	}
-	addition, err := wopanPersonal(value)
-	if err != nil {
-		return view, err
-	}
-	account, err := h.admin.provider.Account(ctx, addition.AccessToken)
-	if err != nil {
-		return view, err
-	}
-	if account.ID == "" {
-		return view, wopanError(http.StatusBadGateway, "provider_invalid_response")
-	}
-	quota, err := h.admin.provider.Quota(ctx, addition.AccessToken, account.ID)
-	if err != nil {
-		return view, err
-	}
-	if quota.TotalBytes <= 0 || quota.UsedBytes < 0 || quota.UsedBytes > quota.TotalBytes || quota.AvailableBytes < 0 || quota.AvailableBytes != quota.TotalBytes-quota.UsedBytes {
-		return view, wopanError(http.StatusBadGateway, "provider_invalid_response")
+	if err := result.Validate(); err != nil {
+		return view, quotaFailure(err)
 	}
 	view.Supported = true
-	view.Scope = "personal"
-	view.TotalBytes = strconv.FormatInt(quota.TotalBytes, 10)
-	view.UsedBytes = strconv.FormatInt(quota.UsedBytes, 10)
-	view.AvailableBytes = strconv.FormatInt(quota.AvailableBytes, 10)
+	view.Scope = result.Scope
+	view.TotalBytes = strconv.FormatInt(result.Total, 10)
+	view.UsedBytes = strconv.FormatInt(result.Used, 10)
+	// An over-quota account has no available bytes to report. Omitting the field
+	// is honest; a negative or clamped count would not be.
+	if !result.OverQuota {
+		view.AvailableBytes = strconv.FormatInt(result.Total-result.Used, 10)
+	}
 	return view, nil
+}
+
+// quotaFailure maps a provider error onto the endpoint's error contract. Errors
+// that are not quota errors already carry their own upstream status.
+func quotaFailure(err error) error {
+	var failure *quota.Error
+	if errors.As(err, &failure) {
+		return wopanError(failure.Status, failure.Code)
+	}
+	return err
 }
