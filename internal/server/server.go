@@ -244,6 +244,10 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 			protected.POST("/wopan/automation", ginWrap(wopanAdmin.SaveAutomation))
 			protected.GET("/wopan/storages", ginWrap(wopanAdmin.Storages))
 			protected.GET("/wopan/quota", ginWrap(wopanAdmin.Quota))
+			// Unified quota entry point: every storage in one answer, so a
+			// caller does not need to know which provider backs a mount.
+			quotaHandler := handler.NewQuotaHandler(wopanAdmin)
+			protected.GET("/quota", ginWrap(quotaHandler.Quota))
 			protected.POST("/wopan/recycle/prepare", ginWrap(wopanAdmin.PrepareRecycle))
 			protected.POST("/wopan/recycle/clear", ginWrap(wopanAdmin.ClearRecycle))
 			protected.POST("/playbackInterest", playbackInterestHandler(s.cfg, s.fileDAO, s.probeScheduler))
