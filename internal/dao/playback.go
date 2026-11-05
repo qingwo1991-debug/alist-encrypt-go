@@ -60,6 +60,31 @@ func (d *FileDAO) playbackEpochLocked(path string) uint64 {
 	}
 	return epoch
 }
+
+// playbackConfirmedLimit bounds the in-memory confirmation set. The working set
+// is every encrypted file the user browses, so a small cap evicts live proofs
+// and listings silently stop reporting sizes. Evict the oldest proof rather
+// than an arbitrary map entry so a stable working set stays resident.
+const playbackConfirmedLimit = 65536
+
+func (s *playbackState) admitConfirmedLocked(identity string, info FileInfo) {
+	if s.confirmed == nil {
+		s.confirmed = make(map[string]FileInfo)
+	}
+	if len(s.confirmed) >= playbackConfirmedLimit {
+		oldestKey, oldest := "", time.Time{}
+		for key, value := range s.confirmed {
+			if oldestKey == "" || value.GeometryConfirmedAt.Before(oldest) {
+				oldestKey, oldest = key, value.GeometryConfirmedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.confirmed, oldestKey)
+		}
+	}
+	s.confirmed[identity] = info
+}
+
 func (d *FileDAO) GetConfirmedPlayback(identity string) (*FileInfo, bool) {
 	s := &d.playback
 	s.mu.Lock()
@@ -81,16 +106,7 @@ func (d *FileDAO) GetConfirmedPlayback(identity string) (*FileInfo, bool) {
 	if fence := s.pathFence[info.Path]; fence != nil && info.GeometryConfirmedAt.Before(fence.revokedAt) {
 		return nil, false
 	}
-	if s.confirmed == nil {
-		s.confirmed = make(map[string]FileInfo)
-	}
-	if len(s.confirmed) >= 2048 {
-		for key := range s.confirmed {
-			delete(s.confirmed, key)
-			break
-		}
-	}
-	s.confirmed[identity] = info
+	s.admitConfirmedLocked(identity, info)
 	info.NonceField = append([]byte(nil), info.NonceField...)
 	return &info, true
 }
@@ -108,16 +124,7 @@ func (d *FileDAO) PublishConfirmedPlayback(info *FileInfo, epoch uint64) bool {
 			return false
 		}
 	}
-	if s.confirmed == nil {
-		s.confirmed = make(map[string]FileInfo)
-	}
-	if len(s.confirmed) >= 2048 {
-		for k := range s.confirmed {
-			delete(s.confirmed, k)
-			break
-		}
-	}
-	s.confirmed[copy.GeometryIdentity] = copy
+	s.admitConfirmedLocked(copy.GeometryIdentity, copy)
 	// Legacy consumers still see the same complete geometry. Dedicated Bolt
 	// confirmation above, rather than optional MySQL write-behind, owns restart.
 	_ = d.Set(&copy)
