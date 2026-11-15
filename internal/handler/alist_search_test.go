@@ -848,6 +848,168 @@ func TestResolveRemoveNameStripsOriginalPrefix(t *testing.T) {
 	}
 }
 
+func TestHandleFsRemoveKeepsCachedDirectoryName(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+
+	var capturedRemoveBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("cached directory remove must not probe fs/get")
+	})
+	mux.HandleFunc("/api/fs/remove", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedRemoveBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read remove body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, fileDAO := newTestAlistHandler(t, srv.URL, passwd)
+	displayPath := "/encrypt/season1"
+	fileDAO.SetEncPathMappingWithInfo(displayPath, displayPath, "season1", 0, true)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/remove", strings.NewReader(`{"dir":"/encrypt","names":["season1"]}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsRemove(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var captured struct {
+		Names []string `json:"names"`
+	}
+	if err := json.Unmarshal(capturedRemoveBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if len(captured.Names) != 1 || captured.Names[0] != "season1" {
+		t.Fatalf("captured names = %#v, want [season1]", captured.Names)
+	}
+}
+
+func TestHandleFsRemoveProbesUncachedDirectory(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+
+	var capturedRemoveBody []byte
+	var probedPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		var reqData struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+			t.Fatalf("decode fs/get body: %v", err)
+		}
+		probedPath = reqData.Path
+		if reqData.Path == "/encrypt/season1" {
+			writeJSONResponse(w, map[string]interface{}{
+				"code":    200,
+				"message": "success",
+				"data":    map[string]interface{}{"name": "season1", "is_dir": true},
+			})
+			return
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 500, "message": "object not found", "data": nil})
+	})
+	mux.HandleFunc("/api/fs/remove", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedRemoveBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read remove body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/remove", strings.NewReader(`{"dir":"/encrypt","names":["season1"]}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsRemove(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if probedPath != "/encrypt/season1" {
+		t.Fatalf("fs/get probe path = %q, want /encrypt/season1", probedPath)
+	}
+	var captured struct {
+		Names []string `json:"names"`
+	}
+	if err := json.Unmarshal(capturedRemoveBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if len(captured.Names) != 1 || captured.Names[0] != "season1" {
+		t.Fatalf("captured names = %#v, want [season1]", captured.Names)
+	}
+}
+
+func TestHandleFsRemoveStillEncryptsUncachedFile(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+	converter := encryption.NewFileNameConverter(passwd.Password, passwd.EncType, passwd.EncSuffix)
+	want := converter.ToRealName("movie.mp4")
+
+	var capturedRemoveBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResponse(w, map[string]interface{}{"code": 500, "message": "object not found", "data": nil})
+	})
+	mux.HandleFunc("/api/fs/remove", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedRemoveBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read remove body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/remove", strings.NewReader(`{"dir":"/encrypt","names":["movie.mp4"]}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsRemove(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var captured struct {
+		Names []string `json:"names"`
+	}
+	if err := json.Unmarshal(capturedRemoveBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if len(captured.Names) != 1 || captured.Names[0] != want {
+		t.Fatalf("captured names = %#v, want [%q]", captured.Names, want)
+	}
+}
+
 func TestHandleFsSearchForwardsUpstreamAuthorizationOnly(t *testing.T) {
 	passwd := &config.PasswdInfo{
 		Password:  "testpass",

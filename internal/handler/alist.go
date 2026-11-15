@@ -378,15 +378,36 @@ func (h *AlistHandler) collectEncryptedSearchRoots() []string {
 }
 
 func (h *AlistHandler) resolveRemoveName(dirPath, name string, passwdInfo *config.PasswdInfo) string {
+	return h.resolveRemoveNameForRequest(nil, dirPath, name, passwdInfo)
+}
+
+func (h *AlistHandler) resolveRemoveNameForRequest(r *http.Request, dirPath, name string, passwdInfo *config.PasswdInfo) string {
 	displayPath := path.Join(dirPath, name)
 
 	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok {
 		return path.Base(encPath)
 	}
 
-	if fileInfo, ok := h.fileDAO.Get(url.QueryEscape(displayPath)); ok && fileInfo != nil && fileInfo.Path != "" {
-		if base := path.Base(fileInfo.Path); base != "" {
-			return base
+	cachedRemoveName := func(fileInfo *dao.FileInfo) (string, bool) {
+		if fileInfo == nil {
+			return "", false
+		}
+		if fileInfo.IsDir {
+			if fileInfo.Path != "" {
+				return path.Base(fileInfo.Path), true
+			}
+			return name, true
+		}
+		if fileInfo.EncryptedPath != "" && fileInfo.EncryptedPath != displayPath {
+			return path.Base(fileInfo.EncryptedPath), true
+		}
+		return "", false
+	}
+	for _, cacheKey := range []string{displayPath, url.QueryEscape(displayPath)} {
+		if fileInfo, ok := h.fileDAO.Get(cacheKey); ok {
+			if resolved, hit := cachedRemoveName(fileInfo); hit {
+				return resolved
+			}
 		}
 	}
 
@@ -400,20 +421,52 @@ func (h *AlistHandler) resolveRemoveName(dirPath, name string, passwdInfo *confi
 		if strings.HasPrefix(fileName, encryption.OrigPrefix) {
 			return strings.TrimPrefix(fileName, encryption.OrigPrefix)
 		}
+		// Directories and unencrypted files keep their upstream spelling. Only
+		// names with no upstream object under the display spelling are encrypted.
+		if h.removeDisplayObjectExists(r, displayPath) {
+			return name
+		}
 		return converter.ToRealName(name)
 	}
 
 	return name
 }
 
-func (h *AlistHandler) resolveRemoveNames(dirPath string, names []string, passwdInfo *config.PasswdInfo) []string {
+func (h *AlistHandler) removeDisplayObjectExists(r *http.Request, displayPath string) bool {
+	if r == nil || h == nil {
+		return false
+	}
+	body, err := json.Marshal(map[string]string{"path": displayPath})
+	if err != nil {
+		return false
+	}
+	resp, err := h.proxyToAlist(r, http.MethodPost, "/api/fs/get", body, r)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		return false
+	}
+	var payload struct {
+		Code float64                `json:"code"`
+		Data map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return false
+	}
+	return payload.Code == 200 && payload.Data != nil
+}
+
+func (h *AlistHandler) resolveRemoveNames(r *http.Request, dirPath string, names []string, passwdInfo *config.PasswdInfo) []string {
 	if len(names) == 0 {
 		return nil
 	}
 
 	resolved := make([]string, 0, len(names))
 	for _, name := range names {
-		resolved = append(resolved, h.resolveRemoveName(dirPath, name, passwdInfo))
+		resolved = append(resolved, h.resolveRemoveNameForRequest(r, dirPath, name, passwdInfo))
 	}
 	return resolved
 }
@@ -1541,7 +1594,7 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 	// Resolve each name to a single upstream target.
 	fileNames := reqData.Names
 	if found && passwdInfo.EncName {
-		fileNames = h.resolveRemoveNames(reqData.Dir, reqData.Names, passwdInfo)
+		fileNames = h.resolveRemoveNames(r, reqData.Dir, reqData.Names, passwdInfo)
 	}
 
 	// Forward modified request
