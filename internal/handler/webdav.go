@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -767,6 +768,8 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	if found && passwdInfo.EncName {
 		realSrcPath = h.convertToRealPath(davPath, passwdInfo)
 	}
+	sourceIsDir := false
+	sourceIsDirChecked := false
 
 	// Convert destination path from header
 	destination := r.Header.Get("Destination")
@@ -778,9 +781,17 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 			destDisplayPath = destPath
 			destPasswd, destFound := h.passwdDAO.FindByPath(destPath)
 			if destFound && destPasswd.EncName {
+				if !sourceIsDirChecked {
+					sourceIsDir = h.webdavSourceIsDir(r, davPath, realSrcPath)
+					sourceIsDirChecked = true
+				}
 				converter := encryption.NewFileNameConverter(destPasswd.Password, destPasswd.EncType, destPasswd.EncSuffix)
 				fileName := path.Base(destPath)
-				realDestPath := path.Dir(destPath) + "/" + converter.ToRealName(fileName)
+				realDestName := fileName
+				if !sourceIsDir {
+					realDestName = converter.ToRealName(fileName)
+				}
+				realDestPath := path.Join(path.Dir(destPath), realDestName)
 				if limit := protectedFilenameLimit(h.cfg, destPath); limit > 0 && len(path.Base(realDestPath)) > limit {
 					RespondHTTPErrorWithStatus(w, "Encrypted write destination exceeds configured filename limit; use a shorter name", http.StatusBadRequest)
 					return
@@ -854,6 +865,57 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
+}
+
+// webdavSourceIsDir reports whether the MOVE/COPY source is a directory.
+// Cache hits are authoritative; otherwise one bounded /api/fs/get probe on the
+// resolved upstream path decides, since directory names are never
+// filename-encrypted and must not receive an encrypted destination name.
+func (h *WebDAVHandler) webdavSourceIsDir(r *http.Request, displayPath, realPath string) bool {
+	if h.fileDAO != nil {
+		for _, key := range []string{displayPath, realPath, url.QueryEscape(displayPath), url.QueryEscape(realPath)} {
+			if info, ok := h.fileDAO.Get(key); ok && info != nil && info.IsDir {
+				return true
+			}
+		}
+	}
+	if h.cfg == nil || strings.TrimSpace(realPath) == "" {
+		return false
+	}
+	body, err := json.Marshal(map[string]string{"path": realPath})
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.cfg.GetAlistURL()+"/api/fs/get", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := h.getStdClient().Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		return false
+	}
+	var payload struct {
+		Code float64 `json:"code"`
+		Data *struct {
+			IsDir bool `json:"is_dir"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return false
+	}
+	return payload.Code == 200 && payload.Data != nil && payload.Data.IsDir
 }
 
 // handlePropfind handles PROPFIND requests - follows OpenList-Encrypt logic:

@@ -1010,6 +1010,225 @@ func TestHandleFsRemoveStillEncryptsUncachedFile(t *testing.T) {
 	}
 }
 
+func TestHandleFsMoveKeepsCachedDirectoryName(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+
+	var capturedMoveBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("cached directory move must not probe fs/get")
+	})
+	mux.HandleFunc("/api/fs/move", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedMoveBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read move body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, fileDAO := newTestAlistHandler(t, srv.URL, passwd)
+	fileDAO.SetEncPathMappingWithInfo("/encrypt/season1", "/encrypt/season1", "season1", 0, true)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/move", strings.NewReader(`{"src_dir":"/encrypt","dst_dir":"/encrypt/sub","names":["season1"]}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsMove(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var captured struct {
+		Names []string `json:"names"`
+	}
+	if err := json.Unmarshal(capturedMoveBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if len(captured.Names) != 1 || captured.Names[0] != "season1" {
+		t.Fatalf("captured names = %#v, want [season1]", captured.Names)
+	}
+}
+
+func TestHandleFsMoveProbesUncachedDirectory(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+
+	var capturedMoveBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		var reqData struct {
+			Path string `json:"path"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reqData)
+		if reqData.Path == "/encrypt/season1" {
+			writeJSONResponse(w, map[string]interface{}{
+				"code":    200,
+				"message": "success",
+				"data":    map[string]interface{}{"name": "season1", "is_dir": true},
+			})
+			return
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 500, "message": "object not found", "data": nil})
+	})
+	mux.HandleFunc("/api/fs/move", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedMoveBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read move body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/move", strings.NewReader(`{"src_dir":"/encrypt","dst_dir":"/encrypt/sub","names":["season1"]}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsMove(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var captured struct {
+		Names []string `json:"names"`
+	}
+	if err := json.Unmarshal(capturedMoveBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if len(captured.Names) != 1 || captured.Names[0] != "season1" {
+		t.Fatalf("captured names = %#v, want [season1]", captured.Names)
+	}
+}
+
+func TestHandleFsRenameKeepsCachedDirectoryName(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+
+	var capturedRenameBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("cached directory rename must not probe fs/get")
+	})
+	mux.HandleFunc("/api/fs/rename", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedRenameBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read rename body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, fileDAO := newTestAlistHandler(t, srv.URL, passwd)
+	fileDAO.SetEncPathMappingWithInfo("/encrypt/season1", "/encrypt/season1", "season1", 0, true)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/rename", strings.NewReader(`{"path":"/encrypt/season1","name":"season2"}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var captured struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(capturedRenameBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if captured.Path != "/encrypt/season1" || captured.Name != "season2" {
+		t.Fatalf("captured rename = %#v, want path=/encrypt/season1 name=season2", captured)
+	}
+}
+
+func TestHandleFsRenameProbesUncachedDirectory(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password:  "testpass",
+		EncType:   "aesctr",
+		Enable:    true,
+		EncName:   true,
+		EncSuffix: ".bin",
+		EncPath:   []string{"/encrypt/*"},
+	}
+
+	var capturedRenameBody []byte
+	var probedPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fs/get", func(w http.ResponseWriter, r *http.Request) {
+		var reqData struct {
+			Path string `json:"path"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reqData)
+		probedPath = reqData.Path
+		if reqData.Path == "/encrypt/season1" {
+			writeJSONResponse(w, map[string]interface{}{
+				"code":    200,
+				"message": "success",
+				"data":    map[string]interface{}{"name": "season1", "is_dir": true},
+			})
+			return
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 500, "message": "object not found", "data": nil})
+	})
+	mux.HandleFunc("/api/fs/rename", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedRenameBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read rename body: %v", err)
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 200, "message": "success", "data": map[string]interface{}{}})
+	})
+
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	req := httptest.NewRequest(http.MethodPost, "/api/fs/rename", strings.NewReader(`{"path":"/encrypt/season1","name":"season2"}`))
+	rec := httptest.NewRecorder()
+	handler.HandleFsRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if probedPath != "/encrypt/season1" {
+		t.Fatalf("fs/get probe path = %q, want /encrypt/season1", probedPath)
+	}
+	var captured struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(capturedRenameBody, &captured); err != nil {
+		t.Fatalf("decode captured body: %v", err)
+	}
+	if captured.Path != "/encrypt/season1" || captured.Name != "season2" {
+		t.Fatalf("captured rename = %#v, want path=/encrypt/season1 name=season2", captured)
+	}
+}
+
 func TestHandleFsSearchForwardsUpstreamAuthorizationOnly(t *testing.T) {
 	passwd := &config.PasswdInfo{
 		Password:  "testpass",
