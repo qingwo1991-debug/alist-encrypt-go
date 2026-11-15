@@ -519,7 +519,9 @@ func (h *AlistHandler) resolveRenameSource(r *http.Request, displayPath string, 
 		return displayPath, false
 	}
 	if strings.HasPrefix(fileName, encryption.OrigPrefix) {
-		return path.Join(path.Dir(displayPath), strings.TrimPrefix(fileName, encryption.OrigPrefix)), false
+		// Keep the stripped spelling literal: "." / ".." must reach the
+		// mutation-name validation instead of being cleaned away by path.Join.
+		return path.Dir(displayPath) + "/" + strings.TrimPrefix(fileName, encryption.OrigPrefix), false
 	}
 	if exists, isDir := h.probeDisplayObject(r, displayPath); exists {
 		return displayPath, isDir
