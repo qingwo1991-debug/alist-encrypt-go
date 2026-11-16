@@ -491,14 +491,68 @@ func (h *AlistHandler) snapshotPayloadRootPoisoned(dirPath string, payload []byt
 	return dirs >= 3
 }
 
-func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string, page, perPage int) {
+// serveSnapshot writes the cached listing and returns the parsed content
+// items (full directory, not just the served page) so callers can reuse them
+// for probe warmup without re-parsing the payload.
+func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string, page, perPage int) []interface{} {
 	if snap == nil {
 		RespondHTTPErrorWithStatus(w, "snapshot not found", http.StatusNotFound)
-		return
+		return nil
 	}
 	now := time.Now()
 	stale := snap.Stale || (!snap.NextRefreshAt.IsZero() && now.After(snap.NextRefreshAt))
 	syncing := snap.SyncState == "syncing"
+
+	// Fast path: parse the payload ONCE, inject serving-mode fields, slice the
+	// content window in memory and marshal a single response. The legacy path
+	// re-parsed and re-marshaled the whole directory payload up to three times
+	// per request (mark fields, paginate, probe extraction).
+	var doc map[string]interface{}
+	if err := json.Unmarshal(snap.PayloadJSON, &doc); err == nil && doc != nil {
+		doc["stale"] = stale
+		doc["syncing"] = syncing
+		doc["cache_hit"] = true
+		doc["cache_mode"] = cacheMode
+		if !snap.LastSyncAt.IsZero() {
+			doc["last_sync_at"] = snap.LastSyncAt.Format(time.RFC3339)
+		}
+		if !snap.NextRefreshAt.IsZero() {
+			doc["next_refresh_at"] = snap.NextRefreshAt.Format(time.RFC3339)
+		}
+		if snap.LastError != "" {
+			doc["degraded_reason"] = publicDirSyncError(snap.LastError)
+		}
+		var allItems []interface{}
+		if data, ok := doc["data"].(map[string]interface{}); ok {
+			if content, ok := data["content"].([]interface{}); ok {
+				allItems = content
+				if page > 0 && perPage > 0 {
+					total := len(content)
+					start := (page - 1) * perPage
+					var sliced []interface{}
+					if start < total {
+						end := start + perPage
+						if end > total {
+							end = total
+						}
+						sliced = content[start:end]
+					} else {
+						sliced = []interface{}{}
+					}
+					data["content"] = sliced
+					if _, ok := data["total"].(float64); !ok {
+						data["total"] = float64(total)
+					}
+				}
+			}
+		}
+		if encoded, err := json.Marshal(doc); err == nil {
+			RespondRaw(w, http.StatusOK, "application/json", encoded)
+			return allItems
+		}
+	}
+
+	// Fallback for payloads that do not round-trip through a JSON object.
 	respond := h.markSnapshotServingMode(snap.PayloadJSON, stale, syncing, cacheMode, snap)
 	if page > 0 && perPage > 0 {
 		if sliced, ok := paginateSnapshotJSON(respond, page, perPage); ok {
@@ -506,6 +560,7 @@ func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapsho
 		}
 	}
 	RespondRaw(w, http.StatusOK, "application/json", respond)
+	return nil
 }
 
 // listPaginationFromBody extracts the page/per_page window a client requested.
@@ -523,6 +578,54 @@ func listPaginationFromBody(reqBody map[string]interface{}) (int, int) {
 		perPage = int(v)
 	}
 	return page, perPage
+}
+
+// paginateListDoc slices an already-parsed list document to the requested
+// window without re-parsing the payload. Top-level and data maps are shallow
+// copied so concurrent joiners of a shared flight never observe each other's
+// page window.
+func paginateListDoc(doc map[string]interface{}, page, perPage int) ([]byte, bool) {
+	if page <= 0 || perPage <= 0 || doc == nil {
+		return nil, false
+	}
+	data, ok := doc["data"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	content, ok := data["content"].([]interface{})
+	if !ok {
+		return nil, false
+	}
+	total := len(content)
+	start := (page - 1) * perPage
+	var sliced []interface{}
+	if start < total {
+		end := start + perPage
+		if end > total {
+			end = total
+		}
+		sliced = content[start:end]
+	} else {
+		sliced = []interface{}{}
+	}
+	newData := make(map[string]interface{}, len(data)+1)
+	for k, v := range data {
+		newData[k] = v
+	}
+	newData["content"] = sliced
+	if _, ok := newData["total"].(float64); !ok {
+		newData["total"] = float64(total)
+	}
+	newDoc := make(map[string]interface{}, len(doc)+1)
+	for k, v := range doc {
+		newDoc[k] = v
+	}
+	newDoc["data"] = newData
+	encoded, err := json.Marshal(newDoc)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
 }
 
 // paginateSnapshotJSON trims a snapshot list payload to the requested window

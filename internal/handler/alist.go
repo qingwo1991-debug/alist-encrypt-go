@@ -98,6 +98,9 @@ type liveListFlight struct {
 	StatusCode int
 	Payload    []byte
 	ItemCount  int
+	// Doc is the parsed response document from liveFsListResponse, reused by
+	// joiners for in-memory pagination instead of re-parsing PayloadJSON.
+	Doc map[string]interface{}
 }
 
 type fsMetaUpstreamResponse struct {
@@ -926,8 +929,8 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
-					h.serveSnapshot(w, snap, "snapshot", page, perPage)
-					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
+					items := h.serveSnapshot(w, snap, "snapshot", page, perPage)
+					h.enqueueProbeFromSnapshotItems(r, dirPath, items)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
 					}
@@ -961,8 +964,8 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath), authHash, h.cfg.GetAlistURL()); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && h.snapshotScopeMatches(snap, authHash) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
-					h.serveSnapshot(w, snap, "snapshot-shared", page, perPage)
-					h.enqueueProbeFromSnapshot(r, dirPath, snap.PayloadJSON)
+					items := h.serveSnapshot(w, snap, "snapshot-shared", page, perPage)
+					h.enqueueProbeFromSnapshotItems(r, dirPath, items)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
 					}
@@ -1009,8 +1012,10 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		detachReq.Header.Set("Content-Type", "application/json")
+		var flightDoc map[string]interface{}
 		fetch := func(reqBody []byte) (int, []byte, int, error) {
-			status, _, payload, count, err := h.liveFsListResponse(detachReq, reqBody, dirPath, true)
+			status, doc, payload, count, err := h.liveFsListResponse(detachReq, reqBody, dirPath, true)
+			flightDoc = doc
 			return status, payload, count, err
 		}
 		upstreamBody := fullListRequestBody(body)
@@ -1041,7 +1046,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) && !h.snapshotPayloadRootPoisoned(dirPath, payload) {
 			h.persistSnapshot(flightCtx, dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
 		}
-		return &liveListFlight{StatusCode: statusCode, Payload: payload, ItemCount: itemCount}, nil
+		return &liveListFlight{StatusCode: statusCode, Payload: payload, ItemCount: itemCount, Doc: flightDoc}, nil
 	})
 	if flightErr != nil {
 		log.Error().Err(flightErr).Msg("Failed to proxy fs/list")
@@ -1051,7 +1056,11 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	flight := v.(*liveListFlight)
 	respond := flight.Payload
 	if page > 0 && perPage > 0 {
-		if sliced, ok := paginateSnapshotJSON(respond, page, perPage); ok {
+		if flight.Doc != nil {
+			if sliced, ok := paginateListDoc(flight.Doc, page, perPage); ok {
+				respond = sliced
+			}
+		} else if sliced, ok := paginateSnapshotJSON(respond, page, perPage); ok {
 			respond = sliced
 		}
 	}
