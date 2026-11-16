@@ -72,6 +72,16 @@ type AlistHandler struct {
 	statsRecorder      StatsRecorder
 	fsMetaCache        map[string]fsMetaCacheEntry
 
+	// dirSyncScanFails backs off paths whose upstream listing keeps failing
+	// (e.g. an unmounted "storage not found" root) so they stop consuming an
+	// upstream fetch on every 15-minute scan cycle. Guarded by dirSyncMu.
+	dirSyncScanFails map[string]dirSyncScanFail
+	// recentLists is a small LRU of recently served fs/list directories whose
+	// request_fill snapshots are refreshed before their short TTL expires, so
+	// repeat visits stay on the warm snapshot path. Guarded by recentListsMu.
+	recentListsMu sync.Mutex
+	recentLists   map[string]recentListEntry
+
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
 	fsMetaSingleflightHits uint64
@@ -411,7 +421,16 @@ func (h *AlistHandler) resolveRemoveName(dirPath, name string, passwdInfo *confi
 // spelling and only names with no upstream object are filename-encrypted.
 func (h *AlistHandler) resolveUpstreamNameForRequest(r *http.Request, dirPath, name string, passwdInfo *config.PasswdInfo) string {
 	displayPath := path.Join(dirPath, name)
+	return h.resolveUpstreamNameWithProbe(r, dirPath, name, displayPath, passwdInfo, func() bool {
+		exists, _ := h.probeDisplayObject(r, displayPath)
+		return exists
+	})
+}
 
+// resolveUpstreamNameWithProbe is resolveUpstreamNameForRequest with the
+// upstream existence probe injectable, so batch callers can substitute one
+// directory listing for N per-name fs/get probes.
+func (h *AlistHandler) resolveUpstreamNameWithProbe(r *http.Request, dirPath, name, displayPath string, passwdInfo *config.PasswdInfo, probe func() bool) string {
 	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok {
 		return path.Base(encPath)
 	}
@@ -451,7 +470,7 @@ func (h *AlistHandler) resolveUpstreamNameForRequest(r *http.Request, dirPath, n
 		}
 		// Directories and unencrypted files keep their upstream spelling. Only
 		// names with no upstream object under the display spelling are encrypted.
-		if exists, _ := h.probeDisplayObject(r, displayPath); exists {
+		if probe() {
 			return name
 		}
 		return converter.ToRealName(name)
@@ -506,14 +525,101 @@ func (h *AlistHandler) displayPathForUpstreamName(dirPath, name string, upstream
 	return displayPath
 }
 
+// dirObjectSet is one upstream directory listing used to answer existence
+// probes locally during batch name resolution.
+type dirObjectSet struct {
+	names map[string]bool // upstream basename -> is_dir
+}
+
+// fetchDirObjectSet lists dirPath once upstream and indexes the raw entry
+// names. It also warms the display<->upstream name mappings from the same
+// payload so subsequent mutations on this directory resolve from cache
+// instead of re-listing. Returns nil when the listing cannot be fetched;
+// callers then fall back to per-name probes.
+func (h *AlistHandler) fetchDirObjectSet(r *http.Request, dirPath string, passwdInfo *config.PasswdInfo) *dirObjectSet {
+	items, err := h.fetchFsListContent(r, dirPath)
+	if err != nil {
+		return nil
+	}
+	set := &dirObjectSet{names: make(map[string]bool, len(items))}
+	for _, item := range items {
+		m, _ := item.(map[string]interface{})
+		name, _ := m["name"].(string)
+		isDir, _ := m["is_dir"].(bool)
+		if name != "" {
+			set.names[name] = isDir
+		}
+	}
+	h.warmDirNameCache(dirPath, items, passwdInfo)
+	return set
+}
+
+// warmDirNameCache writes the display<->upstream path mappings for a freshly
+// listed directory into the in-memory path cache, mirroring what the fs/list
+// pipeline persists. This is what lets a batch mutation warm the cache once
+// and have every later remove/move/rename hit cache instead of upstream.
+func (h *AlistHandler) warmDirNameCache(dirPath string, items []interface{}, passwdInfo *config.PasswdInfo) {
+	if h == nil || h.fileDAO == nil || passwdInfo == nil || !passwdInfo.EncName {
+		return
+	}
+	if len(items) >= dirServerHugeListEntries {
+		return
+	}
+	for _, item := range items {
+		fileData, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rawName, _ := fileData["name"].(string)
+		if rawName == "" {
+			continue
+		}
+		isDir, _ := fileData["is_dir"].(bool)
+		size := int64(0)
+		if s, ok := fileData["size"].(float64); ok {
+			size = int64(s)
+		}
+		showName := h.convertEntryShowName(passwdInfo, rawName, isDir)
+		displayPath := path.Join(dirPath, showName)
+		encPath := path.Join(dirPath, rawName)
+		h.fileDAO.SetEncPathMapping(displayPath, encPath)
+		h.fileDAO.SetEncPathMappingWithInfo(displayPath, encPath, showName, size, isDir)
+	}
+}
+
 func (h *AlistHandler) resolveUpstreamNames(r *http.Request, dirPath string, names []string, passwdInfo *config.PasswdInfo) []string {
 	if len(names) == 0 {
 		return nil
 	}
+	if len(names) == 1 {
+		return []string{h.resolveUpstreamNameForRequest(r, dirPath, names[0], passwdInfo)}
+	}
+
+	// Batch path: names that miss every cache and reach the existence probe
+	// share one upstream directory listing instead of one fs/get each. The
+	// listing is fetched lazily on the first probe so fully-cached batches
+	// cost nothing extra.
+	var listing *dirObjectSet
+	listingFetched := false
+	probe := func(displayPath string) bool {
+		if !listingFetched {
+			listingFetched = true
+			listing = h.fetchDirObjectSet(r, dirPath, passwdInfo)
+		}
+		if listing == nil {
+			exists, _ := h.probeDisplayObject(r, displayPath)
+			return exists
+		}
+		_, exists := listing.names[path.Base(displayPath)]
+		return exists
+	}
 
 	resolved := make([]string, 0, len(names))
 	for _, name := range names {
-		resolved = append(resolved, h.resolveUpstreamNameForRequest(r, dirPath, name, passwdInfo))
+		displayPath := path.Join(dirPath, name)
+		resolved = append(resolved, h.resolveUpstreamNameWithProbe(r, dirPath, name, displayPath, passwdInfo, func() bool {
+			return probe(displayPath)
+		}))
 	}
 	return resolved
 }
@@ -922,9 +1028,11 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	page, perPage := listPaginationFromBody(reqData)
 	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
 	h.ensureDirSyncLoop()
-	authHash := authScopeHash(h.requestAuthHeaders(r))
+	reqHeaders := h.requestAuthHeaders(r)
+	authHash := authScopeHash(reqHeaders)
 	scopeKey := buildDirScopeKey(dirPath, authHash)
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
+		h.rememberRecentList(dirPath, scopeKey, reqHeaders)
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {

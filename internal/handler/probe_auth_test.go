@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/proxy"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 func configureProbeTestAlist(t *testing.T, cfg *config.Config, serverURL string) {

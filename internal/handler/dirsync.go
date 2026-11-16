@@ -40,6 +40,19 @@ const (
 	// under sustained miss load dropping the excess is safe and prevents
 	// unbounded goroutine/DB-write growth.
 	dirSyncRefreshMaxConcurrent = 8
+	// dirSyncPrewarmEvery is how often recently-accessed directories have
+	// their request_fill snapshots refreshed ahead of the 2-minute TTL.
+	dirSyncPrewarmEvery = 60 * time.Second
+	// dirSyncPrewarmWindow is how close to expiry a snapshot must be before
+	// the prewarm pass refreshes it.
+	dirSyncPrewarmWindow = 90 * time.Second
+	// recentListMaxEntries bounds the LRU of directories eligible for
+	// snapshot prewarming.
+	recentListMaxEntries = 64
+	// dirSyncScanBackoffBase/Cap drive the exponential retry backoff for
+	// directories whose upstream listing keeps failing.
+	dirSyncScanBackoffBase = 30 * time.Minute
+	dirSyncScanBackoffCap  = 12 * time.Hour
 	// dirServerHugeListEntries is the huge-directory budget shared by the
 	// listing paths (fs/list live and WebDAV PROPFIND). Mirrors the mobile
 	// proxy budget: once a single directory reaches this many entries, listing
@@ -1140,17 +1153,143 @@ func (h *AlistHandler) learnRootMountsOnce(ctx context.Context) {
 	})
 }
 
+// dirSyncScanFail records consecutive upstream listing failures for one
+// scanned path so the scheduler can back off instead of retrying a
+// permanently broken storage root on every cycle.
+type dirSyncScanFail struct {
+	count int
+	next  time.Time
+}
+
+// recentListEntry is one LRU slot: a directory whose request_fill snapshot
+// should be kept warm because it was listed recently.
+type recentListEntry struct {
+	dirPath  string
+	scopeKey string
+	headers  http.Header
+	lastSeen time.Time
+}
+
+// dirSyncScanBackoffActive reports whether path is inside its failure
+// backoff window and should be skipped by the current scan.
+func (h *AlistHandler) dirSyncScanBackoffActive(path string, now time.Time) bool {
+	h.dirSyncMu.Lock()
+	defer h.dirSyncMu.Unlock()
+	f, ok := h.dirSyncScanFails[path]
+	return ok && now.Before(f.next)
+}
+
+// dirSyncScanNoteResult records a scan outcome: successes clear the backoff,
+// failures extend it exponentially (30m, 1h, 2h, ... capped at 12h).
+func (h *AlistHandler) dirSyncScanNoteResult(path string, ok bool, now time.Time) {
+	h.dirSyncMu.Lock()
+	defer h.dirSyncMu.Unlock()
+	if h.dirSyncScanFails == nil {
+		h.dirSyncScanFails = make(map[string]dirSyncScanFail)
+	}
+	if ok {
+		delete(h.dirSyncScanFails, path)
+		return
+	}
+	f := h.dirSyncScanFails[path]
+	f.count++
+	shift := f.count - 1
+	if shift > 5 {
+		shift = 5
+	}
+	backoff := dirSyncScanBackoffBase << shift
+	if backoff <= 0 || backoff > dirSyncScanBackoffCap {
+		backoff = dirSyncScanBackoffCap
+	}
+	f.next = now.Add(backoff)
+	h.dirSyncScanFails[path] = f
+}
+
+// rememberRecentList records a served fs/list directory for snapshot
+// prewarming, evicting the oldest entry past recentListMaxEntries.
+func (h *AlistHandler) rememberRecentList(dirPath, scopeKey string, headers http.Header) {
+	if h == nil {
+		return
+	}
+	if headers == nil {
+		headers = http.Header{}
+	}
+	h.recentListsMu.Lock()
+	defer h.recentListsMu.Unlock()
+	if h.recentLists == nil {
+		h.recentLists = make(map[string]recentListEntry)
+	}
+	if _, ok := h.recentLists[scopeKey]; !ok && len(h.recentLists) >= recentListMaxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, e := range h.recentLists {
+			if oldestKey == "" || e.lastSeen.Before(oldestTime) {
+				oldestKey, oldestTime = k, e.lastSeen
+			}
+		}
+		delete(h.recentLists, oldestKey)
+	}
+	h.recentLists[scopeKey] = recentListEntry{
+		dirPath:  dirPath,
+		scopeKey: scopeKey,
+		headers:  headers.Clone(),
+		lastSeen: time.Now(),
+	}
+}
+
+// prewarmRecentListings refreshes request_fill snapshots that are about to
+// expire for directories the client listed recently, so the next visit hits
+// a warm snapshot instead of paying a cold upstream listing again.
+func (h *AlistHandler) prewarmRecentListings(ctx context.Context) {
+	if h == nil || h.dirSyncStore == nil {
+		return
+	}
+	now := time.Now()
+	h.recentListsMu.Lock()
+	entries := make([]recentListEntry, 0, len(h.recentLists))
+	for _, e := range h.recentLists {
+		entries = append(entries, e)
+	}
+	h.recentListsMu.Unlock()
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		snap, ok, _ := h.dirSyncStore.GetSnapshot(ctx, e.scopeKey)
+		if !ok || snap == nil || snap.SourceMode != dirSyncModeReq {
+			continue
+		}
+		if !snap.NextRefreshAt.IsZero() && snap.NextRefreshAt.After(now.Add(dirSyncPrewarmWindow)) && !snap.Stale {
+			continue
+		}
+		body, err := json.Marshal(map[string]interface{}{
+			"path":     e.dirPath,
+			"page":     1,
+			"per_page": dirSyncSnapshotMaxPerPage,
+			"refresh":  false,
+		})
+		if err != nil {
+			continue
+		}
+		h.refreshDirSnapshotAsync(e.dirPath, body, e.headers, e.scopeKey, dirSyncModeReq)
+	}
+}
+
 func (h *AlistHandler) runDirSyncScheduler(ctx context.Context) {
 	h.learnRootMountsOnce(ctx)
 	h.runDirSyncScan(ctx, "bootstrap_scan")
-	ticker := time.NewTicker(dirSyncScanEvery)
-	defer ticker.Stop()
+	scanTicker := time.NewTicker(dirSyncScanEvery)
+	prewarmTicker := time.NewTicker(dirSyncPrewarmEvery)
+	defer scanTicker.Stop()
+	defer prewarmTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-scanTicker.C:
 			h.runDirSyncScan(ctx, "scheduled_scan")
+		case <-prewarmTicker.C:
+			h.prewarmRecentListings(ctx)
 		}
 	}
 }
@@ -1242,6 +1381,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 			status.DirsSkipped++
 			status.DirsScanned++
 			statusDirty = true
+			h.dirSyncScanNoteResult(node.path, true, time.Now())
 			if node.depth < maxDepth {
 				for _, child := range h.extractDirChildrenFromPayload(node.path, snap.PayloadJSON) {
 					if _, exists := seen[child]; exists {
@@ -1251,6 +1391,14 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 					queue = append(queue, scanNode{path: child, depth: node.depth + 1})
 				}
 			}
+			flushStatus(false)
+			continue
+		}
+
+		if h.dirSyncScanBackoffActive(node.path, time.Now()) {
+			status.DirsSkipped++
+			status.DirsScanned++
+			statusDirty = true
 			flushStatus(false)
 			continue
 		}
@@ -1270,6 +1418,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		statusDirty = true
 		if err != nil || respStatus < 200 || respStatus >= 300 || !isSuccessfulListPayload(payload) {
 			status.DirsFailed++
+			h.dirSyncScanNoteResult(node.path, false, time.Now())
 			logDirSyncFailure("scan", node.path, respStatus, payloadResponseCode(payload), err)
 			status.LastError = "upstream list refresh failed"
 			if code := payloadResponseCode(payload); code != 0 {
@@ -1281,6 +1430,7 @@ func (h *AlistHandler) runDirSyncScan(ctx context.Context, jobType string) {
 		status.DirsSucceeded++
 		status.ItemsSynced += itemCount
 		status.LastError = ""
+		h.dirSyncScanNoteResult(node.path, true, time.Now())
 		h.persistSnapshot(ctx, node.path, scopeKey, dirSyncScopeScan, payload, itemCount, dirSyncModeScan, "")
 		if node.depth < maxDepth {
 			for _, child := range h.extractDirChildrenFromResponse(node.path, respData) {
