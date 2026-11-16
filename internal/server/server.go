@@ -197,6 +197,9 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	// WebDAV shares the same dir-sync snapshot store as the HTTP fs/list path so
 	// directory listings on whitelisted encrypted paths read the cache too.
 	webdavHandler.SetDirSyncStore(dirSyncStore)
+	// WebDAV directory activity feeds the same recency LRU that drives
+	// request_fill snapshot prewarming on the HTTP path.
+	webdavHandler.SetRecentListHook(alistHandler.RememberRecentList)
 	// 播放/删除统计：BoltDB stats bucket + 记录器接入三个 handler。
 	statsStore := handler.NewStatsStore(s.store)
 	statsRecorder := handler.NewBoltStatsRecorder(statsStore)

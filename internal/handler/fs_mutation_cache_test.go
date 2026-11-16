@@ -290,6 +290,39 @@ func TestRememberRecentListEvictsOldest(t *testing.T) {
 	}
 }
 
+func TestReqRefreshBackoff(t *testing.T) {
+	handler, _ := newTestAlistHandler(t, "http://127.0.0.1:1", testEncPasswd())
+	now := time.Now()
+
+	if handler.reqRefreshBackoffActive("scope", now) {
+		t.Fatal("no failure recorded, backoff should be inactive")
+	}
+	handler.reqRefreshNoteResult("scope", false, now)
+	if !handler.reqRefreshBackoffActive("scope", now.Add(time.Minute)) {
+		t.Fatal("first failure should activate 10m backoff")
+	}
+	if handler.reqRefreshBackoffActive("scope", now.Add(dirSyncReqRefreshBackoffBase+time.Minute)) {
+		t.Fatal("backoff should expire after base delay")
+	}
+	handler.reqRefreshNoteResult("scope", true, now)
+	if handler.reqRefreshBackoffActive("scope", now) {
+		t.Fatal("success should clear backoff")
+	}
+}
+
+func TestRecentListHotThreshold(t *testing.T) {
+	handler, _ := newTestAlistHandler(t, "http://127.0.0.1:1", testEncPasswd())
+	if handler.recentListHot("cold") {
+		t.Fatal("unknown scope should not be hot")
+	}
+	for i := 0; i < recentListHotHits; i++ {
+		handler.rememberRecentList("/hot", "hot", nil)
+	}
+	if !handler.recentListHot("hot") {
+		t.Fatal("scope at hit threshold should be hot")
+	}
+}
+
 func TestHandleFsMkdirForwardsUnderProtection(t *testing.T) {
 	passwd := testEncPasswd()
 

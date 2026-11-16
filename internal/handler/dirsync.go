@@ -49,6 +49,17 @@ const (
 	// recentListMaxEntries bounds the LRU of directories eligible for
 	// snapshot prewarming.
 	recentListMaxEntries = 64
+	// recentListHotHits is the access count at which a directory's
+	// request_fill snapshot earns the elevated TTL: dirs the client keeps
+	// revisiting stay warm longer, cold ones keep the short TTL.
+	recentListHotHits = 3
+	// dirSyncRequestTTLElevated is the longer freshness window for hot
+	// request_fill snapshots.
+	dirSyncRequestTTLElevated = 10 * time.Minute
+	// dirSyncReqRefreshBackoffBase/Cap drive the prewarm retry backoff for
+	// request_fill snapshots whose upstream refresh keeps failing.
+	dirSyncReqRefreshBackoffBase = 10 * time.Minute
+	dirSyncReqRefreshBackoffCap  = 2 * time.Hour
 	// dirSyncScanBackoffBase/Cap drive the exponential retry backoff for
 	// directories whose upstream listing keeps failing.
 	dirSyncScanBackoffBase = 30 * time.Minute
@@ -721,6 +732,10 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 			Msg("Skipping snapshot persist: refusing to downgrade a fuller recent snapshot")
 		return
 	}
+	ttl := listResponseTTL(sourceMode)
+	if sourceMode == dirSyncModeReq && h.recentListHot(scopeKey) {
+		ttl = dirSyncRequestTTLElevated
+	}
 	snap := DirListSnapshot{
 		ScopeKey:      scopeKey,
 		ProviderHost:  h.cfg.GetAlistURL(),
@@ -732,7 +747,7 @@ func (h *AlistHandler) persistSnapshot(ctx context.Context, dirPath, scopeKey, a
 		SyncState:     "fresh",
 		LastSyncAt:    now,
 		LastSuccessAt: now,
-		NextRefreshAt: now.Add(listResponseTTL(sourceMode)),
+		NextRefreshAt: now.Add(ttl),
 		LastError:     lastErr,
 		SourceMode:    sourceMode,
 		PayloadJSON:   payload,
@@ -1099,10 +1114,16 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			if liveErr != nil {
 				logDirSyncFailure("snapshot_refresh", dirPath, status, 0, liveErr)
 				h.updateSnapshotSyncing(ctx, scopeKey, false, publicDirSyncError(liveErr.Error()))
+				if sourceMode == dirSyncModeReq {
+					h.reqRefreshNoteResult(scopeKey, false, time.Now())
+				}
 				return nil, liveErr
 			}
 			if status >= 200 && status < 300 && isSuccessfulListPayload(payload) {
 				h.persistSnapshot(ctx, dirPath, scopeKey, authScopeHash(headers), payload, itemCount, sourceMode, "")
+				if sourceMode == dirSyncModeReq {
+					h.reqRefreshNoteResult(scopeKey, true, time.Now())
+				}
 				return nil, nil
 			}
 			errText := "upstream list refresh failed"
@@ -1111,6 +1132,9 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			}
 			logDirSyncFailure("snapshot_refresh", dirPath, status, payloadResponseCode(payload), nil)
 			h.updateSnapshotSyncing(ctx, scopeKey, false, errText)
+			if sourceMode == dirSyncModeReq {
+				h.reqRefreshNoteResult(scopeKey, false, time.Now())
+			}
 			return nil, nil
 		})
 	}) {
@@ -1168,6 +1192,15 @@ type recentListEntry struct {
 	scopeKey string
 	headers  http.Header
 	lastSeen time.Time
+	hits     int
+}
+
+// reqRefreshFail records consecutive failed request_fill snapshot refreshes
+// per scope key so the prewarm pass backs off instead of retrying a broken
+// upstream every tick.
+type reqRefreshFail struct {
+	count int
+	next  time.Time
 }
 
 // dirSyncScanBackoffActive reports whether path is inside its failure
@@ -1205,6 +1238,12 @@ func (h *AlistHandler) dirSyncScanNoteResult(path string, ok bool, now time.Time
 	h.dirSyncScanFails[path] = f
 }
 
+// RememberRecentList exposes the fs/list recency LRU to sibling handlers
+// (WebDAV) so their directory activity feeds the same snapshot prewarm.
+func (h *AlistHandler) RememberRecentList(dirPath, scopeKey string, headers http.Header) {
+	h.rememberRecentList(dirPath, scopeKey, headers)
+}
+
 // rememberRecentList records a served fs/list directory for snapshot
 // prewarming, evicting the oldest entry past recentListMaxEntries.
 func (h *AlistHandler) rememberRecentList(dirPath, scopeKey string, headers http.Header) {
@@ -1229,12 +1268,62 @@ func (h *AlistHandler) rememberRecentList(dirPath, scopeKey string, headers http
 		}
 		delete(h.recentLists, oldestKey)
 	}
-	h.recentLists[scopeKey] = recentListEntry{
+	entry := recentListEntry{
 		dirPath:  dirPath,
 		scopeKey: scopeKey,
 		headers:  headers.Clone(),
 		lastSeen: time.Now(),
+		hits:     1,
 	}
+	if prev, ok := h.recentLists[scopeKey]; ok {
+		entry.hits = prev.hits + 1
+	}
+	h.recentLists[scopeKey] = entry
+}
+
+// recentListHot reports whether scopeKey has been listed enough times to
+// earn the elevated request_fill snapshot TTL.
+func (h *AlistHandler) recentListHot(scopeKey string) bool {
+	h.recentListsMu.Lock()
+	defer h.recentListsMu.Unlock()
+	e, ok := h.recentLists[scopeKey]
+	return ok && e.hits >= recentListHotHits
+}
+
+// reqRefreshBackoffActive reports whether scopeKey's snapshot refresh is
+// inside its failure backoff window.
+func (h *AlistHandler) reqRefreshBackoffActive(scopeKey string, now time.Time) bool {
+	h.dirSyncMu.Lock()
+	defer h.dirSyncMu.Unlock()
+	f, ok := h.reqRefreshFails[scopeKey]
+	return ok && now.Before(f.next)
+}
+
+// reqRefreshNoteResult records a request_fill refresh outcome for the
+// prewarm backoff: failures extend exponentially (10m -> 2h cap), success
+// clears.
+func (h *AlistHandler) reqRefreshNoteResult(scopeKey string, ok bool, now time.Time) {
+	h.dirSyncMu.Lock()
+	defer h.dirSyncMu.Unlock()
+	if h.reqRefreshFails == nil {
+		h.reqRefreshFails = make(map[string]reqRefreshFail)
+	}
+	if ok {
+		delete(h.reqRefreshFails, scopeKey)
+		return
+	}
+	f := h.reqRefreshFails[scopeKey]
+	f.count++
+	shift := f.count - 1
+	if shift > 3 {
+		shift = 3
+	}
+	backoff := dirSyncReqRefreshBackoffBase << shift
+	if backoff <= 0 || backoff > dirSyncReqRefreshBackoffCap {
+		backoff = dirSyncReqRefreshBackoffCap
+	}
+	f.next = now.Add(backoff)
+	h.reqRefreshFails[scopeKey] = f
 }
 
 // prewarmRecentListings refreshes request_fill snapshots that are about to
@@ -1257,6 +1346,9 @@ func (h *AlistHandler) prewarmRecentListings(ctx context.Context) {
 		}
 		snap, ok, _ := h.dirSyncStore.GetSnapshot(ctx, e.scopeKey)
 		if !ok || snap == nil || snap.SourceMode != dirSyncModeReq {
+			continue
+		}
+		if h.reqRefreshBackoffActive(e.scopeKey, now) {
 			continue
 		}
 		if !snap.NextRefreshAt.IsZero() && snap.NextRefreshAt.After(now.Add(dirSyncPrewarmWindow)) && !snap.Stale {
