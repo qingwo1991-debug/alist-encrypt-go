@@ -54,7 +54,7 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	if h.dirSyncStore != nil {
 		if parent := path.Dir(filePath); parent != "" && parent != "." && parent != "/" && h.snapshotScopeEnabled(parent) {
 			reqHeaders := h.requestAuthHeaders(r)
-			h.rememberRecentList(parent, buildDirScopeKey(parent, authScopeHash(reqHeaders)), reqHeaders)
+			h.rememberRecentList(parent, buildDirScopeKey(parent, h.requestScopeHash(reqHeaders)), reqHeaders)
 		}
 	}
 

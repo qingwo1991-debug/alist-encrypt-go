@@ -167,7 +167,7 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 	// the same-session scope key.
 	var snap *DirListSnapshot
 	var ok bool
-	webdavAuth := authScopeHash(h.webdavAuthHeaders(r))
+	webdavAuth := h.webdavScopeHash(r)
 	webdavProvider := h.cfg.GetAlistURL()
 	if s, found, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), dirPath, webdavAuth, webdavProvider); found && s != nil {
 		snap, ok = s, true
@@ -450,7 +450,11 @@ func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, e
 	if err != nil {
 		return
 	}
-	scopeKey := buildDirScopeKey(dirPath, authScopeHash(h.webdavAuthHeaders(r)))
+	// The upstream PROPFIND already succeeded by the time this runs, so the
+	// credential is validated now — resolve scope AFTER noting it so the very
+	// first persist lands under the stable per-account scope.
+	h.noteUpstreamAuthOK(r)
+	scopeKey := buildDirScopeKey(dirPath, h.webdavScopeHash(r))
 	h.noteRecentList(dirPath, scopeKey, r)
 	h.upsertWebDAVSnapshot(r.Context(), dirPath, scopeKey, payload, len(content))
 }
@@ -470,7 +474,7 @@ func (h *WebDAVHandler) upsertWebDAVSnapshot(ctx context.Context, dirPath, scope
 		ScopeKey:      scopeKey,
 		ProviderHost:  h.cfg.GetAlistURL(),
 		DisplayPath:   dirPath,
-		AuthScopeHash: "",
+		AuthScopeHash: scopeHashFromScopeKey(scopeKey),
 		RuleVersion:   "v1",
 		ItemCount:     itemCount,
 		Stale:         false,

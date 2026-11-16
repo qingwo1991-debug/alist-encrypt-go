@@ -52,3 +52,40 @@ func TestApplyEnvOverridesV2KeyCacheTTL(t *testing.T) {
 		t.Fatalf("V2KeyCacheTTLMinutes=%d, want 2880", cfg.AlistServer.V2KeyCacheTTLMinutes)
 	}
 }
+
+func TestApplyEnvOverridesSecrets(t *testing.T) {
+	t.Setenv("JWT_SECRET", "env-jwt-secret")
+	t.Setenv("STATS_PASSWORD", "env-stats-pass")
+	t.Setenv("SCAN_USERNAME", "env-scan-user")
+	t.Setenv("SCAN_PASSWORD", "env-scan-pass")
+	t.Setenv("SCAN_AUTH_HEADER", "env-scan-header")
+
+	cfg := DefaultConfig()
+	cfg.JWTSecret = "file-jwt"
+	cfg.StatsPassword = "file-stats"
+	cfg.AlistServer.ScanUsername = "file-user"
+	cfg.AlistServer.ScanPassword = "file-pass"
+	cfg.AlistServer.ScanAuthHeader = "file-header"
+	cfg.applyEnvOverrides()
+
+	if cfg.JWTSecret != "env-jwt-secret" {
+		t.Fatalf("JWTSecret=%q, want env value", cfg.JWTSecret)
+	}
+	if cfg.StatsPassword != "env-stats-pass" {
+		t.Fatalf("StatsPassword=%q, want env value", cfg.StatsPassword)
+	}
+	if cfg.AlistServer.ScanUsername != "env-scan-user" ||
+		cfg.AlistServer.ScanPassword != "env-scan-pass" ||
+		cfg.AlistServer.ScanAuthHeader != "env-scan-header" {
+		t.Fatalf("scan creds not overridden: %+v", cfg.AlistServer)
+	}
+}
+
+func TestApplyEnvOverridesSecretsEmptyKeepsFile(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AlistServer.ScanPassword = "file-pass"
+	cfg.applyEnvOverrides()
+	if cfg.AlistServer.ScanPassword != "file-pass" {
+		t.Fatalf("ScanPassword=%q, want file value when env unset", cfg.AlistServer.ScanPassword)
+	}
+}

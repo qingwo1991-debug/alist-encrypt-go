@@ -201,6 +201,7 @@ func (s *Server) createHandlers() (*handler.APIHandler, *handler.ProxyHandler, *
 	// WebDAV directory activity feeds the same recency LRU that drives
 	// request_fill snapshot prewarming on the HTTP path.
 	webdavHandler.SetRecentListHook(alistHandler.RememberRecentList)
+	webdavHandler.SetScopeFuncs(alistHandler.RequestScopeHash, alistHandler.NoteUpstreamAuthOK)
 	// 播放/删除统计：BoltDB stats bucket + 记录器接入三个 handler。
 	statsStore := handler.NewStatsStore(s.store)
 	statsRecorder := handler.NewBoltStatsRecorder(statsStore)
