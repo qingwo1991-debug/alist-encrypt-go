@@ -40,6 +40,9 @@ func TestProtectedFilenameReadAuthorizesCurrentCaller(t *testing.T) {
 			ah, d := newTestAlistHandler(t, upstream.URL, ep)
 			t.Cleanup(ah.Stop)
 			h := &WebDAVHandler{cfg: ah.cfg, fileDAO: d, passwdDAO: ah.passwdDAO, stdClient: upstream.Client(), shortClient: upstream.Client()}
+			// This test covers the standard profile's per-read upstream
+			// authorization; trusted_local deliberately skips the remote check.
+			ah.cfg.AlistServer.PlaybackProfile = config.PlaybackProfileStandard
 			upload := httptest.NewRequest("PUT", "http://proxy/upload", nil)
 			upload.Header.Set("Authorization", "Bearer upload-secret")
 			rec, err := d.ReserveFilename(storage.FilenameRecord{Origin: h.cfg.GetAlistURL(), EncryptedPath: raw, OriginalPath: original, DisplayName: "short.bin", AuthScope: filenameRequestScope(upload), RuleFingerprint: filenameRuleScope(ep), CiphertextSize: 37})

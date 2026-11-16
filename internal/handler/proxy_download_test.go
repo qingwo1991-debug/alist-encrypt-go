@@ -164,7 +164,7 @@ func TestHandleDownloadUsesWarmCacheWithoutMetadataPrefetch(t *testing.T) {
 	}
 	flow.Encrypt(ciphertext)
 
-	var fsGetCalls, fsLinkCalls, rawCalls int
+	var fsGetCalls, fsLinkCalls, rawCalls, fullRawCalls int
 	var backendURL string
 	backend := newSocketTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -176,6 +176,9 @@ func TestHandleDownloadUsesWarmCacheWithoutMetadataPrefetch(t *testing.T) {
 			t.Fatalf("fs/link should not be called when warm cache is present")
 		case "/raw/movie.mp4":
 			rawCalls++
+			if r.Header.Get("Range") == "" {
+				fullRawCalls++
+			}
 			w.Header().Set("Content-Type", "video/mp4")
 			w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
 			w.WriteHeader(http.StatusOK)
@@ -237,8 +240,10 @@ func TestHandleDownloadUsesWarmCacheWithoutMetadataPrefetch(t *testing.T) {
 	if fsGetCalls != 0 || fsLinkCalls != 0 {
 		t.Fatalf("metadata prefetch should not run, fs/get=%d fs/link=%d", fsGetCalls, fsLinkCalls)
 	}
-	if rawCalls != 1 {
-		t.Fatalf("raw calls=%d, want 1", rawCalls)
+	// A first-frame range probe may precede the full fetch; the invariant is
+	// exactly one full-body upstream read and no metadata prefetch.
+	if fullRawCalls != 1 {
+		t.Fatalf("full raw calls=%d, want 1 (total raw calls=%d incl. range probe)", fullRawCalls, rawCalls)
 	}
 }
 

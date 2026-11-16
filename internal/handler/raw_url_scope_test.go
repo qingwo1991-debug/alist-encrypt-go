@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/storage"
 )
@@ -18,7 +19,12 @@ func newRawURLScopeTestDAO(t *testing.T) *dao.FileDAO {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	fileDAO := dao.NewFileDAO(store)
+	// Scope isolation is standard-profile semantics: under trusted_local the
+	// cache gate switches to RawURLIdentity, so pin the profile explicitly
+	// instead of inheriting whatever the shared test config happens to set.
+	cfg := &config.Config{}
+	cfg.AlistServer.PlaybackProfile = config.PlaybackProfileStandard
+	fileDAO := dao.NewFileDAO(store, cfg)
 	t.Cleanup(func() {
 		fileDAO.Stop()
 		_ = store.Close()

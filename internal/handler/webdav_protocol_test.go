@@ -49,6 +49,9 @@ func TestLP0ConfirmedPropfindGeometryAndBinding(t *testing.T) {
 			ep := &config.PasswdInfo{Enable: true, Password: "pw", EncType: "aesctr"}
 			ah, d := newTestAlistHandler(t, "http://127.0.0.1:1", ep)
 			t.Cleanup(ah.Stop)
+			// Listing length reuse is standard-profile behavior; trusted_local
+			// requires confirmed playback geometry instead.
+			ah.cfg.AlistServer.PlaybackProfile = config.PlaybackProfileStandard
 			metaStore := &protocolMetaStore{}
 			h := &WebDAVHandler{cfg: ah.cfg, fileDAO: d, passwdDAO: ah.passwdDAO, metaStore: metaStore}
 			raw := "/limited/raw.bin"
