@@ -18,6 +18,7 @@ import (
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
+	"github.com/alist-encrypt-go/internal/metrics"
 	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/rs/zerolog/log"
 )
@@ -1112,6 +1113,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			req.Header = headers.Clone()
 			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, upstreamBody, dirPath, true)
 			if liveErr != nil {
+				metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "fail"}, 1)
 				logDirSyncFailure("snapshot_refresh", dirPath, status, 0, liveErr)
 				h.updateSnapshotSyncing(ctx, scopeKey, false, publicDirSyncError(liveErr.Error()))
 				if sourceMode == dirSyncModeReq {
@@ -1120,6 +1122,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 				return nil, liveErr
 			}
 			if status >= 200 && status < 300 && isSuccessfulListPayload(payload) {
+				metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "ok"}, 1)
 				h.persistSnapshot(ctx, dirPath, scopeKey, authScopeHash(headers), payload, itemCount, sourceMode, "")
 				if sourceMode == dirSyncModeReq {
 					h.reqRefreshNoteResult(scopeKey, true, time.Now())
@@ -1130,6 +1133,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			if code := payloadResponseCode(payload); code != 0 {
 				errText = "upstream list returned code " + strconv.Itoa(code)
 			}
+			metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "fail"}, 1)
 			logDirSyncFailure("snapshot_refresh", dirPath, status, payloadResponseCode(payload), nil)
 			h.updateSnapshotSyncing(ctx, scopeKey, false, errText)
 			if sourceMode == dirSyncModeReq {
@@ -1242,6 +1246,40 @@ func (h *AlistHandler) dirSyncScanNoteResult(path string, ok bool, now time.Time
 // (WebDAV) so their directory activity feeds the same snapshot prewarm.
 func (h *AlistHandler) RememberRecentList(dirPath, scopeKey string, headers http.Header) {
 	h.rememberRecentList(dirPath, scopeKey, headers)
+}
+
+// MetricsGaugets reports live operational gauges for the /metrics endpoint:
+// probe queue depth, in-flight snapshot refreshes, scan-backoff directories
+// and the recent-directory prewarm set. Values are read under their guards.
+func (h *AlistHandler) MetricsGaugets() map[string]float64 {
+	out := make(map[string]float64)
+	if h == nil {
+		return out
+	}
+	if h.probe != nil {
+		if stats := h.probe.Stats(); stats != nil {
+			for _, key := range []string{"queue_len", "queue_cap", "running_count", "enqueued_total", "dropped_total"} {
+				if v, ok := stats[key]; ok {
+					switch n := v.(type) {
+					case int:
+						out["alist_probe_"+key] = float64(n)
+					case uint64:
+						out["alist_probe_"+key] = float64(n)
+					case float64:
+						out["alist_probe_"+key] = n
+					}
+				}
+			}
+		}
+	}
+	h.dirSyncMu.Lock()
+	out["alist_dirsync_refresh_pending"] = float64(len(h.dirSyncRefreshPending))
+	out["alist_dirsync_scan_backoff_dirs"] = float64(len(h.dirSyncScanFails))
+	h.dirSyncMu.Unlock()
+	h.recentListsMu.Lock()
+	out["alist_dirsync_recent_dirs"] = float64(len(h.recentLists))
+	h.recentListsMu.Unlock()
+	return out
 }
 
 // rememberRecentList records a served fs/list directory for snapshot

@@ -22,6 +22,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/handler"
+	"github.com/alist-encrypt-go/internal/metrics"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
@@ -315,6 +316,23 @@ func (s *Server) registerRoutes(r *gin.Engine, apiHandler *handler.APIHandler, p
 		}
 		debugGroup.GET("/status", debugHandler.ServeStatus)
 		debugGroup.GET("/logs", debugHandler.ServeLogs)
+
+		// Prometheus-text metrics: fs/list hit rate & latency, upstream
+		// errors, snapshot refresh results, probe queue depth. Shares the
+		// debug gate and optional token so it stays off by default.
+		var metricsHandler http.HandlerFunc = func(w http.ResponseWriter, req *http.Request) {
+			if s.alistHandler != nil {
+				for name, value := range s.alistHandler.MetricsGaugets() {
+					metrics.Default.SetGauge(name, nil, value)
+				}
+			}
+			metrics.Handler()(w, req)
+		}
+		if token := s.cfg.DebugToken(); token != "" {
+			r.GET("/metrics", debugTokenMiddleware(token), ginWrap(metricsHandler))
+		} else {
+			r.GET("/metrics", ginWrap(metricsHandler))
+		}
 	}
 
 	// /dav/* - WebDAV proxy (supports all WebDAV methods: PROPFIND, MKCOL, etc.)
