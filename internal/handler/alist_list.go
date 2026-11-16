@@ -218,8 +218,18 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		// ever overwriting the full row (fullListRequestBody guarantees full).
 		// Use the handler's long-lived dir-sync context so the write outlives
 		// the (possibly cancelled) leading request that triggered the flight.
+		//
+		// The fetch above just proved this credential upstream-valid, so
+		// requestScopeHash now resolves to the stable per-account "u:" scope
+		// for JWT credentials: persist under THAT scope so every rotated
+		// token of the same account shares this snapshot instead of each
+		// minting its own legacy-scope row.
 		if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) && statusCode >= 200 && statusCode < 300 && isSuccessfulListPayload(payload) && !h.snapshotPayloadRootPoisoned(dirPath, payload) {
-			h.persistSnapshot(flightCtx, dirPath, scopeKey, authHash, payload, itemCount, dirSyncModeReq, "")
+			persistHash := authHash
+			if stable := h.requestScopeHash(fakeAuth); stable != "" {
+				persistHash = stable
+			}
+			h.persistSnapshot(flightCtx, dirPath, buildDirScopeKey(dirPath, persistHash), persistHash, payload, itemCount, dirSyncModeReq, "")
 		}
 		return &liveListFlight{StatusCode: statusCode, Payload: payload, ItemCount: itemCount, Doc: flightDoc}, nil
 	})
