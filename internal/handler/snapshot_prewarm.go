@@ -33,13 +33,34 @@ func (h *AlistHandler) enqueueProbeFromSnapshot(r *http.Request, dirPath string,
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return
 	}
+	items := make([]interface{}, 0, len(body.Data.Content))
+	for _, item := range body.Data.Content {
+		if item == nil {
+			continue
+		}
+		items = append(items, item)
+	}
+	h.enqueueProbeFromSnapshotItems(r, dirPath, items)
+}
+
+// enqueueProbeFromSnapshotItems is the parsed-payload variant: serveSnapshot
+// already unmarshaled the directory once, so probe warmup reuses those items
+// instead of paying a third full JSON parse per request.
+func (h *AlistHandler) enqueueProbeFromSnapshotItems(r *http.Request, dirPath string, items []interface{}) {
+	if h == nil || h.probe == nil || len(items) == 0 || strings.TrimSpace(dirPath) == "" {
+		return
+	}
+	if !h.passwdDAO.MatchDir(dirPath) {
+		return
+	}
 	type probeTask struct {
 		displayPath string
 		size        int64
 	}
 	var tasks []probeTask
-	for _, item := range body.Data.Content {
-		if item == nil {
+	for _, raw := range items {
+		item, ok := raw.(map[string]interface{})
+		if !ok || item == nil {
 			continue
 		}
 		isDir, _ := item["is_dir"].(bool)
