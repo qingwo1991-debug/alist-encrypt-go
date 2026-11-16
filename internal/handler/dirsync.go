@@ -831,6 +831,10 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 			proxyReq.Header.Add(key, value)
 		}
 	}
+	// This endpoint is always a JSON API call; synthetic callers (snapshot
+	// refresh, scans) may not set Content-Type, and upstream silently
+	// defaults path to "/" without it (root-listing masquerade).
+	proxyReq.Header.Set("Content-Type", "application/json")
 	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		return 0, nil, nil, 0, err
@@ -1114,6 +1118,10 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			upstreamBody := fullListRequestBody(body)
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(upstreamBody))
 			req.Header = headers.Clone()
+			// Synthetic requests carry only auth headers; without an explicit
+			// JSON content type upstream cannot bind the body and defaults
+			// path to "/", returning the root listing (root-poison).
+			req.Header.Set("Content-Type", "application/json")
 			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, upstreamBody, dirPath, true)
 			// Same transient root-poison recovery as the foreground flight: a
 			// refresh:true retry forces the upstream to bypass its poisoned
@@ -1124,6 +1132,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 				refreshBody := withRefreshTrue(upstreamBody)
 				retryReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(refreshBody))
 				retryReq.Header = headers.Clone()
+				retryReq.Header.Set("Content-Type", "application/json")
 				status2, _, payload2, itemCount2, err2 := h.liveFsListResponse(retryReq, refreshBody, dirPath, true)
 				if err2 == nil && status2 >= 200 && status2 < 300 && !h.snapshotPayloadRootPoisoned(dirPath, payload2) {
 					log.Info().Str("path", dirPath).Msg("Snapshot refresh recovered from root-poison via refresh:true retry")
