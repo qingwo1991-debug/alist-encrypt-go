@@ -15,11 +15,19 @@ import (
 // /api/fs/remove works. handleDelete must fall back to the JSON API so
 // clients see a successful delete.
 func TestHandleDeleteFallsBackToAPIOnUpstream500(t *testing.T) {
+	for _, davStatus := range []int{http.StatusInternalServerError, http.StatusNotFound} {
+		t.Run(http.StatusText(davStatus), func(t *testing.T) {
+			testHandleDeleteFallsBackToAPI(t, davStatus)
+		})
+	}
+}
+
+func testHandleDeleteFallsBackToAPI(t *testing.T, davStatus int) {
 	var removedDir, removedName string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dav/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			w.WriteHeader(davStatus)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

@@ -791,15 +791,16 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		return
 	}
 	// OpenList's WebDAV DELETE handler 500s on some drivers even though the
-	// object exists and /api/fs/remove deletes it fine. On an upstream 5xx,
-	// retry once through the JSON API so clients see a working delete.
-	if resp.StatusCode >= 500 {
+	// object exists and /api/fs/remove deletes it fine; freshly uploaded
+	// objects can also 404 through DAV while the JSON API already sees them
+	// (storage propagation lag). On upstream 5xx or 404, retry once through
+	// the JSON API so clients see a working delete.
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusNotFound {
 		if ok, apiStatus, apiBody := h.davDeleteViaAPI(r, realPath); ok {
-			if apiStatus >= 200 && apiStatus < 300 {
-				if h.statsRecorder != nil {
-					h.statsRecorder.RecordDeletion(davPath)
-				}
-				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			if h.statsRecorder != nil && apiStatus == http.StatusNoContent {
+				h.statsRecorder.RecordDeletion(davPath)
+			}
+			if apiStatus == http.StatusNoContent {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -808,7 +809,7 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 				Str("real_path", realPath).
 				Int("dav_status", resp.StatusCode).
 				Int("api_status", apiStatus).
-				Msg("WebDAV DELETE api fallback also failed")
+				Msg("WebDAV DELETE api fallback did not delete")
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(apiStatus)
 			w.Write(apiBody)
@@ -871,6 +872,17 @@ func (h *WebDAVHandler) davDeleteViaAPI(r *http.Request, realPath string) (bool,
 	apiBody, err := readLimitedBody(resp, maxProxyResponseBody)
 	if err != nil {
 		return true, http.StatusBadGateway, []byte("upstream api remove unreadable")
+	}
+	// Alist's JSON API reports logical failures inside an HTTP 200 body
+	// ({"code":404,...}); only code==200 means the object was removed.
+	var apiResp struct {
+		Code int `json:"code"`
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && json.Unmarshal(apiBody, &apiResp) == nil && apiResp.Code == 200 {
+		return true, http.StatusNoContent, nil
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, http.StatusNotFound, apiBody
 	}
 	return true, resp.StatusCode, apiBody
 }
