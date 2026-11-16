@@ -76,6 +76,9 @@ type AlistHandler struct {
 	// (e.g. an unmounted "storage not found" root) so they stop consuming an
 	// upstream fetch on every 15-minute scan cycle. Guarded by dirSyncMu.
 	dirSyncScanFails map[string]dirSyncScanFail
+	// reqRefreshFails backs off request_fill snapshot refreshes (keyed by
+	// scope key) whose upstream fetch keeps failing. Guarded by dirSyncMu.
+	reqRefreshFails map[string]reqRefreshFail
 	// recentLists is a small LRU of recently served fs/list directories whose
 	// request_fill snapshots are refreshed before their short TTL expires, so
 	// repeat visits stay on the warm snapshot path. Guarded by recentListsMu.
@@ -1201,6 +1204,15 @@ func (h *AlistHandler) handleFsGetOrLink(w http.ResponseWriter, r *http.Request,
 	filePath, _ := reqData["path"].(string)
 	originalPath := filePath
 	trace.Logf(r.Context(), "get", "Processing %s path: %s", apiPath, filePath)
+
+	// Single-file reads signal the parent directory is in use: record it for
+	// snapshot prewarming so browsing back into that directory stays warm.
+	if h.dirSyncStore != nil {
+		if parent := path.Dir(filePath); parent != "" && parent != "." && parent != "/" && h.snapshotScopeEnabled(parent) {
+			reqHeaders := h.requestAuthHeaders(r)
+			h.rememberRecentList(parent, buildDirScopeKey(parent, authScopeHash(reqHeaders)), reqHeaders)
+		}
+	}
 
 	// Check if filename encryption is needed
 	passwdInfo, found := h.passwdDAO.PathFindPasswd(filePath)

@@ -54,9 +54,14 @@ type WebDAVHandler struct {
 	warmupEnqueueCount    uint64
 	statsRecorder         StatsRecorder
 	dirSyncStore          DirSyncStore
-	mediaRecovery         mediaRecoveryState
-	stopOnce              sync.Once
-	rawWarmups            webdavRawWarmups
+	// recentListHook, when set, is invoked with (dirPath, scopeKey, headers)
+	// whenever a directory listing is served from or persisted into the
+	// shared dir-sync snapshot store, so the HTTP prewarm pass keeps
+	// WebDAV-active directories warm too.
+	recentListHook func(dirPath, scopeKey string, headers http.Header)
+	mediaRecovery  mediaRecoveryState
+	stopOnce       sync.Once
+	rawWarmups     webdavRawWarmups
 }
 
 // SetDirSyncStore injects the shared dir-sync snapshot store so directory
@@ -64,6 +69,21 @@ type WebDAVHandler struct {
 // reads and writes (whitelisted encrypted paths only, see snapshotScopeEnabled).
 func (h *WebDAVHandler) SetDirSyncStore(store DirSyncStore) {
 	h.dirSyncStore = store
+}
+
+// SetRecentListHook wires directory-listing activity into the shared
+// snapshot-prewarm recency LRU owned by the HTTP handler.
+func (h *WebDAVHandler) SetRecentListHook(hook func(dirPath, scopeKey string, headers http.Header)) {
+	h.recentListHook = hook
+}
+
+// noteRecentList records dir activity for snapshot prewarming when a hook
+// is configured.
+func (h *WebDAVHandler) noteRecentList(dirPath, scopeKey string, r *http.Request) {
+	if h == nil || h.recentListHook == nil {
+		return
+	}
+	h.recentListHook(dirPath, scopeKey, h.webdavAuthHeaders(r))
 }
 
 const propfindPersistentWriteThreshold = 128

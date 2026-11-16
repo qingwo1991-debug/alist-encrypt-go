@@ -209,6 +209,7 @@ func (h *WebDAVHandler) serveSnapshotListing(r *http.Request, davPath string) ([
 	if len(body) == 0 {
 		return nil, false
 	}
+	h.noteRecentList(dirPath, buildDirScopeKey(dirPath, webdavAuth), r)
 	return body, true
 }
 
@@ -450,6 +451,7 @@ func (h *WebDAVHandler) persistWebDAVSnapshot(r *http.Request, davPath string, e
 		return
 	}
 	scopeKey := buildDirScopeKey(dirPath, authScopeHash(h.webdavAuthHeaders(r)))
+	h.noteRecentList(dirPath, scopeKey, r)
 	h.upsertWebDAVSnapshot(r.Context(), dirPath, scopeKey, payload, len(content))
 }
 
