@@ -44,8 +44,13 @@ config.json
 .claude/settings.local.json
 
 # Log files
+*.log
 log_*.txt
 openlist_logs_*.txt
+
+# Local agent/scratch state
+.local-*/
+.agent-worktrees/
 
 # OS files
 .DS_Store
