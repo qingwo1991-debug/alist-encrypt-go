@@ -20,6 +20,7 @@ import (
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/dao"
 	"github.com/alist-encrypt-go/internal/httputil"
+	"github.com/alist-encrypt-go/internal/metrics"
 	"github.com/alist-encrypt-go/internal/ports"
 	"github.com/alist-encrypt-go/internal/proxy"
 	"github.com/alist-encrypt-go/internal/storage"
@@ -923,7 +924,18 @@ func (h *AlistHandler) proxyToAlist(ctx interface{}, method, endpoint string, bo
 		return nil, err
 	}
 
-	return h.httpClient.Do(req)
+	resp, err := h.httpClient.Do(req)
+	switch {
+	case err != nil:
+		metrics.Inc("alist_upstream_requests_total", map[string]string{"result": "transport_error"}, 1)
+	case resp.StatusCode >= 500:
+		metrics.Inc("alist_upstream_requests_total", map[string]string{"result": "upstream_5xx"}, 1)
+	case resp.StatusCode >= 400:
+		metrics.Inc("alist_upstream_requests_total", map[string]string{"result": "upstream_4xx"}, 1)
+	default:
+		metrics.Inc("alist_upstream_requests_total", map[string]string{"result": "ok"}, 1)
+	}
+	return resp, err
 }
 
 // HandleFsList intercepts /api/fs/list to handle filename decryption
@@ -946,6 +958,12 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	}
 	page, perPage := listPaginationFromBody(reqData)
 	trace.Logf(r.Context(), "list", "Handling fs list for path: %s", dirPath)
+	listStart := time.Now()
+	listResult := "live"
+	defer func() {
+		metrics.Inc("alist_fs_list_total", map[string]string{"result": listResult}, 1)
+		metrics.Observe("alist_fs_list_duration_seconds", map[string]string{"result": listResult}, time.Since(listStart).Seconds())
+	}()
 	h.ensureDirSyncLoop()
 	reqHeaders := h.requestAuthHeaders(r)
 	authHash := authScopeHash(reqHeaders)
@@ -956,6 +974,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
+					listResult = "snapshot"
 					items := h.serveSnapshot(w, snap, "snapshot", page, perPage)
 					h.enqueueProbeFromSnapshotItems(r, dirPath, items)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
@@ -991,6 +1010,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		if snap, ok, _ := h.dirSyncStore.GetRequestFilledSnapshotByDisplay(r.Context(), normalizeDirPath(dirPath), authHash, h.cfg.GetAlistURL()); ok && snap != nil && len(snap.PayloadJSON) > 0 && snap.ItemCount > 0 && h.snapshotScopeMatches(snap, authHash) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
+					listResult = "snapshot-shared"
 					items := h.serveSnapshot(w, snap, "snapshot-shared", page, perPage)
 					h.enqueueProbeFromSnapshotItems(r, dirPath, items)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
@@ -1076,6 +1096,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		return &liveListFlight{StatusCode: statusCode, Payload: payload, ItemCount: itemCount, Doc: flightDoc}, nil
 	})
 	if flightErr != nil {
+		listResult = "error"
 		log.Error().Err(flightErr).Msg("Failed to proxy fs/list")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 		return
