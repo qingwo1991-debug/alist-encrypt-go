@@ -790,12 +790,89 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
 		return
 	}
+	// OpenList's WebDAV DELETE handler 500s on some drivers even though the
+	// object exists and /api/fs/remove deletes it fine. On an upstream 5xx,
+	// retry once through the JSON API so clients see a working delete.
+	if resp.StatusCode >= 500 {
+		if ok, apiStatus, apiBody := h.davDeleteViaAPI(r, realPath); ok {
+			if apiStatus >= 200 && apiStatus < 300 {
+				if h.statsRecorder != nil {
+					h.statsRecorder.RecordDeletion(davPath)
+				}
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			log.Warn().
+				Str("path", davPath).
+				Str("real_path", realPath).
+				Int("dav_status", resp.StatusCode).
+				Int("api_status", apiStatus).
+				Msg("WebDAV DELETE api fallback also failed")
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(apiStatus)
+			w.Write(apiBody)
+			return
+		}
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 && h.statsRecorder != nil {
 		h.statsRecorder.RecordDeletion(davPath)
 	}
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
+}
+
+// davDeleteViaAPI deletes realPath through upstream POST /api/fs/remove,
+// returning (attempted, httpStatus, body). It returns attempted=false when the
+// path cannot be split into dir+name or the request cannot be built, so the
+// caller can fall back to the original upstream response.
+func (h *WebDAVHandler) davDeleteViaAPI(r *http.Request, realPath string) (bool, int, []byte) {
+	dir := path.Dir(realPath)
+	name := path.Base(realPath)
+	if dir == "." || name == "" || name == "." || name == "/" {
+		return false, 0, nil
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"dir":   dir,
+		"names": []string{name},
+	})
+	if err != nil {
+		return false, 0, nil
+	}
+	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/api/fs/remove")
+	req, err := httputil.NewRequest("POST", targetURL).
+		WithContext(r.Context()).
+		WithBodyReader(bytes.NewReader(body)).
+		CopyHeaders(r).
+		Build()
+	if err != nil {
+		return false, 0, nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// WebDAV clients authenticate with HTTP Basic while /api/fs/remove expects
+	// the upstream JWT. Exchange Basic credentials for a token; non-Basic
+	// credentials (already a JWT) pass through untouched.
+	if auth := req.Header.Get("Authorization"); strings.HasPrefix(auth, "Basic ") {
+		if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(auth[6:])); err == nil {
+			if i := strings.IndexByte(string(decoded), ':'); i > 0 {
+				if token := fetchAlistJWTContext(r.Context(), h.cfg.GetAlistURL(), string(decoded[:i]), string(decoded[i+1:])); token != "" {
+					req.Header.Set("Authorization", token)
+				}
+			}
+		}
+	}
+	resp, err := h.getStdClient().Do(req)
+	if err != nil {
+		log.Warn().Err(err).Str("real_path", realPath).Msg("WebDAV DELETE api fallback request failed")
+		return true, http.StatusBadGateway, []byte("upstream api remove failed")
+	}
+	defer resp.Body.Close()
+	apiBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		return true, http.StatusBadGateway, []byte("upstream api remove unreadable")
+	}
+	return true, resp.StatusCode, apiBody
 }
 
 // handleMove handles MOVE requests with filename encryption
