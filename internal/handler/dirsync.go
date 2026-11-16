@@ -863,6 +863,9 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 
 	itemCount := 0
 	if code, ok := respData["code"].(float64); ok && code == 200 {
+		// Upstream accepted this credential: safe to trust its JWT username
+		// claim for stable scope hashing from now on.
+		h.noteUpstreamAuthOK(r.Header)
 		if data, ok := respData["data"].(map[string]interface{}); ok {
 			if content, ok := data["content"].([]interface{}); ok {
 				itemCount = len(content)
@@ -1112,6 +1115,23 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(upstreamBody))
 			req.Header = headers.Clone()
 			status, _, payload, itemCount, liveErr := h.liveFsListResponse(req, upstreamBody, dirPath, true)
+			// Same transient root-poison recovery as the foreground flight: a
+			// refresh:true retry forces the upstream to bypass its poisoned
+			// directory cache. Without it every prewarm cycle re-fetches the
+			// masquerade and persistSnapshot rejects it, so the snapshot never
+			// actually refreshes.
+			if liveErr == nil && h.snapshotScopeEnabled(dirPath) && h.snapshotPayloadRootPoisoned(dirPath, payload) {
+				refreshBody := withRefreshTrue(upstreamBody)
+				retryReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://dirsync.local/api/fs/list", bytes.NewReader(refreshBody))
+				retryReq.Header = headers.Clone()
+				status2, _, payload2, itemCount2, err2 := h.liveFsListResponse(retryReq, refreshBody, dirPath, true)
+				if err2 == nil && status2 >= 200 && status2 < 300 && !h.snapshotPayloadRootPoisoned(dirPath, payload2) {
+					log.Info().Str("path", dirPath).Msg("Snapshot refresh recovered from root-poison via refresh:true retry")
+					status, payload, itemCount = status2, payload2, itemCount2
+				} else {
+					log.Warn().Str("path", dirPath).Msg("Snapshot refresh root-poison retry did not help")
+				}
+			}
 			if liveErr != nil {
 				metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "fail"}, 1)
 				logDirSyncFailure("snapshot_refresh", dirPath, status, 0, liveErr)
@@ -1123,7 +1143,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			}
 			if status >= 200 && status < 300 && isSuccessfulListPayload(payload) {
 				metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "ok"}, 1)
-				h.persistSnapshot(ctx, dirPath, scopeKey, authScopeHash(headers), payload, itemCount, sourceMode, "")
+				h.persistSnapshot(ctx, dirPath, scopeKey, scopeHashFromScopeKey(scopeKey), payload, itemCount, sourceMode, "")
 				if sourceMode == dirSyncModeReq {
 					h.reqRefreshNoteResult(scopeKey, true, time.Now())
 				}

@@ -94,7 +94,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	}()
 	h.ensureDirSyncLoop()
 	reqHeaders := h.requestAuthHeaders(r)
-	authHash := authScopeHash(reqHeaders)
+	authHash := h.requestScopeHash(reqHeaders)
 	scopeKey := buildDirScopeKey(dirPath, authHash)
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		h.rememberRecentList(dirPath, scopeKey, reqHeaders)

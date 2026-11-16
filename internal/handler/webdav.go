@@ -59,9 +59,15 @@ type WebDAVHandler struct {
 	// shared dir-sync snapshot store, so the HTTP prewarm pass keeps
 	// WebDAV-active directories warm too.
 	recentListHook func(dirPath, scopeKey string, headers http.Header)
-	mediaRecovery  mediaRecoveryState
-	stopOnce       sync.Once
-	rawWarmups     webdavRawWarmups
+	// scopeHashFn resolves the dir-sync snapshot scope discriminator for the
+	// request's auth headers (shared with the HTTP handler so a rotating JWT
+	// keeps one stable per-account scope). scopeAuthOKFn records a credential
+	// as upstream-validated after a successful live upstream response.
+	scopeHashFn   func(headers http.Header) string
+	scopeAuthOKFn func(headers http.Header)
+	mediaRecovery mediaRecoveryState
+	stopOnce      sync.Once
+	rawWarmups    webdavRawWarmups
 }
 
 // SetDirSyncStore injects the shared dir-sync snapshot store so directory
@@ -75,6 +81,32 @@ func (h *WebDAVHandler) SetDirSyncStore(store DirSyncStore) {
 // snapshot-prewarm recency LRU owned by the HTTP handler.
 func (h *WebDAVHandler) SetRecentListHook(hook func(dirPath, scopeKey string, headers http.Header)) {
 	h.recentListHook = hook
+}
+
+// SetScopeFuncs wires the shared auth-scope resolver so WebDAV snapshot
+// lookups/persists use the same per-account discriminator as fs/list.
+func (h *WebDAVHandler) SetScopeFuncs(hashFn func(http.Header) string, authOKFn func(http.Header)) {
+	h.scopeHashFn = hashFn
+	h.scopeAuthOKFn = authOKFn
+}
+
+// webdavScopeHash resolves the snapshot scope for this request's auth
+// headers, falling back to the legacy raw-material hash when unwired.
+func (h *WebDAVHandler) webdavScopeHash(r *http.Request) string {
+	headers := h.webdavAuthHeaders(r)
+	if h != nil && h.scopeHashFn != nil {
+		return h.scopeHashFn(headers)
+	}
+	return authScopeHash(headers)
+}
+
+// noteUpstreamAuthOK records the request credential as upstream-validated
+// after a successful live upstream response.
+func (h *WebDAVHandler) noteUpstreamAuthOK(r *http.Request) {
+	if h == nil || h.scopeAuthOKFn == nil {
+		return
+	}
+	h.scopeAuthOKFn(h.webdavAuthHeaders(r))
 }
 
 // noteRecentList records dir activity for snapshot prewarming when a hook

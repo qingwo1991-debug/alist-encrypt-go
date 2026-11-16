@@ -77,6 +77,11 @@ type AlistHandler struct {
 	recentListsMu sync.Mutex
 	recentLists   map[string]recentListEntry
 
+	// authScope tracks upstream-validated bearer tokens so requestScopeHash
+	// can collapse a rotating JWT into a stable per-account scope. Guarded
+	// internally; nil-safe in requestScopeHash.
+	authScope *authScopeValidator
+
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
 	fsMetaSingleflightHits uint64
@@ -137,6 +142,7 @@ func NewAlistHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO por
 		dirSyncCancel:      dirSyncCancel,
 		dirSyncRefreshSem:  make(chan struct{}, dirSyncRefreshMaxConcurrent),
 		listMaintenanceSem: make(chan struct{}, 4),
+		authScope:          newAuthScopeValidator(),
 	}
 }
 
