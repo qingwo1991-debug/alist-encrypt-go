@@ -2,9 +2,12 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -99,12 +102,25 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		h.rememberRecentList(dirPath, scopeKey, reqHeaders)
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
+		tok := effectiveBearerToken(reqHeaders)
+		user := jwtUsernameClaim(tok)
+		sum := sha256.Sum256([]byte(tok))
 		log.Info().
 			Str("path", dirPath).
 			Str("scope_key", scopeKey).
 			Bool("snap_ok", snapOK).
 			Bool("has_payload", snap != nil && len(snap.PayloadJSON) > 0).
 			Bool("scope_match", snap != nil && h.snapshotScopeMatches(snap, authHash)).
+			Bool("tok_validated", h.authScope.has(tok)).
+			Str("tok_fp", hex.EncodeToString(sum[:])[:8]).
+			Str("user_fp", func() string {
+				if user == "" {
+					return ""
+				}
+				s := sha256.Sum256([]byte(user))
+				return hex.EncodeToString(s[:])[:8]
+			}()).
+			Bool("has_cookie", strings.TrimSpace(reqHeaders.Get("Cookie")) != "").
 			Msg("fslist snapshot lookup")
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
