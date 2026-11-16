@@ -2,9 +2,12 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -97,14 +100,33 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	authHash := h.requestScopeHash(reqHeaders)
 	scopeKey := buildDirScopeKey(dirPath, authHash)
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
+		// Clients that rotate credentials per request (fresh JWT every poll)
+		// never accumulate validated entries, so their scope would stay on
+		// the legacy per-token hash and miss every snapshot. Resolve the
+		// account identity once via upstream /api/me — authoritative and
+		// cheap (~ms) — then reuse the stable "u:" scope.
+		if !strings.HasPrefix(authHash, "u:") && h.resolveScopeViaMe(r.Context(), reqHeaders) {
+			authHash = h.requestScopeHash(reqHeaders)
+			scopeKey = buildDirScopeKey(dirPath, authHash)
+		}
 		h.rememberRecentList(dirPath, scopeKey, reqHeaders)
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
+		fp, credValidated, meUser := h.DebugScopeInfo(reqHeaders)
 		log.Info().
 			Str("path", dirPath).
 			Str("scope_key", scopeKey).
 			Bool("snap_ok", snapOK).
 			Bool("has_payload", snap != nil && len(snap.PayloadJSON) > 0).
 			Bool("scope_match", snap != nil && h.snapshotScopeMatches(snap, authHash)).
+			Str("cred_fp", fp[:min(8, len(fp))]).
+			Bool("cred_validated", credValidated).
+			Str("me_user_fp", func() string {
+				if meUser == "" {
+					return ""
+				}
+				s := sha256.Sum256([]byte(meUser))
+				return hex.EncodeToString(s[:])[:8]
+			}()).
 			Msg("fslist snapshot lookup")
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {

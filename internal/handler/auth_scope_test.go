@@ -127,7 +127,7 @@ func TestAuthScopeValidatorEvictsOldest(t *testing.T) {
 	v := newAuthScopeValidator()
 	// Fill beyond cap with distinct tokens.
 	for i := 0; i < authScopeValidatedCap+10; i++ {
-		v.note(testJWT(t, "u"+strings.Repeat("x", 1)+string(rune('a'+i%26))+strings.Repeat("y", i)))
+		v.note("fp"+strings.Repeat("x", i)+string(rune('a'+i%26)), "user"+string(rune('a'+i%26)))
 	}
 	v.mu.Lock()
 	n := len(v.validated)
@@ -194,5 +194,53 @@ func TestHandleFsListRotatedJWTsShareSnapshot(t *testing.T) {
 	}
 	if upstreamCalls > 2 {
 		t.Fatalf("rotated token caused extra upstream calls: %d", upstreamCalls)
+	}
+}
+
+// TestResolveScopeViaMe proves the /api/me probe path: an unvalidated
+// credential resolves to the stable "u:" scope using the username upstream
+// reports, and a forged/unknown credential stays legacy.
+func TestResolveScopeViaMe(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/me", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer good-token" {
+			writeJSONResponse(w, map[string]interface{}{
+				"code": 200, "message": "success",
+				"data": map[string]interface{}{"username": "admin"},
+			})
+			return
+		}
+		writeJSONResponse(w, map[string]interface{}{"code": 401, "message": "token is invalidated", "data": nil})
+	})
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, &config.PasswdInfo{
+		Password: "p", EncType: "aesctr", Enable: true, EncName: true,
+		EncPath: []string{"/cloud/encrypt/*"},
+	})
+
+	good := bearerHeaders("good-token")
+	if got := handler.requestScopeHash(good); strings.HasPrefix(got, "u:") {
+		t.Fatalf("unvalidated credential must not start in u: scope, got %q", got)
+	}
+	if !handler.resolveScopeViaMe(t.Context(), good) {
+		t.Fatal("resolveScopeViaMe failed for valid credential")
+	}
+	got := handler.requestScopeHash(good)
+	if !strings.HasPrefix(got, "u:") {
+		t.Fatalf("expected stable u: scope after /api/me, got %q", got)
+	}
+
+	bad := bearerHeaders("forged-token")
+	if handler.resolveScopeViaMe(t.Context(), bad) {
+		t.Fatal("forged credential must not resolve")
+	}
+	if got := handler.requestScopeHash(bad); strings.HasPrefix(got, "u:") {
+		t.Fatalf("forged credential leaked u: scope %q", got)
+	}
+	// Second forged attempt is negative-cached: still legacy, no panic.
+	if handler.resolveScopeViaMe(t.Context(), bad) {
+		t.Fatal("negative cache should suppress re-probe")
 	}
 }
