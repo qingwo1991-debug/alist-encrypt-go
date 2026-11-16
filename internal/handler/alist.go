@@ -432,54 +432,10 @@ func (h *AlistHandler) resolveUpstreamNameForRequest(r *http.Request, dirPath, n
 
 // resolveUpstreamNameWithProbe is resolveUpstreamNameForRequest with the
 // upstream existence probe injectable, so batch callers can substitute one
-// directory listing for N per-name fs/get probes.
+// directory listing for N per-name fs/get probes. The decision chain itself
+// lives in nameResolver so every mutation entry point shares it.
 func (h *AlistHandler) resolveUpstreamNameWithProbe(r *http.Request, dirPath, name, displayPath string, passwdInfo *config.PasswdInfo, probe func() bool) string {
-	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok {
-		return path.Base(encPath)
-	}
-
-	cachedRemoveName := func(fileInfo *dao.FileInfo) (string, bool) {
-		if fileInfo == nil {
-			return "", false
-		}
-		if fileInfo.IsDir {
-			if fileInfo.Path != "" {
-				return path.Base(fileInfo.Path), true
-			}
-			return name, true
-		}
-		if fileInfo.EncryptedPath != "" && fileInfo.EncryptedPath != displayPath {
-			return path.Base(fileInfo.EncryptedPath), true
-		}
-		return "", false
-	}
-	for _, cacheKey := range []string{displayPath, url.QueryEscape(displayPath)} {
-		if fileInfo, ok := h.fileDAO.Get(cacheKey); ok {
-			if resolved, hit := cachedRemoveName(fileInfo); hit {
-				return resolved
-			}
-		}
-	}
-
-	if passwdInfo != nil && passwdInfo.EncName {
-		converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-		fileName := path.Base(name)
-		encBase := strings.TrimSuffix(fileName, path.Ext(fileName))
-		if converter.DecryptFileName(encBase) != "" {
-			return name
-		}
-		if strings.HasPrefix(fileName, encryption.OrigPrefix) {
-			return strings.TrimPrefix(fileName, encryption.OrigPrefix)
-		}
-		// Directories and unencrypted files keep their upstream spelling. Only
-		// names with no upstream object under the display spelling are encrypted.
-		if probe() {
-			return name
-		}
-		return converter.ToRealName(name)
-	}
-
-	return name
+	return newNameResolver(h.fileDAO, passwdInfo).upstreamBasename(dirPath, name, probe)
 }
 
 // probeDisplayObject asks upstream whether displayPath exists as a real
@@ -632,49 +588,9 @@ func (h *AlistHandler) resolveUpstreamNames(r *http.Request, dirPath string, nam
 // never filename-encrypted, so cached or probed directories keep their
 // spelling instead of being run through ToRealName.
 func (h *AlistHandler) resolveRenameSource(r *http.Request, displayPath string, passwdInfo *config.PasswdInfo) (string, bool) {
-	if encPath, ok := h.fileDAO.GetEncPath(displayPath); ok && strings.TrimSpace(encPath) != "" {
-		if info, ok := h.fileDAO.Get(displayPath); ok && info != nil {
-			return encPath, info.IsDir
-		}
-		if info, ok := h.fileDAO.Get(url.QueryEscape(displayPath)); ok && info != nil {
-			return encPath, info.IsDir
-		}
-		return encPath, false
-	}
-
-	for _, cacheKey := range []string{displayPath, url.QueryEscape(displayPath)} {
-		if info, ok := h.fileDAO.Get(cacheKey); ok && info != nil {
-			if info.IsDir {
-				if info.EncryptedPath != "" && info.EncryptedPath != displayPath {
-					return info.EncryptedPath, true
-				}
-				return displayPath, true
-			}
-			if info.EncryptedPath != "" && info.EncryptedPath != displayPath {
-				return info.EncryptedPath, false
-			}
-			return displayPath, false
-		}
-	}
-
-	if passwdInfo == nil || !passwdInfo.EncName {
-		return displayPath, false
-	}
-	converter := encryption.NewFileNameConverter(passwdInfo.Password, passwdInfo.EncType, passwdInfo.EncSuffix)
-	fileName := path.Base(displayPath)
-	encBase := strings.TrimSuffix(fileName, path.Ext(fileName))
-	if converter.DecryptFileName(encBase) != "" {
-		return displayPath, false
-	}
-	if strings.HasPrefix(fileName, encryption.OrigPrefix) {
-		// Keep the stripped spelling literal: "." / ".." must reach the
-		// mutation-name validation instead of being cleaned away by path.Join.
-		return path.Dir(displayPath) + "/" + strings.TrimPrefix(fileName, encryption.OrigPrefix), false
-	}
-	if exists, isDir := h.probeDisplayObject(r, displayPath); exists {
-		return displayPath, isDir
-	}
-	return path.Join(path.Dir(displayPath), converter.ToRealName(fileName)), false
+	return newNameResolver(h.fileDAO, passwdInfo).sourcePath(displayPath, func() (bool, bool) {
+		return h.probeDisplayObject(r, displayPath)
+	})
 }
 
 func (h *AlistHandler) fetchFsListContent(r *http.Request, realPath string) ([]interface{}, error) {

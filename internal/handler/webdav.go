@@ -726,8 +726,12 @@ func (h *WebDAVHandler) handleDelete(w http.ResponseWriter, r *http.Request, dav
 		return
 	}
 
-	// Convert display path to real encrypted path
-	realPath := h.convertToRealPath(davPath, passwdInfo)
+	// Resolve the display path through the shared mutation resolver so
+	// plaintext files and directories keep their upstream spelling instead of
+	// being filename-encrypted into a nonexistent target.
+	realPath, _ := newNameResolver(h.fileDAO, passwdInfo).sourcePath(davPath, func() (bool, bool) {
+		return h.probeDavObject(r, davPath)
+	})
 	targetURL := httputil.BuildTargetURLStripped(h.cfg.GetAlistURL(), "/dav"+realPath)
 
 	proxyReq, err := httputil.NewRequest("DELETE", targetURL).
@@ -791,13 +795,17 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	}
 	passwdInfo, found := h.passwdDAO.FindByPath(davPath)
 
-	// Convert source path
+	// Convert source path through the shared mutation resolver (probe-backed,
+	// so plaintext files/directories keep their upstream spelling).
 	realSrcPath := davPath
-	if found && passwdInfo.EncName {
-		realSrcPath = h.convertToRealPath(davPath, passwdInfo)
-	}
 	sourceIsDir := false
 	sourceIsDirChecked := false
+	if found && passwdInfo.EncName {
+		realSrcPath, sourceIsDir = newNameResolver(h.fileDAO, passwdInfo).sourcePath(davPath, func() (bool, bool) {
+			return h.probeDavObject(r, davPath)
+		})
+		sourceIsDirChecked = true
+	}
 
 	// Convert destination path from header
 	destination := r.Header.Get("Destination")
@@ -813,13 +821,7 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 					sourceIsDir = h.webdavSourceIsDir(r, davPath, realSrcPath)
 					sourceIsDirChecked = true
 				}
-				converter := encryption.NewFileNameConverter(destPasswd.Password, destPasswd.EncType, destPasswd.EncSuffix)
-				fileName := path.Base(destPath)
-				realDestName := fileName
-				if !sourceIsDir {
-					realDestName = converter.ToRealName(fileName)
-				}
-				realDestPath := path.Join(path.Dir(destPath), realDestName)
+				realDestPath := newNameResolver(h.fileDAO, destPasswd).destinationPath(destPath, sourceIsDir)
 				if limit := protectedFilenameLimit(h.cfg, destPath); limit > 0 && len(path.Base(realDestPath)) > limit {
 					RespondHTTPErrorWithStatus(w, "Encrypted write destination exceeds configured filename limit; use a shorter name", http.StatusBadRequest)
 					return
@@ -899,6 +901,45 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	w.Write(respBody)
 }
 
+// probeDavObject asks upstream whether path exists as a real object and
+// reports whether it is a directory, using the caller's credentials.
+func (h *WebDAVHandler) probeDavObject(r *http.Request, objectPath string) (bool, bool) {
+	body, err := json.Marshal(map[string]string{"path": objectPath})
+	if err != nil {
+		return false, false
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.cfg.GetAlistURL()+"/api/fs/get", bytes.NewReader(body))
+	if err != nil {
+		return false, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := h.getStdClient().Do(req)
+	if err != nil {
+		return false, false
+	}
+	defer resp.Body.Close()
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		return false, false
+	}
+	var payload struct {
+		Code float64 `json:"code"`
+		Data *struct {
+			IsDir bool `json:"is_dir"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return false, false
+	}
+	return payload.Code == 200 && payload.Data != nil, payload.Data != nil && payload.Data.IsDir
+}
+
 // webdavSourceIsDir reports whether the MOVE/COPY source is a directory.
 // Cache hits are authoritative; otherwise one bounded /api/fs/get probe on the
 // resolved upstream path decides, since directory names are never
@@ -914,40 +955,8 @@ func (h *WebDAVHandler) webdavSourceIsDir(r *http.Request, displayPath, realPath
 	if h.cfg == nil || strings.TrimSpace(realPath) == "" {
 		return false
 	}
-	body, err := json.Marshal(map[string]string{"path": realPath})
-	if err != nil {
-		return false
-	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.cfg.GetAlistURL()+"/api/fs/get", bytes.NewReader(body))
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-	if cookie := r.Header.Get("Cookie"); cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-	resp, err := h.getStdClient().Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
-	if err != nil {
-		return false
-	}
-	var payload struct {
-		Code float64 `json:"code"`
-		Data *struct {
-			IsDir bool `json:"is_dir"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(respBody, &payload); err != nil {
-		return false
-	}
-	return payload.Code == 200 && payload.Data != nil && payload.Data.IsDir
+	_, isDir := h.probeDavObject(r, realPath)
+	return isDir
 }
 
 // handlePropfind handles PROPFIND requests - follows OpenList-Encrypt logic:
