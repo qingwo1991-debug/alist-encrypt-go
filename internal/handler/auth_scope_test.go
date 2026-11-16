@@ -77,20 +77,25 @@ func TestRequestScopeHashForgedTokenStaysLegacy(t *testing.T) {
 	}
 }
 
-func TestRequestScopeHashAuthorizetokenHeader(t *testing.T) {
+func TestRequestScopeHashAuthorizetokenIgnoredForScope(t *testing.T) {
 	h := &AlistHandler{authScope: newAuthScopeValidator()}
-	tok := testJWT(t, "admin")
+	// Authorizetoken is a per-request auxiliary credential: it must NOT
+	// participate in the scope hash or every poll mints a new scope.
 	hdr := make(http.Header)
-	hdr.Set("Authorizetoken", tok)
-	// Authorizetoken is the middleware's preferred credential; it must feed
-	// both the legacy hash and the stable-scope path.
-	legacy := scopeHashLegacy(hdr)
-	if legacy == "anon" || legacy == authScopeHash(make(http.Header)) {
-		t.Fatalf("Authorizetoken must participate in scope hash, got %q", legacy)
+	hdr.Set("Authorizetoken", "nonce-"+testJWT(t, "admin"))
+	if got := h.requestScopeHash(hdr); strings.HasPrefix(got, "u:") {
+		t.Fatalf("Authorizetoken-only client must keep legacy scope, got %q", got)
 	}
-	h.noteUpstreamAuthOK(hdr)
-	if got := h.requestScopeHash(hdr); !strings.HasPrefix(got, "u:") {
-		t.Fatalf("Authorizetoken JWT should reach stable scope after validation, got %q", got)
+	// Authorization is the stable credential: a rotating Authorizetoken or
+	// Cookie must not change the scope.
+	tok := testJWT(t, "admin")
+	stable := make(http.Header)
+	stable.Set("Authorization", "Bearer "+tok)
+	withNoise := stable.Clone()
+	withNoise.Set("Authorizetoken", "nonce-1")
+	withNoise.Set("Cookie", "session=abc")
+	if got, want := h.requestScopeHash(withNoise), h.requestScopeHash(stable); got != want {
+		t.Fatalf("auxiliary headers changed scope: %q vs %q", got, want)
 	}
 }
 

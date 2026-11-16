@@ -67,15 +67,12 @@ func (v *authScopeValidator) has(token string) bool {
 	return ok
 }
 
-// effectiveBearerToken mirrors AuthMiddleware's credential extraction:
-// Authorizetoken wins over Authorization, and a "Bearer " prefix is stripped
-// from Authorization only.
+// effectiveBearerToken extracts the credential the UPSTREAM validates:
+// Authorization wins (upstream alist/openlist reads it), Authorizetoken is
+// only a fallback for clients that send no Authorization at all.
 func effectiveBearerToken(headers http.Header) string {
 	if headers == nil {
 		return ""
-	}
-	if t := strings.TrimSpace(headers.Get("Authorizetoken")); t != "" {
-		return t
 	}
 	if a := strings.TrimSpace(headers.Get("Authorization")); a != "" {
 		if len(a) >= 7 && strings.EqualFold(a[:7], "Bearer ") {
@@ -83,7 +80,7 @@ func effectiveBearerToken(headers http.Header) string {
 		}
 		return a
 	}
-	return ""
+	return strings.TrimSpace(headers.Get("Authorizetoken"))
 }
 
 // jwtUsernameClaim decodes the username claim WITHOUT verifying the signature.
@@ -108,21 +105,25 @@ func jwtUsernameClaim(token string) string {
 	return strings.TrimSpace(claims.Username)
 }
 
-// scopeHashLegacy preserves the historical authScopeHash output while folding
-// the Authorizetoken credential header into the hash input. Previously a
-// client authenticating solely via Authorizetoken hashed as "anon"/cookie-only
-// and shared one snapshot scope with every other such client.
+// scopeHashLegacy hashes only the STABLE credential material. Authorization
+// is the primary credential and fully determines the scope when present;
+// Cookie is consulted only for cookie-only clients. Auxiliary per-request
+// headers (Authorizetoken, and Cookie when Authorization exists) are
+// deliberately excluded: clients that rotate them every request would
+// otherwise mint a new snapshot scope per poll and the cache could never
+// warm.
 func scopeHashLegacy(headers http.Header) string {
 	if headers == nil {
 		return authScopeHash(nil)
 	}
-	if strings.TrimSpace(headers.Get("Authorizetoken")) == "" {
-		return authScopeHash(headers)
+	if strings.TrimSpace(headers.Get("Authorization")) != "" {
+		clone := headers.Clone()
+		clone.Del("Cookie")
+		clone.Del("Authorizetoken")
+		return authScopeHash(clone)
 	}
 	clone := headers.Clone()
-	if strings.TrimSpace(clone.Get("Authorization")) == "" {
-		clone.Set("Authorization", headers.Get("Authorizetoken"))
-	}
+	clone.Del("Authorizetoken")
 	return authScopeHash(clone)
 }
 
