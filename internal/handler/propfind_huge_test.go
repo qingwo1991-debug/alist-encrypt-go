@@ -59,7 +59,7 @@ type recordingFileDAO struct {
 
 func (m *recordingFileDAO) Get(path string) (*dao.FileInfo, bool) { return nil, false }
 func (m *recordingFileDAO) Delete(path string) error              { return nil }
-func (m *recordingFileDAO) List(limit int) []*dao.FileInfo         { return nil }
+func (m *recordingFileDAO) List(limit int) []*dao.FileInfo        { return nil }
 func (m *recordingFileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 	m.mu.Lock()
 	m.encMappingCalls++
@@ -72,7 +72,7 @@ func (m *recordingFileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath,
 }
 func (m *recordingFileDAO) GetEncPath(displayPath string) (string, bool) { return "", false }
 func (m *recordingFileDAO) HasEncryptedPath(encryptedPath string) bool   { return false }
-func (m *recordingFileDAO) DeleteEncPathMapping(displayPath string)       {}
+func (m *recordingFileDAO) DeleteEncPathMapping(displayPath string)      {}
 func (m *recordingFileDAO) InvalidateRawURLForScope(displayPath, authScope string) bool {
 	return false
 }
@@ -82,8 +82,9 @@ func (m *recordingFileDAO) Set(info *dao.FileInfo) error {
 	m.mu.Unlock()
 	return nil
 }
-func (m *recordingFileDAO) Config() *config.Config       { return nil }
-func (m *recordingFileDAO) InvalidateDisplayPath(string) {}
+func (m *recordingFileDAO) Config() *config.Config          { return nil }
+func (m *recordingFileDAO) InvalidateDisplayPath(string)    {}
+func (m *recordingFileDAO) InvalidateDisplaySubtree(string) {}
 func (m *recordingFileDAO) GetFileSize(path string) (int64, bool) {
 	return 0, false
 }

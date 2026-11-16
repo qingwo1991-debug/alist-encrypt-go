@@ -166,7 +166,15 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	// This also covers no-rule passthrough and extension writes.
 	if h.fileDAO != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != "PROPFIND" && r.Method != http.MethodOptions {
 		h.fileDAO.InvalidateDisplayPath(davPath)
-		defer h.fileDAO.InvalidateDisplayPath(davPath)
+		defer func() {
+			h.fileDAO.InvalidateDisplayPath(davPath)
+			if r.Method == http.MethodDelete || r.Method == "MOVE" {
+				// Deleting or moving a directory takes its whole subtree; the
+				// post-mutation pass drops descendant mappings too. It runs
+				// after dispatch so MOVE/COPY can still read the source type.
+				h.fileDAO.InvalidateDisplaySubtree(davPath)
+			}
+		}()
 	}
 	switch r.Method {
 	case "GET", "HEAD":
@@ -861,6 +869,10 @@ func (h *WebDAVHandler) handleMoveOrCopy(w http.ResponseWriter, r *http.Request,
 	// 目标被覆盖 = 一次"删除"。明文展示路径记录到统计。
 	if resp.StatusCode == http.StatusNoContent && destDisplayPath != "" && h.statsRecorder != nil {
 		h.statsRecorder.RecordDeletion(destDisplayPath)
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && destDisplayPath != "" && h.fileDAO != nil {
+		// An overwritten destination directory loses its previous subtree.
+		h.fileDAO.InvalidateDisplaySubtree(destDisplayPath)
 	}
 	httputil.CopyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)

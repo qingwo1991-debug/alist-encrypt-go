@@ -1,6 +1,8 @@
 package dao
 
 import (
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -251,6 +253,64 @@ func (c *PathCache) Delete(encPath string) {
 		}
 	}
 	shard.mu.Unlock()
+}
+
+// DeleteSubtree removes every entry whose encrypted or display path equals
+// prefix or lives beneath it (prefix + "/"), returning the removed keys.
+// Query-escaped spellings are matched too because legacy callers cache
+// either form. Used when a whole directory disappears upstream so descendant
+// mappings cannot linger until their TTL expires.
+func (c *PathCache) DeleteSubtree(prefix string) []string {
+	if c == nil {
+		return nil
+	}
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return nil
+	}
+	escaped := url.QueryEscape(prefix)
+	matches := func(key string) bool {
+		if key == prefix || strings.HasPrefix(key, prefix+"/") {
+			return true
+		}
+		return escaped != prefix && (key == escaped || strings.HasPrefix(key, escaped+"%2F"))
+	}
+	removed := make(map[string]struct{})
+	dispPaths := make(map[string]struct{})
+	for _, shard := range c.shards {
+		shard.mu.Lock()
+		for k, e := range shard.byEncPath {
+			if matches(k) || (e.DisplayPath != "" && matches(e.DisplayPath)) {
+				delete(shard.byEncPath, k)
+				removed[k] = struct{}{}
+				if e.DisplayPath != "" {
+					dispPaths[e.DisplayPath] = struct{}{}
+				}
+			}
+		}
+		for k := range shard.byDispPath {
+			if matches(k) {
+				delete(shard.byDispPath, k)
+				removed[k] = struct{}{}
+			}
+		}
+		shard.mu.Unlock()
+	}
+	// Entries evicted through the encrypted index may leave their display
+	// index behind when the display spelling did not textually match (e.g.
+	// decrypted file names under an encrypted-path prefix).
+	for dp := range dispPaths {
+		shard := c.getShard(dp)
+		shard.mu.Lock()
+		delete(shard.byDispPath, dp)
+		shard.mu.Unlock()
+		removed[dp] = struct{}{}
+	}
+	out := make([]string, 0, len(removed))
+	for k := range removed {
+		out = append(out, k)
+	}
+	return out
 }
 
 // evictOldest removes expired entries, or the oldest 10% if none expired.

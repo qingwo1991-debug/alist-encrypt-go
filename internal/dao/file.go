@@ -697,6 +697,69 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 	}
 }
 
+// pathWithinSubtree reports whether p is root itself or a descendant of it.
+func pathWithinSubtree(p, root string) bool {
+	return p == root || strings.HasPrefix(p, root+"/")
+}
+
+func deleteStorePathPrefix(store *storage.Store, bucket []byte, path string) {
+	if store == nil {
+		return
+	}
+	_, _ = store.DeletePrefix(bucket, path, "/")
+	if escaped := url.QueryEscape(path); escaped != path {
+		_, _ = store.DeletePrefix(bucket, escaped, "%2F")
+	}
+}
+
+// InvalidateDisplaySubtree clears cached metadata for a display path and every
+// descendant after the upstream object was removed or moved away. Directory
+// deletions must not leave child mappings, sizes, or playback confirmations
+// alive until their TTL expires.
+func (d *FileDAO) InvalidateDisplaySubtree(displayPath string) {
+	if d == nil {
+		return
+	}
+	displayPath = strings.TrimSpace(displayPath)
+	if displayPath == "" {
+		return
+	}
+	roots := []string{displayPath}
+	if enc, ok := d.pathCache.GetEncPath(displayPath); ok && enc != "" && enc != displayPath {
+		roots = append(roots, enc)
+	}
+	removed := make(map[string]struct{})
+	for _, root := range roots {
+		for _, p := range d.pathCache.DeleteSubtree(root) {
+			removed[p] = struct{}{}
+		}
+		deleteStorePathPrefix(d.store, storage.BucketFileInfo, root)
+		deleteStorePathPrefix(d.store, storage.BucketFileSize, root)
+	}
+	d.playback.mu.Lock()
+	defer d.playback.mu.Unlock()
+	affected := make(map[string]struct{})
+	for p := range removed {
+		if pathWithinSubtree(p, displayPath) {
+			affected[p] = struct{}{}
+		}
+	}
+	for _, info := range d.playback.confirmed {
+		if info.Path != "" && pathWithinSubtree(info.Path, displayPath) {
+			affected[info.Path] = struct{}{}
+		}
+	}
+	for p := range d.playback.pathFence {
+		if pathWithinSubtree(p, displayPath) {
+			affected[p] = struct{}{}
+		}
+	}
+	for p := range affected {
+		d.invalidateDisplayPathLocked(p)
+	}
+	d.invalidateDisplayPathLocked(displayPath)
+}
+
 // InvalidateRawURLForScope clears only a signed URL owned by authScope. It
 // deliberately preserves path mappings and size/content metadata, and cannot
 // evict a URL fetched under another caller's credentials.
