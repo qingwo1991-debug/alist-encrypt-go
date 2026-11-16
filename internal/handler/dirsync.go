@@ -758,7 +758,12 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 				// One write transaction for the whole directory instead of one per
 				// entry: builds are collected, cache-refreshed immediately, and
 				// flushed together via PersistFromList after the listing pass.
+				// All of it is deferred past the response: persistence, meta
+				// upserts and probe admission are cache warming and must not
+				// inflate fs/list latency.
 				var prepared []*dao.FileInfo
+				var metaUpserts []fsListMetaUpsert
+				var probeJobs []fsListProbeJob
 
 				for i, item := range content {
 					if fileData, ok := item.(map[string]interface{}); ok {
@@ -860,9 +865,9 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 								h.fileDAO.SetEncPathMappingWithInfo(displayPath, encryptedPath, name, size, isDir)
 								if !isDir && enableProbe {
 									if size > 0 {
-										h.upsertMetaFromListing(r.Context(), displayPath, size)
+										metaUpserts = append(metaUpserts, fsListMetaUpsert{path: displayPath, size: size})
 									}
-									h.enqueueProbeFromList(r, displayPath, size)
+									probeJobs = append(probeJobs, fsListProbeJob{path: displayPath, size: size})
 								}
 							}
 						}
@@ -898,11 +903,19 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 					data["content"] = filtered
 				}
 
-				if len(prepared) > 0 {
-					if err := h.fileDAO.PersistFromList(prepared); err != nil {
-						log.Warn().Err(err).Int("items", len(prepared)).Str("dir", dirPath).Msg("failed to batch-persist directory listing")
+				var authHeaders http.Header
+				probeSource := ""
+				if len(probeJobs) > 0 {
+					authHeaders = make(http.Header)
+					if auth := r.Header.Get("Authorization"); auth != "" {
+						authHeaders.Set("Authorization", auth)
 					}
+					if cookie := r.Header.Get("Cookie"); cookie != "" {
+						authHeaders.Set("Cookie", cookie)
+					}
+					probeSource = probeSourceFromContext(r.Context(), probeSourceFSList)
 				}
+				h.deferListMaintenance(prepared, metaUpserts, probeJobs, authHeaders, probeSource)
 			}
 		}
 	}

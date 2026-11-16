@@ -62,10 +62,15 @@ type AlistHandler struct {
 	filenameTaskMu        sync.Mutex
 	filenameTaskSem       chan struct{}
 	filenameTaskPending   map[string]bool
-	fsMetaGroup           singleflight.Group
-	fsMetaMu              sync.Mutex
-	statsRecorder         StatsRecorder
-	fsMetaCache           map[string]fsMetaCacheEntry
+	// listMaintenanceSem bounds concurrent post-response listing maintenance
+	// (persist + meta upsert + probe enqueue). These are cache-warming writes
+	// that used to run inline and could add seconds of MySQL/Bolt latency to
+	// every fs/list; they now run in a bounded background pass instead.
+	listMaintenanceSem chan struct{}
+	fsMetaGroup        singleflight.Group
+	fsMetaMu           sync.Mutex
+	statsRecorder      StatsRecorder
+	fsMetaCache        map[string]fsMetaCacheEntry
 
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
@@ -112,17 +117,18 @@ type fsMetaFetchResult struct {
 func NewAlistHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO ports.FileRepository, passwdDAO ports.KeyRepository, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
 	dirSyncCtx, dirSyncCancel := context.WithCancel(context.Background())
 	return &AlistHandler{
-		cfg:               cfg,
-		streamProxy:       streamProxy,
-		httpClient:        proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
-		fileDAO:           fileDAO,
-		passwdDAO:         passwdDAO,
-		proxyHandler:      proxyHandler,
-		metaStore:         metaStore,
-		probe:             probe,
-		dirSyncCtx:        dirSyncCtx,
-		dirSyncCancel:     dirSyncCancel,
-		dirSyncRefreshSem: make(chan struct{}, dirSyncRefreshMaxConcurrent),
+		cfg:                cfg,
+		streamProxy:        streamProxy,
+		httpClient:         proxy.NewHTTPClient(cfg, getAlistRequestTimeout(cfg)),
+		fileDAO:            fileDAO,
+		passwdDAO:          passwdDAO,
+		proxyHandler:       proxyHandler,
+		metaStore:          metaStore,
+		probe:              probe,
+		dirSyncCtx:         dirSyncCtx,
+		dirSyncCancel:      dirSyncCancel,
+		dirSyncRefreshSem:  make(chan struct{}, dirSyncRefreshMaxConcurrent),
+		listMaintenanceSem: make(chan struct{}, 4),
 	}
 }
 
@@ -1458,6 +1464,54 @@ func contentVersionLabel(meta encryption.ContentMeta) string {
 	return "V1"
 }
 
+// fsListMetaUpsert / fsListProbeJob are the deferred per-entry maintenance
+// records collected during a live fs/list pass.
+type fsListMetaUpsert struct {
+	path string
+	size int64
+}
+
+type fsListProbeJob struct {
+	path string
+	size int64
+}
+
+// deferListMaintenance moves listing cache-warming off the request path. The
+// response body is already fully computed when this runs, so persistence,
+// meta upserts and probe admission can no longer inflate fs/list latency.
+// Work is bounded by listMaintenanceSem; on shutdown in-flight passes abort.
+func (h *AlistHandler) deferListMaintenance(prepared []*dao.FileInfo, metaUpserts []fsListMetaUpsert, probes []fsListProbeJob, authHeaders http.Header, probeSource string) {
+	if len(prepared)+len(metaUpserts)+len(probes) == 0 {
+		return
+	}
+	work := func() {
+		if len(prepared) > 0 {
+			if err := h.fileDAO.PersistFromList(prepared); err != nil {
+				log.Warn().Err(err).Int("items", len(prepared)).Msg("failed to batch-persist directory listing")
+			}
+		}
+		for _, m := range metaUpserts {
+			h.upsertMetaFromListing(context.Background(), m.path, m.size)
+		}
+		for _, p := range probes {
+			h.enqueueProbeFromListWithHeaders(p.path, p.size, authHeaders, probeSource)
+		}
+	}
+	if h.listMaintenanceSem == nil {
+		work()
+		return
+	}
+	go func() {
+		select {
+		case h.listMaintenanceSem <- struct{}{}:
+			defer func() { <-h.listMaintenanceSem }()
+		case <-h.dirSyncCtx.Done():
+			return
+		}
+		work()
+	}()
+}
+
 func (h *AlistHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {
 	if h.metaStore == nil || size <= 0 {
 		return
@@ -1472,6 +1526,25 @@ func (h *AlistHandler) upsertMetaFromListing(ctx context.Context, displayPath st
 }
 
 func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string, reportedSize int64) {
+	authHeaders := make(http.Header)
+	var source string
+	if r != nil {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			authHeaders.Set("Authorization", auth)
+		}
+		if cookie := r.Header.Get("Cookie"); cookie != "" {
+			authHeaders.Set("Cookie", cookie)
+		}
+		source = probeSourceFromContext(r.Context(), probeSourceFSList)
+	} else {
+		source = probeSourceFSList
+	}
+	h.enqueueProbeFromListWithHeaders(displayPath, reportedSize, authHeaders, source)
+}
+
+// enqueueProbeFromListWithHeaders is the request-free variant used by the
+// deferred post-response listing maintenance pass.
+func (h *AlistHandler) enqueueProbeFromListWithHeaders(displayPath string, reportedSize int64, authHeaders http.Header, source string) {
 	if h.probe == nil {
 		return
 	}
@@ -1492,14 +1565,7 @@ func (h *AlistHandler) enqueueProbeFromList(r *http.Request, displayPath string,
 		CompatStorageKey: buildRangeCompatStorageKey(passwdInfo, displayPath),
 		PasswdInfo:       passwdInfo,
 	}
-	authHeaders := make(http.Header)
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		authHeaders.Set("Authorization", auth)
-	}
-	if cookie := r.Header.Get("Cookie"); cookie != "" {
-		authHeaders.Set("Cookie", cookie)
-	}
-	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, probeSourceFromContext(r.Context(), probeSourceFSList))
+	h.probe.EnqueueWithSource(file, authHeaders, reportedSize, source)
 }
 
 // HandleFsPut handles /api/fs/put for encrypted uploads with filename encryption
