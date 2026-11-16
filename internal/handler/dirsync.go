@@ -751,6 +751,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 				type decryptTask struct {
 					index      int
 					name       string
+					isDir      bool
 					passwdInfo *config.PasswdInfo
 				}
 				var tasks []decryptTask
@@ -773,11 +774,11 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 								fileData["size"] = float64(info.Size)
 							}
 						}
-						if isDir || !allowDecrypt {
+						if !allowDecrypt {
 							continue
 						}
 						if dirPasswd != nil && dirPasswd.EncName {
-							tasks = append(tasks, decryptTask{index: i, name: name, passwdInfo: dirPasswd})
+							tasks = append(tasks, decryptTask{index: i, name: name, isDir: isDir, passwdInfo: dirPasswd})
 						}
 						if fileType, ok := fileData["type"].(float64); ok && fileType == 5 {
 							baseName := strings.Split(name, ".")[0]
@@ -791,7 +792,9 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 						if fileData, ok := content[result.index].(map[string]interface{}); ok {
 							encName := fileData["name"].(string)
 							fileData["name"] = result.showName
-							normalizeDecryptedListItem(fileData, result.showName)
+							if isDir, _ := fileData["is_dir"].(bool); !isDir {
+								normalizeDecryptedListItem(fileData, result.showName)
+							}
 							content[result.index] = fileData
 							displayPath := path.Join(dirPath, result.showName)
 							encryptedPath := path.Join(dirPath, encName)
@@ -806,7 +809,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 							semaphore <- struct{}{}
 							go func(t decryptTask) {
 								defer func() { <-semaphore }()
-								showName := h.convertShowName(t.passwdInfo, t.name)
+								showName := h.convertEntryShowName(t.passwdInfo, t.name, t.isDir)
 								results <- decryptResult{index: t.index, showName: showName}
 							}(task)
 						}
@@ -816,7 +819,7 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 						close(results)
 					} else {
 						for _, task := range tasks {
-							showName := h.convertShowName(task.passwdInfo, task.name)
+							showName := h.convertEntryShowName(task.passwdInfo, task.name, task.isDir)
 							applyResult(decryptResult{index: task.index, showName: showName})
 						}
 					}

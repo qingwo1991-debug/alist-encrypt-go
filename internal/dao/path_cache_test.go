@@ -445,3 +445,41 @@ func TestPathCache_InPlaceMutateThenSetStillWorks(t *testing.T) {
 		t.Fatalf("read-modify-write failed: %+v", got)
 	}
 }
+
+func TestPathCache_DeleteSubtree(t *testing.T) {
+	cache := NewPathCache(8, 100)
+
+	entries := []*PathEntry{
+		{EncryptedPath: "/enc/dir", DisplayPath: "/enc/dir", IsDir: true},
+		{EncryptedPath: "/enc/dir/a.bin", DisplayPath: "/enc/dir/movie.mp4"},
+		{EncryptedPath: "/enc/dir/sub", DisplayPath: "/enc/dir/sub", IsDir: true},
+		{EncryptedPath: "/enc/dir/sub/b.bin", DisplayPath: "/enc/dir/sub/song.mp3"},
+		{EncryptedPath: "/enc/dir2/c.bin", DisplayPath: "/enc/dir2/other.mp4"},
+		{EncryptedPath: "/enc/dir_extra/d.bin", DisplayPath: "/enc/dir_extra/x.mp4"},
+	}
+	for _, e := range entries {
+		cache.Set(e, time.Hour)
+	}
+
+	removed := cache.DeleteSubtree("/enc/dir")
+	if len(removed) == 0 {
+		t.Fatal("DeleteSubtree should report removed keys")
+	}
+
+	for _, gone := range []string{
+		"/enc/dir", "/enc/dir/a.bin", "/enc/dir/movie.mp4",
+		"/enc/dir/sub", "/enc/dir/sub/b.bin", "/enc/dir/sub/song.mp3",
+	} {
+		if _, ok := cache.Get(gone); ok {
+			t.Fatalf("subtree entry %q should be removed", gone)
+		}
+	}
+	for _, kept := range []string{
+		"/enc/dir2/c.bin", "/enc/dir2/other.mp4",
+		"/enc/dir_extra/d.bin", "/enc/dir_extra/x.mp4",
+	} {
+		if _, ok := cache.Get(kept); !ok {
+			t.Fatalf("sibling entry %q should be kept", kept)
+		}
+	}
+}

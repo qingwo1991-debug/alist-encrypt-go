@@ -252,6 +252,21 @@ func (h *AlistHandler) convertShowName(passwdInfo *config.PasswdInfo, name strin
 	return encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, name, passwdInfo.EncSuffix, allowLoose)
 }
 
+// convertEntryShowName decrypts listing/search entry names. Files keep the
+// orig_ fallback for undecodable names; directories may legitimately be
+// plaintext upstream, so undecodable directory names keep their spelling
+// instead of being mangled into orig_ display names.
+func (h *AlistHandler) convertEntryShowName(passwdInfo *config.PasswdInfo, name string, isDir bool) string {
+	if !isDir {
+		return h.convertShowName(passwdInfo, name)
+	}
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
+	if show, ok := encryption.TryConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, name, passwdInfo.EncSuffix, allowLoose); ok {
+		return show
+	}
+	return name
+}
+
 // normalizeDecryptedListItem keeps display fields aligned with decrypted filename,
 // so frontend preview strategy won't be stuck on encrypted suffix/type (e.g. ".bin").
 func normalizeDecryptedListItem(fileData map[string]interface{}, showName string) {
@@ -467,6 +482,21 @@ func (h *AlistHandler) probeDisplayObject(r *http.Request, displayPath string) (
 	return payload.Code == 200 && payload.Data != nil, payload.Data != nil && payload.Data.IsDir
 }
 
+// displayPathForUpstreamName recovers the cached display path for a request
+// name that may carry the upstream spelling (already-encrypted or
+// orig_-stripped). Falls back to dirPath/name when nothing is cached.
+func (h *AlistHandler) displayPathForUpstreamName(dirPath, name string, upstreamNames []string, index int) string {
+	displayPath := path.Join(dirPath, name)
+	upstreamName := name
+	if index >= 0 && index < len(upstreamNames) && upstreamNames[index] != "" {
+		upstreamName = upstreamNames[index]
+	}
+	if info, ok := h.fileDAO.Get(path.Join(dirPath, upstreamName)); ok && info != nil && info.Path != "" {
+		return info.Path
+	}
+	return displayPath
+}
+
 func (h *AlistHandler) resolveUpstreamNames(r *http.Request, dirPath string, names []string, passwdInfo *config.PasswdInfo) []string {
 	if len(names) == 0 {
 		return nil
@@ -646,7 +676,7 @@ func (h *AlistHandler) searchEncryptedTree(r *http.Request, rootPath, keyword st
 
 			childDisplayName := rawName
 			if currentPasswd != nil && currentPasswd.EncName {
-				childDisplayName = h.convertShowName(currentPasswd, rawName)
+				childDisplayName = h.convertEntryShowName(currentPasswd, rawName, isDir)
 			}
 			if childDisplayName == "" {
 				childDisplayName = rawName
@@ -1693,8 +1723,11 @@ func (h *AlistHandler) HandleFsRemove(w http.ResponseWriter, r *http.Request) {
 	var respData map[string]interface{}
 	if err := json.Unmarshal(respBody, &respData); err == nil {
 		if code, ok := respData["code"].(float64); ok && code == 200 {
-			for _, name := range reqData.Names {
-				displayPath := path.Join(reqData.Dir, name)
+			for i, name := range reqData.Names {
+				displayPath := h.displayPathForUpstreamName(reqData.Dir, name, fileNames, i)
+				// Directories take their whole subtree with them; invalidating
+				// only the exact path would leave descendant mappings until TTL.
+				h.fileDAO.InvalidateDisplaySubtree(displayPath)
 				h.fileDAO.DeleteEncPathMapping(displayPath)
 				h.fileDAO.InvalidateDisplayPath(displayPath)
 				h.fileDAO.Delete(url.QueryEscape(displayPath))
@@ -1807,7 +1840,8 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 	var respData map[string]interface{}
 	if err := json.Unmarshal(respBody, &respData); err == nil {
 		if code, ok := respData["code"].(float64); ok && code == 200 {
-			// Delete old path mapping
+			// Delete old path mapping; a renamed directory takes its subtree.
+			h.fileDAO.InvalidateDisplaySubtree(reqData.Path)
 			h.fileDAO.DeleteEncPathMapping(reqData.Path)
 			h.fileDAO.InvalidateDisplayPath(reqData.Path)
 			h.fileDAO.Delete(url.QueryEscape(reqData.Path))
@@ -1826,6 +1860,50 @@ func (h *AlistHandler) HandleFsRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondRaw(w, resp.StatusCode, "application/json", respBody)
+}
+
+// HandleFsMkdir handles /api/fs/mkdir. Directory names are never
+// filename-encrypted, so the request forwards unchanged after syntax checks;
+// refusing it under filenameWriteLimits would break plain directory creation
+// even though no encrypted-name mapping is involved.
+func (h *AlistHandler) HandleFsMkdir(w http.ResponseWriter, r *http.Request) {
+	body, err := readLimitedRequestBody(r)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "Failed to read request", http.StatusBadRequest)
+		return
+	}
+
+	var reqData struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &reqData); err != nil {
+		RespondHTTPErrorWithStatus(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if _, err := mutationPathVariants(reqData.Path); err != nil {
+		respondProtectedMutationError(w, invalidMutation("mkdir"))
+		return
+	}
+	if _, err := mutationNameVariants(reqData.Name); err != nil {
+		respondProtectedMutationError(w, invalidMutation("mkdir"))
+		return
+	}
+
+	resp, err := h.proxyToAlist(nil, "POST", "/api/fs/mkdir", body, r)
+	if err != nil {
+		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := readLimitedBody(resp, maxProxyResponseBody)
+	if err != nil {
+		log.Warn().Err(err).Msg("Upstream response body read failed")
+		http.Error(w, "Bad gateway: upstream response too large", http.StatusBadGateway)
+		return
+	}
+	RespondRaw(w, resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 }
 
 // HandleFsMove handles /api/fs/move with filename encryption
@@ -1925,13 +2003,16 @@ func (h *AlistHandler) handleCopyOrMove(w http.ResponseWriter, r *http.Request, 
 					}
 				}
 
-				// For move operations, delete the source cache entry
+				// For move operations, delete the source cache entry; a moved
+				// directory takes its whole subtree with it.
 				if isMove {
-					h.fileDAO.DeleteEncPathMapping(srcDisplayPath)
-					h.fileDAO.InvalidateDisplayPath(srcDisplayPath)
-					h.fileDAO.Delete(url.QueryEscape(srcDisplayPath))
+					moveSrcDisplayPath := h.displayPathForUpstreamName(reqData.SrcDir, name, fileNames, i)
+					h.fileDAO.InvalidateDisplaySubtree(moveSrcDisplayPath)
+					h.fileDAO.DeleteEncPathMapping(moveSrcDisplayPath)
+					h.fileDAO.InvalidateDisplayPath(moveSrcDisplayPath)
+					h.fileDAO.Delete(url.QueryEscape(moveSrcDisplayPath))
 					if h.probe != nil {
-						h.probe.InvalidateWarm(srcDisplayPath, "fs_move_source")
+						h.probe.InvalidateWarm(moveSrcDisplayPath, "fs_move_source")
 					}
 				}
 

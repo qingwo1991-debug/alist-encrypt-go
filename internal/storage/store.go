@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -169,6 +170,35 @@ func (s *Store) Delete(bucket []byte, key string) error {
 		}
 		return b.Delete([]byte(key))
 	})
+}
+
+// DeletePrefix removes the exact key and every descendant key beneath it.
+// childSep begins a descendant key ("/" for plain paths, "%2F" for
+// query-escaped spellings) so sibling prefixes cannot overmatch.
+func (s *Store) DeletePrefix(bucket []byte, prefix, childSep string) (int, error) {
+	deleted := 0
+	err := s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return fmt.Errorf("bucket not found: %s", bucket)
+		}
+		if b.Get([]byte(prefix)) != nil {
+			if err := b.Delete([]byte(prefix)); err != nil {
+				return err
+			}
+			deleted++
+		}
+		child := []byte(prefix + childSep)
+		c := b.Cursor()
+		for k, _ := c.Seek(child); k != nil && bytes.HasPrefix(k, child); k, _ = c.Next() {
+			if err := c.Delete(); err != nil {
+				return err
+			}
+			deleted++
+		}
+		return nil
+	})
+	return deleted, err
 }
 
 // UpdateBucket runs multiple operations against one bucket in a single write transaction.

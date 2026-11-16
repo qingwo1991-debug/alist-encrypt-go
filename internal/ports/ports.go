@@ -48,6 +48,7 @@ type FileRepository interface {
 	InvalidateRawURLForScope(displayPath, authScope string) bool
 	Config() *config.Config
 	InvalidateDisplayPath(displayPath string)
+	InvalidateDisplaySubtree(displayPath string)
 
 	GetFileSize(path string) (int64, bool)
 	SetFileSize(path string, size int64, ttl time.Duration)

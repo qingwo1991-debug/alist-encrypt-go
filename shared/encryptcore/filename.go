@@ -346,6 +346,22 @@ func ConvertShowNameWithOptions(password, encType, pathText string, allowLoose b
 // ConvertShowNameWithSuffixOptions converts encrypted filename to display name with
 // optional configured encrypted suffix and loose decode fallback.
 func ConvertShowNameWithSuffixOptions(password, encType, pathText, encSuffix string, allowLoose bool) string {
+	showName, ok := TryConvertShowNameWithSuffixOptions(password, encType, pathText, encSuffix, allowLoose)
+	if !ok {
+		decoded, err := url.PathUnescape(pathText)
+		if err != nil {
+			decoded = pathText
+		}
+		return OrigPrefix + path.Base(decoded)
+	}
+	return showName
+}
+
+// TryConvertShowNameWithSuffixOptions is ConvertShowNameWithSuffixOptions
+// without the orig_ fallback: ok is false when the name does not decode, so
+// callers handling plaintext-tolerant objects (e.g. directories) can keep the
+// upstream spelling instead of minting an orig_ display name.
+func TryConvertShowNameWithSuffixOptions(password, encType, pathText, encSuffix string, allowLoose bool) (string, bool) {
 	// URL decode the path using PathUnescape (NOT QueryUnescape!)
 	// QueryUnescape converts '+' to space, but '+' is valid in MixBase64
 	decoded, err := url.PathUnescape(pathText)
@@ -394,13 +410,13 @@ func ConvertShowNameWithSuffixOptions(password, encType, pathText, encSuffix str
 		}
 	}
 	if showName == "" {
-		return OrigPrefix + fileName
+		return "", false
 	}
 	if dupSuffix != "" {
 		showName = appendDuplicateSuffix(showName, dupSuffix)
 	}
 	// Node.js logic: encrypted name includes extension; decrypted name does not append extension
-	return showName
+	return showName, true
 }
 
 func splitTrailingDuplicateSuffix(name string) (trimmed, suffix string, ok bool) {

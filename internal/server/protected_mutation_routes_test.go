@@ -40,7 +40,7 @@ func TestProtectedMutationRealRouteFallback(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{"POST", "/api/fs/form"}, {"POST", "/api/fs/batch_rename"},
 		{"POST", "/api/fs/recursive_move"}, {"POST", "/api/fs/other"},
-		{"POST", "/api/fs/mkdir"}, {"GET", "/api/fs/rename"},
+		{"GET", "/api/fs/rename"},
 		{"POST", "/api/fs/put"}, {"PATCH", "/api/fs/get"},
 		{"POST", "/api/fs/../fs/form"}, {"MKCOL", "/dav/mount/protected/new"},
 		{"PROPPATCH", "/dav/mount/protected/file"},
