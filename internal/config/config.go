@@ -1100,6 +1100,25 @@ func (c *Config) applyEnvOverrides() {
 	if v, ok := getEnvInt("STREAM_OVERLOAD_STATUS"); ok {
 		c.AlistServer.StreamOverloadStatus = v
 	}
+
+	// Secrets: env vars win over config.json so credentials can live in the
+	// deployment environment (compose env_file, orchestrator secrets) instead
+	// of a plaintext file on disk. Empty env leaves the file value untouched.
+	if v := strings.TrimSpace(os.Getenv("JWT_SECRET")); v != "" {
+		c.JWTSecret = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STATS_PASSWORD")); v != "" {
+		c.StatsPassword = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SCAN_USERNAME")); v != "" {
+		c.AlistServer.ScanUsername = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SCAN_PASSWORD")); v != "" {
+		c.AlistServer.ScanPassword = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SCAN_AUTH_HEADER")); v != "" {
+		c.AlistServer.ScanAuthHeader = v
+	}
 }
 
 // applyTuningProfile applies a coarse deployment-shape bundle keyed by the
