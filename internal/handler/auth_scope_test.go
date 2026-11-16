@@ -4,8 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/alist-encrypt-go/internal/config"
+	"github.com/alist-encrypt-go/internal/storage"
 )
 
 var testJWTNonce int
@@ -125,5 +129,65 @@ func TestAuthScopeValidatorEvictsOldest(t *testing.T) {
 	v.mu.Unlock()
 	if n > authScopeValidatedCap {
 		t.Fatalf("validator exceeded cap: %d", n)
+	}
+}
+
+// TestHandleFsListRotatedJWTsShareSnapshot is the end-to-end proof: two
+// different upstream JWTs for the SAME account must converge on one stable
+// "u:" scope after upstream validation, so the second token is served from
+// the snapshot the first one persisted.
+func TestHandleFsListRotatedJWTsShareSnapshot(t *testing.T) {
+	passwd := &config.PasswdInfo{
+		Password: "testpass", EncType: "aesctr", Enable: true, EncName: true,
+		EncPath: []string{"/cloud/encrypt/*"},
+	}
+	mux := http.NewServeMux()
+	upstreamCalls := 0
+	mux.HandleFunc("/api/fs/list", func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		writeJSONResponse(w, map[string]interface{}{
+			"code": 200, "message": "success",
+			"data": map[string]interface{}{
+				"content": []interface{}{map[string]interface{}{
+					"name": "f1.bin", "path": "/cloud/encrypt/f1.bin", "is_dir": false, "size": float64(1), "type": float64(0)}},
+				"total": float64(1),
+			},
+		})
+	})
+	srv := newSocketTestServer(t, mux)
+	defer srv.Close()
+
+	handler, _ := newTestAlistHandler(t, srv.URL, passwd)
+	handler.dirSyncStart.Do(func() {})
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create snapshot store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler.SetDirSyncStore(NewBoltDirSyncStore(store))
+
+	tokA := testJWT(t, "admin")
+	tokB := testJWT(t, "admin") // rotated token, same account
+
+	request := func(token string) string {
+		req := httptest.NewRequest(http.MethodPost, "/api/fs/list", strings.NewReader(`{"path":"/cloud/encrypt","page":1,"per_page":1000}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		handler.HandleFsList(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	request(tokA)         // live fetch; validates tokA and persists under its scope
+	request(tokB)         // different token: miss -> live -> persists under u: scope (if bound)
+	body := request(tokB) // should now hit the shared u: snapshot
+	if !strings.Contains(body, `"cache_hit":true`) && !strings.Contains(body, `"cache_hit": true`) {
+		t.Fatalf("expected snapshot hit for rotated token, body=%s", body)
+	}
+	if upstreamCalls > 2 {
+		t.Fatalf("rotated token caused extra upstream calls: %d", upstreamCalls)
 	}
 }
