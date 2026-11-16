@@ -99,6 +99,13 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 	if h.dirSyncStore != nil && h.snapshotScopeEnabled(dirPath) {
 		h.rememberRecentList(dirPath, scopeKey, reqHeaders)
 		snap, snapOK, _ := h.dirSyncStore.GetSnapshot(r.Context(), scopeKey)
+		log.Info().
+			Str("path", dirPath).
+			Str("scope_key", scopeKey).
+			Bool("snap_ok", snapOK).
+			Bool("has_payload", snap != nil && len(snap.PayloadJSON) > 0).
+			Bool("scope_match", snap != nil && h.snapshotScopeMatches(snap, authHash)).
+			Msg("fslist snapshot lookup")
 		if snapOK && snap != nil && len(snap.PayloadJSON) > 0 && h.snapshotScopeMatches(snap, authHash) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
@@ -230,6 +237,16 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 				persistHash = stable
 			}
 			h.persistSnapshot(flightCtx, dirPath, buildDirScopeKey(dirPath, persistHash), persistHash, payload, itemCount, dirSyncModeReq, "")
+		} else {
+			log.Info().
+				Str("path", dirPath).
+				Str("scope_key", scopeKey).
+				Int("status", statusCode).
+				Bool("store", h.dirSyncStore != nil).
+				Bool("scope_enabled", h.snapshotScopeEnabled(dirPath)).
+				Bool("payload_ok", isSuccessfulListPayload(payload)).
+				Bool("poisoned", h.snapshotPayloadRootPoisoned(dirPath, payload)).
+				Msg("fslist snapshot persist skipped")
 		}
 		return &liveListFlight{StatusCode: statusCode, Payload: payload, ItemCount: itemCount, Doc: flightDoc}, nil
 	})
