@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alist-encrypt-go/shared/encryptcore"
 	"github.com/alist-encrypt-go/internal/storage/mysqlstore"
+	"github.com/alist-encrypt-go/shared/encryptcore"
 )
 
 func TestPreserveV2FileMetaRecordKeepsPlainSizeForSizeOnlyUpdate(t *testing.T) {
