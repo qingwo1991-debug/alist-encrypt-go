@@ -699,3 +699,37 @@ func TestProbeSchedulerPersistsV1LegacyContentMeta(t *testing.T) {
 		t.Fatalf("HeaderLen=%d, want 0 for legacy V1", info.HeaderLen)
 	}
 }
+
+func TestRawURLNeedsRefresh(t *testing.T) {
+	store, err := storage.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	fileDAO := dao.NewFileDAO(store)
+	ps := &ProbeScheduler{cfg: config.DefaultConfig(), fileDAO: fileDAO}
+
+	file := FileItem{DisplayPath: "/enc/a.mp4"}
+	if ps.rawURLNeedsRefresh(file) {
+		t.Fatal("no cached entry should not request refresh")
+	}
+
+	// Fresh raw URL inside the staleness window: no refresh.
+	_ = fileDAO.Set(&dao.FileInfo{Path: "/enc/a.mp4", RawURL: "https://cdn/x", UpstreamFetchedAt: time.Now()})
+	if ps.rawURLNeedsRefresh(file) {
+		t.Fatal("fresh raw URL should not request refresh")
+	}
+
+	// Stale raw URL beyond the staleness window: refresh.
+	_ = fileDAO.Set(&dao.FileInfo{Path: "/enc/a.mp4", RawURL: "https://cdn/x", UpstreamFetchedAt: time.Now().Add(-2 * time.Hour)})
+	if !ps.rawURLNeedsRefresh(file) {
+		t.Fatal("stale raw URL should request refresh")
+	}
+
+	// Entry without raw URL: leave to the normal cooldown path.
+	_ = fileDAO.Set(&dao.FileInfo{Path: "/enc/b.mp4", UpstreamFetchedAt: time.Now().Add(-2 * time.Hour)})
+	if ps.rawURLNeedsRefresh(FileItem{DisplayPath: "/enc/b.mp4"}) {
+		t.Fatal("missing raw URL should not bypass cooldown here")
+	}
+}
