@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/dao"
@@ -43,6 +44,37 @@ func (w *MySQLFileMetaWriter) UpsertFileMeta(info *dao.FileInfo) error {
 		return nil
 	}
 	return w.store.UpsertFileMeta(context.Background(), fileMetaRecordFromInfo(info))
+}
+
+// GetFileInfoByPath hydrates a FileInfo from the freshest file_meta row that
+// carries confirmed content metadata. Rows are keyed by provider host, which
+// varies with the raw URL observed at write time, so the lookup is by display
+// path only. Only content_version>0 rows qualify, which also guarantees the
+// record describes a file (directories never carry content metadata).
+func (w *MySQLFileMetaWriter) GetFileInfoByPath(ctx context.Context, path string) (*dao.FileInfo, bool) {
+	if w == nil || w.store == nil || strings.TrimSpace(path) == "" {
+		return nil, false
+	}
+	record, ok, err := w.store.GetFileMetaByPath(ctx, path)
+	if err != nil || !ok || record == nil {
+		return nil, false
+	}
+	return &dao.FileInfo{
+		Path:              record.OriginalPath,
+		EncryptedPath:     record.EncryptedPath,
+		Name:              record.Name,
+		Size:              record.Size,
+		CiphertextSize:    record.CiphertextSize,
+		ContentVersion:    record.ContentVersion,
+		HeaderLen:         record.HeaderLen,
+		NonceField:        append([]byte(nil), record.NonceField...),
+		ChunkSize:         record.ChunkSize,
+		KDFIterations:     record.KDFIterations,
+		RawURL:            record.RawURL,
+		RawURLAuthScope:   record.RawURLAuthScope,
+		Sign:              record.Sign,
+		UpstreamFetchedAt: record.UpstreamFetchedAt,
+	}, true
 }
 
 func fileMetaRecordFromInfo(info *dao.FileInfo) mysqlstore.FileMetaRecord {

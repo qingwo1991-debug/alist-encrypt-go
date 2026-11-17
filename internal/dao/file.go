@@ -2,6 +2,7 @@ package dao
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -59,12 +60,22 @@ type FileMetaStoreWriter interface {
 	UpsertFileMeta(info *FileInfo) error
 }
 
+// FileInfoReader is an optional read-back interface for external metadata
+// stores. When a MySQL file-meta writer is configured, persistInfo skips the
+// BoltDB fileinfo bucket entirely, so without a reader every cached FileInfo —
+// including confirmed content metadata — would be lost on restart even though
+// the rows still exist in MySQL.
+type FileInfoReader interface {
+	GetFileInfoByPath(ctx context.Context, path string) (*FileInfo, bool)
+}
+
 // FileDAO handles file information caching
 type FileDAO struct {
 	store          *storage.Store
 	cfg            *config.Config
 	pathCache      *PathCache // Unified high-performance cache
 	fileMetaWriter FileMetaStoreWriter
+	fileInfoReader FileInfoReader
 	cleanupStop    chan struct{}
 	cleanupOnce    sync.Once
 	cleanupWG      sync.WaitGroup
@@ -195,6 +206,12 @@ func (d *FileDAO) SetFileMetaWriter(w FileMetaStoreWriter) {
 	d.fileMetaWriter = w
 }
 
+// SetFileInfoReader injects a read-back source consulted when both the path
+// cache and the BoltDB bucket miss (the MySQL-backed deployment case).
+func (d *FileDAO) SetFileInfoReader(r FileInfoReader) {
+	d.fileInfoReader = r
+}
+
 // Get retrieves file info from cache or store
 func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 	// Check unified path cache first
@@ -226,14 +243,16 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 
 	// Check persistent store
 	var info FileInfo
-	if err := d.store.GetJSON(storage.BucketFileInfo, path, &info); err != nil {
-		return nil, false
+	if err := d.store.GetJSON(storage.BucketFileInfo, path, &info); err == nil && info.Path != "" {
+		return &info, true
 	}
-	if info.Path == "" {
-		return nil, false
+	if d.fileInfoReader != nil {
+		if hydrated, ok := d.fileInfoReader.GetFileInfoByPath(context.Background(), path); ok && hydrated != nil {
+			d.cacheInfo(hydrated)
+			return hydrated, true
+		}
 	}
-
-	return &info, true
+	return nil, false
 }
 
 // mergeMissingFields carries previously-known fields into an incoming FileInfo
