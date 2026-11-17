@@ -89,9 +89,13 @@ func New(cfg *config.Config) (*Server, error) {
 		mysqlStore:  mysqlStore,
 	}
 
-	// If MySQL is available, hook it into FileDAO for file metadata persistence.
+	// If MySQL is available, hook it into FileDAO for file metadata persistence
+	// and read-back hydration (the writer bypasses the BoltDB fileinfo bucket,
+	// so Get needs this reader to survive restarts).
 	if mysqlStore != nil {
-		s.fileDAO.SetFileMetaWriter(handler.NewMySQLFileMetaWriter(mysqlStore))
+		fileMetaWriter := handler.NewMySQLFileMetaWriter(mysqlStore)
+		s.fileDAO.SetFileMetaWriter(fileMetaWriter)
+		s.fileDAO.SetFileInfoReader(fileMetaWriter)
 	}
 
 	// Ensure default admin user exists
