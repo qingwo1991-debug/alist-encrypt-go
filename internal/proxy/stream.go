@@ -67,27 +67,29 @@ func PutBuffer(buf *[]byte) {
 
 // StreamProxy handles streaming proxy with encryption/decryption
 type StreamProxy struct {
-	client           *Client
-	cfg              *config.Config
-	compatStore      RangeCompatStore
-	redirectRewriter RedirectRewriter
-	rangeStats       *rangeLearningStats
-	playbackHintsMu  sync.RWMutex
-	playbackHints    map[string]recentPlaybackHint
-	playbackHintHits uint64
-	chunkedHintHits  uint64
-	rangeHintHits    uint64
-	fullHintHits     uint64
-	cbGate           *backoff.Gate           // circuit breaker for the configured upstream and invalid targets
-	cbGates          *circuitBreakerRegistry // host-isolated circuit breakers for CDN/data-plane targets
-	retrier          *backoff.Retrier        // retry with jitter for transient network errors
-	uploadMetaMu     sync.Mutex
-	uploadMeta       map[string]uploadMetaEntry
-	blockCache       *decryptedBlockCache
-	v3Memory         *v3MemoryBudget
-	streamLimiter    chan struct{}
-	activeStreams    int64
-	rejectedStreams  uint64
+	client            *Client
+	cfg               *config.Config
+	compatStore       RangeCompatStore
+	redirectRewriter  RedirectRewriter
+	rangeStats        *rangeLearningStats
+	playbackHintsMu   sync.RWMutex
+	playbackHints     map[string]recentPlaybackHint
+	playbackHintHits  uint64
+	chunkedHintHits   uint64
+	rangeHintHits     uint64
+	fullHintHits      uint64
+	cbGate            *backoff.Gate           // circuit breaker for the configured upstream and invalid targets
+	cbGates           *circuitBreakerRegistry // host-isolated circuit breakers for CDN/data-plane targets
+	retrier           *backoff.Retrier        // retry with jitter for transient network errors
+	uploadMetaMu      sync.Mutex
+	uploadMeta        map[string]uploadMetaEntry
+	blockCache        *decryptedBlockCache
+	v3Memory          *v3MemoryBudget
+	streamLimiter     chan struct{}
+	activeStreams     int64
+	rejectedStreams   uint64
+	readaheadActive   atomic.Int32
+	readaheadInflight sync.Map
 }
 
 // StreamOutcome describes the streaming result for strategy selection.

@@ -682,6 +682,10 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true
 
+	if activeRange != nil {
+		s.maybeReadahead(req, targetURL, passwdInfo, fileSize, meta, activeRange.Start, activeRange.End, strategy, compatStorageKey)
+	}
+
 	buf := getBuffer()
 	defer putBuffer(buf)
 	written, err := copyStreamBody(w, readerToStream, *buf, result.ExpectedBytes)
