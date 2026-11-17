@@ -196,7 +196,7 @@ func (s *Store) CleanupFileMeta(ctx context.Context, cutoff time.Time) error {
 	if s == nil {
 		return nil
 	}
-	return s.markFileMetaExpired(ctx, cutoff)
+	return s.deleteExpiredFileMeta(ctx, cutoff)
 }
 
 func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]FileMetaRecord, error) {

@@ -413,20 +413,23 @@ func (s *Store) upsertRangeCompats(ctx context.Context, records []RangeCompatRec
 	return err
 }
 
-func (s *Store) markStrategyExpired(ctx context.Context, cutoff time.Time) error {
-	query := fmt.Sprintf("UPDATE %s SET is_active=0 WHERE last_accessed < ?", TableName("strategy"))
+func (s *Store) deleteExpiredStrategy(ctx context.Context, cutoff time.Time) error {
+	// 软删(is_active=0)不释放磁盘且行会永久残留,过期缓存必须物理删除。
+	query := fmt.Sprintf("DELETE FROM %s WHERE last_accessed < ?", TableName("strategy"))
 	_, err := s.db.ExecContext(ctx, query, cutoff)
 	return err
 }
 
-func (s *Store) markFileMetaExpired(ctx context.Context, cutoff time.Time) error {
-	query := fmt.Sprintf("UPDATE %s SET is_active=0 WHERE last_accessed < ?", TableName("file_meta"))
+func (s *Store) deleteExpiredFileMeta(ctx context.Context, cutoff time.Time) error {
+	// 软删(is_active=0)不释放磁盘且行会永久残留,过期缓存必须物理删除。
+	query := fmt.Sprintf("DELETE FROM %s WHERE last_accessed < ?", TableName("file_meta"))
 	_, err := s.db.ExecContext(ctx, query, cutoff)
 	return err
 }
 
-func (s *Store) markRangeCompatExpired(ctx context.Context, cutoff time.Time) error {
-	query := fmt.Sprintf("UPDATE %s SET is_active=0 WHERE last_accessed < ?", TableName("range_compat"))
+func (s *Store) deleteExpiredRangeCompat(ctx context.Context, cutoff time.Time) error {
+	// 软删(is_active=0)不释放磁盘且行会永久残留,过期缓存必须物理删除。
+	query := fmt.Sprintf("DELETE FROM %s WHERE last_accessed < ?", TableName("range_compat"))
 	_, err := s.db.ExecContext(ctx, query, cutoff)
 	return err
 }
