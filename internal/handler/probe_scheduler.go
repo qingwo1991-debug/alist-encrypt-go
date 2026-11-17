@@ -386,7 +386,7 @@ func (ps *ProbeScheduler) EnqueueWithSource(file FileItem, authHeaders http.Head
 	}
 
 	key := probeCooldownKey(file)
-	reservedAt, skipStatus := ps.reserveProbe(key, ps.warmNeedsRefresh(file.DisplayPath) || ps.needsContentMeta(file))
+	reservedAt, skipStatus := ps.reserveProbe(key, ps.warmNeedsRefresh(file.DisplayPath) || ps.needsContentMeta(file) || ps.rawURLNeedsRefresh(file))
 	if skipStatus != "" {
 		if skipStatus == probeStatusSkippedCD {
 			atomic.AddUint64(&ps.cooldownSkips, 1)
@@ -1085,6 +1085,30 @@ func probeCooldownKey(file FileItem) string {
 		displayPath = strings.TrimSpace(file.EncryptedPath)
 	}
 	return provider + "::" + displayPath
+}
+
+// rawURLNeedsRefresh reports whether the cached signed raw URL is old enough
+// to be expired while the file still sits inside the full probe cooldown.
+// Signed URLs die long before the 24h probe cooldown, so without this bypass a
+// file listed an hour ago keeps a dead URL and every first play pays a fresh
+// upstream fs/get. The bypass only re-admits the file once per staleness
+// window: after a refresh UpstreamFetchedAt is renewed and ordinary cooldown
+// applies again. Files with no cached raw URL are left to the normal path.
+func (ps *ProbeScheduler) rawURLNeedsRefresh(file FileItem) bool {
+	if ps == nil || ps.fileDAO == nil || strings.TrimSpace(file.DisplayPath) == "" {
+		return false
+	}
+	info, ok := ps.fileDAO.Get(file.DisplayPath)
+	if !ok || info == nil || strings.TrimSpace(info.RawURL) == "" {
+		return false
+	}
+	threshold := 30 * time.Minute
+	if ps.cfg != nil {
+		if minutes := ps.cfg.AlistServer.UpstreamStalenessMinutes; minutes > 0 {
+			threshold = time.Duration(minutes) * time.Minute
+		}
+	}
+	return info.UpstreamFetchedAt.IsZero() || time.Since(info.UpstreamFetchedAt) > threshold
 }
 
 func (ps *ProbeScheduler) needsContentMeta(file FileItem) bool {
