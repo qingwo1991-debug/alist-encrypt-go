@@ -243,13 +243,13 @@ func (s *Store) flushBuffers(ctx context.Context) {
 
 func (s *Store) cleanup(ctx context.Context) error {
 	cutoff := time.Now().Add(-time.Duration(s.cleanupDays) * 24 * time.Hour)
-	if err := s.markStrategyExpired(ctx, cutoff); err != nil {
+	if err := s.deleteExpiredStrategy(ctx, cutoff); err != nil {
 		return err
 	}
-	if err := s.markFileMetaExpired(ctx, cutoff); err != nil {
+	if err := s.deleteExpiredFileMeta(ctx, cutoff); err != nil {
 		return err
 	}
-	if err := s.markRangeCompatExpired(ctx, cutoff); err != nil {
+	if err := s.deleteExpiredRangeCompat(ctx, cutoff); err != nil {
 		return err
 	}
 	// 目录快照是纯缓存:命中后由请求侧按需重建,删除旧行不影响功能与播放链路。
