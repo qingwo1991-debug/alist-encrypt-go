@@ -78,8 +78,10 @@ func (s *Store) GetFileMeta(ctx context.Context, providerKey, originalPath strin
 	return &record, true, nil
 }
 
-// GetFileMetaByPath returns the freshest active record for a display path that
-// carries confirmed content metadata. The file_meta key embeds the provider
+// GetFileMetaByPath returns the best active record for a display path that
+// carries confirmed content metadata, preferring rows that also hold a raw
+// URL (signed URLs expire, so the freshest fetch wins) and falling back to
+// content-meta-only rows. The file_meta key embeds the provider
 // host observed when the row was written, which is not stable across raw-url
 // providers, so path-only lookups cannot use KeyHash. Content metadata
 // (version/nonce/geometry) is file-intrinsic and safe to share across scopes.
@@ -87,7 +89,7 @@ func (s *Store) GetFileMetaByPath(ctx context.Context, originalPath string) (*Fi
 	if s == nil || s.db == nil {
 		return nil, false, nil
 	}
-	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE BINARY original_path = BINARY ? AND is_active=1 AND content_version > 0 ORDER BY last_accessed DESC LIMIT 1"
+	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE BINARY original_path = BINARY ? AND is_active=1 AND content_version > 0 ORDER BY (raw_url IS NOT NULL AND raw_url <> '') DESC, upstream_fetched_at DESC LIMIT 1"
 	row := s.db.QueryRowContext(ctx, query, originalPath)
 
 	var record FileMetaRecord
