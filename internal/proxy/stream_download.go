@@ -694,16 +694,13 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true
 
-	if activeRange != nil {
-		s.maybeReadahead(req, targetURL, passwdInfo, fileSize, meta, activeRange.Start, activeRange.End, strategy, compatStorageKey)
-	} else if fullRequestedRange == nil && req.Method == http.MethodGet {
-		// Range-less playback start: treat it as an open range from 0.
-		s.maybeReadahead(req, targetURL, passwdInfo, fileSize, meta, 0, fileSize-1, strategy, compatStorageKey)
-	}
+	// Readahead is armed now but starts only after the first body byte went
+	// out (plus a short delay), so it never competes with the first frame.
+	bodyDst := s.readaheadAfterFirstByte(w, req, targetURL, passwdInfo, fileSize, meta, activeRange, fullRequestedRange, strategy, compatStorageKey)
 
 	buf := getBuffer()
 	defer putBuffer(buf)
-	written, err := copyStreamBody(w, readerToStream, *buf, result.ExpectedBytes)
+	written, err := copyStreamBody(bodyDst, readerToStream, *buf, result.ExpectedBytes)
 	result.BytesWritten = written
 	result.WallDuration = time.Since(streamStart)
 	if result.WallDuration > 0 && written > 0 {

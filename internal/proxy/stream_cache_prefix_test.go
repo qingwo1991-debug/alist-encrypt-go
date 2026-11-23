@@ -214,3 +214,54 @@ func TestReadaheadTailWindowOnPlaybackStart(t *testing.T) {
 		t.Fatal("forward window already covers a small file's tail")
 	}
 }
+
+func TestMP4MoovAtFront(t *testing.T) {
+	box := func(typ string, size int) []byte {
+		b := make([]byte, size)
+		b[0], b[1], b[2], b[3] = byte(size>>24), byte(size>>16), byte(size>>8), byte(size)
+		copy(b[4:8], typ)
+		return b
+	}
+	front := append(append(box("ftyp", 32), box("moov", 64)...), box("free", 8)...)
+	if !mp4MoovAtFront(front) {
+		t.Fatal("moov before mdat must be detected")
+	}
+	back := append(box("ftyp", 32), []byte{0, 0, 0, 0, 'm', 'd', 'a', 't'}...)
+	if mp4MoovAtFront(back) {
+		t.Fatal("mdat first means the index is at the tail")
+	}
+	if mp4MoovAtFront([]byte("\x1aE\xdf\xa3 matroska")) {
+		t.Fatal("non-MP4 must keep tail warm-up")
+	}
+}
+
+func TestFirstWriteHookFiresOnceAfterSniffBytes(t *testing.T) {
+	var got [][]byte
+	var dst bytes.Buffer
+	h := &firstWriteHook{dst: &dst, fire: func(b []byte) { got = append(got, append([]byte(nil), b...)) }}
+	h.Write(make([]byte, 100))
+	if len(got) != 0 {
+		t.Fatal("fired before sniff bytes collected")
+	}
+	h.Write(bytes.Repeat([]byte{1}, 1000))
+	h.Write([]byte{2})
+	if len(got) != 1 || len(got[0]) != firstWriteSniffBytes || dst.Len() != 1101 {
+		t.Fatalf("fires=%d written=%d", len(got), dst.Len())
+	}
+}
+
+func TestContinuationWriterRejectsMismatchedRange(t *testing.T) {
+	rec := httptest.NewRecorder()
+	cw := &continuationWriter{dst: rec, header: make(http.Header), contStart: 100, end: 199}
+	cw.Header().Set("Content-Range", "bytes 0-199/1000")
+	cw.WriteHeader(http.StatusPartialContent)
+	if n, err := cw.Write([]byte("x")); err == nil || n != 0 || rec.Body.Len() != 0 {
+		t.Fatalf("mismatched continuation leaked bytes: n=%d err=%v", n, err)
+	}
+	ok := &continuationWriter{dst: rec, header: make(http.Header), contStart: 100, end: 199}
+	ok.Header().Set("Content-Range", "bytes 100-199/1000")
+	ok.WriteHeader(http.StatusPartialContent)
+	if _, err := ok.Write([]byte("y")); err != nil || rec.Body.String() != "y" || rec.Header().Get("Content-Range") != "" {
+		t.Fatalf("matching continuation: err=%v body=%q hdr=%v", err, rec.Body.String(), rec.Header())
+	}
+}

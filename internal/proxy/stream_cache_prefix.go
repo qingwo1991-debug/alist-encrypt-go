@@ -67,15 +67,6 @@ func (s *StreamProxy) tryServeDecryptedCachePrefix(w http.ResponseWriter, req *h
 
 	creq := req.Clone(context.WithValue(req.Context(), decryptedCachePrefixKey{}, true))
 	creq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", contStart, end))
-	pw := &prefixResponseWriter{
-		ResponseWriter: w,
-		prefix:         prefix,
-		start:          start,
-		contStart:      contStart,
-		end:            end,
-		total:          fileSize,
-		wholeBody:      rangeHeader == "",
-	}
 	log.Info().
 		Str("category", "playback").
 		Str("target_url", targetURL).
@@ -84,97 +75,125 @@ func (s *StreamProxy) tryServeDecryptedCachePrefix(w http.ResponseWriter, req *h
 		Int64("continuation_start", contStart).
 		Msg("Serving decrypted cache prefix with upstream continuation")
 
-	outcome := cont(pw, creq)
+	// Commit headers and the cached prefix immediately: the first byte must not
+	// wait for the continuation's upstream round trip. The continuation is
+	// opened only afterwards, while the player is already consuming the prefix.
+	// Trade-off: once the prefix is out, a failed continuation can no longer
+	// fall back transparently; the response ends short and the player
+	// re-requests from where it stopped (mainstream players do).
+	h := w.Header()
+	for _, name := range []string{"Content-Encoding", "Transfer-Encoding", "ETag", "Last-Modified"} {
+		h.Del(name)
+	}
+	h.Set("Accept-Ranges", "bytes")
+	status := http.StatusPartialContent
+	if rangeHeader == "" {
+		h.Del("Content-Range")
+		h.Set("Content-Length", strconv.FormatInt(fileSize, 10))
+		status = http.StatusOK
+	} else {
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+		h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	}
+	w.WriteHeader(status)
+	n, err := w.Write(prefix)
+	if err == nil && n < len(prefix) {
+		err = errors.NewProxyError("short write of cached prefix")
+	}
+	if err == nil {
+		_ = http.NewResponseController(w).Flush()
+	}
+	expected := end - start + 1
+	if err != nil {
+		return &StreamOutcome{
+			ResponseStarted: true,
+			StatusCode:      status,
+			BytesWritten:    int64(n),
+			ExpectedBytes:   expected,
+			Err:             err,
+			FailureReason:   classifyStreamCopyError(req.Context(), err),
+			NoLearning:      true,
+		}, true
+	}
+
+	cw := &continuationWriter{dst: w, header: make(http.Header), contStart: contStart, end: end}
+	outcome := cont(cw, creq)
 	if outcome == nil {
 		outcome = &StreamOutcome{}
 	}
-	if pw.prefixDone {
-		outcome.ResponseStarted = true
-		outcome.BytesWritten += pw.prefixWritten
-		outcome.ExpectedBytes += int64(len(prefix))
-		if pw.wholeBody {
-			outcome.StatusCode = http.StatusOK
-		}
-		if pw.err != nil && outcome.Err == nil {
-			outcome.Err = pw.err
-			outcome.FailureReason = classifyStreamCopyError(req.Context(), pw.err)
-			outcome.Retryable = false
-			outcome.NoLearning = true
+	outcome.ResponseStarted = true
+	outcome.StatusCode = status
+	outcome.BytesWritten = int64(n) + cw.written
+	outcome.ExpectedBytes = expected
+	if cw.err != nil && outcome.Err == nil {
+		outcome.Err = cw.err
+		outcome.FailureReason = "continuation_mismatch"
+	}
+	if outcome.Err == nil && outcome.BytesWritten < expected {
+		outcome.Err = errors.NewProxyError("cached prefix continuation ended early")
+		outcome.FailureReason = "upstream_truncated"
+	}
+	if outcome.Err != nil {
+		// Headers and prefix are committed: nothing may be appended by a retry.
+		outcome.Retryable = false
+		outcome.NoLearning = true
+		if outcome.FailureReason == "" {
+			outcome.FailureReason = "continuation_failed"
 		}
 	}
 	return outcome, true
 }
 
-// prefixResponseWriter rewrites the continuation's 206 headers to describe the
-// client's original interval, then writes the cached prefix before any
-// continuation body bytes. If the continuation fails before committing headers,
-// nothing reaches the client and the caller's retry/fallback logic still works.
-type prefixResponseWriter struct {
-	http.ResponseWriter
-	prefix        []byte
-	start         int64
-	contStart     int64
-	end           int64
-	total         int64
-	wholeBody     bool
-	headerDone    bool
-	prefixDone    bool
-	prefixWritten int64
-	err           error
+// continuationWriter receives the upstream continuation after the client
+// response (headers + cached prefix) was already committed. The continuation's
+// own headers go to a scratch map; its body is forwarded only if it really is
+// a 206 for exactly [contStart, end], otherwise nothing is appended.
+type continuationWriter struct {
+	dst        http.ResponseWriter
+	header     http.Header
+	contStart  int64
+	end        int64
+	headerDone bool
+	written    int64
+	err        error
 }
 
-func (p *prefixResponseWriter) WriteHeader(status int) {
-	if p.headerDone {
-		p.ResponseWriter.WriteHeader(status)
+func (c *continuationWriter) Header() http.Header { return c.header }
+
+func (c *continuationWriter) WriteHeader(status int) {
+	if c.headerDone {
 		return
 	}
-	p.headerDone = true
-	h := p.ResponseWriter.Header()
+	c.headerDone = true
 	if status != http.StatusPartialContent {
-		p.ResponseWriter.WriteHeader(status)
+		c.err = errors.NewProxyError(fmt.Sprintf("continuation returned status %d", status))
 		return
 	}
-	actual, ok := parseContentRange(h.Get("Content-Range"))
-	if !ok || actual.Start != p.contStart || actual.End != p.end {
-		// Still a truthful 206 for the interval it describes.
+	actual, ok := parseContentRange(c.header.Get("Content-Range"))
+	if !ok || actual.Start != c.contStart || actual.End != c.end {
 		log.Warn().
-			Str("content_range", h.Get("Content-Range")).
-			Int64("expected_start", p.contStart).
-			Int64("expected_end", p.end).
-			Msg("Continuation range mismatch; passing through without cached prefix")
-		p.ResponseWriter.WriteHeader(status)
-		return
+			Str("content_range", c.header.Get("Content-Range")).
+			Int64("expected_start", c.contStart).
+			Int64("expected_end", c.end).
+			Msg("Continuation range mismatch; ending response after cached prefix")
+		c.err = errors.NewProxyError("continuation range mismatch")
 	}
-	if p.wholeBody {
-		h.Del("Content-Range")
-		h.Set("Content-Length", strconv.FormatInt(p.total, 10))
-		status = http.StatusOK
-	} else {
-		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", p.start, p.end, p.total))
-		h.Set("Content-Length", strconv.FormatInt(p.end-p.start+1, 10))
-	}
-	p.ResponseWriter.WriteHeader(status)
-	p.prefixDone = true
-	n, err := p.ResponseWriter.Write(p.prefix)
-	p.prefixWritten = int64(n)
-	if err == nil && n < len(p.prefix) {
-		err = errors.NewProxyError("short write of cached prefix")
-	}
-	p.err = err
 }
 
-func (p *prefixResponseWriter) Write(b []byte) (int, error) {
-	if !p.headerDone {
-		p.WriteHeader(http.StatusOK)
+func (c *continuationWriter) Write(b []byte) (int, error) {
+	if !c.headerDone {
+		c.WriteHeader(http.StatusOK)
 	}
-	if p.err != nil {
-		return 0, p.err
+	if c.err != nil {
+		return 0, c.err
 	}
-	return p.ResponseWriter.Write(b)
+	n, err := c.dst.Write(b)
+	c.written += int64(n)
+	return n, err
 }
 
-func (p *prefixResponseWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+func (c *continuationWriter) Unwrap() http.ResponseWriter { return c.dst }
 
-func (p *prefixResponseWriter) Flush() {
-	_ = http.NewResponseController(p.ResponseWriter).Flush()
+func (c *continuationWriter) Flush() {
+	_ = http.NewResponseController(c.dst).Flush()
 }
