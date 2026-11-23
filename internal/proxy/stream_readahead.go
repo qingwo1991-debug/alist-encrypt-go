@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/alist-encrypt-go/internal/config"
 	"github.com/alist-encrypt-go/internal/httputil"
 	encryption "github.com/alist-encrypt-go/shared/encryptcore"
+	"github.com/rs/zerolog/log"
 )
 
 // Playback readahead: when a client Range stream starts, a background task
@@ -39,7 +41,98 @@ const (
 	// V3 records live in a small, short-TTL cache (64 MiB / 30 s); a smaller
 	// window keeps warmed records from expiring or evicting live ones.
 	readaheadV3LookaheadBytes = 8 << 20
+	// playbackWindowLogBytes is the body size after which the live stream logs
+	// how long it took to deliver it; closer to "picture is back" than the
+	// first byte, since players buffer a few MiB before resuming.
+	playbackWindowLogBytes = 4 << 20
 )
+
+// readaheadRegistry tracks running readaheads per file so a seek can cancel
+// the ones that no longer cover the playback position, and invalidates
+// readaheads that were scheduled but have not started yet.
+type readaheadRegistry struct {
+	mu    sync.Mutex
+	seq   uint64
+	files map[string]*fileReadaheads
+}
+
+type fileReadaheads struct {
+	gen     uint64
+	touched time.Time
+	runs    map[uint64]*readaheadRun
+}
+
+type readaheadRun struct {
+	start, end int64
+	cancel     context.CancelFunc
+}
+
+func (r *readaheadRegistry) file(baseKey string) *fileReadaheads {
+	if r.files == nil {
+		r.files = make(map[string]*fileReadaheads)
+	}
+	f := r.files[baseKey]
+	if f == nil {
+		f = &fileReadaheads{runs: make(map[uint64]*readaheadRun)}
+		r.files[baseKey] = f
+	}
+	f.touched = time.Now()
+	return f
+}
+
+// supersede records a new live request for baseKey at plaintext offset pos.
+// Running readaheads whose window does not contain pos are cancelled, and
+// any readahead scheduled by an earlier request is invalidated. It returns
+// the generation the new request's own readahead must still match.
+func (r *readaheadRegistry) supersede(baseKey string, pos int64) (uint64, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.files) > 512 {
+		cutoff := time.Now().Add(-time.Minute)
+		for k, f := range r.files {
+			if len(f.runs) == 0 && f.touched.Before(cutoff) {
+				delete(r.files, k)
+			}
+		}
+	}
+	f := r.file(baseKey)
+	r.seq++
+	f.gen = r.seq
+	cancelled := 0
+	for id, run := range f.runs {
+		if pos < run.start || pos > run.end {
+			run.cancel()
+			delete(f.runs, id)
+			cancelled++
+		}
+	}
+	return f.gen, cancelled
+}
+
+func (r *readaheadRegistry) current(baseKey string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f := r.files[baseKey]; f != nil {
+		return f.gen
+	}
+	return 0
+}
+
+func (r *readaheadRegistry) register(baseKey string, start, end int64, cancel context.CancelFunc) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	r.file(baseKey).runs[r.seq] = &readaheadRun{start: start, end: end, cancel: cancel}
+	return r.seq
+}
+
+func (r *readaheadRegistry) unregister(baseKey string, id uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f := r.files[baseKey]; f != nil {
+		delete(f.runs, id)
+	}
+}
 
 type streamReadaheadKey struct{}
 
@@ -62,14 +155,15 @@ func (d *discardResponseWriter) Write(p []byte) (int, error) {
 
 // readaheadWindow returns the plaintext interval to prefetch for an active
 // range. A bounded range prefetches right after its end. An open-ended range
-// ("bytes=N-" or no Range, which parse to End = EOF) is already streaming from
-// N, so the window starts a fixed lead ahead of the live position instead of
-// at End+1, which would always lie past EOF.
+// ("bytes=N-" or no Range, which parse to End = EOF) gets no forward window:
+// its own connection already streams those bytes next, so a parallel fetch
+// would download them twice and split the upstream bandwidth the player
+// needs to refill its buffer after a seek.
 func readaheadWindow(plainSize, activeStart, activeEnd int64) (int64, int64, bool) {
-	nextStart := activeEnd + 1
 	if activeEnd >= plainSize-1 {
-		nextStart = activeStart + readaheadOpenRangeLeadBytes
+		return 0, 0, false
 	}
+	nextStart := activeEnd + 1
 	if nextStart < 0 || nextStart >= plainSize {
 		return 0, 0, false
 	}
@@ -97,7 +191,9 @@ func (s *StreamProxy) maybeReadahead(req *http.Request, targetURL string, passwd
 // scheduleReadahead is called once the live stream wrote its first body byte
 // (first holds those bytes). It defers the readahead by readaheadStartDelay
 // and skips the tail warm-up when the file is an MP4 with its moov up front.
-func (s *StreamProxy) scheduleReadahead(req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, activeRangeStart, activeRangeEnd int64, strategy StreamStrategy, compatStorageKey string, first []byte) {
+// A later request for the same file (a seek) bumps the generation and the
+// deferred readahead is dropped.
+func (s *StreamProxy) scheduleReadahead(req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, activeRangeStart, activeRangeEnd int64, strategy StreamStrategy, compatStorageKey string, first []byte, baseKey string, gen uint64) {
 	if s == nil || s.blockCache == nil || req == nil || req.Context().Value(streamReadaheadKey{}) != nil {
 		return
 	}
@@ -119,6 +215,9 @@ func (s *StreamProxy) scheduleReadahead(req *http.Request, targetURL string, pas
 			if activeRangeEnd >= plainSize-1 {
 				return
 			}
+		}
+		if gen != 0 && s.readaheadFiles.current(baseKey) != gen {
+			return
 		}
 		s.readahead(req, targetURL, passwdInfo, fileSize, meta, activeRangeStart, activeRangeEnd, strategy, compatStorageKey, warmTail)
 	}()
@@ -222,33 +321,62 @@ func (s *StreamProxy) runReadahead(req *http.Request, targetURL string, passwdIn
 	}()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), readaheadTimeout)
 	defer cancel()
+	id := s.readaheadFiles.register(baseKey, nextStart, nextStart+lookahead-1, cancel)
+	defer s.readaheadFiles.unregister(baseKey, id)
 	synth := req.Clone(ctx)
 	synth = synth.WithContext(context.WithValue(ctx, streamReadaheadKey{}, true))
 	synth.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", nextStart, nextStart+lookahead-1))
 	s.ProxyDownloadDecryptReqWithStrategyForStorage(&discardResponseWriter{}, synth, targetURL, passwdInfo, fileSize, strategy, compatStorageKey)
-	_ = baseKey
 }
 
 // readaheadAfterFirstByte returns the writer the live body should be copied
-// into. On its first Write it schedules the playback readahead, handing over
-// the first plaintext bytes so the tail warm-up can be skipped for MP4s whose
-// moov sits at the front. Returns w unchanged when no readahead applies.
-func (s *StreamProxy) readaheadAfterFirstByte(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, activeRange, fullRequestedRange *httputil.Range, strategy StreamStrategy, compatStorageKey string) io.Writer {
-	if s == nil || s.blockCache == nil || req == nil || req.Method != http.MethodGet {
+// into. Every live GET first supersedes the file's earlier readaheads (a seek
+// cancels windows that no longer cover the new position). Once enough body
+// went out it schedules this request's readahead, handing over the first
+// plaintext bytes so the tail warm-up can be skipped for MP4s whose moov sits
+// at the front. It also logs how long the first playbackWindowLogBytes took.
+func (s *StreamProxy) readaheadAfterFirstByte(w http.ResponseWriter, req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, meta encryption.ContentMeta, activeRange, fullRequestedRange *httputil.Range, strategy StreamStrategy, compatStorageKey string, streamStart time.Time) io.Writer {
+	if s == nil || req == nil || req.Method != http.MethodGet || req.Context().Value(streamReadaheadKey{}) != nil {
 		return w
 	}
-	start, end := int64(0), fileSize-1
+	plainSize := fileSize
+	if meta.PlainSize > 0 {
+		plainSize = meta.PlainSize
+	}
+	start, end := int64(0), plainSize-1
+	schedule := true
 	switch {
 	case activeRange != nil:
 		start, end = activeRange.Start, activeRange.End
 	case fullRequestedRange == nil:
 		// Range-less playback start: treat it as an open range from 0.
 	default:
-		return w
+		schedule = false
 	}
-	return &firstWriteHook{dst: w, fire: func(first []byte) {
-		s.scheduleReadahead(req, targetURL, passwdInfo, fileSize, meta, start, end, strategy, compatStorageKey, first)
+	openEnded := end >= plainSize-1
+	hook := &firstWriteHook{dst: w, started: streamStart, onWindow: func(d time.Duration) {
+		log.Info().
+			Int64("range_start", start).
+			Bool("open_ended", openEnded).
+			Int64("file_size", plainSize).
+			Float64("first_4mib_ms", float64(d)/float64(time.Millisecond)).
+			Msg("Playback window delivered")
 	}}
+	if s.blockCache == nil || !schedule {
+		return hook
+	}
+	baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
+	if baseKey == "" {
+		return hook
+	}
+	gen, cancelled := s.readaheadFiles.supersede(baseKey, start)
+	if cancelled > 0 {
+		log.Debug().Int("cancelled", cancelled).Int64("range_start", start).Msg("Seek cancelled stale readahead")
+	}
+	hook.fire = func(first []byte) {
+		s.scheduleReadahead(req, targetURL, passwdInfo, fileSize, meta, start, end, strategy, compatStorageKey, first, baseKey, gen)
+	}
+	return hook
 }
 
 // firstWriteSniffBytes is how much of the body is collected before the
@@ -261,11 +389,21 @@ type firstWriteHook struct {
 	fire func([]byte)
 	head []byte
 	done bool
+
+	started      time.Time
+	written      int64
+	onWindow     func(time.Duration)
+	windowLogged bool
 }
 
 func (h *firstWriteHook) Write(b []byte) (int, error) {
 	n, err := h.dst.Write(b)
-	if !h.done && n > 0 {
+	h.written += int64(n)
+	if h.onWindow != nil && !h.windowLogged && h.written >= playbackWindowLogBytes {
+		h.windowLogged = true
+		h.onWindow(time.Since(h.started))
+	}
+	if h.fire != nil && !h.done && n > 0 {
 		if need := firstWriteSniffBytes - len(h.head); need > 0 {
 			if need > n {
 				need = n

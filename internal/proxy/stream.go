@@ -90,6 +90,7 @@ type StreamProxy struct {
 	rejectedStreams   uint64
 	readaheadActive   atomic.Int32
 	readaheadInflight sync.Map
+	readaheadFiles    readaheadRegistry
 }
 
 // StreamOutcome describes the streaming result for strategy selection.
