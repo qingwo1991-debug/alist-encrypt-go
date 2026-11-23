@@ -623,6 +623,7 @@ func loadConfigAt(configPath string) *Config {
 	cfg.applyEnvOverrides()
 	cfg.normalizeAlistServerTuning()
 	encryption.SetV2KeyCacheTTL(time.Duration(cfg.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
+	prewarmV2Keys(cfg.AlistServer.PasswdList)
 	cfg.normalizeProxyConfig()
 
 	if strings.TrimSpace(cfg.JWTSecret) == "" || cfg.JWTSecret == "alist-encrypt-secret" {
@@ -886,6 +887,7 @@ func (c *Config) ReplaceFromJSON(data []byte) error {
 	}
 	c.runtimeRevision++
 	encryption.SetV2KeyCacheTTL(time.Duration(c.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
+	prewarmV2Keys(c.AlistServer.PasswdList)
 	return nil
 }
 
@@ -1571,6 +1573,7 @@ func (c *Config) UpdateAlistServer(server AlistServer) error {
 	}
 	c.runtimeRevision++
 	encryption.SetV2KeyCacheTTL(time.Duration(c.AlistServer.V2KeyCacheTTLMinutes) * time.Minute)
+	prewarmV2Keys(c.AlistServer.PasswdList)
 	return nil
 }
 

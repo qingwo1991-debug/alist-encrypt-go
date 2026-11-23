@@ -26,6 +26,10 @@ const (
 	// already streams from N onwards, so the window starts this far ahead of
 	// it to avoid racing the player's own upstream body.
 	readaheadOpenRangeLeadBytes = 4 << 20
+	// On a playback start (range starting at 0) also warm the file tail:
+	// MP4s with a trailing moov make the player read the end before the first
+	// frame, costing an extra upstream round trip per start.
+	readaheadTailBytes = 4 << 20
 )
 
 type streamReadaheadKey struct{}
@@ -88,15 +92,32 @@ func (s *StreamProxy) maybeReadahead(req *http.Request, targetURL string, passwd
 	if plainSize < readaheadMinFileSize {
 		return
 	}
-	nextStart, lookahead, ok := readaheadWindow(plainSize, activeRangeStart, activeRangeEnd)
-	if !ok {
-		return
-	}
 	baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)
 	if baseKey == "" {
 		return
 	}
-	dedupKey := fmt.Sprintf("%s@%d", baseKey, nextStart/readaheadDedupBucketBytes)
+	if tailStart, tailLen, ok := readaheadTailWindow(plainSize, activeRangeStart); ok {
+		// Tail first: on a start the player needs it before the forward window.
+		if cached := s.blockCache.getPrefix(baseKey, tailStart, tailLen); int64(len(cached)) < tailLen {
+			s.spawnReadahead(req, targetURL, passwdInfo, fileSize, strategy, compatStorageKey, baseKey, tailStart, tailLen)
+		}
+	}
+	if nextStart, lookahead, ok := readaheadWindow(plainSize, activeRangeStart, activeRangeEnd); ok {
+		s.spawnReadahead(req, targetURL, passwdInfo, fileSize, strategy, compatStorageKey, baseKey, nextStart, lookahead)
+	}
+}
+
+// readaheadTailWindow returns the file tail to warm on a playback start.
+func readaheadTailWindow(plainSize, activeStart int64) (int64, int64, bool) {
+	if activeStart != 0 || plainSize <= readaheadOpenRangeLeadBytes+readaheadLookaheadBytes+readaheadTailBytes {
+		// Not a start, or the forward window already reaches the tail.
+		return 0, 0, false
+	}
+	return plainSize - readaheadTailBytes, readaheadTailBytes, true
+}
+
+func (s *StreamProxy) spawnReadahead(req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey, baseKey string, start, length int64) {
+	dedupKey := fmt.Sprintf("%s@%d", baseKey, start/readaheadDedupBucketBytes)
 	if _, loaded := s.readaheadInflight.LoadOrStore(dedupKey, struct{}{}); loaded {
 		return
 	}
@@ -105,7 +126,7 @@ func (s *StreamProxy) maybeReadahead(req *http.Request, targetURL string, passwd
 		s.readaheadInflight.Delete(dedupKey)
 		return
 	}
-	go s.runReadahead(req, targetURL, passwdInfo, fileSize, strategy, compatStorageKey, baseKey, dedupKey, nextStart, lookahead)
+	go s.runReadahead(req, targetURL, passwdInfo, fileSize, strategy, compatStorageKey, baseKey, dedupKey, start, length)
 }
 
 func (s *StreamProxy) runReadahead(req *http.Request, targetURL string, passwdInfo *config.PasswdInfo, fileSize int64, strategy StreamStrategy, compatStorageKey, baseKey, dedupKey string, nextStart, lookahead int64) {
