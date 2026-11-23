@@ -696,7 +696,7 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 
 	// Readahead is armed now but starts only after the first body byte went
 	// out (plus a short delay), so it never competes with the first frame.
-	bodyDst := s.readaheadAfterFirstByte(w, req, targetURL, passwdInfo, fileSize, meta, activeRange, fullRequestedRange, strategy, compatStorageKey)
+	bodyDst := s.readaheadAfterFirstByte(w, req, targetURL, passwdInfo, fileSize, meta, activeRange, fullRequestedRange, strategy, compatStorageKey, streamStart)
 
 	buf := getBuffer()
 	defer putBuffer(buf)

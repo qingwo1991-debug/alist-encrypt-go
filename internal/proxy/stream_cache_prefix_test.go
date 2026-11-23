@@ -40,17 +40,16 @@ func TestReadaheadWindowOpenEndedRange(t *testing.T) {
 	if start, n, ok := readaheadWindow(size, 0, 1023); !ok || start != 1024 || n != readaheadLookaheadBytes {
 		t.Fatalf("bounded: start=%d n=%d ok=%v", start, n, ok)
 	}
-	// "bytes=1000-" parses to End = EOF; it must still yield a window ahead
-	// of the live stream rather than nothing.
-	if start, n, ok := readaheadWindow(size, 1000, size-1); !ok || start != 1000+readaheadOpenRangeLeadBytes || n != readaheadLookaheadBytes {
-		t.Fatalf("open-ended: start=%d n=%d ok=%v", start, n, ok)
+	// Open-ended ranges ("bytes=N-" or no Range, End = EOF) get no forward
+	// window: the live connection streams those bytes itself.
+	if _, _, ok := readaheadWindow(size, 1000, size-1); ok {
+		t.Fatal("open-ended range must not prefetch its own stream")
 	}
-	// Range-less playback start behaves like "bytes=0-".
-	if start, _, ok := readaheadWindow(size, 0, size-1); !ok || start != readaheadOpenRangeLeadBytes {
-		t.Fatalf("whole body: start=%d ok=%v", start, ok)
+	if _, _, ok := readaheadWindow(size, 0, size-1); ok {
+		t.Fatal("range-less start must not prefetch its own stream")
 	}
-	// Open range near EOF: window clamps to the remainder.
-	if start, n, ok := readaheadWindow(size, size-(5<<20), size-1); !ok || start+n != size {
+	// Bounded range near EOF: window clamps to the remainder.
+	if start, n, ok := readaheadWindow(size, size-(5<<20), size-(4<<20)); !ok || start+n != size {
 		t.Fatalf("near EOF: start=%d n=%d ok=%v", start, n, ok)
 	}
 	// Open range inside the lead of EOF: nothing to prefetch.
