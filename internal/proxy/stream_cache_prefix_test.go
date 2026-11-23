@@ -214,24 +214,3 @@ func TestReadaheadTailWindowOnPlaybackStart(t *testing.T) {
 		t.Fatal("forward window already covers a small file's tail")
 	}
 }
-
-func TestDecryptedCacheBaseKeyV2SharedAcrossTargets(t *testing.T) {
-	sp := &StreamProxy{}
-	pass := &config.PasswdInfo{Enable: true, EncType: "aesctr"}
-	pass.Password = "k"
-	v2 := acceptanceContainers(t, prefixTestPlain())[1].meta
-	if !v2.IsV2() || len(v2.NonceField) == 0 {
-		t.Fatal("expected V2 container with nonce")
-	}
-	cdn := sp.decryptedCacheBaseKey("https://cdn.example/x?sign=1", pass, 1000, v2, "/encrypt")
-	dav := sp.decryptedCacheBaseKey("http://openalist:5244/dav/encrypt/x", pass, 1000, v2, "/encrypt")
-	if cdn == "" || cdn != dav {
-		t.Fatalf("V2 cache split by target: %q vs %q", cdn, dav)
-	}
-	v1 := acceptanceContainers(t, prefixTestPlain())[0].meta
-	a := sp.decryptedCacheBaseKey("http://up/a", pass, 1000, v1, "/encrypt")
-	b := sp.decryptedCacheBaseKey("http://up/b", pass, 1000, v1, "/encrypt")
-	if a == b {
-		t.Fatal("V1 files of equal size in one rule must not share a cache key")
-	}
-}

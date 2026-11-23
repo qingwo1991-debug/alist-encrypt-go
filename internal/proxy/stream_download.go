@@ -329,17 +329,7 @@ func (s *StreamProxy) decryptedCacheBaseKey(targetURL string, passwdInfo *config
 		return ""
 	}
 	passHash := sha256.Sum256([]byte(passwdInfo.Password))
-	// The compat storage key is only the encryption rule prefix, not a per-file
-	// identity. For V2 content the random 16-byte header nonce (plus password,
-	// sizes and geometry) uniquely pins the plaintext, so the target URL is left
-	// out: otherwise one file splits into separate caches whenever playback
-	// switches between the CDN raw_url and the internal /dav target, or a
-	// signed link is refreshed, and seeks never hit what startup cached.
-	// V1 has no nonce, so the target URL must keep distinguishing files.
-	targetHash := [sha256.Size]byte{}
-	if len(meta.NonceField) == 0 {
-		targetHash = sha256.Sum256([]byte(targetURL))
-	}
+	targetHash := sha256.Sum256([]byte(targetURL))
 	nonce := ""
 	if len(meta.NonceField) > 0 {
 		nonce = hex.EncodeToString(meta.NonceField)
