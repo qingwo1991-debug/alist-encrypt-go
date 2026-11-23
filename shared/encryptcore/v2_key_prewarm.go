@@ -1,4 +1,4 @@
-package encryptcore
+package encryption
 
 import "strings"
 
