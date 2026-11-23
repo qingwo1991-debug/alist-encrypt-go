@@ -80,6 +80,11 @@ func (s *StreamProxy) ProxyDownloadDecryptWithStrategyForStorage(w http.Response
 	if outcome, ok := s.tryServeDecryptedCache(w, r, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey); ok {
 		return outcome
 	}
+	if outcome, ok := s.tryServeDecryptedCachePrefix(w, r, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey, strategy, func(cw http.ResponseWriter, cr *http.Request) *StreamOutcome {
+		return s.ProxyDownloadDecryptWithStrategyForStorage(cw, cr, targetURL, passwdInfo, fileSize, strategy, compatStorageKey)
+	}); ok {
+		return outcome
+	}
 	if !cbGate.Allow() {
 		return &StreamOutcome{Err: errors.NewProxyError("upstream temporarily unavailable (circuit open)"), Retryable: true, FailureReason: "circuit_open"}
 	}
@@ -197,6 +202,11 @@ func (s *StreamProxy) ProxyDownloadDecryptReqWithStrategyForStorage(w http.Respo
 		}
 	}
 	if outcome, ok := s.tryServeDecryptedCache(w, req, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey); ok {
+		return outcome
+	}
+	if outcome, ok := s.tryServeDecryptedCachePrefix(w, req, targetURL, passwdInfo, fileSize, meta, rangeHeader, compatStorageKey, strategy, func(cw http.ResponseWriter, cr *http.Request) *StreamOutcome {
+		return s.ProxyDownloadDecryptReqWithStrategyForStorage(cw, cr, targetURL, passwdInfo, fileSize, strategy, compatStorageKey)
+	}); ok {
 		return outcome
 	}
 	if !cbGate.Allow() {
@@ -665,7 +675,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 			readerToStream = sniffBytes
 		}
 	}
-	if req.Method == http.MethodGet && rangeHeader != "" && s.blockCache != nil {
+	// Cache every decrypted GET body, including range-less playback starts:
+	// players typically reopen at 0 or seek back into already-played spans.
+	if req.Method == http.MethodGet && s.blockCache != nil {
 		cacheTarget := targetURL
 		if source, ok := req.Context().Value(decryptedCacheSourceKey{}).(string); ok {
 			cacheTarget = source
@@ -684,6 +696,9 @@ func (s *StreamProxy) streamDecryptResponse(w http.ResponseWriter, req *http.Req
 
 	if activeRange != nil {
 		s.maybeReadahead(req, targetURL, passwdInfo, fileSize, meta, activeRange.Start, activeRange.End, strategy, compatStorageKey)
+	} else if fullRequestedRange == nil && req.Method == http.MethodGet {
+		// Range-less playback start: treat it as an open range from 0.
+		s.maybeReadahead(req, targetURL, passwdInfo, fileSize, meta, 0, fileSize-1, strategy, compatStorageKey)
 	}
 
 	buf := getBuffer()

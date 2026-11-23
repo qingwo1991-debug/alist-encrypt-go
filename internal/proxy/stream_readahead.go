@@ -22,6 +22,10 @@ const (
 	readaheadMaxConcurrent    = 4
 	readaheadDedupBucketBytes = 4 << 20
 	readaheadTimeout          = 3 * time.Minute
+	// For open-ended ranges ("bytes=N-", or no Range) the active connection
+	// already streams from N onwards, so the window starts this far ahead of
+	// it to avoid racing the player's own upstream body.
+	readaheadOpenRangeLeadBytes = 4 << 20
 )
 
 type streamReadaheadKey struct{}
@@ -41,6 +45,26 @@ func (d *discardResponseWriter) WriteHeader(int) {}
 
 func (d *discardResponseWriter) Write(p []byte) (int, error) {
 	return len(p), nil
+}
+
+// readaheadWindow returns the plaintext interval to prefetch for an active
+// range. A bounded range prefetches right after its end. An open-ended range
+// ("bytes=N-" or no Range, which parse to End = EOF) is already streaming from
+// N, so the window starts a fixed lead ahead of the live position instead of
+// at End+1, which would always lie past EOF.
+func readaheadWindow(plainSize, activeStart, activeEnd int64) (int64, int64, bool) {
+	nextStart := activeEnd + 1
+	if activeEnd >= plainSize-1 {
+		nextStart = activeStart + readaheadOpenRangeLeadBytes
+	}
+	if nextStart < 0 || nextStart >= plainSize {
+		return 0, 0, false
+	}
+	lookahead := int64(readaheadLookaheadBytes)
+	if remaining := plainSize - nextStart; remaining < lookahead {
+		lookahead = remaining
+	}
+	return nextStart, lookahead, lookahead > 0
 }
 
 // maybeReadahead spawns a background cache-warming fetch for the plaintext
@@ -64,15 +88,8 @@ func (s *StreamProxy) maybeReadahead(req *http.Request, targetURL string, passwd
 	if plainSize < readaheadMinFileSize {
 		return
 	}
-	nextStart := activeRangeEnd + 1
-	if nextStart < 0 || nextStart >= plainSize {
-		return
-	}
-	lookahead := int64(readaheadLookaheadBytes)
-	if remaining := plainSize - nextStart; remaining < lookahead {
-		lookahead = remaining
-	}
-	if lookahead <= 0 {
+	nextStart, lookahead, ok := readaheadWindow(plainSize, activeRangeStart, activeRangeEnd)
+	if !ok {
 		return
 	}
 	baseKey := s.decryptedCacheBaseKey(targetURL, passwdInfo, fileSize, meta, compatStorageKey)

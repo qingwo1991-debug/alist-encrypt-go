@@ -239,6 +239,14 @@ func executeDecryptPlayback(req decryptPlaybackRequest) {
 	// StreamOutcome. Next-episode work must start while a long GET is live.
 	w = &playbackFirstByteWriter{ResponseWriter: w, request: r, onFirstByte: func(elapsed time.Duration) {
 		firstByteLatency = elapsed
+		log.Info().
+			Str("category", "playback").
+			Str("consumer_scenario", req.ConsumerScenario).
+			Str("path", req.Path).
+			Str("range", r.Header.Get("Range")).
+			Bool("initial_playback_hint", initialPlaybackHint).
+			Float64("first_byte_ms", float64(elapsed)/float64(time.Millisecond)).
+			Msg("Decrypt playback first body byte")
 		if req.FirstBodyByteCount != nil {
 			atomic.AddUint64(req.FirstBodyByteCount, 1)
 		}
