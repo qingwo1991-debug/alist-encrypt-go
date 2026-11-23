@@ -17,8 +17,11 @@ type decryptedBlockCache struct {
 	missCount uint64
 	putCount  uint64
 	evictions uint64
-	items     map[string]*list.Element
-	lru       *list.List
+	// prefixHits counts partial hits served as a cached prefix followed by an
+	// upstream continuation (see serveDecryptedCachePrefix).
+	prefixHits uint64
+	items      map[string]*list.Element
+	lru        *list.List
 }
 
 type decryptedBlockEntry struct {
@@ -93,6 +96,62 @@ func (c *decryptedBlockCache) getRange(baseKey string, start, length int64) ([]b
 	return out, true
 }
 
+// getPrefix returns a copy of the contiguous cached plaintext that starts at
+// start, capped at maxLen and at the cache's serve limit. It stops at the first
+// missing or short block, so the result is always a gap-free prefix of the
+// requested interval. A nil result means not even the first byte is cached.
+func (c *decryptedBlockCache) getPrefix(baseKey string, start, maxLen int64) []byte {
+	if c == nil || baseKey == "" || start < 0 || maxLen <= 0 {
+		return nil
+	}
+	if limit := c.maxServeBytes(); maxLen > limit {
+		maxLen = limit
+	}
+	var chunks [][]byte
+	total := int64(0)
+	blockStart := (start / c.blockSize) * c.blockSize
+	blockOffset := start - blockStart
+
+	c.mu.Lock()
+	for total < maxLen {
+		elem, ok := c.items[c.blockKey(baseKey, blockStart)]
+		if !ok {
+			break
+		}
+		entry := elem.Value.(*decryptedBlockEntry)
+		if int64(len(entry.data)) <= blockOffset {
+			break
+		}
+		chunk := entry.data[blockOffset:]
+		if rem := maxLen - total; int64(len(chunk)) > rem {
+			chunk = chunk[:rem]
+		}
+		chunks = append(chunks, chunk)
+		c.lru.MoveToFront(elem)
+		total += int64(len(chunk))
+		if int64(len(entry.data)) < c.blockSize {
+			// A short block (stream ended mid-block) breaks contiguity.
+			break
+		}
+		blockStart += c.blockSize
+		blockOffset = 0
+	}
+	if total > 0 {
+		c.prefixHits++
+	}
+	c.mu.Unlock()
+
+	if total == 0 {
+		return nil
+	}
+	out := make([]byte, total)
+	offset := 0
+	for _, chunk := range chunks {
+		offset += copy(out[offset:], chunk)
+	}
+	return out
+}
+
 func (c *decryptedBlockCache) putBlock(baseKey string, blockStart int64, data []byte) {
 	if c == nil || baseKey == "" || blockStart < 0 || blockStart%c.blockSize != 0 || len(data) == 0 {
 		return
@@ -146,15 +205,16 @@ func (c *decryptedBlockCache) stats() map[string]interface{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return map[string]interface{}{
-		"enabled":        true,
-		"entries":        len(c.items),
-		"used_bytes":     c.usedBytes,
-		"max_bytes":      c.maxBytes,
-		"block_size":     c.blockSize,
-		"hit_count":      c.hitCount,
-		"miss_count":     c.missCount,
-		"put_count":      c.putCount,
-		"eviction_count": c.evictions,
+		"enabled":          true,
+		"entries":          len(c.items),
+		"used_bytes":       c.usedBytes,
+		"max_bytes":        c.maxBytes,
+		"block_size":       c.blockSize,
+		"hit_count":        c.hitCount,
+		"miss_count":       c.missCount,
+		"put_count":        c.putCount,
+		"eviction_count":   c.evictions,
+		"prefix_hit_count": c.prefixHits,
 	}
 }
 

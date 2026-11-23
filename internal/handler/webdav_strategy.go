@@ -17,6 +17,15 @@ func (h *WebDAVHandler) getFileSizeWithStrategy(davPath, realPath, targetURL str
 	dirPath := path.Dir(davPath)
 	fileName := path.Base(davPath)
 
+	// Cached sizes first. A learned network strategy (HEAD/Range) would
+	// otherwise send one upstream request on every seek before streaming
+	// starts, even though the resolver already cached the size (24h).
+	for _, p := range []string{davPath, realPath} {
+		if size, ok := h.fileDAO.GetFileSize(p); ok && IsValidSize(size) {
+			return size, StrategyFileSizeCache
+		}
+	}
+
 	// Check if we have a learned strategy for this directory path
 	if strategy, ok := h.strategyCache.GetStrategy(dirPath); ok {
 		trace.Logf(ctx, "strategy", "Using learned strategy %s for path %s (success=%d)",

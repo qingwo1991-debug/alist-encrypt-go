@@ -355,9 +355,13 @@ func (s *StreamProxy) streamV3Response(w http.ResponseWriter, req *http.Request,
 	w.WriteHeader(statusCode)
 	result.ResponseStarted = true
 
+	// V3 readahead warms the authenticated record cache through the same
+	// synthetic Range path, deferred until after the first body byte.
+	bodyDst := s.readaheadAfterFirstByte(w, req, targetURL, passwdInfo, fileSize, meta, activeRange, fullRequestedRange, strategy, compatStorageKey)
+
 	buf := getBuffer()
 	defer putBuffer(buf)
-	written, err := copyStreamBody(w, bodyReader, *buf, result.ExpectedBytes)
+	written, err := copyStreamBody(bodyDst, bodyReader, *buf, result.ExpectedBytes)
 	result.BytesWritten = written
 	result.WallDuration = time.Since(streamStart)
 	if result.WallDuration > 0 && written > 0 {

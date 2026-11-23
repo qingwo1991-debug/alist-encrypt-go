@@ -491,7 +491,13 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 	// issue "GET /file" with no Range first). Treat it like a first-frame read
 	// for the purpose of choosing a fresh raw_url, trimming an extra hop.
 	startupFullGET := r.Method == http.MethodGet && rangeHeader == ""
-	preferRawURL := firstFrameRange || startupFullGET || h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal
+	// Seeks ("bytes=N-" deep into the file) also reuse an already cached, fresh
+	// raw_url: going through /dav adds an OpenList hop that may re-resolve the
+	// driver link on every seek. This is a cache lookup only (no discovery on
+	// the request path); an expired link fails with upstream 4xx before the
+	// response starts and the orchestrator falls back to the internal /dav target.
+	seekGET := r.Method == http.MethodGet && rangeHeader != ""
+	preferRawURL := firstFrameRange || startupFullGET || seekGET || h.cfg.AlistServerSnapshot().PlaybackProfile == config.PlaybackProfileTrustedLocal
 	staleThreshold := h.upstreamStalenessThreshold()
 	rawURLScope := playbackScope(h.cfg, r.Header)
 	needsRawURLWarmup := true
@@ -500,8 +506,14 @@ func (h *WebDAVHandler) handleGet(w http.ResponseWriter, r *http.Request, davPat
 			targetURL = cachedInfo.RawURL
 			needsRawURLWarmup = false
 			sourceHint := "first-frame"
-			if !firstFrameRange {
+			switch {
+			case firstFrameRange:
+			case startupFullGET:
 				sourceHint = "startup-full"
+			case seekGET:
+				sourceHint = "seek"
+			default:
+				sourceHint = "trusted-local"
 			}
 			trace.Logf(r.Context(), "webdav-get", "Using cached raw_url for %s playback, display=%s source=cache", sourceHint, davPath)
 		}
