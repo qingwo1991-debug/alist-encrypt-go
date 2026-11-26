@@ -417,8 +417,18 @@ func cloneStrategyState(src *ProviderStrategyState) *ProviderStrategyState {
 	return &copyState
 }
 
+// mysqlFileMetaPersistence is the storage surface MySQLFileMetaStore needs. It
+// is satisfied by *mysqlstore.Store; the indirection lets tests substitute a
+// fake and assert that the request path performs no read before a write.
+type mysqlFileMetaPersistence interface {
+	GetFileMeta(ctx context.Context, providerKey, originalPath string) (*mysqlstore.FileMetaRecord, bool, error)
+	GetFileMetaByPath(ctx context.Context, originalPath string) (*mysqlstore.FileMetaRecord, bool, error)
+	UpsertFileMeta(ctx context.Context, record mysqlstore.FileMetaRecord) error
+	CleanupFileMeta(ctx context.Context, cutoff time.Time) error
+}
+
 type MySQLFileMetaStore struct {
-	store     *mysqlstore.Store
+	store     mysqlFileMetaPersistence
 	mu        sync.Mutex
 	lastMetas map[string]FileMeta
 }
@@ -427,13 +437,30 @@ func NewMySQLFileMetaStore(store *mysqlstore.Store) *MySQLFileMetaStore {
 	if store == nil {
 		return nil
 	}
+	return newMySQLFileMetaStore(store)
+}
+
+func newMySQLFileMetaStore(store mysqlFileMetaPersistence) *MySQLFileMetaStore {
+	if store == nil {
+		return nil
+	}
 	return &MySQLFileMetaStore{store: store, lastMetas: make(map[string]FileMeta)}
 }
 
 func (s *MySQLFileMetaStore) Get(ctx context.Context, providerKey, originalPath string) (FileMeta, bool, error) {
 	record, ok, err := s.store.GetFileMeta(ctx, providerKey, originalPath)
-	if err != nil || !ok {
+	if err != nil {
 		return FileMeta{}, false, err
+	}
+	if !ok {
+		// Rows are keyed on the stable (alist-origin) host, so a caller that
+		// derived providerKey from a rotating raw-URL host misses the key-hash
+		// lookup. Fall back to the path lookup, which ignores the host: the
+		// size is file-intrinsic, so sharing it across hosts is safe.
+		record, ok, err = s.store.GetFileMetaByPath(ctx, originalPath)
+		if err != nil || !ok || record == nil {
+			return FileMeta{}, false, err
+		}
 	}
 
 	return FileMeta{
@@ -516,21 +543,19 @@ func (s *MySQLFileMetaStore) Upsert(ctx context.Context, meta FileMeta) error {
 	s.lastMetas[key] = meta
 	s.mu.Unlock()
 
-	providerHost, _ := mysqlstore.SplitProviderKey(meta.ProviderKey)
+	// Size-only observation: the row carries no geometry, URL or sign. The
+	// store keys it on the stable host and, at flush time, reconciles it with
+	// the stored row (preserveV2FileMetaRecord) and skips the write when
+	// nothing but timestamps would change. That replaces the per-request
+	// GetFileMeta round trip that used to run here, so the request path no
+	// longer waits on MySQL before enqueueing.
 	record := mysqlstore.FileMetaRecord{
-		KeyHash:      mysqlstore.KeyHash(providerHost, meta.OriginalPath),
-		ProviderHost: providerHost,
 		OriginalPath: meta.OriginalPath,
 		Size:         meta.Size,
 		ETag:         meta.ETag,
 		ContentType:  meta.ContentType,
 		StatusCode:   meta.StatusCode,
-		UpdatedAt:    time.Now(),
-		LastAccessed: time.Now(),
 		Active:       true,
-	}
-	if existing, ok, err := s.store.GetFileMeta(ctx, meta.ProviderKey, meta.OriginalPath); err == nil && ok {
-		preserveV2FileMetaRecord(existing, &record)
 	}
 	return s.store.UpsertFileMeta(ctx, record)
 }

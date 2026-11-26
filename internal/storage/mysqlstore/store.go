@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -24,10 +25,22 @@ type Store struct {
 	strategyBuffer     *strategyBuffer
 	fileMetaBuffer     *fileMetaBuffer
 	rangeCompatBuffer  *rangeCompatBuffer
-	cancelLoops        context.CancelFunc // cancels background flush/cleanup goroutines
-	loopWG             sync.WaitGroup
-	closeOnce          sync.Once
-	closeErr           error
+	// stableProviderHost is the provider_host every new file_meta row key uses
+	// (see SetStableProviderHost). Defaults to the sentinel.
+	stableProviderHost string
+	// mergeStoredRow, when set, reconciles a pending row with the stored row
+	// for the same key before it is written (V2/V3 plaintext-size
+	// preservation). It runs once per flush instead of once per request.
+	mergeStoredRow func(stored, incoming *FileMetaRecord)
+	// loopsCtx is the lifetime of every background goroutine the store starts
+	// (flush/cleanup loops and the duplicate-path migration).
+	loopsCtx    context.Context
+	cancelLoops context.CancelFunc // cancels background flush/cleanup goroutines
+	// dedupeStarted guards the duplicate-path migration against a double start.
+	dedupeStarted atomic.Bool
+	loopWG        sync.WaitGroup
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 var openDB = sql.Open
@@ -131,9 +144,12 @@ func NewStore(cfg *config.Config) (*Store, error) {
 	store.cancelLoops = loopsCancel
 
 	store.startLoops(loopsCtx)
+	// The duplicate-path migration is launched by the server wiring
+	// (StartFileMetaDedupe) once the stable provider host is configured, so
+	// the host is never read before it is set.
+	store.loopsCtx = loopsCtx
 	return store, nil
 }
-
 func closeDBAfterInitError(db *sql.DB, initErr error) error {
 	if db == nil {
 		return initErr
@@ -222,10 +238,23 @@ func (s *Store) flushBuffers(ctx context.Context) {
 
 	metaRecords := s.fileMetaBuffer.drain()
 	if len(metaRecords) > 0 {
+		// Restart-safe no-op elimination: keys this process has not seen are
+		// compared with their stored row (one PK SELECT each) and dropped when
+		// nothing but timestamps would change. This is what stops a restart from
+		// rewriting every cached row.
+		var unchanged []FileMetaRecord
+		metaRecords, unchanged = s.filterUnchangedFileMeta(ctx, metaRecords)
+		s.fileMetaBuffer.rememberFlushed(unchanged)
+		if len(unchanged) > 0 {
+			log.Debug().Int("count", len(unchanged)).Msg("MySQL file meta flush skipped unchanged rows")
+		}
+	}
+	if len(metaRecords) > 0 {
 		if err := s.upsertFileMeta(ctx, metaRecords); err != nil {
 			log.Warn().Err(err).Int("count", len(metaRecords)).Msg("MySQL file meta flush failed, re-enqueue")
 			s.fileMetaBuffer.reEnqueue(metaRecords)
 		} else {
+			s.fileMetaBuffer.markFlushed(metaRecords)
 			log.Debug().Int("count", len(metaRecords)).Msg("MySQL file meta flush complete")
 		}
 	}
