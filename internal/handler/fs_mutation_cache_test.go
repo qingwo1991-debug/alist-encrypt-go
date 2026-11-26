@@ -323,6 +323,42 @@ func TestRecentListHotThreshold(t *testing.T) {
 	}
 }
 
+func TestForgetRecentListOnAuthFailure(t *testing.T) {
+	handler, _ := newTestAlistHandler(t, "http://127.0.0.1:1", testEncPasswd())
+	now := time.Now()
+	handler.rememberRecentList("/a", "expired", nil)
+	handler.rememberRecentList("/b", "transient", nil)
+	handler.reqRefreshNoteResult("expired", false, now)
+
+	// Non-auth failures keep the entry so the normal backoff applies.
+	handler.forgetRecentListOnAuthFailure("transient", http.StatusBadGateway, 500)
+	handler.forgetRecentListOnAuthFailure("expired", http.StatusOK, 0)
+	// HTTP 200 carrying alist code 401 is the real-world expired-token shape.
+	handler.forgetRecentListOnAuthFailure("expired", http.StatusOK, http.StatusUnauthorized)
+
+	handler.recentListsMu.Lock()
+	_, expiredKept := handler.recentLists["expired"]
+	_, transientKept := handler.recentLists["transient"]
+	handler.recentListsMu.Unlock()
+	if expiredKept {
+		t.Fatal("entry with rejected credentials should be dropped")
+	}
+	if !transientKept {
+		t.Fatal("non-auth failure must not drop the entry")
+	}
+	if handler.reqRefreshBackoffActive("expired", now) {
+		t.Fatal("dropped entry should not leave a stale backoff record")
+	}
+
+	// HTTP-level 401 is handled the same way.
+	handler.forgetRecentListOnAuthFailure("transient", http.StatusUnauthorized, 0)
+	handler.recentListsMu.Lock()
+	defer handler.recentListsMu.Unlock()
+	if _, ok := handler.recentLists["transient"]; ok {
+		t.Fatal("HTTP 401 should drop the entry")
+	}
+}
+
 func TestHandleFsMkdirForwardsUnderProtection(t *testing.T) {
 	passwd := testEncPasswd()
 
