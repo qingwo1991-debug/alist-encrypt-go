@@ -59,6 +59,33 @@ func (w *MySQLFileMetaWriter) GetFileInfoByPath(ctx context.Context, path string
 	if err != nil || !ok || record == nil {
 		return nil, false
 	}
+	return fileInfoFromFileMetaRecord(record), true
+}
+
+// GetFileInfosByPaths resolves many display paths with a few IN (...) queries
+// instead of one full table scan per path. Each hit carries the same field
+// mapping as GetFileInfoByPath; paths without a qualifying row are absent.
+func (w *MySQLFileMetaWriter) GetFileInfosByPaths(ctx context.Context, paths []string) map[string]*dao.FileInfo {
+	if w == nil || w.store == nil || len(paths) == 0 {
+		return nil
+	}
+	records, err := w.store.GetFileMetaByPaths(ctx, paths)
+	if err != nil {
+		return nil
+	}
+	infos := make(map[string]*dao.FileInfo, len(records))
+	for p, record := range records {
+		if record == nil {
+			continue
+		}
+		infos[p] = fileInfoFromFileMetaRecord(record)
+	}
+	return infos
+}
+
+// fileInfoFromFileMetaRecord applies the FileInfo hydration shared by the
+// single-path and batch readers.
+func fileInfoFromFileMetaRecord(record *mysqlstore.FileMetaRecord) *dao.FileInfo {
 	return &dao.FileInfo{
 		Path:              record.OriginalPath,
 		EncryptedPath:     record.EncryptedPath,
@@ -74,7 +101,7 @@ func (w *MySQLFileMetaWriter) GetFileInfoByPath(ctx context.Context, path string
 		RawURLAuthScope:   record.RawURLAuthScope,
 		Sign:              record.Sign,
 		UpstreamFetchedAt: record.UpstreamFetchedAt,
-	}, true
+	}
 }
 
 func fileMetaRecordFromInfo(info *dao.FileInfo) mysqlstore.FileMetaRecord {

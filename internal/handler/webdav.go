@@ -1668,6 +1668,15 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 	// above stays 100% intact.
 	hugeDir := len(entries) >= dirServerHugeListEntries
 
+	// Cold-cache batch warm-up: the loop below calls fileDAO.Get (directly and
+	// via propfindPlainSize) once or twice per entry, and on a MySQL-backed
+	// deployment every cache miss is one path lookup there. Resolve all of
+	// those paths in a few IN (...) queries up front so a 568-entry encrypted
+	// directory no longer pays hundreds of sequential backend round trips.
+	if !hugeDir {
+		h.prefetchFileInfos(ctx, entries)
+	}
+
 	for _, entry := range entries {
 		displayPath := entry.Path
 		displayName := entry.Name
@@ -1725,6 +1734,55 @@ func (h *WebDAVHandler) parsePropfindResponse(ctx context.Context, body []byte, 
 		}
 	}
 	return entries
+}
+
+// fileInfoPrefetcher is the optional FileRepository extension that resolves
+// many paths in one backend batch (implemented by *dao.FileDAO).
+type fileInfoPrefetcher interface {
+	Prefetch(ctx context.Context, paths []string)
+}
+
+// prefetchFileInfos warms the file-info cache for every path the PROPFIND
+// per-entry loop reads: the raw/encrypted entry path (used by both
+// propfindPlainSize and the direct Get) and, when names are encrypted, the
+// decrypted display path. Best-effort: repositories without batch support and
+// empty path lists are ignored.
+func (h *WebDAVHandler) prefetchFileInfos(ctx context.Context, entries []propfindEntry) {
+	if h == nil || h.fileDAO == nil || len(entries) == 0 {
+		return
+	}
+	prefetcher, ok := h.fileDAO.(fileInfoPrefetcher)
+	if !ok {
+		return
+	}
+	allowLoose := h.cfg != nil && h.cfg.AlistServerSnapshot().AllowLooseDecode
+	paths := make([]string, 0, len(entries)*2)
+	seen := make(map[string]struct{}, len(entries)*2)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		paths = append(paths, p)
+	}
+	for _, entry := range entries {
+		add(entry.Path)
+		if entry.IsDir || h.passwdDAO == nil {
+			continue
+		}
+		passwdInfo, found := h.passwdDAO.FindByPath(entry.Path)
+		if !found || passwdInfo == nil || !passwdInfo.EncName {
+			continue
+		}
+		decryptedName := encryption.ConvertShowNameWithSuffixOptions(passwdInfo.Password, passwdInfo.EncType, entry.Name, passwdInfo.EncSuffix, allowLoose)
+		if decryptedName != "" && decryptedName != entry.Name {
+			add(path.Join(path.Dir(entry.Path), decryptedName))
+		}
+	}
+	prefetcher.Prefetch(ctx, paths)
 }
 
 func (h *WebDAVHandler) upsertMetaFromListing(ctx context.Context, displayPath string, size int64) {

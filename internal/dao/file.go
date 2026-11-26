@@ -69,6 +69,133 @@ type FileInfoReader interface {
 	GetFileInfoByPath(ctx context.Context, path string) (*FileInfo, bool)
 }
 
+// FileInfoBatchReader is an optional FileInfoReader extension that resolves
+// many paths in ONE backend round trip (chunked IN (...) queries) instead of
+// one query per path. FileDAO.Prefetch uses it to warm the path cache before
+// a directory listing touches every entry, which otherwise costs one full
+// table scan per file on a cold MySQL-backed cache.
+type FileInfoBatchReader interface {
+	GetFileInfosByPaths(ctx context.Context, paths []string) map[string]*FileInfo
+}
+
+const (
+	// missCacheCapacity bounds the negative cache: beyond it, every new miss
+	// first evicts expired entries, then the oldest ones.
+	missCacheCapacity = 50000
+	// missCacheTTL is how long a "reader has no row for this path" result is
+	// reused. Short enough that a freshly written row becomes visible quickly
+	// even if a writer outside this process created it; long enough to absorb
+	// repeated listings of directories whose files have no metadata yet.
+	missCacheTTL = 10 * time.Minute
+)
+
+// missCache remembers paths the external reader could not resolve so a cold
+// listing does not pay one backend query per missing file on every request.
+// Every write to a path clears its entry (see forgetMiss), so a Set() is
+// always observed by the next Get(). Guarded by its own mutex.
+type missCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	cap     int
+	now     func() time.Time
+	entries map[string]time.Time
+}
+
+func newMissCache() *missCache {
+	return &missCache{ttl: missCacheTTL, cap: missCacheCapacity, now: time.Now, entries: make(map[string]time.Time)}
+}
+
+func (m *missCache) get(path string) bool {
+	if m == nil || path == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	at, ok := m.entries[path]
+	if !ok {
+		return false
+	}
+	if !m.now().Before(at.Add(m.ttl)) {
+		delete(m.entries, path)
+		return false
+	}
+	return true
+}
+
+func (m *missCache) set(path string) {
+	if m == nil || path == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	if _, exists := m.entries[path]; !exists && len(m.entries) >= m.cap {
+		// Drop expired entries first; only if the map is still full evict the
+		// single oldest one. Eviction can never deny a file — only cost a query.
+		for k, at := range m.entries {
+			if !now.Before(at.Add(m.ttl)) {
+				delete(m.entries, k)
+			}
+		}
+		if len(m.entries) >= m.cap {
+			var oldestKey string
+			var oldestAt time.Time
+			for k, at := range m.entries {
+				if oldestKey == "" || at.Before(oldestAt) {
+					oldestKey, oldestAt = k, at
+				}
+			}
+			delete(m.entries, oldestKey)
+		}
+	}
+	m.entries[path] = now
+}
+
+// forget clears one path. Every FileDAO write to a path must call this.
+func (m *missCache) forget(path string) {
+	if m == nil || path == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.entries, path)
+	m.mu.Unlock()
+}
+
+// forgetPrefix clears every path equal to root or beneath it (root + "/").
+func (m *missCache) forgetPrefix(root string) {
+	if m == nil || root == "" {
+		return
+	}
+	m.mu.Lock()
+	for p := range m.entries {
+		if pathWithinSubtree(p, root) {
+			delete(m.entries, p)
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *missCache) len() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.entries)
+}
+
+// SetMissCacheTTLForTest shortens the negative-cache TTL so tests can prove
+// expiry without waiting the production 10 minutes. Production code never
+// calls it.
+func (d *FileDAO) SetMissCacheTTLForTest(ttl time.Duration) {
+	if d == nil || d.misses == nil {
+		return
+	}
+	d.misses.mu.Lock()
+	d.misses.ttl = ttl
+	d.misses.mu.Unlock()
+}
+
 // FileDAO handles file information caching
 type FileDAO struct {
 	store          *storage.Store
@@ -76,6 +203,7 @@ type FileDAO struct {
 	pathCache      *PathCache // Unified high-performance cache
 	fileMetaWriter FileMetaStoreWriter
 	fileInfoReader FileInfoReader
+	misses         *missCache // negative cache for reader lookups
 	cleanupStop    chan struct{}
 	cleanupOnce    sync.Once
 	cleanupWG      sync.WaitGroup
@@ -168,6 +296,7 @@ func NewFileDAO(store *storage.Store, configs ...*config.Config) *FileDAO {
 		store:       store,
 		cfg:         selectConfig(configs...),
 		pathCache:   NewPathCache(32, 1000), // 32 shards, 1000 entries per shard = 32k max
+		misses:      newMissCache(),
 		cleanupStop: make(chan struct{}),
 	}
 
@@ -247,12 +376,84 @@ func (d *FileDAO) Get(path string) (*FileInfo, bool) {
 		return &info, true
 	}
 	if d.fileInfoReader != nil {
+		// A recent negative result for this path skips the backend round trip.
+		// Every write to the path clears it, so this can only hide rows that
+		// appeared through another writer within the TTL.
+		if d.misses.get(path) {
+			return nil, false
+		}
 		if hydrated, ok := d.fileInfoReader.GetFileInfoByPath(context.Background(), path); ok && hydrated != nil {
 			d.cacheInfo(hydrated)
 			return hydrated, true
 		}
+		d.misses.set(path)
 	}
 	return nil, false
+}
+
+// Prefetch warms the path cache for every path that is neither in the path
+// cache nor in BoltDB using ONE batch reader call (chunked IN (...) queries)
+// instead of one backend query per path, and records misses in the negative
+// cache so the following per-entry Get() calls skip the backend entirely.
+// Paths already resolvable are left untouched. It is a no-op without a batch
+// reader; a plain FileInfoReader keeps its per-path behaviour.
+func (d *FileDAO) Prefetch(ctx context.Context, paths []string) {
+	if d == nil || d.fileInfoReader == nil || len(paths) == 0 {
+		return
+	}
+	batch, ok := d.fileInfoReader.(FileInfoBatchReader)
+	if !ok {
+		return
+	}
+	wanted := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		if _, cached := d.pathCache.Get(p); cached {
+			continue
+		}
+		var info FileInfo
+		if err := d.store.GetJSON(storage.BucketFileInfo, p, &info); err == nil && info.Path != "" {
+			continue
+		}
+		if d.misses.get(p) {
+			continue
+		}
+		wanted = append(wanted, p)
+	}
+	if len(wanted) == 0 {
+		return
+	}
+	hits := batch.GetFileInfosByPaths(ctx, wanted)
+	for _, p := range wanted {
+		info, ok := hits[p]
+		if !ok || info == nil {
+			d.misses.set(p)
+			continue
+		}
+		if info.Path == "" {
+			info.Path = p
+		}
+		// Own the value before publishing: cacheInfo stamps UpstreamFetchedAt
+		// on the object, and a reader may hand back a shared pointer.
+		owned := *info
+		owned.NonceField = append([]byte(nil), info.NonceField...)
+		d.cacheInfo(&owned)
+	}
+}
+
+// forgetMiss clears the negative-cache entry for a path. Must run on EVERY
+// write to that path so a Set() is never shadowed by an earlier miss.
+func (d *FileDAO) forgetMiss(paths ...string) {
+	for _, p := range paths {
+		d.misses.forget(p)
+	}
 }
 
 // mergeMissingFields carries previously-known fields into an incoming FileInfo
@@ -352,6 +553,8 @@ func (d *FileDAO) cacheInfo(info *FileInfo) {
 	if entry.EncryptedPath == "" {
 		entry.EncryptedPath = info.Path
 	}
+	// Any positive write to this path invalidates a cached reader miss.
+	d.forgetMiss(info.Path, entry.EncryptedPath, entry.DisplayPath)
 	d.pathCache.Set(entry, 24*time.Hour)
 }
 
@@ -467,6 +670,7 @@ func (d *FileDAO) SetComplete(info *FileInfo) error {
 	if entry.EncryptedPath == "" {
 		entry.EncryptedPath = info.Path
 	}
+	d.forgetMiss(info.Path, entry.EncryptedPath, entry.DisplayPath)
 	d.pathCache.Set(entry, 24*time.Hour)
 
 	// Persist: prefer MySQL if available, else BoltDB.
@@ -485,6 +689,7 @@ func (d *FileDAO) Delete(path string) error {
 	defer d.playback.mu.Unlock()
 	d.invalidateDisplayPathLocked(path)
 	d.pathCache.Delete(path)
+	d.forgetMiss(path)
 	return d.store.Delete(storage.BucketFileInfo, path)
 }
 
@@ -510,6 +715,7 @@ func (d *FileDAO) SetEncPathMapping(displayPath, encryptedPath string) {
 		Size:          0,
 		IsDir:         false,
 	}
+	d.forgetMiss(displayPath, encryptedPath)
 	d.pathCache.Set(entry, 24*time.Hour)
 }
 
@@ -570,6 +776,7 @@ func (d *FileDAO) SetEncPathMappingWithInfo(displayPath, encryptedPath, name str
 		entry.Sign = existing.Sign
 		entry.UpstreamFetchedAt = existing.UpstreamFetchedAt
 	}
+	d.forgetMiss(displayPath, encryptedPath)
 	d.pathCache.Set(entry, 24*time.Hour)
 }
 
@@ -596,6 +803,9 @@ func (d *FileDAO) DeleteEncPathMapping(displayPath string) {
 		if entry.DisplayPath != "" && entry.DisplayPath != entry.EncryptedPath {
 			d.pathCache.Delete(entry.DisplayPath)
 		}
+		d.forgetMiss(displayPath, entry.EncryptedPath, entry.DisplayPath)
+	} else {
+		d.forgetMiss(displayPath)
 	}
 }
 
@@ -654,6 +864,7 @@ func (d *FileDAO) SetFileSize(path string, size int64, ttl time.Duration) {
 			DisplayPath:   path,
 			Size:          size,
 		}
+		d.forgetMiss(path)
 		d.pathCache.Set(cacheEntry, ttl)
 	}
 
@@ -675,6 +886,7 @@ func (d *FileDAO) DeleteFileSize(path string) {
 		entry.Size = 0
 		d.pathCache.Set(&entry, 24*time.Hour)
 	}
+	d.forgetMiss(path)
 	_ = d.store.Delete(storage.BucketFileSize, path)
 }
 
@@ -714,6 +926,9 @@ func (d *FileDAO) InvalidateDisplayPath(displayPath string) {
 			d.DeleteFileSize(entry.EncryptedPath)
 		}
 	}
+	// The persisted row is gone: a later Get must be allowed to ask the
+	// reader again instead of trusting an older cached miss.
+	d.forgetMiss(displayPath)
 }
 
 // pathWithinSubtree reports whether p is root itself or a descendant of it.
@@ -777,6 +992,11 @@ func (d *FileDAO) InvalidateDisplaySubtree(displayPath string) {
 		d.invalidateDisplayPathLocked(p)
 	}
 	d.invalidateDisplayPathLocked(displayPath)
+	// Descendants removed wholesale: drop their negative entries too so a
+	// re-created file with the same name is looked up fresh.
+	for _, root := range roots {
+		d.misses.forgetPrefix(root)
+	}
 }
 
 // InvalidateRawURLForScope clears only a signed URL owned by authScope. It
@@ -808,6 +1028,7 @@ func (d *FileDAO) InvalidateRawURLForScope(displayPath, authScope string) bool {
 		entry.Sign = ""
 		entry.UpstreamFetchedAt = 0
 		d.pathCache.Set(&entry, 24*time.Hour)
+		d.forgetMiss(displayPath, entry.EncryptedPath)
 		invalidated = true
 	}
 	if d.store != nil {
