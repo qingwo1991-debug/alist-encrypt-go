@@ -914,6 +914,23 @@ func (h *AlistHandler) liveFsListResponse(r *http.Request, body []byte, dirPath 
 				var metaUpserts []fsListMetaUpsert
 				var probeJobs []fsListProbeJob
 
+				// PrepareFromAlistResponse merges against the existing entry via
+				// fileDAO.Get for every item, so a cold MySQL-backed cache would
+				// otherwise pay one path lookup per entry. Warm them in one batch.
+				if !hugeDir {
+					prefetch := make([]string, 0, len(content))
+					for _, item := range content {
+						if fileData, ok := item.(map[string]interface{}); ok {
+							if name, _ := fileData["name"].(string); name != "" {
+								prefetch = append(prefetch, path.Join(dirPath, name))
+							}
+						}
+					}
+					if p, ok := h.fileDAO.(fileInfoPrefetcher); ok {
+						p.Prefetch(r.Context(), prefetch)
+					}
+				}
+
 				for i, item := range content {
 					if fileData, ok := item.(map[string]interface{}); ok {
 						name, _ := fileData["name"].(string)

@@ -153,6 +153,12 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		fmt.Sprintf("CREATE INDEX idx_strategy_provider_updated ON %s(provider_host, updated_at)", TableName("strategy")),
 		fmt.Sprintf("CREATE INDEX idx_file_meta_last_accessed ON %s(last_accessed)", TableName("file_meta")),
 		fmt.Sprintf("CREATE INDEX idx_file_meta_provider_path ON %s(provider_host, original_path(255))", TableName("file_meta")),
+		// Path-only lookups (GetFileMetaByPath, ListFileMeta by OriginalPath /
+		// PathPrefix) carry no provider host, so the composite index above
+		// cannot serve them. A prefix index on the path alone lets the
+		// collation-equality predicate narrow the scan; the BINARY recheck that
+		// follows keeps the match exact.
+		fmt.Sprintf("CREATE INDEX idx_file_meta_path ON %s(original_path(255))", TableName("file_meta")),
 		fmt.Sprintf("CREATE INDEX idx_range_compat_last_accessed ON %s(last_accessed)", TableName("range_compat")),
 		fmt.Sprintf("CREATE INDEX idx_dir_snapshot_scope_key ON %s(scope_key)", TableName("dir_snapshot")),
 		fmt.Sprintf("CREATE INDEX idx_dir_snapshot_last_accessed ON %s(last_accessed)", TableName("dir_snapshot")),

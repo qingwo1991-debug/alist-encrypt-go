@@ -9,6 +9,24 @@ import (
 	"time"
 )
 
+// fileMetaPathChunk is the number of original_path values folded into one
+// IN (...) predicate by the batch lookups. ~200 keeps the statement well
+// below max_allowed_packet while still collapsing a 500-entry directory into
+// three queries instead of five hundred.
+const fileMetaPathChunk = 200
+
+// fileMetaByPathPredicates narrows a path-only lookup to rows whose
+// original_path equals ? under the table collation AND bytewise. The plain
+// equality is sargable (it can use idx_file_meta_path); the BINARY recheck
+// keeps the match exact for case and accents, which utf8mb4_0900_ai_ci would
+// otherwise fold. Both placeholders receive the same value.
+const fileMetaByPathPredicates = " AND original_path = ? AND BINARY original_path = BINARY ?"
+
+// escapeLikePattern escapes LIKE metacharacters for use with ESCAPE '='.
+func escapeLikePattern(prefix string) string {
+	return strings.NewReplacer("=", "==", "%", "=%", "_", "=_").Replace(prefix)
+}
+
 type FileMetaFilter struct {
 	ProviderHost  string
 	OriginalPath  string
@@ -85,14 +103,166 @@ func (s *Store) GetFileMeta(ctx context.Context, providerKey, originalPath strin
 // host observed when the row was written, which is not stable across raw-url
 // providers, so path-only lookups cannot use KeyHash. Content metadata
 // (version/nonce/geometry) is file-intrinsic and safe to share across scopes.
+//
+// The predicate pairs a plain collation equality (sargable through
+// idx_file_meta_path) with a BINARY recheck so the match stays exact even
+// though the table collation is case/accent-insensitive.
 func (s *Store) GetFileMetaByPath(ctx context.Context, originalPath string) (*FileMetaRecord, bool, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || originalPath == "" {
 		return nil, false, nil
 	}
-	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE BINARY original_path = BINARY ? AND is_active=1 AND content_version > 0 ORDER BY (raw_url IS NOT NULL AND raw_url <> '') DESC, upstream_fetched_at DESC LIMIT 1"
-	row := s.db.QueryRowContext(ctx, query, originalPath)
+	query := "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM " + TableName("file_meta") + " WHERE is_active=1 AND content_version > 0" + fileMetaByPathPredicates + " ORDER BY (raw_url IS NOT NULL AND raw_url <> '') DESC, upstream_fetched_at DESC LIMIT 1"
+	row := s.db.QueryRowContext(ctx, query, originalPath, originalPath)
 
+	record, err := scanFileMetaRow(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return record, true, nil
+}
+
+// GetFileMetaByPaths resolves many display paths in a handful of IN (...)
+// queries instead of one full scan per path. For every requested path that has
+// at least one qualifying row, the returned record is the same one
+// GetFileMetaByPath would select (raw URL present first, then the newest
+// upstream_fetched_at; only is_active=1 AND content_version>0 rows qualify).
+// Paths with no qualifying row are simply absent from the map. Rows whose
+// path differs only by case or accent are rejected by a bytewise comparison in
+// Go, mirroring the BINARY recheck of the single-path query.
+func (s *Store) GetFileMetaByPaths(ctx context.Context, paths []string) (map[string]*FileMetaRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	result := make(map[string]*FileMetaRecord)
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		unique = append(unique, p)
+	}
+	for start := 0; start < len(unique); start += fileMetaPathChunk {
+		end := start + fileMetaPathChunk
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		if err := s.getFileMetaByPathsChunk(ctx, chunk, result); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// betterFileMetaCandidate reports whether candidate should replace best as the
+// row returned for one path. It mirrors the ORDER BY of GetFileMetaByPath:
+// a raw URL wins, then the newer upstream_fetched_at. Ties keep the first row
+// seen (the single-path query has no tiebreaker beyond the index order).
+func betterFileMetaCandidate(candidate, best *FileMetaRecord) bool {
+	if best == nil {
+		return true
+	}
+	cHasRaw := candidate.RawURL != ""
+	bHasRaw := best.RawURL != ""
+	if cHasRaw != bHasRaw {
+		return cHasRaw
+	}
+	return candidate.UpstreamFetchedAt.After(best.UpstreamFetchedAt)
+}
+
+func (s *Store) getFileMetaByPathsChunk(ctx context.Context, paths []string, out map[string]*FileMetaRecord) error {
+	var qb strings.Builder
+	qb.WriteString("SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM ")
+	qb.WriteString(TableName("file_meta"))
+	qb.WriteString(" WHERE is_active=1 AND content_version > 0 AND original_path IN (")
+	args := make([]interface{}, 0, len(paths)*3)
+	for i, p := range paths {
+		if i > 0 {
+			qb.WriteString(",")
+		}
+		qb.WriteString("?")
+		args = append(args, p)
+	}
+	qb.WriteString(")")
+	// The IN list narrows through idx_file_meta_path under the collation; the
+	// per-row BINARY comparison below keeps the match exact without wrapping
+	// the column itself in BINARY (which would defeat the index).
+	qb.WriteString(" AND (")
+	for i, p := range paths {
+		if i > 0 {
+			qb.WriteString(" OR ")
+		}
+		qb.WriteString("(original_path = ? AND BINARY original_path = BINARY ?)")
+		args = append(args, p, p)
+	}
+	qb.WriteString(")")
+
+	rows, err := s.db.QueryContext(ctx, qb.String(), args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		record, err := scanFileMetaRows(rows)
+		if err != nil {
+			return err
+		}
+		// Exact match in Go: rows that the collation folded together (case or
+		// accent differences) must never answer for another path.
+		if _, requested := seenPath(paths, record.OriginalPath); !requested {
+			continue
+		}
+		if betterFileMetaCandidate(record, out[record.OriginalPath]) {
+			out[record.OriginalPath] = record
+		}
+	}
+	return rows.Err()
+}
+
+// seenPath reports whether exact matches one of the chunk's requested paths bytewise.
+func seenPath(paths []string, exact string) (int, bool) {
+	// Paths are short and chunks bounded (~200); a linear scan is cheaper than
+	// allocating a map per chunk.
+	for i, p := range paths {
+		if p == exact {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// fileMetaScanner is satisfied by both *sql.Row and *sql.Rows.
+type fileMetaScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanFileMetaRow reads a single file_meta row into a record.
+func scanFileMetaRow(row fileMetaScanner) (*FileMetaRecord, error) {
 	var record FileMetaRecord
+	if err := scanFileMetaInto(row, &record); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+// scanFileMetaRows reads the current *sql.Rows row into a record.
+func scanFileMetaRows(rows *sql.Rows) (*FileMetaRecord, error) {
+	var record FileMetaRecord
+	if err := scanFileMetaInto(rows, &record); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func scanFileMetaInto(row fileMetaScanner, record *FileMetaRecord) error {
 	var isActive int
 	var upstreamFetchedAt sql.NullTime
 	var encryptedPath, name, etag, contentType, rawURL, rawURLAuthScope, sign sql.NullString
@@ -121,10 +291,7 @@ func (s *Store) GetFileMetaByPath(ctx context.Context, originalPath string) (*Fi
 		&upstreamFetchedAt,
 		&isActive,
 	); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, false, nil
-		}
-		return nil, false, err
+		return err
 	}
 	record.EncryptedPath = encryptedPath.String
 	record.Name = name.String
@@ -138,7 +305,7 @@ func (s *Store) GetFileMetaByPath(ctx context.Context, originalPath string) (*Fi
 	if upstreamFetchedAt.Valid {
 		record.UpstreamFetchedAt = upstreamFetchedAt.Time
 	}
-	return &record, true, nil
+	return nil
 }
 
 func (s *Store) UpsertFileMeta(ctx context.Context, record FileMetaRecord) error {
@@ -229,17 +396,20 @@ func (s *Store) ListFileMeta(ctx context.Context, filter FileMetaFilter) ([]File
 	args := []interface{}{}
 
 	if filter.ProviderHost != "" {
-		query += " AND BINARY provider_host = BINARY ?"
-		args = append(args, filter.ProviderHost)
+		// Collation equality (sargable) + BINARY recheck: exact match, no full scan.
+		query += " AND provider_host = ? AND BINARY provider_host = BINARY ?"
+		args = append(args, filter.ProviderHost, filter.ProviderHost)
 	}
 	if filter.OriginalPath != "" {
-		query += " AND BINARY original_path = BINARY ?"
-		args = append(args, filter.OriginalPath)
+		query += fileMetaByPathPredicates
+		args = append(args, filter.OriginalPath, filter.OriginalPath)
 	}
 	if filter.PathPrefix != "" {
-		query += " AND BINARY original_path LIKE BINARY ? ESCAPE '='"
-		prefix := strings.NewReplacer("=", "==", "%", "=%", "_", "=_").Replace(filter.PathPrefix)
-		args = append(args, prefix+"%")
+		// LIKE 'prefix%' is a range scan on idx_file_meta_path; the BINARY LIKE
+		// recheck keeps case/accent-sensitive semantics for the rows it returns.
+		query += " AND original_path LIKE ? ESCAPE '=' AND BINARY original_path LIKE BINARY ? ESCAPE '='"
+		prefix := escapeLikePattern(filter.PathPrefix)
+		args = append(args, prefix+"%", prefix+"%")
 	}
 	if !filter.UpdatedAfter.IsZero() {
 		query += " AND " + timeColumn + " >= " + timePlaceholder
