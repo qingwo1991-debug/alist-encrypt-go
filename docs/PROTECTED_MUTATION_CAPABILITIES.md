@@ -10,13 +10,14 @@
 | API rename | 展示路径与最终物理路径相交则501 | 专用入口保持既有行为 | 未支持，不能假称安全 |
 | API move/copy | 每个真实源/目标检查，batch整体早拒绝 | 专用入口不相交保持既有行为 | 未支持 |
 | DAV MOVE/COPY | Destination同host且合法DAV路径，展示及最终物理路径二次检查，相交501 | 合法不相交保持既有行为 | 未支持 |
-| DAV MKCOL/PROPPATCH/LOCK/UNLOCK及未知方法 | 请求路径子树相交501 | 不相交既有透传 | 未支持 |
+| DAV MKCOL | 与API mkdir同语义：仅校验literal父目录与basename语法，畸形400；目录名从不加密，不涉及原名审计，**保护范围内透传** | 透传 | 不涉及 |
+| DAV PROPPATCH/LOCK/UNLOCK及未知方法 | 请求路径子树相交501 | 不相交既有透传 | 未支持 |
 | catch-all `/api/fs/*` 未确认操作或method | 保护启用时501，不解析未知body | **保护启用时即使声明无关目标也拒绝**；无配置保持既有行为 | 未支持 |
 | 已确认catch-all只读route/method | get/list/search/dirs/archive meta/list的GET/HEAD/POST，link的POST | 透传 | 不涉及 |
 | API remove / DAV DELETE | 保留既有删除语义 | 既有行为 | 占位不自动释放；完整删除/tombstone联动在P8完善 |
 | GET/HEAD/PROPFIND | 保留实际授权和作用域隔离的读取 | 既有行为 | 不涉及 |
 
-未知fs操作包括form、batch/regex rename、recursive move、mkdir、offline/direct-upload及driver自定义other。未知schema可能包含多个目标或异步副作用，不能从一个path字段猜测全部对象。拒绝这类操作是有意的保守限制，不把它计算为“已支持该操作”。
+未知fs操作包括form、batch/regex rename、recursive move、offline/direct-upload及driver自定义other。`mkdir`不属于未知操作：它是已分类的专用入口，目录名从不做文件名加密，也不写入加密名映射，因此DAV MKCOL与API mkdir采用同一语义。未知schema可能包含多个目标或异步副作用，不能从一个path字段猜测全部对象。拒绝这类操作是有意的保守限制，不把它计算为“已支持该操作”。
 
 ## 路径和状态
 
