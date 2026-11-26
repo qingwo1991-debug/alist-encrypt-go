@@ -93,6 +93,17 @@ func New(cfg *config.Config) (*Server, error) {
 	// and read-back hydration (the writer bypasses the BoltDB fileinfo bucket,
 	// so Get needs this reader to survive restarts).
 	if mysqlStore != nil {
+		// One row per path: key new file_meta rows on the alist origin host
+		// (stable across rotating raw-URL hosts) so GetFileMeta's key-hash
+		// lookup — ProviderKey(cfg.GetAlistURL(), path) — resolves them
+		// directly, then collapse the legacy duplicates in the background.
+		stableHost := handler.StableFileMetaProviderHost(cfg)
+		mysqlStore.SetStableProviderHost(stableHost)
+		// V2/V3 plaintext-size preservation now runs once per flush against
+		// the stored row instead of once per request before every write.
+		mysqlStore.SetFileMetaStoredRowMerger(handler.PreserveFileMetaStoredRow)
+		mysqlStore.StartFileMetaDedupe()
+
 		fileMetaWriter := handler.NewMySQLFileMetaWriter(mysqlStore)
 		s.fileDAO.SetFileMetaWriter(fileMetaWriter)
 		s.fileDAO.SetFileInfoReader(fileMetaWriter)

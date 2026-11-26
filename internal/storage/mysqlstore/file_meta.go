@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // fileMetaPathChunk is the number of original_path values folded into one
@@ -312,9 +314,17 @@ func (s *Store) UpsertFileMeta(ctx context.Context, record FileMetaRecord) error
 	if s == nil {
 		return nil
 	}
-	if record.KeyHash == "" {
-		record.KeyHash = KeyHash(record.ProviderHost, record.OriginalPath)
-	}
+	// One row per path: every new write lands on the stable key regardless of
+	// which provider host the caller observed. provider_host is kept as the
+	// stable host too so the row is self-consistent; the raw URL host the
+	// caller saw lives in raw_url, which is where it belongs.
+	record.ProviderHost = s.StableProviderHost()
+	record.KeyHash = s.StableFileMetaKeyHash(record.OriginalPath)
+
+	// A caller-supplied fetch time marks a real upstream observation. Capture
+	// it before the write stamp is applied so the no-op check can tell a
+	// genuine refresh apart from the stamp (see fileMetaWriteUnchanged).
+	record.explicitFetch = !record.UpstreamFetchedAt.IsZero()
 
 	record.UpdatedAt = time.Now()
 	record.LastAccessed = time.Now()
@@ -353,10 +363,136 @@ func (s *Store) UpsertFileMeta(ctx context.Context, record FileMetaRecord) error
 			}
 		}
 	}
+	// Fast path: the row equals what this process last flushed (or last found
+	// unchanged in the database) for the key, so the database already holds
+	// it. Keys not in memory are compared against the database once per flush
+	// (filterUnchangedFileMeta), never here on the request path.
+	if last, ok := b.lastFlushed[record.KeyHash]; ok && s.reconcileUnchanged(&record, last) {
+		b.mu.Unlock()
+		return nil
+	}
 	record.NonceField = append([]byte(nil), record.NonceField...)
 	b.items[record.KeyHash] = record
 	b.mu.Unlock()
 	return nil
+}
+
+// filterUnchangedFileMeta drops records whose stored row already equals them
+// in every information-bearing column. Keys known from this process's last
+// flush are checked in memory; every other key costs exactly one primary-key
+// SELECT, and that same row is handed to the configured merger so the V2/V3
+// size reconciliation that used to run on every request runs once per flush
+// instead. A SELECT error is not fatal: the record is kept and written, which
+// is the pre-dedup behaviour. The returned kept slice aliases records; the
+// second return lists the records that were dropped as unchanged.
+func (s *Store) filterUnchangedFileMeta(ctx context.Context, records []FileMetaRecord) (kept, unchanged []FileMetaRecord) {
+	if s == nil || s.db == nil || len(records) == 0 {
+		return records, nil
+	}
+	b := s.fileMetaBuffer
+	b.mu.Lock()
+	known := make(map[string]FileMetaRecord, len(b.lastFlushed))
+	for k, v := range b.lastFlushed {
+		known[k] = v
+	}
+	b.mu.Unlock()
+
+	kept = records[:0]
+	for _, record := range records {
+		if last, ok := known[record.KeyHash]; ok {
+			if s.reconcileUnchanged(&record, last) {
+				unchanged = append(unchanged, effectiveFileMetaRow(record, last))
+				continue
+			}
+			kept = append(kept, record)
+			continue
+		}
+		existing, found, err := s.getFileMetaRow(ctx, "key_hash = ?", record.KeyHash)
+		if err != nil || !found {
+			if err != nil {
+				log.Warn().Err(err).Str("key_hash", record.KeyHash).Msg("MySQL file meta dedup lookup failed, writing row")
+			}
+			kept = append(kept, record)
+			continue
+		}
+		if s.reconcileUnchanged(&record, *existing) {
+			// Remember what the database actually holds (the stored row with the
+			// incoming record's timestamps), not the bare incoming record, so the
+			// next identical write is recognised in memory.
+			effective := *existing
+			effective.UpdatedAt = record.UpdatedAt
+			effective.LastAccessed = record.LastAccessed
+			if record.UpstreamFetchedAt.After(effective.UpstreamFetchedAt) {
+				effective.UpstreamFetchedAt = record.UpstreamFetchedAt
+			}
+			unchanged = append(unchanged, effective)
+			continue
+		}
+		kept = append(kept, record)
+	}
+	return kept, unchanged
+}
+
+// effectiveFileMetaRow is the row the database is believed to hold after a
+// write judged unchanged against a remembered row.
+func effectiveFileMetaRow(record, remembered FileMetaRecord) FileMetaRecord {
+	effective := remembered
+	effective.UpdatedAt = record.UpdatedAt
+	effective.LastAccessed = record.LastAccessed
+	if record.UpstreamFetchedAt.After(effective.UpstreamFetchedAt) {
+		effective.UpstreamFetchedAt = record.UpstreamFetchedAt
+	}
+	return effective
+}
+
+// reconcileUnchanged applies the configured stored-row merger to record (the
+// V2/V3 plaintext-size preservation) and then reports whether writing it
+// would leave the stored row informationally identical. record is modified in
+// place so a kept row is written with the reconciled values.
+func (s *Store) reconcileUnchanged(record *FileMetaRecord, stored FileMetaRecord) bool {
+	if s != nil && s.mergeStoredRow != nil {
+		s.mergeStoredRow(&stored, record)
+	}
+	return fileMetaWriteUnchanged(*record, stored)
+}
+
+// SetFileMetaStoredRowMerger installs the hook that reconciles a pending row
+// with its stored counterpart at flush time. Pass nil to disable.
+func (s *Store) SetFileMetaStoredRowMerger(merger func(stored, incoming *FileMetaRecord)) {
+	if s == nil {
+		return
+	}
+	s.mergeStoredRow = merger
+}
+
+// GetFileMetaByKeyHash returns the row for a key_hash regardless of is_active.
+// It serves the write path: the no-op-write check must see an inactive row
+// too, because the upsert would otherwise re-activate it (a real change).
+func (s *Store) GetFileMetaByKeyHash(ctx context.Context, keyHash string) (*FileMetaRecord, bool, error) {
+	if s == nil || s.db == nil {
+		return nil, false, nil
+	}
+	return s.getFileMetaRow(ctx, "key_hash = ?", keyHash)
+}
+
+// fileMetaSelectColumns is the shared projection for the write-path row
+// reader. It mirrors the read side so every column compared by
+// FileMetaWriteEqual is populated.
+const fileMetaSelectColumns = "SELECT key_hash, provider_host, original_path, encrypted_path, name, size, ciphertext_size, content_version, header_len, nonce_field, chunk_size, kdf_iterations, etag, content_type, raw_url, raw_url_auth_scope, sign, status_code, updated_at, last_accessed, upstream_fetched_at, is_active FROM "
+
+// getFileMetaRow reads one file_meta row matching an arbitrary predicate.
+// Decoding is shared with the read path (scanFileMetaInto) so the column
+// order exists in exactly one place.
+func (s *Store) getFileMetaRow(ctx context.Context, predicate string, args ...interface{}) (*FileMetaRecord, bool, error) {
+	query := fileMetaSelectColumns + TableName("file_meta") + " WHERE " + predicate
+	record, err := scanFileMetaRow(s.db.QueryRowContext(ctx, query, args...))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return record, true, nil
 }
 
 func (s *Store) CleanupFileMeta(ctx context.Context, cutoff time.Time) error {

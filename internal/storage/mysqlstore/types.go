@@ -65,6 +65,12 @@ type FileMetaRecord struct {
 	UpstreamFetchedAt time.Time
 	StatusCode        int
 	Active            bool
+
+	// explicitFetch is an in-process marker (never serialised: unexported) set
+	// when the caller supplied UpstreamFetchedAt from a real upstream fetch.
+	// It lets the flush distinguish a genuine freshness change from the write
+	// stamp. See fileMetaUpstreamFetchedChanged.
+	explicitFetch bool `json:"-"`
 }
 
 type RangeCompatRecord struct {
