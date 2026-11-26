@@ -113,7 +113,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 			if isSuccessfulListPayload(snap.PayloadJSON) && !h.snapshotPayloadRootPoisoned(dirPath, snap.PayloadJSON) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					listResult = "snapshot"
-					items := h.serveSnapshot(w, snap, "snapshot", page, perPage)
+					items := h.serveSnapshotWithQuota(w, snap, "snapshot", page, perPage, authHash, reqHeaders)
 					h.enqueueProbeFromSnapshotItems(r, dirPath, items)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
@@ -149,7 +149,7 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 			if snap.NextRefreshAt.IsZero() || time.Now().Before(snap.NextRefreshAt) {
 				if valid, reason := validateSnapshotForDir(dirPath, snap); valid {
 					listResult = "snapshot-shared"
-					items := h.serveSnapshot(w, snap, "snapshot-shared", page, perPage)
+					items := h.serveSnapshotWithQuota(w, snap, "snapshot-shared", page, perPage, authHash, reqHeaders)
 					h.enqueueProbeFromSnapshotItems(r, dirPath, items)
 					if snap.NextRefreshAt.IsZero() || time.Now().After(snap.NextRefreshAt) || snap.Stale {
 						h.refreshDirSnapshotAsync(dirPath, body, h.requestAuthHeaders(r), scopeKey, dirSyncModeReq)
@@ -250,6 +250,14 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flight := v.(*liveListFlight)
+	// The flight doc is shared by every joiner of this singleflight, and
+	// paginateListDoc only shallow-copies it (entry maps stay shared), so it
+	// must never be written to here. Observation is read-only and idempotent,
+	// so every joiner may do it; injection happens on this caller's own
+	// encoded response below.
+	if flight.Doc != nil {
+		h.observeMountQuotaForSharedDoc(authHash, dirPath, flight.Doc, reqHeaders)
+	}
 	respond := flight.Payload
 	if page > 0 && perPage > 0 {
 		if flight.Doc != nil {
@@ -260,5 +268,6 @@ func (h *AlistHandler) HandleFsList(w http.ResponseWriter, r *http.Request) {
 			respond = sliced
 		}
 	}
+	respond = h.applyMountQuotaToResponse(authHash, dirPath, respond)
 	RespondRaw(w, flight.StatusCode, "application/json", respond)
 }

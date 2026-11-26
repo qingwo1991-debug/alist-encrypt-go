@@ -520,6 +520,14 @@ func (h *AlistHandler) snapshotPayloadRootPoisoned(dirPath string, payload []byt
 // items (full directory, not just the served page) so callers can reuse them
 // for probe warmup without re-parsing the payload.
 func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string, page, perPage int) []interface{} {
+	return h.serveSnapshotWithQuota(w, snap, cacheMode, page, perPage, "", nil)
+}
+
+// serveSnapshotWithQuota is serveSnapshot plus mount-quota injection for the
+// caller's account. A snapshot freezes whatever quota upstream returned when
+// it was taken; the per-account cache replaces it with the latest value so a
+// listing served from a snapshot converges on the same quota as a live one.
+func (h *AlistHandler) serveSnapshotWithQuota(w http.ResponseWriter, snap *DirListSnapshot, cacheMode string, page, perPage int, authHash string, headers http.Header) []interface{} {
 	if snap == nil {
 		RespondHTTPErrorWithStatus(w, "snapshot not found", http.StatusNotFound)
 		return nil
@@ -527,7 +535,7 @@ func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapsho
 	now := time.Now()
 	stale := snap.Stale || (!snap.NextRefreshAt.IsZero() && now.After(snap.NextRefreshAt))
 	syncing := snap.SyncState == "syncing"
-
+	var allItems []interface{}
 	// Fast path: parse the payload ONCE, inject serving-mode fields, slice the
 	// content window in memory and marshal a single response. The legacy path
 	// re-parsed and re-marshaled the whole directory payload up to three times
@@ -547,9 +555,11 @@ func (h *AlistHandler) serveSnapshot(w http.ResponseWriter, snap *DirListSnapsho
 		if snap.LastError != "" {
 			doc["degraded_reason"] = publicDirSyncError(snap.LastError)
 		}
-		var allItems []interface{}
 		if data, ok := doc["data"].(map[string]interface{}); ok {
 			if content, ok := data["content"].([]interface{}); ok {
+				// Quota is injected on the full content before slicing so an
+				// entry outside the requested page still triggers a refresh.
+				h.ensureMountQuotaForList(authHash, snap.DisplayPath, doc, headers)
 				allItems = content
 				if page > 0 && perPage > 0 {
 					total := len(content)
