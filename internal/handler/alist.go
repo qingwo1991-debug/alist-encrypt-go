@@ -82,6 +82,19 @@ type AlistHandler struct {
 	// internally; nil-safe in requestScopeHash.
 	authScope *authScopeValidator
 
+	// mountQuota caches per-account storage quota (upstream mount_details)
+	// observed on live fs/list responses and refreshes it in the background.
+	// See mount_quota.go for the full contract. Guarded by mountQuotaMu.
+	mountQuota           *mountQuotaCache
+	mountQuotaCtx        context.Context
+	mountQuotaCancel     context.CancelFunc
+	mountQuotaSem        chan struct{}
+	mountQuotaRefreshing map[string]bool
+	mountQuotaMu         sync.Mutex
+	mountQuotaStopped    bool
+	mountQuotaWG         sync.WaitGroup
+	mountQuotaStop       sync.Once
+
 	fsMetaRequests         uint64
 	fsMetaCacheHits        uint64
 	fsMetaSingleflightHits uint64
@@ -129,6 +142,7 @@ type fsMetaFetchResult struct {
 // proxyHandler must be the same instance used for /redirect routes
 func NewAlistHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO ports.FileRepository, passwdDAO ports.KeyRepository, proxyHandler *ProxyHandler, metaStore FileMetaStore, probe *ProbeScheduler) *AlistHandler {
 	dirSyncCtx, dirSyncCancel := context.WithCancel(context.Background())
+	mountQuotaCtx, mountQuotaCancel := context.WithCancel(context.Background())
 	return &AlistHandler{
 		cfg:                cfg,
 		streamProxy:        streamProxy,
@@ -143,6 +157,10 @@ func NewAlistHandler(cfg *config.Config, streamProxy ports.Streamer, fileDAO por
 		dirSyncRefreshSem:  make(chan struct{}, dirSyncRefreshMaxConcurrent),
 		listMaintenanceSem: make(chan struct{}, 4),
 		authScope:          newAuthScopeValidator(),
+		mountQuota:         &mountQuotaCache{},
+		mountQuotaCtx:      mountQuotaCtx,
+		mountQuotaCancel:   mountQuotaCancel,
+		mountQuotaSem:      make(chan struct{}, mountQuotaRefreshMaxConcurrent),
 	}
 }
 
@@ -160,6 +178,7 @@ func (h *AlistHandler) Stop() {
 		h.dirSyncMu.Unlock()
 		h.dirSyncWG.Wait()
 	})
+	h.stopMountQuota()
 }
 
 func (h *AlistHandler) startDirSyncWork(work func(context.Context)) bool {
