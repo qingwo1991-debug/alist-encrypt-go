@@ -42,8 +42,7 @@ func TestProtectedMutationRealRouteFallback(t *testing.T) {
 		{"POST", "/api/fs/recursive_move"}, {"POST", "/api/fs/other"},
 		{"GET", "/api/fs/rename"},
 		{"POST", "/api/fs/put"}, {"PATCH", "/api/fs/get"},
-		{"POST", "/api/fs/../fs/form"}, {"MKCOL", "/dav/mount/protected/new"},
-		{"PROPPATCH", "/dav/mount/protected/file"},
+		{"POST", "/api/fs/../fs/form"}, {"PROPPATCH", "/dav/mount/protected/file"},
 		{"MOVE", "/dav/mount/protected/file"}, {"COPY", "/dav/mount/protected/file"},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
@@ -56,6 +55,25 @@ func TestProtectedMutationRealRouteFallback(t *testing.T) {
 			}
 			if calls.Load() != 0 {
 				t.Fatal("refused operation reached actual upstream")
+			}
+		})
+	}
+	// MKCOL only creates a directory and never touches encrypted filename
+	// mappings, so inside a protected scope it follows /api/fs/mkdir semantics:
+	// forwarded unchanged to the actual upstream route.
+	for _, tc := range []struct{ method, path, upstream string }{
+		{"MKCOL", "/dav/mount/protected/new", "/dav/mount/protected/new"},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			before := calls.Load()
+			req := httptest.NewRequest(tc.method, "http://example.com"+tc.path, nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != 204 || calls.Load() != before+1 {
+				t.Fatalf("MKCOL route status=%d calls=%d body=%s", rec.Code, calls.Load(), rec.Body.String())
+			}
+			if got := <-seen; got != tc.upstream {
+				t.Fatalf("MKCOL actual upstream path=%q want=%q", got, tc.upstream)
 			}
 		})
 	}

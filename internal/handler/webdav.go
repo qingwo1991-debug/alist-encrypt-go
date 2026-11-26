@@ -243,8 +243,14 @@ func (h *WebDAVHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.handleCopy(w, r, davPath)
 	case "OPTIONS":
 		h.handlePassthrough(w, r)
+	case "MKCOL":
+		// MKCOL only creates a directory. Directory names are never
+		// filename-encrypted and no encrypted-name mapping is created, so it
+		// shares /api/fs/mkdir semantics: syntax-check the literal path and
+		// basename, then pass through even inside protected scopes.
+		h.handleMkcol(w, r, davPath)
 	default:
-		// Unknown/extension methods and directory/property/lock mutations have
+		// Unknown/extension methods and property/lock mutations have
 		// no protected-name audit contract. Do not route them around the guard.
 		if err := guardProtectedMutation(h.cfg, r.Method, davPath); err != nil {
 			respondProtectedMutationError(w, err)
@@ -1530,6 +1536,28 @@ func (h *WebDAVHandler) handlePassthrough(w http.ResponseWriter, r *http.Request
 		log.Error().Err(err).Str("method", r.Method).Msg("WebDAV passthrough failed")
 		RespondHTTPErrorWithStatus(w, "Proxy error", http.StatusBadGateway)
 	}
+}
+
+// handleMkcol forwards MKCOL like /api/fs/mkdir: directory names are never
+// filename-encrypted, so no protected-name audit is involved. Only the literal
+// path and basename are syntax-checked; a malformed one is refused with 400
+// exactly like the API handler instead of being forwarded upstream.
+// path.Base silently strips a trailing slash, which would turn /a/b/ into the
+// same directory as /a/b; reject the spelling instead of guessing the intent.
+func (h *WebDAVHandler) handleMkcol(w http.ResponseWriter, r *http.Request, davPath string) {
+	if davPath == "/" || strings.HasSuffix(davPath, "/") {
+		respondProtectedMutationError(w, invalidMutation("mkdir"))
+		return
+	}
+	if _, err := mutationPathVariants(path.Dir(davPath)); err != nil {
+		respondProtectedMutationError(w, invalidMutation("mkdir"))
+		return
+	}
+	if _, err := mutationNameVariants(path.Base(davPath)); err != nil {
+		respondProtectedMutationError(w, invalidMutation("mkdir"))
+		return
+	}
+	h.handlePassthrough(w, r)
 }
 
 type propfindEntry struct {
