@@ -1171,6 +1171,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			if liveErr != nil {
 				metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "fail"}, 1)
 				logDirSyncFailure("snapshot_refresh", dirPath, status, 0, liveErr)
+				h.forgetRecentListOnAuthFailure(scopeKey, status, 0)
 				h.updateSnapshotSyncing(ctx, scopeKey, false, publicDirSyncError(liveErr.Error()))
 				if sourceMode == dirSyncModeReq {
 					h.reqRefreshNoteResult(scopeKey, false, time.Now())
@@ -1191,6 +1192,7 @@ func (h *AlistHandler) refreshDirSnapshotAsync(dirPath string, body []byte, head
 			}
 			metrics.Inc("alist_dirsync_snapshot_refresh_total", map[string]string{"result": "fail"}, 1)
 			logDirSyncFailure("snapshot_refresh", dirPath, status, payloadResponseCode(payload), nil)
+			h.forgetRecentListOnAuthFailure(scopeKey, status, payloadResponseCode(payload))
 			h.updateSnapshotSyncing(ctx, scopeKey, false, errText)
 			if sourceMode == dirSyncModeReq {
 				h.reqRefreshNoteResult(scopeKey, false, time.Now())
@@ -1373,6 +1375,29 @@ func (h *AlistHandler) rememberRecentList(dirPath, scopeKey string, headers http
 		entry.hits = prev.hits + 1
 	}
 	h.recentLists[scopeKey] = entry
+}
+
+// forgetRecentListOnAuthFailure drops a prewarm entry whose captured client
+// credentials the upstream rejected (HTTP 401 or alist code 401). Prewarm
+// replays the headers of the last real listing; once that client token
+// expires every replay fails and only backs off to the 2h cap, forever. The
+// scope key embeds the auth hash, so a client that logs in again registers a
+// fresh entry and nothing with valid credentials is lost.
+func (h *AlistHandler) forgetRecentListOnAuthFailure(scopeKey string, status, code int) {
+	if h == nil || (status != http.StatusUnauthorized && code != http.StatusUnauthorized) {
+		return
+	}
+	h.recentListsMu.Lock()
+	_, existed := h.recentLists[scopeKey]
+	delete(h.recentLists, scopeKey)
+	h.recentListsMu.Unlock()
+	if !existed {
+		return
+	}
+	h.dirSyncMu.Lock()
+	delete(h.reqRefreshFails, scopeKey)
+	h.dirSyncMu.Unlock()
+	log.Info().Str("scope", scopeKey).Msg("Dropped snapshot prewarm entry: captured credentials rejected by upstream")
 }
 
 // recentListHot reports whether scopeKey has been listed enough times to
